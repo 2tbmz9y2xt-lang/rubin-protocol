@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -234,5 +235,54 @@ func TestCrossingStageOrder(t *testing.T) {
 	want := []stage{stageCreate, stageWrite, stageFileSync, stageRename, stageDirSync, stageClose, stageAck}
 	if fmt.Sprint(seen) != fmt.Sprint(want) {
 		t.Fatalf("crossing stages %v, want %v", seen, want)
+	}
+}
+
+// recordFS wraps realFS, records each call (marking the control path as P)
+// and fails the call named fail.
+func recordFS(calls *[]string, dir, fail string) fsOps {
+	do := func(op, path string, real func() error) error {
+		if path == filepath.Join(dir, controlFile) {
+			op += "(P)"
+		}
+		if *calls = append(*calls, op); op == fail {
+			return errors.New("injected " + op)
+		}
+		return real()
+	}
+	r := realFS
+	return fsOps{
+		remove:  func(p string) error { return do("remove", p, func() error { return r.remove(p) }) },
+		syncDir: func(d string) error { return do("syncDir", "", func() error { return r.syncDir(d) }) },
+		write:   func(f *os.File, b []byte) error { return do("write", "", func() error { return r.write(f, b) }) },
+		sync:    func(f *os.File) error { return do("sync", "", func() error { return r.sync(f) }) },
+		close:   func(f *os.File) error { return do("close", "", func() error { return r.close(f) }) },
+		rename:  func(a, b string) error { return do("rename", b, func() error { return r.rename(a, b) }) },
+		open: func(p string) (f *os.File, err error) {
+			err = do("open", p, func() error { f, err = r.open(p); return err })
+			return f, err
+		},
+	}
+}
+
+// H1: Create and a commit sync the scratch, rename it over P and sync the
+// directory, in that order, never remove P, and propagate each failure into
+// its stage's OLD/UNKNOWN classification.
+func TestCrossingFileSystemCalls(t *testing.T) {
+	id, want := testIdentity(1), "[remove open write sync rename(P) syncDir close]"
+	var calls []string
+	dir, h := storeDir(t), productionHooks
+	h.ops = recordFS(&calls, dir, "")
+	if s, err := start(dir, id, &NewInstallationProof{Identity: id}, h); err != nil || fmt.Sprint(calls) != want {
+		t.Fatalf("Create calls %v: %v", calls, err)
+	} else {
+		_ = s.Close()
+	}
+	for fail, truth := range map[string]Truth{"": NEW, "sync": OLD, "rename(P)": OLD, "syncDir": UNKNOWN} {
+		dir, s := seedStore(t, ownerlessState(id, 40))
+		calls, s.ops = nil, recordFS(&calls, dir, fail)
+		if r, _ := controlTx(t, s, "a").Commit(); r.Truth != truth || bytes.Contains([]byte(fmt.Sprint(calls)), []byte("remove(P)")) || (fail == "" && fmt.Sprint(calls) != want) {
+			t.Fatalf("fail %q: %v with calls %v, want %v", fail, r.Truth, calls, truth)
+		}
 	}
 }
