@@ -622,6 +622,54 @@ func TestUnregisterPeerHoldsQuotaLockThroughPeerManagerRemoval(t *testing.T) {
 		}
 	}
 	f.requireAbsent(chunk, "cleanup raced replacement")
+	// H2 under the barrier: the key lock is held from unregister's entry through peer-map removal,
+	// PeerManager removal and the inactive-key decision. With peersMu held, a stale IPv4 exit owns
+	// the socket key while parked at peer-map removal; its mapped-IPv6 replacement's ingress then
+	// parks on the same key, and the replacement's State B record survives the stale exit.
+	h2 := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f2 := newDAIngressFixture(t, h2)
+	stale := daRelayTestPeer(h2, "configured-stale.example:19131", "127.0.0.4:19131")
+	replacement := daRelayTestPeer(h2, "configured-replacement.example:19132", "[::ffff:127.0.0.4]:19132")
+	for _, peer := range []*peer{stale, replacement} {
+		must(t, h2.service.registerPeer(peer), "register same-key peer")
+	}
+	stagedID := daRelayTestID(113)
+	commit, staged, late := f2.commit(stagedID, 3), f2.chunk(stagedID, 0, []byte("staged")), f2.chunk(stagedID, 1, []byte("late"))
+	must(t, replacement.handleTx(commit), "replacement commit")
+	must(t, replacement.handleTx(staged), "replacement chunk")
+	keyHeld := func() bool { // the socket key's mutex is owned by someone other than this probe
+		h2.service.peerQuotaLocksMu.Lock()
+		defer h2.service.peerQuotaLocksMu.Unlock()
+		quotaLock := h2.service.peerQuotaLocks["127.0.0.4"]
+		if quotaLock == nil || !quotaLock.mu.TryLock() {
+			return quotaLock != nil
+		}
+		quotaLock.mu.Unlock()
+		return false
+	}
+	h2.service.peersMu.Lock()
+	staleDone := make(chan error, 1)
+	go func() { h2.service.unregisterPeer(stale); staleDone <- nil }()
+	held := false
+	for deadline := time.Now().Add(5 * time.Second); !held && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		held = keyHeld()
+	}
+	if !held {
+		h2.service.peersMu.Unlock()
+		t.Fatal("the stale exit did not hold its socket key while parked at peer-map removal")
+	}
+	ingress := make(chan error, 1)
+	go func() { ingress <- replacement.handleTx(late) }()
+	waitForPeerQuotaLockRefs(t, h2.service, "127.0.0.4", 2)
+	requireStillBlocked(t, ingress, "replacement ingress while the stale exit holds the socket key")
+	h2.service.peersMu.Unlock()
+	requireReturned(t, staleDone, "the stale exit")
+	requireReturned(t, ingress, "the replacement ingress after the stale exit")
+	f2.requireRetained(commit, "the replacement's State B commit after the raced stale exit")
+	f2.requireRetained(staged, "the replacement's State B chunk after the raced stale exit")
+	f2.requireRetained(late, "the replacement's chunk admitted after the stale exit")
+	h2.service.unregisterPeer(replacement)
+	f2.requireAbsent(commit, "the final same-key exit's commit")
 }
 
 // TestHandleConnInitializesPeerQualityPerSession: a peer handleConn constructs starts at 50 anchored
