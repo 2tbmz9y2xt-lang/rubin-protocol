@@ -158,6 +158,10 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 			return nil, err
 		}
 
+		if err := checkCompleteMapLogicalState(blockHeight, state.Utxos, workUtxos); err != nil {
+			return nil, err
+		}
+
 		return commitInMemoryConnectSummary(
 			state,
 			workUtxos,

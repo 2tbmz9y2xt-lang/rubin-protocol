@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"errors"
+	"maps"
 	"math/big"
 	"reflect"
 	"testing"
@@ -119,7 +120,7 @@ func TestLogicalStateEntryBytes(t *testing.T) {
 }
 
 func TestLogicalStateLimitLiterals(t *testing.T) {
-	if maxLogicalStateBytes != 412316860416 || maxCreatedLogicalStateBytes != 86545430 {
+	if maxLogicalStateBytes != 1649267441664 || MAX_BLOCK_NET_STATE_GROWTH_BYTES != 773120 || maxCreatedLogicalStateBytes != 86545430 {
 		t.Fatal("logical state limit literal mismatch")
 	}
 }
@@ -143,8 +144,20 @@ func TestLogicalStateRegistryAndLazyEvaluation(t *testing.T) {
 	if result, got := evaluateLogicalStateCap(prior, registry, id1, 5, view, nil, new(int)); !logicalStateSameErrorPointer(got, prior) || !reflect.DeepEqual(result, logicalStateCapResult[*int]{}) || view.counterCalls != 0 {
 		t.Fatal("prior error was not exact and lazy")
 	}
-	if result, got := evaluateLogicalStateCap[*int](nil, registry, id1, 4, view, []logicalTouchedState{{Final: UtxoEntry{Value: 1}}}, new(int)); got != nil || !reflect.DeepEqual(result, logicalStateCapResult[*int]{}) || view.counterCalls != 0 {
-		t.Fatal("inactive path performed work")
+	touch := []logicalTouchedState{{Outpoint: Outpoint{Txid: id2}, FinalPresent: true, Final: logicalStateTestEntry(0, 1)}}
+	present := logicalStateCounterRead{kind: logicalStateCountersPresent, counters: logicalStateCounters{bytes: 56, entries: 1}}
+	for _, tc := range []struct {
+		name   string
+		reg    validatedLogicalStateCapRegistry
+		chain  [32]byte
+		height uint64
+		active bool
+	}{{"empty", empty, id1, 5, false}, {"unmatched", registry, [32]byte{}, 5, false}, {"before", registry, id1, 4, false}, {"at", registry, id1, 5, true}, {"after", registry, id1, 6, true}} {
+		inactive := &logicalStateTestView{counter: present, rows: map[Outpoint]logicalStateRowRead{{Txid: id2}: {kind: logicalStateRowAbsent}}}
+		result, got := evaluateLogicalStateCap(nil, tc.reg, tc.chain, tc.height, inactive, touch, new(int))
+		if got != nil || result.active != tc.active || result.plan.Parent != (logicalStateCounters{bytes: 56, entries: 1}) || result.plan.Result != (logicalStateCounters{bytes: 112, entries: 2}) || len(result.plan.Puts) != 1 || result.plan.Metadata == nil || inactive.counterCalls != 1 || len(inactive.lookups) != 1 {
+			t.Fatalf("%s derivation mismatch: %#v %v counters=%d lookups=%d", tc.name, result, got, inactive.counterCalls, len(inactive.lookups))
+		}
 	}
 	genesis, _ := validateLogicalStateCapRegistry([]logicalStateCapRegistryRow{{chainID: id1[:], activationHeight: 0}})
 	result, got := evaluateLogicalStateCap(nil, genesis, id1, 0, nil, []logicalTouchedState{{Outpoint: Outpoint{Txid: id2}, FinalPresent: true, Final: logicalStateTestEntry(0, 1)}}, &id2)
@@ -359,7 +372,7 @@ func TestEvaluateLogicalStateCapMathAndFailures(t *testing.T) {
 		row     logicalStateRowRead
 		wantCap bool
 	}{{"below_cross", maxLogicalStateBytes - 1, []logicalTouchedState{{Outpoint: Outpoint{Txid: id}, FinalPresent: true, Final: entry}}, logicalStateRowRead{kind: logicalStateRowAbsent}, true}, {"at_cap", maxLogicalStateBytes, nil, logicalStateRowRead{}, false}, {"cross_cap", maxLogicalStateBytes, []logicalTouchedState{{Outpoint: Outpoint{Txid: id}, FinalPresent: true, Final: entry}}, logicalStateRowRead{kind: logicalStateRowAbsent}, true}, {"drain_equal", maxLogicalStateBytes + 1, nil, logicalStateRowRead{}, false}, {"drain_down", maxLogicalStateBytes + logicalStateEntryLength(entry), []logicalTouchedState{{Outpoint: Outpoint{Txid: id}}}, logicalStateRowRead{kind: logicalStateRowPresent, entry: entry}, false}, {"grow_over_cap", maxLogicalStateBytes + 1, []logicalTouchedState{{Outpoint: Outpoint{Txid: id}, FinalPresent: true, Final: entry}}, logicalStateRowRead{kind: logicalStateRowAbsent}, true}} {
-		result, err := evaluateLogicalStateCap(nil, registry, id, 5000, makeView(tc.s0, tc.row), tc.touched, tc.name)
+		result, err := evaluateLogicalStateCap(nil, registry, id, 20000, makeView(tc.s0, tc.row), tc.touched, tc.name)
 		if tc.wantCap {
 			if !reflect.DeepEqual(result, logicalStateCapResult[string]{}) || mustTxErrCode(t, err) != BLOCK_ERR_STATE_CAP_EXCEEDED || err.Error() != "BLOCK_ERR_STATE_CAP_EXCEEDED: logical state cap exceeded" {
 				t.Fatalf("%s cap rejection mismatch", tc.name)
@@ -375,5 +388,269 @@ func TestEvaluateLogicalStateCapMathAndFailures(t *testing.T) {
 		if !reflect.DeepEqual(result, logicalStateCapResult[*int]{}) || !errors.As(err, &failure) || !logicalStateSameErrorPointer(err, failure) || failure.kind != logicalStateFailureKind(kind-logicalStateCountersUnavailable)+1 || !logicalStateSameErrorPointer(failure.cause, cause) {
 			t.Fatal("active builder failure kind/cause/zero-result mismatch")
 		}
+	}
+}
+
+const (
+	testLogicalCap    uint64 = 1649267441664
+	testLogicalGrowth uint64 = 773120
+	testLogicalBound  uint64 = 371709791468257280
+)
+
+const (
+	testLogicalCapMsg    = "BLOCK_ERR_STATE_CAP_EXCEEDED: logical state cap exceeded"
+	testLogicalGrowthMsg = "BLOCK_ERR_STATE_GROWTH_EXCEEDED: logical state growth exceeded"
+)
+
+func TestLogicalStateEntryLengthLiterals(t *testing.T) {
+	for _, tc := range []struct {
+		data int
+		want uint64
+	}{{0, 56}, {252, 308}, {253, 311}, {65535, 65593}, {65536, 65596}} {
+		if got := logicalStateEntryLength(logicalStateTestEntry(tc.data, 1)); got != tc.want {
+			t.Fatalf("data %d length %d, want %d", tc.data, got, tc.want)
+		}
+	}
+}
+
+func TestLogicalStateCapThenGrowthScalar(t *testing.T) {
+	const c, g, b = testLogicalCap, testLogicalGrowth, testLogicalBound
+	for _, tc := range []struct {
+		s0, s1 uint64
+		active bool
+		want   string
+	}{
+		{1000000, 1773119, false, ""},
+		{1000000, 1773120, false, ""},
+		{1000000, 1000000, false, ""},
+		{1000000, 999999, false, ""},
+		{0, 773119, false, ""},
+		{0, 773120, false, ""},
+		{1000000, 1773121, false, testLogicalGrowthMsg},
+		{0, 773121, false, testLogicalGrowthMsg},
+		{1649266668544, c, true, ""},
+		{c, c, true, ""},
+		{c + 1, c + 1, true, ""},
+		{c + 1, c, true, ""},
+		{c - 1, c + 1, true, testLogicalCapMsg},
+		{c, c + 56, true, testLogicalCapMsg},
+		{c + 1, c + 57, true, testLogicalCapMsg},
+		{1649266668544, c + 1, true, testLogicalCapMsg},
+		{1000000, 1773121, true, testLogicalGrowthMsg},
+		{c - 1, c + 1, false, ""},
+		{c, c + g, false, ""},
+		{c, c + g + 1, false, testLogicalGrowthMsg},
+		{b, 0, false, ""},
+		{b, 0, true, ""},
+		{b, b - 1, true, ""},
+		{b, b + g, false, ""},
+		{b, b + g + 1, false, testLogicalGrowthMsg},
+		{b, b + 1, true, testLogicalCapMsg},
+		{^uint64(0), 0, false, ""},
+		{0, ^uint64(0), false, testLogicalGrowthMsg},
+	} {
+		err := checkLogicalStateCapAndGrowth(tc.s0, tc.s1, tc.active)
+		if tc.want == "" && err != nil || tc.want != "" && (err == nil || err.Error() != tc.want) {
+			t.Fatalf("s0=%d s1=%d active=%v: %v, want %q", tc.s0, tc.s1, tc.active, err, tc.want)
+		}
+		if tc.want != "" {
+			if _, ok := any(err).(*TxError); !ok {
+				t.Fatalf("s0=%d s1=%d: not a bare TxError: %T", tc.s0, tc.s1, err)
+			}
+		}
+	}
+}
+
+// logicalGrowthTouched creates exactly delta logical bytes of absent-parent puts,
+// or stops the test when a nonzero final remainder is outside 311..65593, the entry
+// lengths of data lengths 253..65535 whose CompactSize prefix is 3 bytes.
+func logicalGrowthTouched(t *testing.T, delta uint64) ([]logicalTouchedState, map[Outpoint]logicalStateRowRead) {
+	t.Helper()
+	var touched []logicalTouchedState
+	rows := map[Outpoint]logicalStateRowRead{}
+	add := func(data int) {
+		op := Outpoint{Txid: filled32(9), Vout: uint32(len(touched))}
+		touched = append(touched, logicalTouchedState{Outpoint: op, FinalPresent: true, Final: logicalStateTestEntry(data, 1)})
+		rows[op] = logicalStateRowRead{kind: logicalStateRowAbsent}
+	}
+	for ; delta >= 65596*2; delta -= 65596 {
+		add(65536)
+	}
+	if delta > 65596 {
+		add(65536)
+		delta -= 65596
+	}
+	if delta == 0 {
+		return touched, rows
+	}
+	if delta < 311 || delta > 65593 {
+		t.Fatalf("delta remainder %d not representable by this helper", delta)
+	}
+	add(int(delta) - 58)
+	return touched, rows
+}
+
+func TestEvaluateLogicalStateCapGrowthPlan(t *testing.T) {
+	id := filled32(1)
+	active, _ := validateLogicalStateCapRegistry([]logicalStateCapRegistryRow{{chainID: id[:], activationHeight: 1}})
+	inactive, _ := validateLogicalStateCapRegistry(nil)
+	const big = uint64(25200000)
+	for _, tc := range []struct {
+		name        string
+		reg         validatedLogicalStateCapRegistry
+		height      uint64
+		s0, entries uint64
+		delta       uint64
+		wantActive  bool
+		want        string
+	}{
+		{"inactive-below", inactive, 5000, 1000000, 100, 773119, false, ""},
+		{"inactive-equal", inactive, 5000, 1000000, 100, 773120, false, ""},
+		{"inactive-over", inactive, 5000, 1000000, 100, 773121, false, testLogicalGrowthMsg},
+		{"genesis-equal", inactive, 0, 0, 0, 773120, false, ""},
+		{"genesis-over", inactive, 0, 0, 0, 773121, false, testLogicalGrowthMsg},
+		{"active-below-cap-over-growth", active, 5000, 1000000, 100, 773121, true, testLogicalGrowthMsg},
+		{"active-equal-both", active, 20000, 1649266668544, big, 773120, true, ""},
+		{"active-dual-cap-wins", active, 20000, 1649266668544, big, 773121, true, testLogicalCapMsg},
+		{"inactive-crosses-cap", inactive, 20000, 1649266668544, big, 773121, false, testLogicalGrowthMsg},
+		{"inactive-crosses-cap-within-growth", inactive, 20000, 1649267000000, big, 773120, false, ""},
+	} {
+		touched, rows := logicalGrowthTouched(t, tc.delta)
+		view := &logicalStateTestView{counter: logicalStateCounterRead{kind: logicalStateCountersPresent, counters: logicalStateCounters{bytes: tc.s0, entries: tc.entries}}, rows: rows}
+		result, err := evaluateLogicalStateCap(nil, tc.reg, id, tc.height, view, touched, tc.name)
+		if tc.want != "" {
+			if err == nil || err.Error() != tc.want || !reflect.DeepEqual(result, logicalStateCapResult[string]{}) {
+				t.Fatalf("%s: %#v %v", tc.name, result.active, err)
+			}
+			continue
+		}
+		wantCalls := 1
+		if tc.height == 0 {
+			wantCalls = 0
+		}
+		if err != nil || result.active != tc.wantActive || result.plan.Parent.bytes != tc.s0 || result.plan.Result.bytes != tc.s0+tc.delta || len(result.plan.Puts) != len(touched) || result.plan.Metadata != tc.name || view.counterCalls != wantCalls || len(view.lookups) != wantCalls*len(touched) {
+			t.Fatalf("%s: active=%v parent=%+v result=%+v err=%v", tc.name, result.active, result.plan.Parent, result.plan.Result, err)
+		}
+	}
+}
+
+func TestEvaluateLogicalStateCapBothStatesKeepAccountingFailure(t *testing.T) {
+	id := filled32(1)
+	active, _ := validateLogicalStateCapRegistry([]logicalStateCapRegistryRow{{chainID: id[:], activationHeight: 1}})
+	cause := errors.New("accounting cause")
+	touched, rows := logicalGrowthTouched(t, 773121)
+	badRows := map[Outpoint]logicalStateRowRead{}
+	for op := range rows {
+		badRows[op] = logicalStateRowRead{kind: logicalStateRowUnavailable, cause: cause}
+	}
+	ok := logicalStateCounterRead{kind: logicalStateCountersPresent, counters: logicalStateCounters{bytes: 1000000, entries: 100}}
+	for _, reg := range []validatedLogicalStateCapRegistry{{}, active} {
+		for _, tc := range []struct {
+			name string
+			view *logicalStateTestView
+			kind logicalStateFailureKind
+			text string
+		}{
+			{"counter-unavailable", &logicalStateTestView{counter: logicalStateCounterRead{kind: logicalStateCountersUnavailable, cause: cause}}, logicalStateFailureUnavailable, cause.Error()},
+			{"counter-malformed", &logicalStateTestView{counter: logicalStateCounterRead{kind: logicalStateCountersPresent, counters: logicalStateCounters{bytes: 1, entries: 1}}}, logicalStateFailureStoreIntegrity, "invalid logical state counters"},
+			{"row-unavailable", &logicalStateTestView{counter: ok, rows: badRows}, logicalStateFailureUnavailable, cause.Error()},
+		} {
+			result, err := evaluateLogicalStateCap(nil, reg, id, 5000, tc.view, touched, new(int))
+			var failure *logicalStateFailure
+			if !errors.As(err, &failure) || failure.kind != tc.kind || failure.Error() != tc.text || !reflect.DeepEqual(result, logicalStateCapResult[*int]{}) {
+				t.Fatalf("%s active-rows=%d: %v", tc.name, len(reg.rows), err)
+			}
+		}
+	}
+	view := &logicalStateTestView{counter: ok, rows: rows}
+	prior := &TxError{Code: TX_ERR_PARSE}
+	if result, err := evaluateLogicalStateCap(prior, active, id, 5000, view, touched, new(int)); !logicalStateSameErrorPointer(err, prior) || !reflect.DeepEqual(result, logicalStateCapResult[*int]{}) || view.counterCalls != 0 || len(view.lookups) != 0 {
+		t.Fatal("prior error must win with zero accounting work")
+	}
+}
+
+func TestLogicalStateCompleteMapAccounting(t *testing.T) {
+	row := func(data int) UtxoEntry { return logicalStateTestEntry(data, 1) }
+	op := func(i uint32) Outpoint { return Outpoint{Txid: filled32(7), Vout: i} }
+	bigRows := func(n uint32, from uint32) map[Outpoint]UtxoEntry {
+		m := map[Outpoint]UtxoEntry{}
+		for i := uint32(0); i < n; i++ {
+			m[op(from+i)] = row(65536)
+		}
+		return m
+	}
+	parent := map[Outpoint]UtxoEntry{op(0): row(33)} // 89 bytes
+	grown := func(extra uint32, tail int) map[Outpoint]UtxoEntry {
+		m := bigRows(extra, 1)
+		m[op(0)] = row(33)
+		m[op(1000)] = row(tail)
+		return m
+	}
+	// 11*65596 + (51564-58 data) = 773120 net over the kept 89-byte row.
+	if err := checkCompleteMapLogicalState(200, parent, grown(11, 51564-58)); err != nil {
+		t.Fatalf("equality: %v", err)
+	}
+	if err := checkCompleteMapLogicalState(200, parent, grown(11, 51565-58)); err == nil || err.Error() != testLogicalGrowthMsg {
+		t.Fatalf("over: %v", err)
+	}
+	// A positive-height imported base counts: the same final map against an
+	// empty parent is one 89-byte row further over.
+	if err := checkCompleteMapLogicalState(200, map[Outpoint]UtxoEntry{}, grown(11, 51564-58)); err == nil || err.Error() != testLogicalGrowthMsg {
+		t.Fatalf("imported base ignored: %v", err)
+	}
+	// Replacement uses final bytes: n rows of 89 bytes replaced in place by
+	// 65596-byte rows. 11*(65596-89) = 720577 passes; 12*(65596-89) = 786084 does not.
+	replaced := func(n uint32) (map[Outpoint]UtxoEntry, map[Outpoint]UtxoEntry) {
+		before, after := map[Outpoint]UtxoEntry{}, map[Outpoint]UtxoEntry{}
+		for i := uint32(0); i < n; i++ {
+			before[op(i)], after[op(i)] = row(33), row(65536)
+		}
+		return before, after
+	}
+	before, after := replaced(11)
+	if err := checkCompleteMapLogicalState(200, before, after); err != nil {
+		t.Fatalf("replacement net 720577: %v", err)
+	}
+	before, after = replaced(12)
+	if err := checkCompleteMapLogicalState(200, before, after); err == nil || err.Error() != testLogicalGrowthMsg {
+		t.Fatalf("replacement net 786084 must be refused: %v", err)
+	}
+	// Decrease and empty final map never wrap.
+	if err := checkCompleteMapLogicalState(200, bigRows(100, 0), map[Outpoint]UtxoEntry{}); err != nil {
+		t.Fatalf("shrink: %v", err)
+	}
+	// Height 0 reads no parent row, including a structural malformed one.
+	if err := checkCompleteMapLogicalState(0, map[Outpoint]UtxoEntry{op(0): row(65537)}, map[Outpoint]UtxoEntry{op(1): row(33)}); err != nil {
+		t.Fatalf("genesis parent consulted: %v", err)
+	}
+	// A prior undergrowth supplies no credit to the next block.
+	next := grown(11, 51564-58)
+	over := maps.Clone(next)
+	over[op(2000)] = row(65536)
+	for i := uint32(0); i < 12; i++ {
+		over[op(3000+i)] = row(65536)
+	}
+	if err := checkCompleteMapLogicalState(201, next, over); err == nil || err.Error() != testLogicalGrowthMsg {
+		t.Fatalf("credit retained: %v", err)
+	}
+	// Row-domain and local-invariant classes.
+	assertFailure := func(name string, err error, kind logicalStateFailureKind, text string) {
+		t.Helper()
+		failure, ok := any(err).(*logicalStateFailure)
+		if !ok || failure.kind != kind || failure.Error() != text {
+			t.Fatalf("%s: %T %v", name, err, err)
+		}
+	}
+	assertFailure("parent-row", checkCompleteMapLogicalState(200, map[Outpoint]UtxoEntry{op(0): row(65537)}, grown(12, 1000)), logicalStateFailureStoreIntegrity, "invalid present logical state row")
+	assertFailure("final-row", checkCompleteMapLogicalState(200, parent, map[Outpoint]UtxoEntry{op(0): row(65537)}), logicalStateFailureLocalInvariant, "invalid logical state plan mutation")
+	if total, failure := addLogicalStateEntryBytes(^uint64(0)-55, row(0)); total != 0 || failure == nil || failure.kind != logicalStateFailureLocalInvariant {
+		t.Fatalf("checked accumulation: %d %v", total, failure)
+	}
+	// CSM 2.5: a valid total is below 2^59 = 576460752303423488.
+	if total, failure := addLogicalStateEntryBytes(576460752303423487-56, row(0)); total != 576460752303423487 || failure != nil {
+		t.Fatalf("valid-total bound accepted side: %d %v", total, failure)
+	}
+	if total, failure := addLogicalStateEntryBytes(576460752303423488-56, row(0)); total != 0 || failure == nil || failure.kind != logicalStateFailureLocalInvariant || failure.Error() != "derived logical state counters exceed bounds" {
+		t.Fatalf("valid-total bound refused side: %d %v", total, failure)
 	}
 }

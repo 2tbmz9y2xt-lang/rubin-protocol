@@ -411,6 +411,9 @@ func (c *replayStepCall) stateBatch() (mdbx.Batch, error) {
 	if failure != nil {
 		return mdbx.Batch{}, c.logicalFailureWithOuter(failure, failure)
 	}
+	if err := checkLogicalStateCapAndGrowth(plan.Parent.bytes, plan.Result.bytes, false); err != nil {
+		return mdbx.Batch{}, c.consensus(err)
+	}
 	batch, failure := logicalMDBXPlanToBatch(plan)
 	if failure != nil {
 		return mdbx.Batch{}, c.logicalFailureWithOuter(failure, failure)
