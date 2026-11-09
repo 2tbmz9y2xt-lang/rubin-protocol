@@ -50,6 +50,18 @@ func (p *CanonicalMempoolTxPool) PendingOutpointOwner() *node.PendingOutpointOwn
 	return p.mempool.PendingOutpointOwner()
 }
 
+// AdmissionContextForRelay forwards the adapted mempool's guarded external
+// AdmissionContext observation unchanged: it captures no second source,
+// context, tip or owner. Nil-safe on a nil adapter or a nil adapted mempool.
+//
+// Deliberately NOT part of the generic TxPool interface.
+func (p *CanonicalMempoolTxPool) AdmissionContextForRelay() (node.PendingOutpointAdmissionContext, bool) {
+	if p == nil {
+		return node.PendingOutpointAdmissionContext{}, false
+	}
+	return p.mempool.AdmissionContextForRelay()
+}
+
 func (p *CanonicalMempoolTxPool) Get(txid [32]byte) ([]byte, bool) {
 	if p == nil || p.mempool == nil {
 		return nil, false
