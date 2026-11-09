@@ -2,8 +2,14 @@ package p2p
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
@@ -68,52 +74,11 @@ func TestPeerRegistryOwnershipStaleExitKeepsReplacement(t *testing.T) {
 }
 
 // P2: a stale exit racing a same-address registration under different quota keys always ends
-// with the registered connection owning the address and its state in the PeerManager. While a
-// test holds peersMu no registration reaches the PeerManager, and an observer reading both
-// registries under peersMu throughout the race never sees one hold the address without the other.
+// with the registered connection owning the address and its state in the PeerManager (bounded
+// behavioral evidence of Invariant P; P10 and P11 are the critical-section kills).
 func TestPeerRegistryOwnershipInterleavedExitAndRegistration(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	const addr = "configured.example:19112"
-	held := registryPeer(h, addr, "198.51.100.30:1")
-	h.service.peersMu.Lock()
-	registeredHeld := make(chan error, 1)
-	go func() { registeredHeld <- h.service.registerPeer(held) }()
-	requireStillBlocked(t, registeredHeld, "registerPeer while peersMu is held")
-	early := len(managerStates(h, addr))
-	h.service.peersMu.Unlock()
-	requireReturned(t, registeredHeld, "registerPeer after peersMu is released")
-	require(t, early == 0, "the PeerManager admitted %d entries while peersMu was held", early)
-	h.service.unregisterPeer(held)
-	stop, split := make(chan struct{}), make(chan string, 1)
-	observed := make(chan struct{})
-	go func() {
-		defer close(observed)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			h.service.peersMu.RLock()
-			inPeers, inManager := h.service.peers[addr] != nil, len(managerStates(h, addr)) == 1
-			h.service.peersMu.RUnlock()
-			if inPeers != inManager {
-				select {
-				case split <- fmt.Sprintf("Service.peers=%v PeerManager=%v", inPeers, inManager):
-				default:
-				}
-			}
-		}
-	}()
-	defer func() {
-		close(stop)
-		<-observed
-		select {
-		case got := <-split:
-			t.Fatalf("an observer under peersMu saw the registries split: %s", got)
-		default:
-		}
-	}()
 	for i := 0; i < 200; i++ {
 		older := registryPeer(h, addr, fmt.Sprintf("198.51.100.%d:1", 1+i%2))
 		newer := registryPeer(h, addr, fmt.Sprintf("203.0.113.%d:2", 1+i%2))
@@ -235,4 +200,147 @@ func TestPeerRegistryOwnershipSingleConnectionPaths(t *testing.T) {
 	requireOwner(t, h, "configured-1.example:1", nil, "after the exit")
 	mustRegister(t, h, refused)
 	requireOwner(t, h, "configured-2.example:2", refused, "the refused connection after capacity freed")
+}
+
+// registerPeerParkedOnPeersMu reports whether some goroutine is blocked acquiring an RWMutex
+// write lock directly from registerPeer, read from the full goroutine dump.
+func registerPeerParkedOnPeersMu() bool {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	for _, goroutine := range strings.Split(string(buf), "\n\n") {
+		var caller string
+		for _, line := range strings.Split(goroutine, "\n") {
+			if strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "goroutine ") {
+				continue
+			}
+			if strings.HasPrefix(line, "sync.") || strings.HasPrefix(line, "runtime.") || strings.HasPrefix(line, "internal/") {
+				continue
+			}
+			caller = line
+			break
+		}
+		if strings.Contains(goroutine, "sync.(*RWMutex).Lock(") && strings.Contains(caller, "p2p.(*Service).registerPeer(") {
+			return true
+		}
+	}
+	return false
+}
+
+// P10: while the test holds Service.peersMu and the registering goroutine is parked on it inside
+// registerPeer, the PeerManager has no entry for the registering address.
+func TestPeerRegistryOwnershipRegistrationIsAtomic(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	const addr = "configured.example:19118"
+	p := registryPeer(h, addr, "198.51.100.30:1")
+	h.service.peersMu.Lock()
+	registered := make(chan error, 1)
+	go func() { registered <- h.service.registerPeer(p) }()
+	parked := false
+	for deadline := time.Now().Add(5 * time.Second); !parked && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		parked = registerPeerParkedOnPeersMu()
+	}
+	early := managerStates(h, addr)
+	h.service.peersMu.Unlock()
+	require(t, parked, "registerPeer was never observed parked on peersMu")
+	require(t, len(early) == 0, "the PeerManager held %+v for %s while registerPeer was parked on peersMu", early, addr)
+	requireReturned(t, registered, "registerPeer after peersMu is released")
+	requireOwner(t, h, addr, p, "after the registration completes")
+}
+
+// peerManagerMutation reports whether call is a PeerManager AddPeer, RemovePeer or UpsertPeer call.
+func peerManagerMutation(call *ast.CallExpr) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || (selector.Sel.Name != "AddPeer" && selector.Sel.Name != "RemovePeer" && selector.Sel.Name != "UpsertPeer") {
+		return false
+	}
+	owner, ok := selector.X.(*ast.SelectorExpr)
+	return ok && owner.Sel.Name == "PeerManager"
+}
+
+// peersMuCall returns the method name of a Service.peersMu call, "" otherwise.
+func peersMuCall(call *ast.CallExpr) string {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	if mu, ok := selector.X.(*ast.SelectorExpr); ok && mu.Sel.Name == "peersMu" {
+		return selector.Sel.Name
+	}
+	return ""
+}
+
+// P11: in service_peer_lifecycle.go and peer_runtime.go every PeerManager mutation lies after a
+// Service.peersMu Lock/RLock with no non-deferred Unlock/RUnlock between them, and that span (up
+// to the function's last non-deferred unlock, or its end under a deferred one) also reads or
+// writes Service.peers, so the PeerManager effect and the Service.peers decision are one section.
+func TestPeerRegistryOwnershipPeerManagerMutationsShareThePeersSection(t *testing.T) {
+	seen := map[string]int{}
+	for _, path := range []string{"service_peer_lifecycle.go", "peer_runtime.go"} {
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		must(t, err, "parse "+path)
+		for _, decl := range file.Decls {
+			function, ok := decl.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			deferred := map[*ast.CallExpr]bool{}
+			var locks, unlocks []token.Pos
+			var mutations []*ast.CallExpr
+			var peersAccess []token.Pos
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				switch typed := node.(type) {
+				case *ast.DeferStmt:
+					deferred[typed.Call] = true
+				case *ast.CallExpr:
+					switch name := peersMuCall(typed); {
+					case name == "Lock" || name == "RLock":
+						locks = append(locks, typed.Pos())
+					case (name == "Unlock" || name == "RUnlock") && !deferred[typed]:
+						unlocks = append(unlocks, typed.Pos())
+					case peerManagerMutation(typed):
+						mutations = append(mutations, typed)
+					}
+				case *ast.IndexExpr:
+					if selector, ok := typed.X.(*ast.SelectorExpr); ok && selector.Sel.Name == "peers" {
+						peersAccess = append(peersAccess, typed.Pos())
+					}
+				}
+				return true
+			})
+			for _, mutation := range mutations {
+				name := function.Name.Name + "." + mutation.Fun.(*ast.SelectorExpr).Sel.Name
+				seen[name]++
+				lock := token.NoPos
+				for _, pos := range locks {
+					if pos < mutation.Pos() {
+						lock = pos
+					}
+				}
+				require(t, lock.IsValid(), "%s: %s runs before any peersMu lock", path, name)
+				spanEnd := function.Body.End()
+				for _, pos := range unlocks {
+					require(t, pos < lock || pos > mutation.Pos(), "%s: %s runs after peersMu was released", path, name)
+				}
+				if len(unlocks) > 0 && unlocks[len(unlocks)-1] > mutation.Pos() {
+					spanEnd = unlocks[len(unlocks)-1]
+				}
+				shared := false
+				for _, pos := range peersAccess {
+					shared = shared || (pos > lock && pos < spanEnd)
+				}
+				require(t, shared, "%s: %s's peersMu section neither changes nor checks Service.peers", path, name)
+			}
+		}
+	}
+	for _, name := range []string{"registerPeer.AddPeer", "removePeerEntries.RemovePeer", "removePeerEntries.UpsertPeer", "publishPeerStateIfOwner.UpsertPeer"} {
+		require(t, seen[name] == 1, "%s calls=%d, want exactly one (all calls: %v)", name, seen[name], seen)
+	}
+	require(t, len(seen) == 4, "PeerManager mutations outside the R1-R3 sections: %v", seen)
 }
