@@ -186,9 +186,10 @@ func TestDAPrefetchPreferredConnectionOwnsQuotaKey(t *testing.T) {
 	h := highTipHarness(t, 1440)
 	h.service.cfg.EnableCompactReceive = true
 	f := newDAIngressFixture(t, h)
-	a := addDAPrefetchTestPeer(h.service, "127.0.0.5:1", "127.0.0.5:1", nil)
-	b := addDAPrefetchTestPeer(h.service, "127.0.0.5:2", "127.0.0.5:2", nil)
-	c := addDAPrefetchTestPeer(h.service, "127.0.0.4:1", "127.0.0.4:1", nil)
+	// Logical names differ from the sockets, so a key derived from the logical name cannot pass.
+	a := addDAPrefetchTestPeer(h.service, "configured-a.example:1", "127.0.0.5:1", nil)
+	b := addDAPrefetchTestPeer(h.service, "configured-b.example:2", "127.0.0.5:2", nil)
+	c := addDAPrefetchTestPeer(h.service, "configured-c.example:1", "127.0.0.4:1", nil)
 	blank := addDAPrefetchTestPeer(h.service, "blank", "remote", nil)
 	blank.state.Addr = "" // an accepting session whose non-IP socket endpoint yields no quota key
 	disabled := testPeerForService(h.service, "peer-disabled", 0)

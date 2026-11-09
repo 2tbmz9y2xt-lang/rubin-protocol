@@ -96,6 +96,18 @@ func TestPeerRegistryOwnershipInterleavedExitAndRegistration(t *testing.T) {
 		h.service.unregisterPeer(newer)
 		requireOwner(t, h, addr, nil, fmt.Sprintf("round %d final exit", i))
 	}
+	// Three same-address connections: the owner's exit hands the address to the newest survivor,
+	// not the oldest, in both Service.peers and the PeerManager.
+	oldest, middle, newest := registryPeer(h, addr, "198.51.100.31:1"), registryPeer(h, addr, "198.51.100.32:2"), registryPeer(h, addr, "198.51.100.33:3")
+	mustRegister(t, h, oldest, middle, newest)
+	oldest.setLastError("oldest state")
+	middle.setLastError("middle state")
+	h.service.unregisterPeer(newest)
+	requireOwner(t, h, addr, middle, "after the newest owner's exit")
+	h.service.unregisterPeer(middle)
+	requireOwner(t, h, addr, oldest, "after the middle owner's exit")
+	h.service.unregisterPeer(oldest)
+	requireOwner(t, h, addr, nil, "after the last exit")
 }
 
 // P3/P5: an exiting owner hands its address to the live replaced connection, publishing that
