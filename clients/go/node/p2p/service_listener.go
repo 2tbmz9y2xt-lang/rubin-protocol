@@ -221,13 +221,12 @@ func (s *Service) Close() error {
 	if listener != nil {
 		_ = listener.Close()
 	}
+	// One snapshot of every live connection (the registered set together with Service.peers
+	// referents), so a connection with no Service.peers entry is closed too, each exactly once.
 	s.peersMu.RLock()
-	peers := make([]*peer, 0, len(s.peers))
-	for _, current := range s.peers {
-		peers = append(peers, current)
-	}
+	live := s.livePeersLocked()
 	s.peersMu.RUnlock()
-	for _, current := range peers {
+	for current := range live {
 		_ = current.conn.Close()
 	}
 	s.loopWG.Wait()
