@@ -61,8 +61,8 @@ type Service struct {
 	peerRegistrations uint64
 	// livePeers is the set of registered connections that have not exited (R5): a live
 	// connection can hold no Service.peers entry once a newer registration took its logical
-	// address and its alias equals that address or another connection's. Mutated only in the
-	// registerPeer and unregisterPeer peersMu sections. Guarded by peersMu.
+	// address and its alias equals that address or another connection's logical address.
+	// Mutated only in the registerPeer and unregisterPeer peersMu sections. Guarded by peersMu.
 	livePeers        map[*peer]struct{}
 	peerQuotaLocksMu sync.Mutex
 	peerQuotaLocks   map[string]*peerQuotaLock

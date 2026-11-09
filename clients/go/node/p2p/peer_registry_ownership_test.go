@@ -218,7 +218,9 @@ func TestPeerRegistryOwnershipHiddenLiveConnection(t *testing.T) {
 	requireOwner(t, h, addr, newer, "after the hidden connection's exit")
 	hidden = registryPeer(h, addr, addr)
 	mustRegister(t, h, hidden)
-	h.service.unregisterPeer(newer) // a stale same-address exit after the new owner registered
+	exits = h.service.PeerLifecycleExits()
+	h.service.unregisterPeer(newer) // the replaced connection exits while hidden
+	require(t, h.service.PeerLifecycleExits() == exits+1, "replaced hidden exit counted %d times", h.service.PeerLifecycleExits()-exits)
 	hidden.setLastError("hidden state")
 	requireOwner(t, h, addr, hidden, "after the replaced connection's exit")
 	newer = registryPeer(h, addr, addr)
