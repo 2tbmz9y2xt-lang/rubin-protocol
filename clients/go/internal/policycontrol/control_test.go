@@ -404,16 +404,6 @@ func TestAPICensus(t *testing.T) {
 	}
 }
 
-// A9: a latch transaction found empty (already durably true) still consumes the request.
-func TestEmptyLatchCommitConsumesRequest(t *testing.T) {
-	_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
-	tx := mustBegin(t, s)
-	tx.latch, s.latchRequested = true, true
-	if r, err := tx.Commit(); err != nil || r.Truth != OLD || s.latchRequested {
-		t.Fatalf("%v %v requested=%t", r, err, s.latchRequested)
-	}
-}
-
 // X9: a transaction carries one incident change; every other change is refused, the staged state stays and commits alone.
 func TestOneIncidentChangePerTransaction(t *testing.T) {
 	type op = func(tx *Tx) error
@@ -483,6 +473,16 @@ func TestLatchRequestDuringCrossing(t *testing.T) {
 	s.fault = failAt(stageWrite)
 	wantTruth(t, OLD)(s.PersistLatch(stableProof(g)))
 	wantLatch(t, s, LatchStatus{})
+	// A9: the decision already holds the writer; a request recorded after it is a new one.
+	s.RequestLatch()
+	tx, _, err := s.beginLatch(stableProof(g))
+	if err != nil || tx == nil || s.tx != tx {
+		t.Fatalf("decision without the writer: %v", err)
+	}
+	wantErr(t, ErrBusy)(s.PersistLatch(stableProof(g)))
+	s.RequestLatch()
+	wantTruth(t, OLD)(tx.Commit())
+	wantLatch(t, s, LatchStatus{Requested: true})
 }
 
 // A10: Close discards the RAM request, and a closed store records none.

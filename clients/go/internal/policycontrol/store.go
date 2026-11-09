@@ -85,20 +85,20 @@ type Store struct {
 	crossing                     bool     // commit or recovery I/O in progress
 	pending                      *attempt // unresolved UNKNOWN attempt
 	closed                       bool
-	latchRequested, latchRenewed bool // the one coalesced RAM latch request; recorded during the current crossing
+	latchRequested, latchRenewed bool // the one coalesced RAM latch request; one recorded since the latest latch decision
 }
 
-// Create creates positively new P (sequence 0, empty receipt, both booleans
-// false, no incident, empty journal) in the existing mode-0700 directory dir,
-// which must hold nothing but a stale scratch file, then reads it back. It
-// never creates the directory; a zero or mismatched proof refuses.
+// Create creates positively new P (sequence 0, empty receipt, both booleans false, no incident, empty
+// journal) in the existing mode-0700 directory dir, which must hold nothing but a stale scratch file,
+// holding the directory's exclusive lock until Close, then reads it back. It never creates the directory;
+// a zero or mismatched proof refuses, a contended lock is ErrBusy, any other lock failure ErrUnreadable.
 func Create(dir string, id Identity, proof NewInstallationProof) (*Store, error) {
 	return start(dir, id, &proof, productionHooks)
 }
 
-// Open qualifies existing P in dir against expected. It creates nothing: an
-// absent directory or P is ErrMissingControl; malformed or mismatched P is
-// ErrIntegrity and is never reset, recreated or defaulted to fresh.
+// Open qualifies existing P in dir against expected, holding the directory's exclusive lock until Close.
+// It creates nothing: an absent directory or P is ErrMissingControl, a contended lock ErrBusy, unobtainable
+// bytes ErrUnreadable, malformed or mismatched P ErrIntegrity. P is never reset, recreated or defaulted to fresh.
 func Open(dir string, expected Identity) (*Store, error) {
 	return start(dir, expected, nil, productionHooks)
 }

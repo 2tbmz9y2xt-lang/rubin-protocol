@@ -98,8 +98,12 @@ func (s *Store) Begin() (*Tx, error) {
 	case s.heldLocked():
 		return nil, ErrBusy
 	}
+	return s.newTxLocked(), nil
+}
+
+func (s *Store) newTxLocked() *Tx {
 	s.tx = &Tx{s: s, base: s.st, ctl: s.st.ctl.clone(), puts: map[string]Row{}, dels: map[string]struct{}{}}
-	return s.tx, nil
+	return s.tx
 }
 
 // Ownerless records ownerless control: epoch n+1 and empty intent.
@@ -195,12 +199,12 @@ func lockGuards(qs []Qualified) (held []*Guard, err error) {
 	return held, nil
 }
 
-// Commit ends the transaction with exactly one of OLD, NEW or UNKNOWN. An
-// empty change set writes nothing and is OLD. A refusal before the rename
-// (guard, sequence, domain, bound, scratch I/O) is OLD with nothing changed.
-// A successful durable crossing is NEW with no compulsory second read. A
-// failure after the rename or a lost acknowledgement is UNKNOWN: the store
-// then refuses Begin, views and dependent effects until Recover resolves it.
+// Commit ends a live transaction with exactly one of OLD, NEW or UNKNOWN and the sequence that truth
+// establishes. A finished Tx attempts nothing: zero Result and ErrFinished. An empty change set writes
+// nothing and is OLD. A refusal before the rename (guard, sequence, domain, bound, scratch I/O) is OLD
+// with nothing changed. A successful durable crossing is NEW with no compulsory second read. A failure
+// after the rename or a lost acknowledgement is UNKNOWN: the store then refuses Begin, views and
+// dependent effects until Recover resolves it.
 func (tx *Tx) Commit() (Result, error) {
 	old, proceed, err := tx.enterCommit()
 	if !proceed {
@@ -219,12 +223,10 @@ func (tx *Tx) enterCommit() (old Result, proceed bool, err error) {
 	}
 	old = Result{Truth: OLD, sequence: tx.base.seq}
 	if len(tx.puts) == 0 && len(tx.dels) == 0 && tx.ctl.equal(tx.base.ctl) {
-		if tx.done, s.tx = true, nil; tx.latch {
-			s.afterLatchLocked(true, nil)
-		}
+		tx.done, s.tx = true, nil
 		return old, false, nil
 	}
-	tx.done, s.crossing, s.latchRenewed = true, true, false // Abort and a second Commit now see a finished Tx
+	tx.done, s.crossing = true, true // Abort and a second Commit now see a finished Tx
 	return old, true, nil
 }
 
@@ -262,7 +264,7 @@ func (tx *Tx) finishCommit(old Result, next *state, c crossingResult, failure er
 	return Result{Truth: NEW, sequence: next.seq}, nil
 }
 
-// Abort ends the transaction before commit: OLD with nothing changed.
+// Abort ends a live transaction before commit: OLD with nothing changed. A finished Tx attempts nothing: zero Result and ErrFinished.
 func (tx *Tx) Abort() (Result, error) {
 	s := tx.s
 	s.mu.Lock()
