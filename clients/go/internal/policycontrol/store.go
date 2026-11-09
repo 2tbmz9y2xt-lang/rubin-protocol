@@ -63,13 +63,16 @@ var productionHooks = hooks{acquire: filelock.AcquireDirectory}
 // Store is an open P holding the store directory's exclusive inode lock from
 // Create or Open until Close. All methods are safe for concurrent use.
 type Store struct {
-	dir    string
-	lock   *filelock.Handle
-	fault  func(stage) error
-	mu     sync.Mutex
-	st     *state // last qualified committed state
-	image  []byte // its exact bytes
-	closed bool
+	dir      string
+	lock     *filelock.Handle
+	fault    func(stage) error
+	mu       sync.Mutex
+	st       *state   // last qualified committed state
+	image    []byte   // its exact bytes
+	tx       *Tx      // the held transaction
+	crossing bool     // commit or recovery I/O in progress
+	pending  *attempt // unresolved UNKNOWN attempt
+	closed   bool
 }
 
 // Create creates positively new P (sequence 0, empty receipt, both booleans
@@ -257,7 +260,8 @@ func (s *Store) cross(image []byte) (c crossingResult) {
 	return c
 }
 
-// View returns a protected copy of the last qualified committed P.
+// View returns a protected copy of the last qualified committed P; it refuses
+// with ErrBusy during a crossing or while an attempt is UNKNOWN.
 func (s *Store) View() (View, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -282,15 +286,29 @@ func (s *Store) readableLocked() error {
 	if s.closed {
 		return ErrClosed
 	}
+	if s.crossing || s.pending != nil {
+		return fmt.Errorf("%w: %w", ErrBusy, ErrUnresolved)
+	}
 	return nil
 }
 
-// Close releases the directory lock.
+// Close ends a held transaction as OLD, disposes a retained crossing handle
+// and releases the directory lock. It refuses with ErrBusy during a crossing.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil
+	}
+	if s.crossing {
+		return ErrBusy
+	}
+	if s.tx != nil {
+		s.tx.done, s.tx = true, nil
+	}
+	if p := s.pending; p != nil && p.handle != nil {
+		_ = p.handle.Close()
+		p.handle = nil
 	}
 	s.closed = true
 	return s.lock.Release()
