@@ -639,7 +639,7 @@ const icbKeyDERV1 = "3034020100300b060960864801650304031304228020" +
 	"a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
 
 // icbFixedSigsV1 maps the three base-fixture sighash digests (tx1 input 0,
-// tx2 inputs 0 and 1; identical at heights 5 and 4800) to signatures produced
+// tx2 inputs 0 and 1; identical at icbHeightV1 and icbCapHeightV1) to signatures produced
 // once by hedged SignDigest32 under icbKeyDERV1. They fix the wtxids, hence the
 // coinbase witness commitment, cb:0 txid and the pinned literal roots.
 var icbFixedSigsV1 = map[string]string{
@@ -1966,6 +1966,41 @@ func icbAssertTerminalV1(t *testing.T, name string, spent *blockSpentInputSource
 	logicalMDBXAssert(t, spent != nil && reflect.DeepEqual(*spent, blockSpentInputSource{}), "post-connect refusal retained spent source: %s", name)
 }
 
+// icbSpentCaptureViewV1 retains the transition's original spent source at the
+// first Counters read after candidateV1 assigns the transition. Reads during
+// connect see a nil transition and capture nothing.
+type icbSpentCaptureViewV1 struct {
+	icbPassiveViewV1
+	result   *initial148CompleteBlockResultV1
+	original *blockSpentInputSource
+}
+
+func icbNewSpentCaptureV1(result *initial148CompleteBlockResultV1, counters logicalStateCounterRead, rows map[Outpoint]UtxoEntry) *icbSpentCaptureViewV1 {
+	return &icbSpentCaptureViewV1{icbPassiveViewV1: icbPassiveViewV1{counters: counters, rows: rows}, result: result}
+}
+
+func (v *icbSpentCaptureViewV1) Counters() logicalStateCounterRead {
+	if v.original == nil && v.result.transition != nil {
+		v.original = v.result.transition.spentInputs
+	}
+	return v.icbPassiveViewV1.Counters()
+}
+
+// assertRetainedTerminal requires the captured object itself to be cleared and
+// still be the object the result holds.
+func (v *icbSpentCaptureViewV1) assertRetainedTerminal(t *testing.T, name string) {
+	t.Helper()
+	logicalMDBXAssert(t, v.original != nil, "original spent source not captured: %s", name)
+	icbAssertTerminalV1(t, name, v.original)
+	logicalMDBXAssert(t, v.result.transition.spentInputs == v.original, "spent source pointer replaced: %s", name)
+}
+
+// assertDeliveredLive requires the captured object to be the delivered, live one.
+func (v *icbSpentCaptureViewV1) assertDeliveredLive(t *testing.T, name string) {
+	t.Helper()
+	logicalMDBXAssert(t, v.original != nil && v.result.transition.spentInputs == v.original && v.original.raw != nil, "success must keep the original spent source live: %s", name)
+}
+
 // icbGrowthFrameV1 builds the valid funded census as a complete-frame body.
 func icbGrowthFrameV1(t *testing.T, kp *MLDSA87Keypair, census logicalGrowthCensus, height uint64) initial148CompleteBlockInputV1 {
 	t.Helper()
@@ -2020,17 +2055,18 @@ func icbGrowthOrderCasesV1(header [32]byte, readCause error) []icbGrowthOrderCas
 func icbRunGrowthOrderV1(t *testing.T, in initial148CompleteBlockInputV1, tc icbGrowthOrderCaseV1, header [32]byte, rows map[Outpoint]UtxoEntry, workers int) {
 	t.Helper()
 	f := &initial148CompleteBlockFrameV1{input: in, workers: workers, parallel: workers >= 0}
-	view := &icbPassiveViewV1{counters: icbPresentCountersV1(tc.counters[0], tc.counters[1]), rows: rows}
+	var result initial148CompleteBlockResultV1
+	view := icbNewSpentCaptureV1(&result, icbPresentCountersV1(tc.counters[0], tc.counters[1]), rows)
 	derived := 0
 	derive := func() initial148RootReadOutcomeV1 {
 		derived++
 		return tc.outcome
 	}
-	var result initial148CompleteBlockResultV1
 	err := f.candidateV1(view, derive, header, initial148PendingGeneratedV1(in), &result)
 	name := fmt.Sprintf("%s workers=%d", tc.name, workers)
 	if tc.check == nil {
-		logicalMDBXAssert(t, err == nil && derived == tc.derived && result.transition.spentInputs.raw != nil, "%s control: %v derived=%d", name, err, derived)
+		logicalMDBXAssert(t, err == nil && derived == tc.derived, "%s control: %v derived=%d", name, err, derived)
+		view.assertDeliveredLive(t, name)
 		return
 	}
 	logicalMDBXAssert(t, err != nil && tc.check(err), "%s error: %T %v", name, err, err)
@@ -2038,7 +2074,7 @@ func icbRunGrowthOrderV1(t *testing.T, in initial148CompleteBlockInputV1, tc icb
 	if tc.derived == 0 {
 		logicalMDBXAssert(t, f.outcome.required == (initial148RootReadOutcomeV1{}), "%s root work ran before refusal", name)
 	}
-	icbAssertTerminalV1(t, name, result.transition.spentInputs)
+	view.assertRetainedTerminal(t, name)
 }
 
 // TestInitial148CompleteBlockCandidateGrowthOrder is candidate-boundary
@@ -2099,28 +2135,37 @@ func TestInitial148CompleteBlockCandidateDisposal(t *testing.T) {
 			f := &initial148CompleteBlockFrameV1{input: fx.in, workers: workers, parallel: workers >= 0}
 			derived := 0
 			var result initial148CompleteBlockResultV1
-			err := f.candidateV1(&icbPassiveViewV1{counters: tc.counters, rows: rows}, func() initial148RootReadOutcomeV1 {
+			view := icbNewSpentCaptureV1(&result, tc.counters, rows)
+			err := f.candidateV1(view, func() initial148RootReadOutcomeV1 {
 				derived++
 				return tc.outcome
 			}, fx.header.UtxoRoot, tc.scalar, &result)
 			name := fmt.Sprintf("%s workers=%d", tc.name, workers)
 			logicalMDBXAssert(t, err != nil && tc.check(err) && derived == tc.derived, "%s: %v derived=%d", name, err, derived)
-			icbAssertTerminalV1(t, name, result.transition.spentInputs)
+			if tc.scalar != generated {
+				// The scalar refusal returns before capV1: no callback can capture.
+				icbAssertTerminalV1(t, name, result.transition.spentInputs)
+				continue
+			}
+			view.assertRetainedTerminal(t, name)
 		}
 		// An unwind before accepted handoff disposes of the same source.
 		f := &initial148CompleteBlockFrameV1{input: fx.in, workers: workers, parallel: workers >= 0}
 		var result initial148CompleteBlockResultV1
+		unwind := icbNewSpentCaptureV1(&result, good, rows)
 		func() {
 			defer func() { logicalMDBXAssert(t, recover() != nil, "derive panic not propagated") }()
-			_ = f.candidateV1(&icbPassiveViewV1{counters: good, rows: rows}, func() initial148RootReadOutcomeV1 { panic("derive") }, fx.header.UtxoRoot, generated, &result)
+			_ = f.candidateV1(unwind, func() initial148RootReadOutcomeV1 { panic("derive") }, fx.header.UtxoRoot, generated, &result)
 		}()
-		icbAssertTerminalV1(t, "unwind", result.transition.spentInputs)
+		unwind.assertRetainedTerminal(t, "unwind")
 		// Root success keeps the source live for the accepted handoff.
 		f = &initial148CompleteBlockFrameV1{input: fx.in, workers: workers, parallel: workers >= 0}
 		result = initial148CompleteBlockResultV1{}
-		err := f.candidateV1(&icbPassiveViewV1{counters: good, rows: rows}, func() initial148RootReadOutcomeV1 {
+		control := icbNewSpentCaptureV1(&result, good, rows)
+		err := f.candidateV1(control, func() initial148RootReadOutcomeV1 {
 			return initial148RootReadOutcomeV1{root: fx.header.UtxoRoot, derived: true}
 		}, fx.header.UtxoRoot, generated, &result)
-		logicalMDBXAssert(t, err == nil && result.transition.spentInputs.raw != nil, "success must not dispose: %v", err)
+		logicalMDBXAssert(t, err == nil, "success must not dispose: %v", err)
+		control.assertDeliveredLive(t, "success")
 	}
 }
