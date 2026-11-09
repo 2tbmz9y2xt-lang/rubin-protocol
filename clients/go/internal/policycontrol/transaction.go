@@ -70,25 +70,25 @@ const (
 
 // Tx is the one exclusive P transaction; its changes stay staged until Commit.
 type Tx struct {
-	s       *Store
-	base    *state
-	ctl     control
-	puts    map[string]Row
-	dels    map[string]struct{}
-	mode    ownerMode
-	owner   Owner
-	class   OpClass
-	ordinal uint64
-	cursors *Cursors
-	guards  []Qualified
-	done    bool
+	s           *Store
+	base        *state
+	ctl         control
+	puts        map[string]Row
+	dels        map[string]struct{}
+	mode        ownerMode
+	owner       Owner
+	class       OpClass
+	ordinal     uint64
+	cursors     *Cursors
+	guards      []Qualified
+	latch, done bool // latch persistence transaction; ended
 }
 
 type attempt struct {
-	old, new []byte
-	next     *state
-	handle   *os.File
-	poisoned bool
+	old, new        []byte
+	next            *state
+	handle          *os.File
+	poisoned, latch bool
 }
 
 // Begin is try-or-refuse: it never waits and returns ErrBusy while another
@@ -208,7 +208,9 @@ func (tx *Tx) Commit() (res Result, err error) {
 	}
 	old := Result{Truth: OLD, sequence: tx.base.seq}
 	if len(tx.puts) == 0 && len(tx.dels) == 0 && tx.ctl.equal(tx.base.ctl) {
-		tx.done, s.tx = true, nil
+		if tx.done, s.tx = true, nil; tx.latch {
+			s.afterLatchLocked(true, nil)
+		}
 		s.mu.Unlock()
 		return old, nil
 	}
@@ -230,12 +232,14 @@ func (tx *Tx) Commit() (res Result, err error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx.done, s.tx, s.crossing = true, nil, false
+	if tx.done, s.tx, s.crossing = true, nil, false; tx.latch {
+		defer func() { s.afterLatchLocked(true, err) }()
+	}
 	switch {
 	case err != nil:
 		return old, err
 	case c.crashed || c.ackLost || c.poisoned:
-		s.pending = &attempt{old: s.image, new: image, next: next, handle: c.handle, poisoned: c.crashed || c.poisoned}
+		s.pending = &attempt{old: s.image, new: image, next: next, handle: c.handle, poisoned: c.crashed || c.poisoned, latch: tx.latch}
 		return Result{Truth: UNKNOWN}, fmt.Errorf("%w: %w", ErrUnresolved, c.err)
 	case c.err != nil:
 		return old, c.err
@@ -304,7 +308,9 @@ func (s *Store) Recover() (Result, error) {
 	case NEW:
 		s.st, s.image = p.next, p.new
 	}
-	s.pending = nil
+	if s.pending = nil; p.latch {
+		s.afterLatchLocked(false, nil)
+	}
 	return Result{Truth: truth, sequence: s.st.seq}, nil
 }
 
