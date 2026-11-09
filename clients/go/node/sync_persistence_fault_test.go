@@ -227,6 +227,23 @@ func TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch(t *testing.T) {
 	if got := mempool.AdmissionCounts(); got != (MempoolAdmissionCounts{Unavailable: 2}) {
 		t.Fatalf("terminal standard admission counts=%+v, want two unavailable", got)
 	}
+	// The external relay observer's one guard attempt is refused by the held
+	// terminal writer: it returns zero/false without waiting and, with owner.mu
+	// held here, without reading the source.
+	owner.mu.Lock()
+	observed := make(chan error, 1)
+	go func() {
+		if ctx, ok := mempool.AdmissionContextForRelay(); ok || ctx != (PendingOutpointAdmissionContext{}) {
+			observed <- errors.New("external relay observation authorized a context after the terminal latch")
+			return
+		}
+		observed <- nil
+	}()
+	observeErr := awaitPersistenceResult(t, observed, "terminal external relay observation")
+	owner.mu.Unlock()
+	if observeErr != nil {
+		t.Fatal(observeErr)
+	}
 	if engine.chainState.admissionMu.TryLock() {
 		engine.chainState.admissionMu.Unlock()
 		t.Fatal("terminal admission writer was released")

@@ -431,6 +431,13 @@ type Mempool struct {
 	// the former spenders index: outpoint ownership now lives with the claim
 	// and its token, so no second spender map can drift from the records.
 	pendingOutpoints *PendingOutpointOwner
+	// relaySource is the external relay-cache observer's binding:
+	// NewMempoolWithConfig installs it once, referencing the SAME ChainState
+	// and the SAME owner pointer as chainState and pendingOutpoints, and
+	// nothing reassigns it. AdmissionContextForRelay reads only this binding,
+	// never pendingOutpoints, so it needs no m.mu. A zero/bare Mempool has
+	// none and is unavailable even after its lazy owner is created.
+	relaySource relayAdmissionSource
 	// sigCache is the one positive-only signature cache this Mempool owns.
 	sigCache *consensus.SigCache
 	// Admission counters are bumped exactly once for each AddTx call on a

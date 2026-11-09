@@ -379,6 +379,11 @@ func (o *PendingOutpointOwner) Reserve(
 // This is the ONLY downstream policy-generation seam on the owner: it adds no
 // generic TxPool method, no cache, no callback, no notification hook and no DA
 // behavior.
+//
+// It is the internal read for a caller that already holds the ChainState
+// admission guard. An external relay-cache observer, which holds no guard,
+// uses Mempool.AdmissionContextForRelay instead: that wrapper makes the one
+// non-blocking guard attempt and then calls this method exactly once.
 func (o *PendingOutpointOwner) AdmissionContext() (PendingOutpointAdmissionContext, bool) {
 	if o == nil {
 		return PendingOutpointAdmissionContext{}, false
