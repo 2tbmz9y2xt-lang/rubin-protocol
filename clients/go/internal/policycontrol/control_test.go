@@ -419,7 +419,7 @@ func TestAPICensus(t *testing.T) {
 	}
 	want := map[string][]string{
 		"Store":  {"Begin", "Close", "Gate", "Latch", "Membership", "PersistLatch", "Recover", "RequestLatch", "View"},
-		"Tx":     {"Abort", "AdmitOwner", "AutoBlock", "Batch", "Commit", "ConsumeIntent", "ObserveIncident", "Operation", "Ownerless", "PutRow", "RemoveOnSuccess", "ReplaceObserved", "Require", "RetainOwner"},
+		"Tx":     {"Abort", "AdmitOwner", "AutoBlock", "Batch", "Commit", "ConsumeIntent", "DeleteRow", "ObserveIncident", "Operation", "Ownerless", "PutRow", "RemoveOnSuccess", "ReplaceObserved", "Require", "RetainOwner"},
 		"Result": {"Sequence"},
 	}
 	got := map[string][]string{"Store": methods(&Store{}), "Tx": methods(&Tx{}), "Result": methods(Result{})}
