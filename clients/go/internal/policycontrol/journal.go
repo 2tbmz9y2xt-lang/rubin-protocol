@@ -20,8 +20,7 @@ func (tx *Tx) PutRow(kind RowKind, key, payload []byte) error {
 }
 
 // DeleteRow stages removal of a reservation or working-reservation row; an
-// absent row stages nothing. Lasting slots and contexts are never removed,
-// reused, evicted or reset.
+// absent row stages nothing. Lasting slots and contexts are never removed, reused, evicted or reset.
 func (tx *Tx) DeleteRow(kind RowKind, key []byte) error {
 	if kind != KindReservation && kind != KindWorkingReservation {
 		return refused("lasting slots and contexts are never removed")

@@ -254,6 +254,8 @@ func TestLostAcknowledgementRecovery(t *testing.T) {
 		}
 		wantErr(t, ErrBusy)(s.View())
 		wantErr(t, ErrBusy)(s.Membership())
+		wantErr(t, ErrUnresolved)(s.View())
+		wantErr(t, ErrUnresolved)(s.Membership())
 		r, err = s.Recover()
 		if wantResult(t, r, tc.truth, tc.seq); err != nil {
 			t.Fatalf("%s: recover %v", tc.name, err)
@@ -423,6 +425,7 @@ func TestNoWaiterDuringCrossing(t *testing.T) {
 	start := time.Now()
 	_, beginErr := s.Begin()
 	_, viewErr := s.View()
+	_, memberErr := s.Membership()
 	_, recErr := s.Recover()
 	closeErr := s.Close()
 	abortRes, abortErr := tx.Abort()
@@ -431,9 +434,9 @@ func TestNoWaiterDuringCrossing(t *testing.T) {
 		t.Fatalf("in-flight Tx accepted Abort or a second Commit: %v/%v %v/%v", abortRes, abortErr, againRes, againErr)
 	}
 	g := s.Gate()
-	if time.Since(start) > time.Second || !errors.Is(beginErr, ErrBusy) || !errors.Is(viewErr, ErrBusy) ||
+	if time.Since(start) > time.Second || !errors.Is(beginErr, ErrBusy) || !errors.Is(viewErr, ErrBusy) || errors.Is(viewErr, ErrUnresolved) || !errors.Is(memberErr, ErrBusy) || errors.Is(memberErr, ErrUnresolved) ||
 		!errors.Is(recErr, ErrBusy) || !errors.Is(closeErr, ErrBusy) || g != (Gate{}) {
-		t.Fatalf("crossing waited or allowed: %v %v %v %v %+v", beginErr, viewErr, recErr, closeErr, g)
+		t.Fatalf("crossing waited or allowed: %v %v %v %v %v %+v", beginErr, viewErr, memberErr, recErr, closeErr, g)
 	}
 	close(release)
 	wantResult(t, <-done, NEW, 41)

@@ -141,7 +141,7 @@ func (s *Store) load(id Identity, creating bool) (err error) {
 		return s.create(id)
 	}
 	if _, e := os.Lstat(filepath.Join(s.dir, unresolvedFile)); !errors.Is(e, fs.ErrNotExist) {
-		return fmt.Errorf("%w: a post-rename durability failure was recorded; operator resolution required", ErrUnresolved)
+		return fmt.Errorf("%w: a post-rename durability failure was recorded or cannot be ruled out; operator resolution required", ErrUnresolved)
 	}
 	if s.image, err = s.readImage(); err != nil {
 		return err
@@ -251,8 +251,7 @@ type crossingResult struct {
 	err                                   error
 }
 
-// cross atomically replaces P with st's image. A failure before the rename leaves
-// OLD; one after it is poisoned UNKNOWN; a crash retains the open handle.
+// cross atomically replaces P with st's image. A failure before the rename leaves OLD; one after it is poisoned UNKNOWN; a crash retains the open handle.
 func (s *Store) cross(st *state) (c crossingResult) {
 	if c.image = encode(st); c.image == nil {
 		c.err = refused("state does not encode within its ceilings")
@@ -329,8 +328,10 @@ func (s *Store) readableLocked() error {
 	switch {
 	case s.closed:
 		return ErrClosed
-	case s.crossing || s.pending != nil:
+	case s.pending != nil:
 		return fmt.Errorf("%w: %w", ErrBusy, ErrUnresolved)
+	case s.crossing:
+		return ErrBusy
 	}
 	return nil
 }

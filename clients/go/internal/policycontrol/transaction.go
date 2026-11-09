@@ -18,15 +18,13 @@ const (
 	UNKNOWN
 )
 
-// Result carries only P truth and the sequence that truth establishes; it
-// grants no native, pair, selector, outer or publication permission.
+// Result carries only P truth and the sequence that truth establishes; it grants no native, pair, selector, outer or publication permission.
 type Result struct {
 	Truth    Truth
 	sequence uint64
 }
 
-// Sequence returns the sequence established by OLD or NEW; UNKNOWN establishes
-// none. A zero Result (Truth 0) means the call attempted no transaction.
+// Sequence returns the sequence established by OLD or NEW; UNKNOWN establishes none. A zero Result (Truth 0) means the call attempted no transaction.
 func (r Result) Sequence() (uint64, bool) {
 	return r.sequence, r.Truth == OLD || r.Truth == NEW
 }
@@ -49,7 +47,7 @@ func (g *Guard) Advance() {
 	g.mu.Unlock()
 }
 
-// Qualify returns the current revision for Tx.Require.
+// Qualify returns the current revision for Tx.Require; it waits for a crossing protecting this guard.
 func (g *Guard) Qualify() Qualified {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -115,8 +113,7 @@ func (tx *Tx) AdmitOwner(kind OwnerKind, intent []byte) {
 	tx.mode, tx.owner = ownerAdmit, Owner{Kind: kind, Intent: clone(intent)}
 }
 
-// RetainOwner records a live, continuing, handed-off or ending owner with its
-// original epoch (at most n) and exact intent; it is never re-epoched.
+// RetainOwner records a live, continuing, handed-off or ending owner with its original epoch (at most n) and exact intent; it is never re-epoched.
 func (tx *Tx) RetainOwner(o Owner) {
 	tx.mode, tx.owner = ownerRetain, Owner{Kind: o.Kind, Epoch: o.Epoch, Intent: clone(o.Intent)}
 }
