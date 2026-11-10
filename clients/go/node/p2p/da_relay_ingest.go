@@ -124,8 +124,8 @@ func (s *Service) admitDetachedReorgDA(txBytes []byte) (completion func(bool), e
 // handleRelayDATx is the ONE production remote DA admission path: a remote tx_kind 0x01/0x02
 // transaction past the message bound and full canonical parse invokes AdmitDA exactly once before any
 // standard-pool, seen-set, metadata or inventory effect. The identity is captured once from the peer
-// state handleConn normalized, the quota key from the connection's actual socket endpoint; one outside IDENTITY_BOUNDS_V1 (a defense-in-depth ceiling no normalized
-// address reaches) exits nil with zero effect. Every other identity reaches AdmitDA with no terminal-latch
+// state handleConn normalized, the quota key from the connection's actual socket endpoint; a connection with no quota identity (no IP endpoint), or an identity outside IDENTITY_BOUNDS_V1 (a defense-in-depth ceiling no normalized
+// address reaches), exits nil with zero effect before any quota lock. Every other identity reaches AdmitDA with no terminal-latch
 // shortcut; the key is held only around AdmitDA and released before any effect; this function performs no
 // candidate validation of its own before calling AdmitDA; errors.Is on the hash sentinel is the only peer fault. RETAINED without conflict
 // schedules the prefetch once; DUPLICATE with conflict applies COMPETING_SCORE_V1 once; DUPLICATE without
