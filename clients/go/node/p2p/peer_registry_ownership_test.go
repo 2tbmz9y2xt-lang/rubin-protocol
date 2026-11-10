@@ -145,6 +145,26 @@ func TestPeerRegistryOwnershipNoGhostAfterRemoval(t *testing.T) {
 	require(t, h.service.cfg.PeerManager.Count() == 0, "peer manager count=%d, want 0", h.service.cfg.PeerManager.Count())
 }
 
+// P4, the DA-release error path: the relay's admission fence refuses under an engine that is not
+// latched, so unregisterPeer reaches the release and records its error after the removal; that
+// late setLastError recreates no PeerManager entry and the exit still counts once.
+func TestPeerRegistryOwnershipNoGhostAfterDAReleaseError(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	refusing := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	latchDAHarness(t, refusing, newTestHarness(t, 2, "127.0.0.1:0", nil))
+	h.service.daRelay = refusing.service.daRelay
+	const addr = "configured.example:19120"
+	p := registryPeer(h, addr, "198.51.100.6:6")
+	mustRegister(t, h, p)
+	exits := h.service.PeerLifecycleExits()
+	h.service.unregisterPeer(p)
+	require(t, !h.syncEngine.TerminalFaulted(), "the Service's own engine latched, so the release was skipped")
+	got := p.snapshotState().LastError
+	require(t, got == "pending-outpoint owner admission context unavailable", "the removed peer's LastError=%q, want the release error", got)
+	requireOwner(t, h, addr, nil, "after the DA-release error path")
+	require(t, h.service.PeerLifecycleExits() == exits+1, "exits=%d, want one", h.service.PeerLifecycleExits()-exits)
+}
+
 // P6: an alias equal to another live connection's logical address never displaces it, in either
 // registration order, and that connection's exit still removes its address.
 func TestPeerRegistryOwnershipAliasNeverDisplacesOwner(t *testing.T) {
