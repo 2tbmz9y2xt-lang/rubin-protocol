@@ -141,6 +141,10 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 		return nil, errors.New("nil chainstate")
 	}
 	cfg = normalizeMempoolConfig(cfg)
+	// Exactly one owner per mempool, initialized from the bound ChainState
+	// stable tip. Nothing else constructs one; the external relay observer
+	// binding references this same pointer.
+	owner := newPendingOutpointOwner(pendingOutpointTipOf(chainState))
 	return &Mempool{
 		relations:         buildMempoolRelations(make(map[[32]byte]*mempoolEntry), make(map[[32]byte][32]byte)),
 		chainState:        chainState,
@@ -151,9 +155,8 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 		maxBytes:          cfg.MaxBytes,
 		lowWaterBytes:     defaultMempoolLowWaterBytes(cfg.MaxBytes),
 		currentMinFeeRate: DefaultMempoolMinFeeRate,
-		// Exactly one owner per mempool, initialized from the bound
-		// ChainState stable tip. Nothing else constructs one.
-		pendingOutpoints: newPendingOutpointOwner(pendingOutpointTipOf(chainState)),
+		pendingOutpoints:  owner,
+		relaySource:       relayAdmissionSource{chainState: chainState, owner: owner},
 		// Exactly one positive signature cache per mempool, empty at
 		// construction and never persisted.
 		sigCache: consensus.NewSigCache(mempoolSigCacheCapacity),

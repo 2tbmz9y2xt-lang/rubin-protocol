@@ -384,6 +384,50 @@ func (m *Mempool) bindRelayAdmissionContext(probe *relayAdmissionProbe) {
 	probe.contextProven = true
 }
 
+// relayAdmissionSource is the private immutable constructor-time binding of the
+// external relay observer: references only, never a copied context. Both fields
+// are nil on a zero/bare Mempool.
+type relayAdmissionSource struct {
+	chainState *ChainState
+	owner      *PendingOutpointOwner
+}
+
+// AdmissionContextForRelay is the external relay-cache AdmissionContext
+// observation (RUBIN_MEMPOOL_POLICY.md Section 6.5; RUBIN_COMPACT_BLOCKS.md
+// Section 17.2). It is NOT for a caller that already holds the admission
+// guard: internal reads (bindRelayAdmissionContext, DA admission, Reserve,
+// SyncEngine binding) keep their own guarded owner.AdmissionContext calls.
+//
+// It makes exactly one non-blocking TryRLock attempt on the bound ChainState
+// admission guard. A refusal — an active or pending canonical-transition
+// writer, or the writer a terminal admission latch keeps held — returns the
+// zero context and false at once, reading no owner state and never retrying
+// or waiting. On a grant it performs the bound owner's one AdmissionContext
+// read, which waits for the finite owner-mutex critical section and reads the
+// complete tuple and the exhaustion status together, then releases the guard
+// before returning, so no grant reaches the caller. It takes no Mempool.mu,
+// ChainState.mu or other domain lock.
+//
+// true means a complete, stable, non-exhausted context with HasTip set. false
+// is uniformly non-cache-authorizing (nil receiver, absent binding, refused
+// guard, transition, exhausted generation, or no tip) and carries the zero
+// context.
+func (m *Mempool) AdmissionContextForRelay() (PendingOutpointAdmissionContext, bool) {
+	if m == nil || m.relaySource.chainState == nil || m.relaySource.owner == nil {
+		return PendingOutpointAdmissionContext{}, false
+	}
+	guard := &m.relaySource.chainState.admissionMu
+	if !guard.TryRLock() {
+		return PendingOutpointAdmissionContext{}, false
+	}
+	observed, ok := m.relaySource.owner.AdmissionContext()
+	guard.RUnlock()
+	if !ok || !observed.StableTip.HasTip {
+		return PendingOutpointAdmissionContext{}, false
+	}
+	return observed, true
+}
+
 // noteRetainedLocked selects the success-exit disposition. RETAINED is the
 // contract's exact statement — the exact candidate representation is resident
 // after the call — so the residency is READ from the live index rather than

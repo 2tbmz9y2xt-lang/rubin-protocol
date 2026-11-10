@@ -45,6 +45,79 @@ func TestCanonicalMempoolTxPoolPendingOutpointOwner(t *testing.T) {
 	}
 }
 
+// TestCanonicalMempoolTxPoolAdmissionContextForRelay proves the adapter forwards
+// the adapted mempool's external observation unchanged: nil adapter and nil
+// backing pool are zero/false, every adapter over one pool tracks that pool's
+// actual source through a real canonical connect (no saved tuple), and the
+// generic TxPool interface is not widened.
+func TestCanonicalMempoolTxPoolAdmissionContextForRelay(t *testing.T) {
+	zero := node.PendingOutpointAdmissionContext{}
+	var nilAdapter *CanonicalMempoolTxPool
+	for name, adapter := range map[string]*CanonicalMempoolTxPool{
+		"nil adapter":        nilAdapter,
+		"nil-backed adapter": NewCanonicalMempoolTxPool(nil),
+	} {
+		if ctx, ok := adapter.AdmissionContextForRelay(); ok || ctx != zero {
+			t.Fatalf("%s: observation=(%+v,%v), want zero/false", name, ctx, ok)
+		}
+	}
+
+	// The harness binds one empty mempool to its SyncEngine before any tip.
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	mempool := h.mempool
+	adapters := []*CanonicalMempoolTxPool{NewCanonicalMempoolTxPool(mempool), NewCanonicalMempoolTxPool(mempool)}
+	requireForwarded := func(stage string, wantOK bool) {
+		t.Helper()
+		want, ok := mempool.AdmissionContextForRelay()
+		if ok != wantOK {
+			t.Fatalf("%s: mempool observation ok=%v, want %v", stage, ok, wantOK)
+		}
+		for i, adapter := range adapters {
+			if got, gotOK := adapter.AdmissionContextForRelay(); gotOK != ok || got != want {
+				t.Fatalf("%s: adapter %d=(%+v,%v), want the pool's (%+v,%v)", stage, i, got, gotOK, want, ok)
+			}
+			if adapter.PendingOutpointOwner() != mempool.PendingOutpointOwner() {
+				t.Fatalf("%s: adapter %d owns another source", stage, i)
+			}
+		}
+	}
+
+	// requireSourceTip pins the literal connected tip and a strictly advanced
+	// generation, and requires every adapter to forward that exact tuple.
+	var previous uint64
+	requireSourceTip := func(stage string, height uint64) {
+		t.Helper()
+		requireForwarded(stage, true)
+		hash, _ := testHarnessBlockAtHeight(t, h, height)
+		internal, ok := mempool.PendingOutpointOwner().AdmissionContext()
+		if !ok || internal.StableTip != (node.PendingOutpointTip{HasTip: true, Height: height, Hash: hash}) || internal.Generation <= previous {
+			t.Fatalf("%s: source=(%+v,%v), want tip (%d,%x) after generation %d", stage, internal, ok, height, hash, previous)
+		}
+		for i, adapter := range adapters {
+			if got, _ := adapter.AdmissionContextForRelay(); got != internal {
+				t.Fatalf("%s: adapter %d=%+v, want the source tuple %+v", stage, i, got, internal)
+			}
+		}
+		previous = internal.Generation
+	}
+
+	requireForwarded("no tip", false)
+	if _, err := h.syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	requireSourceTip("after genesis", 0)
+	// A nonzero height distinguishes an adapter that drops or zeroes Height.
+	h.mineNextBlockBytes(t)
+	requireSourceTip("after height 1", 1)
+
+	var generic TxPool = NewMemoryTxPool()
+	if _, widened := generic.(interface {
+		AdmissionContextForRelay() (node.PendingOutpointAdmissionContext, bool)
+	}); widened {
+		t.Fatal("the generic TxPool surface was widened with the relay observer")
+	}
+}
+
 // TestCanonicalMempoolTxPoolRetainedTxByID proves the adapter surface: nil
 // adapter, nil-backed adapter, and a live miss all return the zero snapshot
 // and false; a healthy canonically-admitted hit carries the producer's own
