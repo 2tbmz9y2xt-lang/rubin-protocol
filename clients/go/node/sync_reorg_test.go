@@ -4838,3 +4838,90 @@ func canonicalTxIDsForNodeTest(raw []byte) ([32]byte, [32]byte, error) {
 	_, txid, wtxid, _, err := consensus.ParseTx(raw)
 	return txid, wtxid, err
 }
+
+// bindingStoredBody plants raw under hash and loads it through the live stored-read consumer.
+func bindingStoredBody(t *testing.T, raw []byte, hash [32]byte) error {
+	t.Helper()
+	dir := t.TempDir()
+	store := mustCreateBlockStore(t, BlockStorePath(dir))
+	target := consensus.POW_LIMIT
+	engine, err := NewSyncEngine(NewChainState(), store, DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir)))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	writeRawStoreBlockFile(t, store, hash, raw)
+	_, err = engine.loadVerifiedStoredBlock(hash)
+	return err
+}
+
+func bindingStoredCoinbaseBlock(t *testing.T, edit func([]byte) []byte) ([]byte, [32]byte) {
+	t.Helper()
+	target := consensus.POW_LIMIT
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueForWtxids(t, 7, consensus.BlockSubsidy(7, 0), [][32]byte{{}})
+	raw := buildMultiTxBlock(t, [32]byte{0x51}, target, 1_000, edit(coinbase))
+	hash, err := consensus.BlockHash(raw[:consensus.BLOCK_HEADER_BYTES])
+	if err != nil {
+		t.Fatalf("BlockHash: %v", err)
+	}
+	return raw, hash
+}
+
+// TestLoadVerifiedStoredBlockBinding owns the live stored-read boundary: a pin defect stays local corruption, the
+// whole-coinbase core checks stay outside binding, and the header identity is checked against the lookup hash.
+func TestLoadVerifiedStoredBlockBinding(t *testing.T) {
+	same := func(tx []byte) []byte { return tx }
+	raw, hash := bindingStoredCoinbaseBlock(t, same)
+	if err := bindingStoredBody(t, raw, hash); err != nil {
+		t.Fatalf("binding B01 clean stored body: %v", err)
+	}
+	coreInvalid, coreHash := bindingStoredCoinbaseBlock(t, func(tx []byte) []byte {
+		out := bytes.Clone(tx)
+		out[5] = 1 // tx_nonce: parse-canonical, whole-coinbase invalid, still committed by the header root.
+		return out
+	})
+	if err := bindingStoredBody(t, coreInvalid, coreHash); err != nil {
+		t.Fatalf("binding B03 core-invalid body must load as verified: %v", err)
+	}
+
+	dirty := retainWitnessRaw(raw)
+	err := bindingStoredBody(t, dirty, hash)
+	if !errors.Is(err, errBranchStoreCorrupt) || !strings.Contains(err.Error(), "has invalid commitments") || !strings.Contains(err.Error(), "first tx must be canonical coinbase") {
+		t.Fatalf("binding B12 local corruption: %v", err)
+	}
+	var txErr *consensus.TxError
+	if errors.As(err, &txErr) {
+		t.Fatalf("binding B12 local corruption exposes a consensus error: %v", err)
+	}
+
+	pair, pairHash := bindingStoredCoinbaseBlock(t, func(tx []byte) []byte {
+		wroot, rootErr := consensus.WitnessMerkleRootWtxids([][32]byte{{}})
+		if rootErr != nil {
+			t.Fatalf("WitnessMerkleRootWtxids: %v", rootErr)
+		}
+		commitment := consensus.WitnessCommitmentHash(wroot)
+		return coinbaseTxWithOutputs(7, []testOutput{
+			{value: consensus.BlockSubsidy(7, 0), covenantType: consensus.COV_TYPE_P2PK, covenantData: testP2PKCovenantData(0x11)},
+			{value: 0, covenantType: consensus.COV_TYPE_ANCHOR, covenantData: commitment[:]},
+			{value: 0, covenantType: consensus.COV_TYPE_ANCHOR, covenantData: make([]byte, 32)},
+		})
+	})
+	err = bindingStoredBody(t, pair, pairHash)
+	if !errors.Is(err, errBranchStoreCorrupt) || !strings.Contains(err.Error(), "has invalid commitments") || !strings.Contains(err.Error(), "coinbase witness commitment missing or duplicated") {
+		t.Fatalf("binding B12 local corruption anchor pair: %v", err)
+	}
+	if errors.As(err, &txErr) {
+		t.Fatalf("binding B12 local corruption anchor pair exposes a consensus error: %v", err)
+	}
+
+	otherHash := hash
+	otherHash[0] ^= 1
+	err = bindingStoredBody(t, raw, otherHash)
+	if !errors.Is(err, errBranchStoreCorrupt) || !strings.Contains(err.Error(), "hashes to") {
+		t.Fatalf("binding B06 expected header: %v", err)
+	}
+}
+
+// retainWitnessRaw adds a sentinel coinbase witness item to a single-transaction block; only body bytes change.
+func retainWitnessRaw(raw []byte) []byte {
+	return append(bytes.Clone(raw[:len(raw)-2]), 1, consensus.SUITE_ID_SENTINEL, 0, 0, 0)
+}

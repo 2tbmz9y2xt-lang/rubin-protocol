@@ -73,7 +73,10 @@ func generationData(g uint64, marker byte) []mdbx.Mutation {
 }
 
 func generationProjection(g, h uint64, nonce uint64) ([32]byte, []mdbx.Mutation) {
-	body := sideWorldBlock([32]byte{}, nonce)
+	return generationProjectionBody(g, h, sideWorldBlock([32]byte{}, nonce))
+}
+
+func generationProjectionBody(g, h uint64, body []byte) ([32]byte, []mdbx.Mutation) {
 	hash := sha3_256(body[:116])
 	key, _ := mdbx.HeightKey(g, h)
 	inverse, _ := mdbx.CanonicalOwnerKey(g, hash)

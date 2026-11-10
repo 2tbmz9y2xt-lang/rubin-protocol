@@ -111,22 +111,33 @@ func validateCoinbaseWitnessCommitment(pb *ParsedBlock) error {
 	}
 	expected := WitnessCommitmentHash(wroot)
 
-	matches := countWitnessCommitmentMatches(pb.Txs[0].Outputs, expected)
-	if matches != 1 {
+	if !witnessCommitmentSingleton(pb.Txs[0].Outputs, expected) {
 		return txerr(BLOCK_ERR_WITNESS_COMMITMENT, "coinbase witness commitment missing or duplicated")
 	}
 	return nil
 }
 
-func countWitnessCommitmentMatches(outputs []TxOutput, expected [32]byte) int {
-	matches := 0
-	for _, out := range outputs {
-		if out.CovenantType != COV_TYPE_ANCHOR || len(out.CovenantData) != 32 {
+// witnessCommitmentSingleton implements RUBIN_L1_CANONICAL.md Section 10.4.1: every CORE_ANCHOR output of data length
+// 32 is counted independently of its value and data, and exactly one must exist and equal expected.
+func witnessCommitmentSingleton(outputs []TxOutput, expected [32]byte) bool {
+	var sole *TxOutput
+	for i := range outputs {
+		if outputs[i].CovenantType != COV_TYPE_ANCHOR || len(outputs[i].CovenantData) != 32 {
 			continue
 		}
-		if bytes.Equal(out.CovenantData, expected[:]) {
-			matches++
+		if sole != nil {
+			return false
 		}
+		sole = &outputs[i]
 	}
-	return matches
+	return sole != nil && bytes.Equal(sole.CovenantData, expected[:])
+}
+
+// validateBindingPositionZeroPins requires the two empty position-zero ranges of complete body binding
+// (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.8). It is not a Section 25 step and belongs to no ordered validator.
+func validateBindingPositionZeroPins(first *Tx) error {
+	if len(first.Witness) != 0 || len(first.DaPayload) != 0 {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+	}
+	return nil
 }

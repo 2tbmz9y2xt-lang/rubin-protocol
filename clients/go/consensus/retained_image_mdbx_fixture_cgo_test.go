@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -1231,4 +1232,289 @@ func rifUnwind(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestRetainedImageMDBXBindingIdentity plants, past the writer's keyed-hash guard, a body whose full148 header differs
+// only in the root field: the retained owner refuses it on the complete 148-byte identity.
+func TestRetainedImageMDBXBindingIdentity(t *testing.T) {
+	raw := initial148BlockGenesis(t)
+	hash := sha3.Sum256(raw[:148])
+	for _, at := range []int{108, 139, -108} {
+		w := riSelectedWorld(t, raw[:148], raw, hash)
+		other := bytes.Clone(raw)
+		if at < 0 { // Tampered full header that is also pin-dirty: identity is checked first.
+			other, at = bindingWithWitness(other), -at
+		}
+		other[at] ^= 1
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 4, hash[:], other) == nil, "seed tampered retained body")
+		got, err := riRead(t, w, nil)
+		logicalMDBXAssert(t, got == (retainedPreImageV1{}), "binding B06 expected header: partial %+v", got)
+		failure := riResource(t, err, "selected_damage")
+		logicalMDBXAssert(t, failure.Damage.Artifact == "body" && failure.Damage.Cause.Error() == "retained body identity differs", "binding B06 expected header %d: %+v", at, failure.Damage)
+	}
+}
+
+// TestRetainedImageMDBXBindingRequired owns the required side of B12 on the Update route: a pin-dirty canonical body
+// is store integrity carrying the original binding cause, with no partial quantity, no native write and an OLD image.
+func TestRetainedImageMDBXBindingRequired(t *testing.T) {
+	for _, d := range riBindingDefects(t) {
+		t.Run(d.name, func(t *testing.T) {
+			label := "binding B12 required retained body" + d.suffix
+			var w *btWorld
+			var hash [32]byte
+			if d.suffix == "" {
+				w, _, hash = riGenesis(t)
+				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 4, hash[:], d.stored) == nil, "seed pin-dirty required body")
+			} else {
+				w, hash = riGenesisBody(t, d.stored)
+			}
+			before := btfOldRows(t, w, hash)
+			var out rifResult
+			evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = rifRun(t, w, nil, "source") })
+			var integrity *logicalStateFailure
+			logicalMDBXAssert(t, errors.As(out.source, &integrity) && any(integrity) == any(out.source) && integrity.kind == logicalStateFailureStoreIntegrity, "%s class: %T %v", label, out.source, out.source)
+			var cause *TxError
+			logicalMDBXAssert(t, errors.As(integrity.cause, &cause) && any(cause) == any(integrity.cause) && cause.Code == d.code && cause.Msg == d.msg, "%s cause: %v", label, integrity.cause)
+			logicalMDBXAssert(t, out.image == (retainedPreImageV1{}), "%s partial: %+v", label, out.image)
+			logicalMDBXAssert(t, out.native.truth == 1 && out.native.stage == 1 && out.native.index == -1 && out.native.err != nil, "%s raw tuple: %+v", label, out.native)
+			logicalMDBXAssert(t, harness == nil && evidence.OldGets == bindingRequiredRetainedGets && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0, "%s native write: %+v/%v", label, evidence, harness)
+			rifWantRetained(t, w, label)
+			w.reopen(t)
+			btfWantOld(t, w, before, 255, nil, label+" unchanged")
+			rifOpen(t, w)
+		})
+	}
+}
+
+// TestRetainedImageMDBXBindingTransient owns the source side of B12: a transient fault of the point fetch that opens a
+// pin-dirty required or selected body, or of the streamed read after that fetch was served, is the read failure of its
+// source shape with its original cause, never positive binding damage.
+func TestRetainedImageMDBXBindingTransient(t *testing.T) {
+	raw := initial148BlockGenesis(t)
+	dirty := bindingWithWitness(raw)
+	hash := sha3.Sum256(raw[:148])
+	t.Run("required", func(t *testing.T) {
+		w, _, _ := riGenesis(t)
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 4, hash[:], dirty) == nil, "seed pin-dirty required body")
+		const label = "binding B12 original source"
+		before := btfOldRows(t, w, hash)
+		rifBindingTransient(t, w, hash, label, "canonical_artifact_read")
+		btfWantOld(t, w, before, 255, nil, label+" unchanged")
+	})
+	t.Run("selected", func(t *testing.T) {
+		const label = "binding B12 original source selected"
+		w := riSelectedWorld(t, raw[:148], dirty, hash)
+		before := rifSelectedImage(t, w, label, hash, raw[:148], dirty)
+		rifBindingTransient(t, w, hash, label, "branch_data")
+		logicalMDBXAssert(t, slices.Equal(before, rifSelectedImage(t, w, label, hash, raw[:148], dirty)), "%s cardinality", label)
+	})
+	t.Run("streamed required", func(t *testing.T) {
+		w, _, _ := riGenesis(t)
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 4, hash[:], dirty) == nil, "seed pin-dirty required body")
+		const label = "binding B12 original source streamed required"
+		before := btfOldRows(t, w, hash)
+		rifBindingStreamed(t, w, hash, label, "canonical_artifact_read")
+		btfWantOld(t, w, before, 255, nil, label+" unchanged")
+	})
+	t.Run("streamed selected", func(t *testing.T) {
+		const label = "binding B12 original source streamed selected"
+		w := riSelectedWorld(t, raw[:148], dirty, hash)
+		before := rifSelectedImage(t, w, label, hash, raw[:148], dirty)
+		rifBindingStreamed(t, w, hash, label, "branch_data")
+		logicalMDBXAssert(t, slices.Equal(before, rifSelectedImage(t, w, label, hash, raw[:148], dirty)), "%s cardinality", label)
+	})
+}
+
+// TestRetainedImageMDBXBindingDelegateRefusal pins the admission of the streamed-read delegate: only rank 4 with a
+// 32-byte body key reaches the native fault, and a refused call does not run.
+func TestRetainedImageMDBXBindingDelegateRefusal(t *testing.T) {
+	w, _, _ := riGenesis(t)
+	key := make([]byte, 32)
+	for _, c := range []struct {
+		name string
+		s    *mdbx.Store
+		rank uint8
+		key  []byte
+		nilF bool
+	}{
+		{"nil store", nil, 4, key, false},
+		{"nil run", w.s, 4, key, true},
+		{"rank 3", w.s, 3, key, false},
+		{"rank 5", w.s, 5, key, false},
+		{"nil key", w.s, 4, nil, false},
+		{"key 31", w.s, 4, key[:31], false},
+		{"key 33", w.s, 4, append(slices.Clone(key), 0), false},
+	} {
+		ran := false
+		run := func() { ran = true }
+		if c.nilF {
+			run = nil
+		}
+		gets, err := mdbx.FixtureBodySecondGetEIO(c.s, c.rank, c.key, run)
+		logicalMDBXAssert(t, err != nil && err.Error() == "invalid body read fixture" && gets == 0 && !ran, "binding B12 streamed delegate refusal %s: %d/%v/%v", c.name, gets, err, ran)
+	}
+}
+
+// The OLD-snapshot Gets by rank of one retained binding refusal. Every rank is compared: which ranks a walk past the
+// refused body would raise differs by world and need not include the body's.
+var (
+	bindingRequiredRetainedGets = [8]uint64{5, 0, 1, 0, 2, 0, 0, 0}
+	bindingSelectedRetainedGets = [8]uint64{5, 0, 0, 1, 2, 0, 1, 1}
+	bindingOptionalRetainedGets = map[string][8]uint64{"detached": {5, 0, 0, 1, 2, 0, 0, 1}, "SIDE": {5, 0, 0, 0, 2, 0, 1, 1}}
+)
+
+// rifSelectedImage proves the three rows of the height-5 selected row byte-exact and returns every DBI's entry count.
+func rifSelectedImage(t *testing.T, w *btWorld, label string, hash [32]byte, header, body []byte) []uint64 {
+	t.Helper()
+	key, _ := mdbx.HeightKey(3, 5)
+	for _, row := range []struct {
+		rank       uint8
+		key, value []byte
+	}{{3, hash[:], header}, {4, hash[:], body}, {6, key, mdbx.ChainValue(hash, [32]byte{}, [40]byte{39: 1})}} {
+		equal, err := mdbx.FixtureRawRowEqual(w.s, row.rank, row.key, row.value)
+		logicalMDBXAssert(t, err == nil && equal, "%s rank%d drift: %v", label, row.rank, err)
+	}
+	inspection, err := w.s.Inspect()
+	logicalMDBXAssert(t, err == nil, "%s inspect: %v", label, err)
+	entries := make([]uint64, 0, len(inspection.DBIs))
+	for _, dbi := range inspection.DBIs {
+		entries = append(entries, dbi.Entries)
+	}
+	return entries
+}
+
+// TestRetainedImageMDBXBindingOptional owns the optional source shape of B12: a pin-dirty body that is neither required
+// nor selected (detached or pending SIDE) is the storage_capacity refusal carrying the original cause, with no write.
+func TestRetainedImageMDBXBindingOptional(t *testing.T) {
+	for _, d := range riBindingDefects(t) {
+		raw, dirty := d.raw, d.stored
+		hash := sha3.Sum256(raw[:148])
+		size := uint64(len(dirty))
+		label := "binding B12 optional retained body" + d.suffix
+		for _, kind := range []string{"detached", "SIDE"} {
+			t.Run(kind+d.suffix, func(t *testing.T) {
+				w := riNew(t)
+				mutations := []mdbx.Mutation{btMutation(3, hash[:], raw[:148]), btMutation(4, hash[:], dirty)}
+				if kind == "SIDE" {
+					// The second pending row is what a walk past the refused body would read next.
+					nextBody := bytes.Clone(raw)
+					copy(nextBody[4:36], hash[:])
+					nextHash := sha3.Sum256(nextBody[:148])
+					key5, _ := mdbx.HeightKey(3, 5)
+					key6, _ := mdbx.HeightKey(3, 6)
+					mutations = append(mutations, btMutation(6, key5, mdbx.ChainValue(hash, [32]byte{}, [40]byte{39: 1})),
+						btMutation(3, nextHash[:], nextBody[:148]), btMutation(4, nextHash[:], nextBody), btMutation(6, key6, mdbx.ChainValue(nextHash, hash, [40]byte{39: 2})))
+				}
+				w.pair(t, mutations...)
+				encoded := riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+					a.Authority.Phase = 2
+					if kind == "SIDE" {
+						a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 4, GenerationID: 3, FirstHeight: 5, NextHeight: 5, LastHeight: 6}}}
+						return
+					}
+					a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 3}}}
+					a.Authority.DetachedSuffix = &mdbx.DetachedSuffixV1{Entries: []mdbx.DetachedSuffixEntryV1{{Height: 5, Hash: hash, BlockBytesLen: size}}, Cursor: mdbx.AuthorityPointV1{Height: 5, BlockHash: hash}, EntryCount: 1, LogicalBytes: size}
+				})
+				var out rifResult
+				evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = rifRun(t, w, nil, "source") })
+				var f *RetainedProofFailureV1
+				logicalMDBXAssert(t, errors.As(out.source, &f) && f.Resource == "storage_capacity" && f.Damage == nil, "%s resource: %T %v", label, out.source, out.source)
+				e, ok := any(f.Cause).(*TxError)
+				logicalMDBXAssert(t, ok && e.Code == d.code && e.Msg == d.msg, "%s cause: %v", label, f.Cause)
+				logicalMDBXAssert(t, out.image == (retainedPreImageV1{}), "%s partial: %+v", label, out.image)
+				logicalMDBXAssert(t, out.native.truth == 1 && out.native.stage == 1 && out.native.index == -1 && out.native.err != nil, "%s raw tuple: %+v", label, out.native)
+				logicalMDBXAssert(t, harness == nil && evidence.OldGets == bindingOptionalRetainedGets[kind] && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0, "%s native: %+v/%v", label, evidence, harness)
+				rifWantRetained(t, w, label)
+				w.reopen(t)
+				w.read(t, 0, []byte{2}, encoded)
+				w.read(t, 4, hash[:], dirty)
+				w.read(t, 3, hash[:], raw[:148])
+				rifOpen(t, w)
+			})
+		}
+	}
+}
+
+// TestRetainedImageMDBXBindingSelected owns the selected side of B12 on the Update route: a pin-dirty selected body is
+// selected damage carrying the original binding cause, with no partial quantity and no native write.
+func TestRetainedImageMDBXBindingSelected(t *testing.T) {
+	for _, d := range riBindingDefects(t) {
+		t.Run(d.name, func(t *testing.T) {
+			raw, dirty := d.raw, d.stored
+			hash := sha3.Sum256(raw[:148])
+			label := "binding B12 selected retained body" + d.suffix
+			w := riNew(t)
+			// The second selected row is what a walk past the refused body would read next.
+			nextBody := bytes.Clone(raw)
+			nextBody[147] ^= 1
+			nextHash := sha3.Sum256(nextBody[:148])
+			key5, _ := mdbx.HeightKey(3, 5)
+			key6, _ := mdbx.HeightKey(3, 6)
+			w.pair(t, btMutation(3, hash[:], raw[:148]), btMutation(4, hash[:], dirty), btMutation(6, key5, mdbx.ChainValue(hash, [32]byte{}, [40]byte{39: 1})),
+				btMutation(3, nextHash[:], nextBody[:148]), btMutation(4, nextHash[:], nextBody), btMutation(6, key6, mdbx.ChainValue(nextHash, hash, [40]byte{39: 2})))
+			riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+				a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 4, TipHeight: 6, TipHash: nextHash, RowCount: 2, LogicalBytes: uint64(len(dirty) + len(nextBody)), CumulativeChainwork: [40]byte{39: 2}}
+			})
+			before := rifSelectedImage(t, w, label, hash, raw[:148], dirty)
+			var out rifResult
+			evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = rifRun(t, w, nil, "source") })
+			var f *RetainedProofFailureV1
+			logicalMDBXAssert(t, errors.As(out.source, &f) && f.Resource == "selected_damage" && f.Damage != nil && f.Damage.Artifact == "body" && f.Damage.Hash == hash, "%s resource: %T %v", label, out.source, out.source)
+			e, ok := any(f.Damage.Cause).(*TxError)
+			logicalMDBXAssert(t, ok && e.Code == d.code && e.Msg == d.msg && any(f.Cause) == any(f.Damage.Cause), "%s cause: %+v", label, f.Damage)
+			logicalMDBXAssert(t, out.image == (retainedPreImageV1{}), "%s partial: %+v", label, out.image)
+			logicalMDBXAssert(t, out.native.truth == 1 && out.native.stage == 1 && out.native.index == -1 && out.native.err != nil, "%s raw tuple: %+v", label, out.native)
+			logicalMDBXAssert(t, harness == nil && evidence.OldGets == bindingSelectedRetainedGets && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0, "%s native write: %+v/%v", label, evidence, harness)
+			rifWantRetained(t, w, label)
+			w.reopen(t)
+			logicalMDBXAssert(t, slices.Equal(before, rifSelectedImage(t, w, label, hash, raw[:148], dirty)), "%s cardinality", label)
+			rifOpen(t, w)
+		})
+	}
+}
+
+// rifBindingTransient faults the body Get of hash, pins the exact source failure and raw tuple, and reopens the store.
+func rifBindingTransient(t *testing.T, w *btWorld, hash [32]byte, label, resource string) {
+	t.Helper()
+	var out rifResult
+	evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 4, hash[:], func() { out = rifRun(t, w, nil, "source") })
+	logicalMDBXAssert(t, harness == nil && evidence.Faults == 1 && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0, "%s evidence: %+v/%v", label, evidence, harness)
+	rifBindingSource(t, w, out, label, resource)
+}
+
+// rifBindingStreamed fails the streamed read of a body whose opening fetch was served.
+func rifBindingStreamed(t *testing.T, w *btWorld, hash [32]byte, label, resource string) {
+	t.Helper()
+	var out rifResult
+	var evidence mdbx.SelectedDamageEvidence
+	var harness error
+	gets, fault := mdbx.FixtureBodySecondGetEIO(w.s, 4, hash[:], func() {
+		evidence, harness = mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = rifRun(t, w, nil, "source") })
+	})
+	logicalMDBXAssert(t, fault == nil && harness == nil && gets == 2 && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0, "%s native: %d %+v/%v/%v", label, gets, evidence, fault, harness)
+	rifBindingSource(t, w, out, label, resource)
+}
+
+// rifBindingSource requires the source failure of one faulted read, then reopens the latched handle.
+func rifBindingSource(t *testing.T, w *btWorld, out rifResult, label, resource string) {
+	t.Helper()
+	var f *RetainedProofFailureV1
+	logicalMDBXAssert(t, errors.As(out.source, &f) && f.Resource == resource && f.Damage == nil, "%s resource: %T %v", label, out.source, out.source)
+	_, native := any(f.Cause).(*mdbx.EngineError)
+	logicalMDBXAssert(t, native, "%s cause: %T %v", label, f.Cause, f.Cause)
+	btfEngine(t, f.Cause, "get", "IO", 5, "error 5")
+	logicalMDBXAssert(t, out.image == (retainedPreImageV1{}) && out.native.err != nil && out.native.truth == 1 && out.native.stage == 1, "%s raw tuple: %+v", label, out)
+	out.native.want(t, 1, 1, -1)
+	ran := 0
+	terminal := w.s.View(func(*mdbx.Reader) error { ran++; return nil })
+	logicalMDBXAssert(t, ran == 0 && terminal != nil && any(terminal) == any(out.native.err), "%s handle consumed: %d/%v vs %v", label, ran, terminal, out.native.err)
+	w.reopen(t)
+}
+
+// rifWantRetained observes a callback refusal's retained handle on the refused handle itself, before any reopen.
+func rifWantRetained(t *testing.T, w *btWorld, label string) {
+	t.Helper()
+	ran := 0
+	err := w.s.View(func(*mdbx.Reader) error { ran++; return nil })
+	logicalMDBXAssert(t, err == nil && ran == 1, "%s handle retained: %d/%v", label, ran, err)
 }

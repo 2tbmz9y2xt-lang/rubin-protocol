@@ -1050,3 +1050,69 @@ func TestSelectedSideQualificationLifetime(t *testing.T) {
 	}
 	ssqWantOK(t, "after input mutation", got, err, want)
 }
+
+// TestSelectedSideQualificationBinding: a fresh pin-dirty body passes steps 1-12 and is refused by the post-steps
+// prerequisite; the good copy under the same header then qualifies.
+func TestSelectedSideQualificationBinding(t *testing.T) {
+	w := newSSQWorld(t, ssqSpec{tip: 7})
+	parent := w.canonical[5]
+	raw := w.child(parent, 6, nil)
+	got, err := w.run(retainWitness(raw))
+	ssqWantTx(t, "binding B11 fresh prerequisite qualify", got, err, consensus.BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+	got, err = w.run(raw)
+	ssqWantOK(t, "binding B04 good copy", got, err, w.want(raw, parent, 5, 5, ssqWork(6), ssqWork(7), true, w.canonicalIDs(5, 6)))
+	const pinMsg = "first tx must be canonical coinbase"
+	t.Run("earlier-Q-error", func(t *testing.T) {
+		w := newSSQWorld(t, ssqSpec{tip: 7})
+		old := w.childAt(w.canonical[5], 0, consensus.POW_LIMIT, nil)
+		got, err := w.run(retainWitness(old))
+		ssqWantTx(t, "binding B11 earlier Q error wins qualify", got, err, consensus.BLOCK_ERR_TIMESTAMP_OLD, "timestamp <= MTP median")
+	})
+	t.Run("stored-linking-pin", func(t *testing.T) {
+		const message = "required canonical body does not match its header or commitments"
+		world := func(t *testing.T) (*ssqWorld, [32]byte, []byte) {
+			w := newSSQWorld(t, ssqSpec{tip: 5, side: &ssqSideSpec{f: 2, tip: 4, rows: 2, work: 5}})
+			tip := w.side[4]
+			dirty := retainWitness(w.rows[string(append([]byte{4}, tip[:]...))].value)
+			w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+			w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(tip[:]), dirty, false)})
+			return w, tip, w.child(tip, 5, nil)
+		}
+		t.Run("optional", func(t *testing.T) {
+			w, _, raw := world(t)
+			got, err := w.run(raw)
+			ssqWantRequest(t, "binding B11 stored linking optional pin", got, err, selectedSideDamageRequest{Generation: 2, Tip: 4, Height: 4})
+		})
+		t.Run("required", func(t *testing.T) {
+			w, tip, raw := world(t)
+			w.apply([]mdbx.Mutation{w.literal(2, ssqMust(mdbx.HeightKey(1, 6)), mdbx.ChainValue(tip, w.side[3], ssqWork(7)), false), w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, tip)), mdbx.CanonicalOwnerValue(6), false)})
+			got, err := w.run(raw)
+			ssqWantResult(t, "binding B11 stored linking required pin", got, err, ssqIntegrity)
+			if err.Error() != ssqIntegrity+": "+message {
+				t.Fatalf("binding B11 stored linking required pin cause: %v", err)
+			}
+		})
+	})
+	t.Run("before-selection", func(t *testing.T) {
+		w := newSSQWorld(t, ssqSpec{tip: 5, side: &ssqSideSpec{f: 2, tip: 4, rows: 2, work: 6}})
+		raw := w.child(w.canonical[5], 6, nil)
+		w.apply([]mdbx.Mutation{w.absentRow(6, ssqMust(mdbx.HeightKey(2, 4)))})
+		got, err := w.run(retainWitness(raw))
+		ssqWantTx(t, "binding B11 before selection", got, err, consensus.BLOCK_ERR_COINBASE_INVALID, pinMsg)
+		got, err = w.run(raw) // Control last: this refusal is a store-integrity latch.
+		ssqWantZero(t, "binding B11 selection control", got)
+		if err == nil || err.Error() == "BLOCK_ERR_COINBASE_INVALID: "+pinMsg {
+			t.Fatalf("binding B11 selection control: %v", err)
+		}
+	})
+	t.Run("before-domain", func(t *testing.T) {
+		var limit [40]byte
+		limit[3] = 1
+		w := newSSQWorld(t, ssqSpec{from: 10, tip: 20, work: func(uint64) [40]byte { return limit }})
+		raw := w.child(w.canonical[20], 21, nil)
+		got, err := w.run(raw)
+		ssqWantResult(t, "binding B11 domain control", got, err, ssqBranch)
+		got, err = w.run(retainWitness(raw))
+		ssqWantTx(t, "binding B11 before domain", got, err, consensus.BLOCK_ERR_COINBASE_INVALID, pinMsg)
+	})
+}

@@ -283,7 +283,8 @@ def witnessCommitmentHash (witnessRoot : Bytes) : Bytes :=
   SHA3.sha3_256 (witnessPrefix ++ witnessRoot)
 
 def findCoinbaseAnchorCommitment (coinbaseTx : Bytes) : Except String Bytes := do
-  -- Legacy single-anchor extractor retained for experimental model theorems.
+  -- Section 10.4.1 selection: count outputs of type CORE_ANCHOR with 32-byte data,
+  -- independently of value and data, and return the data of the sole counted output.
   let c0 : Cursor := { bs := coinbaseTx, off := 0 }
   let (_, c1) ← match c0.getU32le? with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
   let (_, c2) ← match c1.getU8? with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
@@ -303,40 +304,13 @@ def findCoinbaseAnchorCommitment (coinbaseTx : Bytes) : Except String Bytes := d
       let (cdLen, cur3, minimal) ← match cur2.getCompactSize? with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
       if !minimal then throw "BLOCK_ERR_WITNESS_COMMITMENT"
       let (cd, cur4) ← match cur3.getBytes? cdLen with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
-      if ct == COV_TYPE_ANCHOR then
+      if ct == COV_TYPE_ANCHOR && cd.size == 32 then
         anchorCount := anchorCount + 1
         anchorData := cd
       cur := cur4
     if anchorCount != 1 then
       throw "BLOCK_ERR_WITNESS_COMMITMENT"
-    if anchorData.size != 32 then
-      throw "BLOCK_ERR_WITNESS_COMMITMENT"
     pure anchorData
-
-/-- Accept when exactly one coinbase output is the exact witness commitment.
-    Nonmatching CORE_ANCHOR outputs are not commitment candidates. -/
-def findMatchingCoinbaseAnchorCommitment
-    (coinbaseTx expectedCommit : Bytes) : Except String Unit := do
-  let c0 : Cursor := { bs := coinbaseTx, off := 0 }
-  let (_, c1) ← match c0.getU32le? with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
-  let (_, c2) ← match c1.getU8? with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
-  let (_, c3) ← match c2.getU64le? with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
-  let (inCount, c4, _) ← match c3.getCompactSize? with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
-  let c5 ← match RubinFormal.TxWeightV2.parseInputsSkip c4 inCount with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
-  let (outCount, c6, _) ← match c5.getCompactSize? with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
-  let mut cur := c6
-  let mut matchCount := 0
-  for _ in [0:outCount] do
-    let (_, cur1) ← match cur.getBytes? 8 with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
-    let (ctRaw, cur2) ← match cur1.getBytes? 2 with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
-    let ct := Wire.u16le? (ctRaw.get! 0) (ctRaw.get! 1)
-    let (cdLen, cur3, minimal) ← match cur2.getCompactSize? with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
-    if !minimal then throw "BLOCK_ERR_WITNESS_COMMITMENT"
-    let (cd, cur4) ← match cur3.getBytes? cdLen with | none => throw "BLOCK_ERR_WITNESS_COMMITMENT" | some x => pure x
-    if ct == COV_TYPE_ANCHOR && cd.size == 32 && cd == expectedCommit then
-      matchCount := matchCount + 1
-    cur := cur4
-  if matchCount != 1 then throw "BLOCK_ERR_WITNESS_COMMITMENT"
 
 def checkWitnessCommitment (pb : ParsedBlock) : Except String Unit := do
   let witnessRoot ← witnessMerkleRootWtxids pb.wtxids
@@ -344,8 +318,7 @@ def checkWitnessCommitment (pb : ParsedBlock) : Except String Unit := do
   match findCoinbaseAnchorCommitment pb.coinbaseTx with
   | .ok gotCommit =>
       if gotCommit != expectedCommit then throw "BLOCK_ERR_WITNESS_COMMITMENT"
-  | .error _ =>
-      findMatchingCoinbaseAnchorCommitment pb.coinbaseTx expectedCommit
+  | .error e => throw e
 
 def validateBlockBasic
     (blockHex : Bytes)

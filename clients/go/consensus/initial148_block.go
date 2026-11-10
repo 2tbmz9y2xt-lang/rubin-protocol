@@ -59,8 +59,9 @@ func ParseInitial148BlockBytes(raw []byte) (*Initial148ParsedBlock, error) {
 
 // ValidateInitial148BlockBodyCommitments checks the local capacity bound, the
 // complete fixed148 frame with all transactions and trailing bytes, then the
-// existing stored-block coinbase, txid and witness commitment order. It
-// materializes no parsed block and does not derive Root(U).
+// shared binding subpredicate: txid root, strict singleton witness commitment
+// and both position-zero pins. It materializes no parsed block, does not
+// derive Root(U) and does not establish the expected header identity.
 func ValidateInitial148BlockBodyCommitments(raw []byte) error {
 	if len(raw) > initial148BlockMaxBytes {
 		return ErrInitial148BlockCapacity
@@ -72,12 +73,6 @@ func ValidateInitial148BlockBodyCommitments(raw []byte) error {
 	first, txRoot, witnessRoot, err := storedCommitmentTransactions(raw, off, count)
 	if err != nil {
 		return err
-	}
-	// CANONICAL Section 10.5 requires output_count >= 1. The inherited
-	// isCoinbaseTx omits that predicate, so this entry rejects the missing
-	// outputs locally before reusing the unchanged commitment checks.
-	if len(first.Outputs) == 0 {
-		return txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
 	}
 	return storedCommitmentChecks(first, header.MerkleRoot, txRoot, witnessRoot)
 }

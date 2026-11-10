@@ -966,9 +966,12 @@ func detachedReadbackOwners(t *testing.T) {
 }
 
 func detachedRequiredBodyDamage(t *testing.T) {
-	for _, variant := range []string{"absent", "parent-absent", "width", "length", "prefix", "commitment"} {
+	for _, variant := range []string{"absent", "parent-absent", "width", "length", "prefix", "commitment", "pin", "anchor pair"} {
 		t.Run(variant, func(t *testing.T) {
 			a, rows := detachedFixture(t, 2)
+			if variant == "anchor pair" {
+				detachedAnchorPair(t, &a, rows)
+			}
 			hash := a.DetachedSuffix.Entries[0].Hash
 			forward, _ := mdbx.HeightKey(1, 19)
 			inverse, _ := mdbx.CanonicalOwnerKey(1, hash)
@@ -985,6 +988,9 @@ func detachedRequiredBodyDamage(t *testing.T) {
 				value = []byte{1}
 			case "prefix":
 				value[108] ^= 1
+			case "pin":
+				value = bindingWithWitness(value)
+				a.DetachedSuffix.Entries[0].BlockBytesLen, a.DetachedSuffix.LogicalBytes = 269, 535
 			case "length", "commitment":
 				value = append(value, 0)
 				if variant == "commitment" {
@@ -1001,6 +1007,7 @@ func detachedRequiredBodyDamage(t *testing.T) {
 			}
 			var out selectedSideOutcome
 			e, err := mdbx.FixtureSelectedDamage(w.s, w.owner, 1, 0, nil, func() { out = detachedRun(t, w) })
+			logicalMDBXAssert(t, variant != "prefix" || out.Result == "TERMINAL_STORE_INTEGRITY(canonical)", "binding B06 expected header: %+v", out)
 			sideWantOutcome(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", 1, 1, "canonical required body damage")
 			logicalMDBXAssert(t, out.Err != nil && out.Err.Error() == "TERMINAL_STORE_INTEGRITY(canonical): invalid cleanup canonical body" && err == nil && e.BeginWrite == 0 && e.OldGets[4] == 1, "required body defect lost priority/image: %v/%+v/%v", out.Err, e, err)
 			logicalMDBXAssert(t, e.Deletes == 0 && e.Commits == 0, "required body refusal wrote native data: %+v", e)
@@ -1080,6 +1087,149 @@ func generationPairGap(t *testing.T) {
 			}
 			generationClean(t, w.run(class, 1), 2)
 			generationRaw(t, w, generationEncoded(t, generationTerminal(a)), generationGone(want))
+		})
+	}
+}
+
+// generationBindingEffect is the whole observable effect of one optional-body cleanup run and its later operation.
+type generationBindingEffect struct {
+	out, next selectedSideOutcome
+	evidence  mdbx.SelectedDamageEvidence
+	gone      []bool
+	authority []byte
+}
+
+// TestCleanupGenerationMDBXBinding owns the cleanup body consumer: a pin-dirty required body is canonical integrity
+// with nothing written, and a pin-dirty optional body takes the same plan as an unparseable optional body.
+func TestCleanupGenerationMDBXBinding(t *testing.T) {
+	type defect struct {
+		name, suffix string
+		hash         [32]byte
+		rows         []mdbx.Mutation
+		dirty        []byte
+	}
+	pinHash, pinRows := generationProjection(2, 5, 55)
+	pairHash, pairRows := generationProjectionBody(2, 5, sideKindBlock(t, "anchor pair", [32]byte{}, 55))
+	for _, class := range []uint8{2, 4} {
+		for _, d := range []defect{
+			{"witness pin", "", pinHash, pinRows, bindingWithWitness(pinRows[3].Literal)},
+			{"anchor pair", " anchor pair", pairHash, pairRows, pairRows[3].Literal},
+		} {
+			a := generationAuthority()
+			a.B, a.U = 10, 13690
+			hash, rows := d.hash, d.rows
+			requiredLabel, optionalLabel := "binding B12 cleanup required"+d.suffix, "binding B12 cleanup optional"+d.suffix
+			t.Run(fmt.Sprintf("class %d required %s", class, d.name), func(t *testing.T) {
+				required := append(slices.Clone(rows), generationCanonical(hash, 11)...)
+				required[3] = generationRow(4, bytes.Clone(hash[:]), d.dirty)
+				w := generationNew(t, a, required...)
+				var out selectedSideOutcome
+				e, err := mdbx.FixtureSelectedDamage(w.s, w.owner, 1, 0, nil, func() { out = CleanupGenerationMDBX(w.s, w.owner, mdbx.ObsoleteClassV1(class), 1) })
+				sideWantOutcome(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", 1, 1, requiredLabel)
+				logicalMDBXAssert(t, err == nil && e.OldGets[4] == 1 && e.Deletes == 0 && e.Commits == 0 && out.Err != nil && out.Err.Error() == "TERMINAL_STORE_INTEGRITY(canonical): invalid cleanup canonical body", "%s: %v/%+v/%v", requiredLabel, err, e, out.Err)
+				sideWantReleased(t, w.owner, requiredLabel)
+				// A callback refusal retains the handle: the later operation on it refuses again with the same integrity result.
+				ran := 0
+				viewErr := w.s.View(func(*mdbx.Reader) error { ran++; return nil })
+				logicalMDBXAssert(t, viewErr == nil && ran == 1, "%s handle retained: %d/%v", requiredLabel, ran, viewErr)
+				next := CleanupGenerationMDBX(w.s, w.owner, mdbx.ObsoleteClassV1(class), 1)
+				sideWantOutcome(t, next, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", 1, 1, requiredLabel+" next")
+				logicalMDBXAssert(t, next.Err != nil && next.Err.Error() == out.Err.Error(), "%s next: %+v", requiredLabel, next)
+				generationRaw(t, w, generationEncoded(t, a), required)
+			})
+
+			t.Run(fmt.Sprintf("class %d optional %s", class, d.name), func(t *testing.T) {
+				// The garbage copy is the existing positive-damage control; the defect copy must take the identical effect.
+				run := func(body []byte) generationBindingEffect {
+					optional := slices.Clone(rows)
+					optional[3] = generationRow(4, bytes.Clone(hash[:]), body)
+					selected := a // Selected membership alone makes the body optional and consulted.
+					optional = append(optional, generationSelected(&selected, hash, body)...)
+					world := generationNew(t, selected, optional...)
+					var effect generationBindingEffect
+					var err error
+					effect.evidence, err = mdbx.FixtureSelectedDamage(world.s, world.owner, 1, 0, nil, func() { effect.out = CleanupGenerationMDBX(world.s, world.owner, mdbx.ObsoleteClassV1(class), 1) })
+					logicalMDBXAssert(t, err == nil, "%s native: %v", optionalLabel, err)
+					sideWantReleased(t, world.owner, optionalLabel)
+					for _, row := range optional {
+						gone, err := mdbx.FixtureRawRowEqual(world.s, row.DBI.Rank, row.Key, nil)
+						logicalMDBXAssert(t, err == nil, "%s row: %v", optionalLabel, err)
+						effect.gone = append(effect.gone, gone)
+					}
+					logicalMDBXAssert(t, world.s.View(func(r *mdbx.Reader) error {
+						value, _, err := r.Get(generationRow(0, []byte{2}, nil).DBI, []byte{2})
+						effect.authority = bytes.Clone(value)
+						return err
+					}) == nil, "%s authority", optionalLabel)
+					effect.next = CleanupGenerationMDBX(world.s, world.owner, mdbx.ObsoleteClassV1(class), 1)
+					return effect
+				}
+				pin, garbage := run(d.dirty), run(append(bytes.Clone(rows[3].Literal), 0))
+				logicalMDBXAssert(t, reflect.DeepEqual(pin, garbage), "%s: %+v vs %+v", optionalLabel, pin, garbage)
+				if d.suffix == "" { // The header of a witness-pin body also commits a healthy body; an anchor pair's commits only itself.
+					good := run(rows[3].Literal)
+					logicalMDBXAssert(t, !reflect.DeepEqual(pin.gone, good.gone) || !bytes.Equal(pin.authority, good.authority), "%s healthy control: %+v vs %+v", optionalLabel, pin, good)
+				}
+				sideWantOutcome(t, pin.out, "LOCAL_STORE_ERROR(noncanonical)", "NOT_APPLICABLE", 2, 3, optionalLabel+" raw tuple")
+				logicalMDBXAssert(t, pin.out.Result == "LOCAL_STORE_ERROR(noncanonical)" && pin.out.CanonicalTruth == "NOT_APPLICABLE" && pin.out.Err == nil && pin.next.Err == nil && pin.evidence.Commits == 1 && pin.evidence.Deletes != 0, "%s effect: %+v", optionalLabel, pin)
+			})
+		}
+	}
+}
+
+// TestDrainDetachedMDBXBindingNative owns the optional detached row's native effect: a pin-dirty body takes the same
+// consulted read, commit, deletions and later operation as an equal-length unparseable body.
+func TestDrainDetachedMDBXBindingNative(t *testing.T) {
+	for _, d := range []struct {
+		name, suffix string
+		pair         bool
+		dirty        func([]byte) []byte
+	}{
+		{"witness pin", "", false, bindingWithWitness},
+		{"anchor pair", " anchor pair", true, func(v []byte) []byte { return v }},
+	} {
+		t.Run(d.name, func(t *testing.T) {
+			label := "binding B12 detached optional native" + d.suffix
+			run := func(edit func([]byte) []byte) generationBindingEffect {
+				a, rows := detachedFixture(t, 2)
+				if d.pair {
+					detachedAnchorPair(t, &a, rows)
+				}
+				body := len(rows) - 1
+				width := len(rows[body].Literal)
+				value := edit(rows[body].Literal)
+				a.DetachedSuffix.Entries[0].BlockBytesLen = uint64(len(value))
+				a.DetachedSuffix.LogicalBytes += uint64(len(value)) - uint64(width)
+				rows[body].Literal = value
+				w := generationNew(t, a, rows...)
+				var effect generationBindingEffect
+				var err error
+				effect.evidence, err = mdbx.FixtureSelectedDamage(w.s, w.owner, 1, 0, nil, func() { effect.out = detachedRun(t, w) })
+				logicalMDBXAssert(t, err == nil, "%s fixture: %v", label, err)
+				for _, row := range rows {
+					gone, err := mdbx.FixtureRawRowEqual(w.s, row.DBI.Rank, row.Key, nil)
+					logicalMDBXAssert(t, err == nil, "%s row: %v", label, err)
+					effect.gone = append(effect.gone, gone)
+				}
+				logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error {
+					value, _, err := r.Get(generationRow(0, []byte{2}, nil).DBI, []byte{2})
+					effect.authority = bytes.Clone(value)
+					return err
+				}) == nil, "%s authority", label)
+				effect.next = detachedRun(t, w)
+				return effect
+			}
+			pin, garbage := run(d.dirty), run(func(v []byte) []byte { return append(bytes.Clone(v), 0, 0, 0) })
+			logicalMDBXAssert(t, reflect.DeepEqual(pin, garbage), "%s same effect: %+v vs %+v", label, pin, garbage)
+			sideWantOutcome(t, pin.out, "LOCAL_STORE_ERROR(noncanonical)", "NOT_APPLICABLE", 2, 3, label+" raw tuple")
+			logicalMDBXAssert(t, pin.out.Err == nil && pin.evidence.OldGets[4] != 0 && pin.evidence.BeginWrite == 1 && pin.evidence.Commits == 1 && pin.evidence.Deletes != 0, "%s consulted and write: %+v", label, pin)
+			sideWantOutcome(t, pin.next, "", "NEW", 2, 3, label+" next")
+			logicalMDBXAssert(t, pin.next.Err == nil, "%s next: %v", label, pin.next.Err)
+			if d.pair {
+				return
+			}
+			good := run(func(v []byte) []byte { return v })
+			logicalMDBXAssert(t, good.out.Result == "" && good.out.CanonicalTruth == "NEW" && good.next.Result == "", "%s healthy control: %+v", label, good)
 		})
 	}
 }

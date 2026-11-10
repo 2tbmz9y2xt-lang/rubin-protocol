@@ -143,8 +143,7 @@ def validateBlockBasicCheck
   match BlockBasicV1.findCoinbaseAnchorCommitment pb.coinbaseTx with
   | .ok gotCommit =>
       if gotCommit != expectCommit then throw "BLOCK_ERR_WITNESS_COMMITMENT"
-  | .error _ =>
-      BlockBasicV1.findMatchingCoinbaseAnchorCommitment pb.coinbaseTx expectCommit
+  | .error e => throw e
 
   -- extra checks used by block_basic_check op in conformance:
   -- - timestamp bounds (MTP + max drift)

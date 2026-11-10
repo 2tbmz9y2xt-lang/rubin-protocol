@@ -23,15 +23,10 @@ func parseStoredCommitmentTestBlock(t *testing.T, txs ...[]byte) *ParsedBlock {
 	return pb
 }
 
-func requireStoredCommitmentError(t *testing.T, pb *ParsedBlock, want ErrorCode) {
+// requireStoredCommitmentError observes the exact direct *TxError, its code, message and unspecified cause.
+func requireStoredCommitmentError(t *testing.T, label string, pb *ParsedBlock, code ErrorCode, msg string) {
 	t.Helper()
-	err := ValidateStoredBlockCommitments(pb)
-	if err == nil {
-		t.Fatal("ValidateStoredBlockCommitments unexpectedly succeeded")
-	}
-	if got := mustTxErrCode(t, err); got != want {
-		t.Fatalf("code=%s, want %s (err=%v)", got, want, err)
-	}
+	initial148BlockWantError(t, "binding stored "+label, ValidateStoredBlockCommitments(pb), code, msg)
 }
 
 func TestValidateStoredBlockCommitments(t *testing.T) {
@@ -43,33 +38,52 @@ func TestValidateStoredBlockCommitments(t *testing.T) {
 	})
 
 	t.Run("nil", func(t *testing.T) {
-		requireStoredCommitmentError(t, nil, BLOCK_ERR_PARSE)
+		requireStoredCommitmentError(t, "nil parsed", nil, BLOCK_ERR_PARSE, "nil parsed block")
 	})
 
-	t.Run("coinbase witness or DA slot precedes commitments", func(t *testing.T) {
-		for _, mutate := range []func(*ParsedBlock){
-			func(pb *ParsedBlock) { pb.Txs[0].Witness = []WitnessItem{{}} },
-			func(pb *ParsedBlock) { pb.Txs[0].DaPayload = []byte{0x01} },
+	t.Run("position-zero pins follow commitments", func(t *testing.T) {
+		for _, c := range []struct {
+			name   string
+			mutate func(*ParsedBlock)
+		}{
+			{"witness pin", func(pb *ParsedBlock) { pb.Txs[0].Witness = []WitnessItem{{}} }},
+			{"payload pin", func(pb *ParsedBlock) { pb.Txs[0].DaPayload = []byte{0x01} }},
 		} {
 			pb := parseStoredCommitmentTestBlock(t, coinbaseWithWitnessCommitment(t))
-			pb.Txids[0][0] ^= 0xff // Coinbases must reject before the later Merkle check.
-			mutate(pb)
-			requireStoredCommitmentError(t, pb, BLOCK_ERR_COINBASE_INVALID)
+			c.mutate(pb)
+			requireStoredCommitmentError(t, c.name, pb, BLOCK_ERR_COINBASE_INVALID, bindingPinMsg)
+			pb.Txids[0][0] ^= 0xff // The Merkle check precedes both pins in binding order.
+			requireStoredCommitmentError(t, c.name+" behind merkle", pb, BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch")
 		}
+	})
+
+	t.Run("absent or nil first transaction", func(t *testing.T) {
+		pb := parseStoredCommitmentTestBlock(t, coinbaseWithWitnessCommitment(t))
+		pb.Txs[0] = nil
+		requireStoredCommitmentError(t, "nil first", pb, BLOCK_ERR_COINBASE_INVALID, bindingPinMsg)
+		pb.Txs = nil
+		requireStoredCommitmentError(t, "absent first", pb, BLOCK_ERR_COINBASE_INVALID, bindingPinMsg)
+		// Both guards precede the txid-root comparison: a wrong root does not change their refusal.
+		wrong := parseStoredCommitmentTestBlock(t, coinbaseWithWitnessCommitment(t))
+		wrong.Header.MerkleRoot[0] ^= 0xff
+		wrong.Txs[0] = nil
+		requireStoredCommitmentError(t, "nil first before root", wrong, BLOCK_ERR_COINBASE_INVALID, bindingPinMsg)
+		wrong.Txs = nil
+		requireStoredCommitmentError(t, "absent first before root", wrong, BLOCK_ERR_COINBASE_INVALID, bindingPinMsg)
 	})
 
 	t.Run("txid Merkle mismatch", func(t *testing.T) {
 		pb := parseStoredCommitmentTestBlock(t, coinbaseWithWitnessCommitment(t))
 		pb.Txids[0][0] ^= 0xff
 		pb.Wtxids[0][0] ^= 0xff
-		requireStoredCommitmentError(t, pb, BLOCK_ERR_MERKLE_INVALID)
+		requireStoredCommitmentError(t, "txid mismatch", pb, BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch")
 	})
 
 	t.Run("witness-only mismatch", func(t *testing.T) {
 		spend := txWithOneOutput(1, COV_TYPE_P2PK, validP2PKCovenantData())
 		pb := parseStoredCommitmentTestBlock(t, coinbaseWithWitnessCommitment(t, spend), spend)
 		pb.Wtxids[1][0] ^= 0xff
-		requireStoredCommitmentError(t, pb, BLOCK_ERR_WITNESS_COMMITMENT)
+		requireStoredCommitmentError(t, "witness-only mismatch", pb, BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg)
 	})
 
 	wroot, err := WitnessMerkleRootWtxids([][32]byte{{}})
@@ -81,13 +95,13 @@ func TestValidateStoredBlockCommitments(t *testing.T) {
 		coinbase := coinbaseTxWithOutputs(0, []testOutput{{
 			value: 1, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData(),
 		}})
-		requireStoredCommitmentError(t, parseStoredCommitmentTestBlock(t, coinbase), BLOCK_ERR_WITNESS_COMMITMENT)
+		requireStoredCommitmentError(t, "missing commitment", parseStoredCommitmentTestBlock(t, coinbase), BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg)
 	})
 	t.Run("duplicated witness commitment", func(t *testing.T) {
 		coinbase := coinbaseTxWithOutputs(0, []testOutput{
 			{value: 0, covenantType: COV_TYPE_ANCHOR, covenantData: commitment[:]},
 			{value: 0, covenantType: COV_TYPE_ANCHOR, covenantData: commitment[:]},
 		})
-		requireStoredCommitmentError(t, parseStoredCommitmentTestBlock(t, coinbase), BLOCK_ERR_WITNESS_COMMITMENT)
+		requireStoredCommitmentError(t, "duplicated commitment", parseStoredCommitmentTestBlock(t, coinbase), BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg)
 	})
 }

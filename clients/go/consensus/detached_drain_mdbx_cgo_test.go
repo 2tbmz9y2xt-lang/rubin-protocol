@@ -33,6 +33,21 @@ func detachedFixture(t *testing.T, count int) (mdbx.StorageAuthorityV1, []mdbx.M
 	return a, rows
 }
 
+// detachedAnchorPair replaces the newest detached block with a hash-bound equal/distinct anchor-pair body.
+func detachedAnchorPair(t *testing.T, a *mdbx.StorageAuthorityV1, rows []mdbx.Mutation) {
+	t.Helper()
+	header, body := len(rows)-2, len(rows)-1
+	var parent [32]byte
+	copy(parent[:], rows[body].Literal[4:36])
+	pair := sideKindBlock(t, "anchor pair", parent, 101)
+	hash := sha3_256(pair[:116])
+	rows[header], rows[body] = generationRow(3, bytes.Clone(hash[:]), bytes.Clone(pair[:116])), generationRow(4, bytes.Clone(hash[:]), pair)
+	entry := &a.DetachedSuffix.Entries[0]
+	a.DetachedSuffix.LogicalBytes += uint64(len(pair)) - entry.BlockBytesLen
+	entry.Hash, entry.BlockBytesLen = hash, uint64(len(pair))
+	a.DetachedSuffix.Cursor.BlockHash = hash
+}
+
 func detachedAfter(a mdbx.StorageAuthorityV1, count uint16, sum uint64) mdbx.StorageAuthorityV1 {
 	d := a.DetachedSuffix
 	a.DetachedSuffix = nil
@@ -367,4 +382,33 @@ func detachedBoundaries(t *testing.T) {
 		detachedCommitted(t, detachedRun(t, w), false)
 		w.image(detachedAfter(a, 1, 266), detachedGone(rows)...)
 	})
+}
+
+// TestDrainDetachedMDBXBinding owns the optional detached row: a pin-dirty body is positive damage that the drain
+// removes through its existing cursor and batch.
+func TestDrainDetachedMDBXBinding(t *testing.T) {
+	for _, c := range []struct {
+		label string
+		edit  func(a *mdbx.StorageAuthorityV1, rows []mdbx.Mutation)
+	}{
+		{"binding B12 detached pin", func(a *mdbx.StorageAuthorityV1, rows []mdbx.Mutation) {
+			a.DetachedSuffix.Entries[0].BlockBytesLen += 3
+			a.DetachedSuffix.LogicalBytes += 3
+			rows[len(rows)-1].Literal = bindingWithWitness(rows[len(rows)-1].Literal)
+		}},
+		{"binding B12 detached anchor pair", func(a *mdbx.StorageAuthorityV1, rows []mdbx.Mutation) { detachedAnchorPair(t, a, rows) }},
+	} {
+		t.Run(c.label, func(t *testing.T) {
+			a, rows := detachedFixture(t, 2)
+			header, body := len(rows)-2, len(rows)-1
+			c.edit(&a, rows)
+			w := generationNew(t, a, rows...)
+			out := detachedRun(t, w)
+			sideWantOutcome(t, out, "LOCAL_STORE_ERROR(noncanonical)", "NOT_APPLICABLE", 2, 3, c.label)
+			logicalMDBXAssert(t, out.Err == nil, "%s: raw error %v", c.label, out.Err)
+			want := slices.Clone(rows)
+			want[header].Literal, want[body].Literal = nil, nil
+			w.image(detachedAfter(a, 1, 266), want...)
+		})
+	}
 }

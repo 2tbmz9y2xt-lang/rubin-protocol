@@ -194,7 +194,7 @@ func (a *selectedRetainAttempt) batch(reader *mdbx.Reader) (mdbx.Batch, error) {
 }
 
 // plan composes the qualifier's own order (authority/control/raw, header, parent evidence, context, steps 1-12,
-// selection and domain) so a NONE canonical parent beside a live side stays an explicit owner outcome.
+// complete body binding, selection and domain) so a NONE canonical parent beside a live side stays an explicit owner outcome.
 func (a *selectedRetainAttempt) plan(reader *mdbx.Reader) (mdbx.Batch, error) {
 	if a.mode == selectedRefillMode { // RF has its own qualification (selected_side_rolling_mdbx_cgo.go).
 		return a.refill(reader)
@@ -703,7 +703,7 @@ func (r *selectedRetention) firstTip(qual selectedSideQualification) (bool, erro
 	return true, nil
 }
 
-// firstBody reads the matched optional body once. Identical bytes reuse this attempt's successful steps 1-12; a
+// firstBody reads the matched optional body once. Identical bytes reuse this attempt's steps 1-12 and binding; a
 // differing body gets only the commitment check: invalid stored bytes are the row's locator, healthy ones branch_data.
 func (r *selectedRetention) firstBody(qual selectedSideQualification) error {
 	first := r.side.F + 1
@@ -780,8 +780,8 @@ func (r *selectedRetention) link(h uint64) ([]byte, error) {
 }
 
 // matched proves the matched stored row before the supplied block: keyed owner, hash-bound header, predecessor,
-// derived and descriptor work, then one stored body with its framing and commitments; only then fresh steps 1-12 at
-// the actual height h.
+// derived and descriptor work, then one stored body with its framing and commitments; only then fresh steps 1-12 and
+// complete body binding at the actual height h.
 func (r *selectedRetention) matched(h uint64, link []byte, hash [32]byte) error {
 	owner, err := r.canonicalOwnerOf(hash)
 	if err != nil {
@@ -876,7 +876,8 @@ func (r *selectedRetention) matchedBody(h uint64, hash [32]byte, required bool) 
 	return nil, r.request(h)
 }
 
-// suppliedValid runs fresh steps 1-12 of the supplied block at the matched height over the matched row's context.
+// suppliedValid runs fresh steps 1-12 and the binding pins of the supplied block at the matched height over the
+// matched row's context.
 func (r *selectedRetention) suppliedValid(parent selectedQualParent) error {
 	height, target, timestamps, err := r.childContext(parent)
 	if err != nil {
@@ -886,7 +887,10 @@ func (r *selectedRetention) suppliedValid(parent selectedQualParent) error {
 	if errors.Is(err, consensus.ErrBlockSteps1To12Context) {
 		return &selectedSideQualificationError{Result: selectedQualBranch, Cause: err}
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return consensus.ValidateBlockBodyCommitments(r.attempt.raw)
 }
 
 // storedDecision reuses the matched row's owner: canonical-known, then a verified K23 winner routes ORDINARY,

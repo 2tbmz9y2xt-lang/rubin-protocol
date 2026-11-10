@@ -5,6 +5,7 @@ package consensus
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -227,6 +228,7 @@ func TestReplayStepMDBXV1(t *testing.T) {
 	t.Run("source_guard", testStepSourceGuard)
 	t.Run("spent", testStepSpent)
 	t.Run("parent_witness", testStepParentWitness)
+	t.Run("binding", testStepBinding)
 	t.Run("inactive", testStepInactive)
 	t.Run("historical", testStepHistorical)
 	t.Run("state_remainder", testStepRemainder)
@@ -1100,6 +1102,128 @@ func stepExactSpentImage(t *testing.T, w *stepWorld, before []mdbx.PrefixRow, un
 	stepExactImageExtra(t, w, 1, before, false, stepManifest(1, 0, 3, 1), extra)
 }
 
+// stepBindingFresh asserts the fresh-unbound result under one label: no state publication, recovery_artifact, the
+// exact Need and no invalidity observation, with the source released.
+func stepBindingFresh(t *testing.T, w *stepWorld, h uint64, body []byte, label, row string) {
+	t.Helper()
+	before := w.image()
+	height, generated, memo := w.step.state.height, w.step.state.generated, w.step.state.memo
+	i := replayStepRun(w.step, w.store, w.owner, body)
+	logicalMDBXAssert(t, w.step.state.height == height && w.step.state.generated == generated && w.step.state.memo == memo, "%s %s supply memo: %+v", label, row, *w.step.state)
+	logicalMDBXAssert(t, replayImagesEqual(before, w.image()) && i.observation.incoming == nil && i.observation.decision == "" && i.out.Needed != nil && *i.out.Needed == (ReplayStepNeedV1{Kind: 2, Height: h, Hash: w.hashes[h]}), "%s %s: %+v/%+v", label, row, i.out, i.observation)
+	logicalMDBXAssert(t, i.out.Result == "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)" && i.out.Decision == "" && i.out.CanonicalTruth == "OLD" && uint8(i.out.Truth) == 1 && uint8(i.out.Stage) == 1, "binding B10 source disposition %s: %+v", row, i.out)
+	stepReleased(t, w)
+}
+
+// stepBindingGood is the next legal operation after a fresh unbound copy that has a same-header good copy.
+func stepBindingGood(t *testing.T, w *stepWorld, h uint64, row string) {
+	t.Helper()
+	before := w.authority()
+	out := w.call(h)
+	logicalMDBXAssert(t, out.Result == "" && out.Decision == "" && out.Needed == nil && out.CanonicalTruth == "NEW", "binding B10 source disposition %s next: %+v", row, out)
+	stepProgress(t, w, h, before, out)
+}
+
+// stepBindingStoredAgain is the next operation after stored damage: the same integrity result, never a fresh retry.
+func stepBindingStoredAgain(t *testing.T, w *stepWorld, body []byte, row string) {
+	t.Helper()
+	before := w.image()
+	i := replayStepRun(w.step, w.store, w.owner, body)
+	logicalMDBXAssert(t, replayImagesEqual(before, w.image()) && i.out.Result == selectedSideIntegrity && i.out.Needed == nil && i.observation.incoming == nil, "binding B10 source disposition %s next: %+v/%+v", row, i.out, i.observation)
+	w.store = w.reopen()
+	stepReleased(t, w)
+}
+
+// stepBindingInvalid asserts a bound Q-invalid body: the exact incoming TxError at the target height and hash.
+func stepBindingInvalid(t *testing.T, w *stepWorld, i *replayStepInvocation, row string) {
+	t.Helper()
+	var e *TxError
+	logicalMDBXAssert(t, errors.As(i.observation.incoming, &e) && any(e) == any(i.observation.incoming) && e.Code == BLOCK_ERR_TIMESTAMP_OLD && e.Msg == "timestamp <= MTP median" && i.out.Result == "" && i.out.Decision == "consensus invalid" && i.out.Needed == nil && i.observation.h == 1 && i.observation.x == w.hashes[1], "binding B10 source disposition %s: %+v/%+v", row, i.out, i.observation)
+}
+
+// testStepBinding owns B04/B10 on the Q-success path: a pin-dirty copy under the exact header is unbound before any
+// invalidity or state effect, fresh and stored stay distinct, and the later good copy reaches ordinary progress.
+func testStepBinding(t *testing.T) {
+	t.Run("supplied_then_good", func(t *testing.T) {
+		w := newStepWorld(t, 1, false)
+		w.prefix(t, 1)
+		stepBindingFresh(t, w, 1, bindingWithWitness(w.bodies[1]), "binding B10 success path", "supplied")
+		stepBindingGood(t, w, 1, "supplied")
+	})
+	t.Run("height0", func(t *testing.T) {
+		w := newStepWorld(t, 1, false)
+		stepBindingFresh(t, w, 0, bindingWithWitness(w.bodies[0]), "binding B10 source disposition", "height0")
+		stepBindingGood(t, w, 0, "height0")
+	})
+	for _, c := range []struct {
+		name  string
+		h     uint64
+		clean bool
+	}{{"stored", 1, false}, {"stored_clean_supplied", 1, true}, {"stored_height0", 0, false}, {"stored_height0_clean_supplied", 0, true}} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newStepWorld(t, 1, false)
+			if c.h != 0 {
+				w.prefix(t, c.h)
+			}
+			dirty := bindingWithWitness(w.bodies[c.h])
+			stepSeedArtifact(w, 4, c.h, dirty)
+			supplied := dirty
+			if c.clean {
+				supplied = bytes.Clone(w.bodies[c.h])
+			}
+			before := w.image()
+			i := replayStepRun(w.step, w.store, w.owner, supplied)
+			logicalMDBXAssert(t, replayImagesEqual(before, w.image()) && i.observation.incoming == nil && i.observation.decision == "", "binding B10 success path %s: %+v/%+v", c.name, i.out, i.observation)
+			logicalMDBXAssert(t, i.out.Result == selectedSideIntegrity && i.out.Needed == nil, "binding B10 source disposition %s: %+v/%+v", c.name, i.out, i.observation)
+			stepTuple(t, i.out, selectedSideIntegrity, "", "OLD", 1, 1, false)
+			w.store = w.reopen()
+			stepReleased(t, w)
+			stepBindingStoredAgain(t, w, supplied, c.name)
+		})
+	}
+	for _, c := range []struct {
+		name     string
+		edit     func([]byte) []byte
+		dirty    bool
+		supplied func([]byte) []byte
+	}{{"stored_q_error_dirty", bindingWithWitness, true, nil}, {"stored_q_error_clean", bytes.Clone, false, nil}, {"stored_q_error_dirty_clean_supplied", bindingWithWitness, true, bytes.Clone}} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newStepWorld(t, 1, false)
+			w.prefix(t, 1)
+			raw := stepFixHeader(t, w, bytes.Clone(w.bodies[1]), w.lastTime)
+			stepReplaceRaw(t, w, raw)
+			copyBody := c.edit(raw)
+			stepSeedArtifact(w, 4, 1, copyBody)
+			supplied := copyBody
+			if c.supplied != nil {
+				supplied = c.supplied(raw)
+			}
+			before := w.image()
+			i := replayStepRun(w.step, w.store, w.owner, supplied)
+			logicalMDBXAssert(t, replayImagesEqual(before, w.image()) && i.out.Needed == nil, "binding B10 source disposition %s: %+v", c.name, i.out)
+			if c.dirty {
+				logicalMDBXAssert(t, i.out.Result == selectedSideIntegrity && i.observation.incoming == nil && i.observation.decision == "", "binding B10 source disposition %s: %+v/%+v", c.name, i.out, i.observation)
+				w.store = w.reopen()
+				stepReleased(t, w)
+				stepBindingStoredAgain(t, w, supplied, c.name)
+				return
+			}
+			stepBindingInvalid(t, w, i, c.name)
+			stepBindingInvalid(t, w, replayStepRun(w.step, w.store, w.owner, copyBody), c.name+" next")
+		})
+	}
+	t.Run("expected_header", func(t *testing.T) {
+		w := newStepWorld(t, 1, false)
+		w.prefix(t, 1)
+		other := bytes.Clone(w.bodies[1])
+		other[108] ^= 1
+		before := w.image()
+		i := replayStepRun(w.step, w.store, w.owner, other)
+		logicalMDBXAssert(t, replayImagesEqual(before, w.image()) && i.out.Needed != nil && *i.out.Needed == (ReplayStepNeedV1{Kind: 2, Height: 1, Hash: w.hashes[1]}) && i.observation.incoming == nil, "binding B06 expected header: %+v", i.out)
+		stepReleased(t, w)
+	})
+}
+
 func testStepParentWitness(t *testing.T) {
 	for _, residual := range []bool{false, true} {
 		t.Run(fmt.Sprint(residual), func(t *testing.T) {
@@ -1289,4 +1413,112 @@ func TestReplayStepMDBXV1LogicalStateGrowth(t *testing.T) {
 	control := stepGrowthWorld(t, logicalGrowthEqual)
 	got := replayStepRun(control.step, control.store, control.owner, control.bodies[h])
 	logicalMDBXAssert(t, got.out.Err == nil && got.out.Decision != "consensus invalid" && got.observation.incoming == nil, "equality must pass the growth law: %+v / %+v", got.out, got.observation)
+}
+
+func stepFixHeader(t *testing.T, w *stepWorld, raw []byte, timestamp uint64) []byte {
+	t.Helper()
+	copy(raw[4:36], w.hashes[0][:])
+	binary.LittleEndian.PutUint64(raw[68:76], timestamp)
+	for nonce := uint64(0); ; nonce++ {
+		binary.LittleEndian.PutUint64(raw[108:116], nonce)
+		if PowCheck(raw[:116], filledHash(0xff)) == nil {
+			return raw
+		}
+	}
+}
+
+func stepReplaceRaw(t *testing.T, w *stepWorld, raw []byte) {
+	t.Helper()
+	old := w.hashes[1]
+	w.bodies[1], w.headers[1], w.hashes[1] = raw, [116]byte(raw[:116]), mustHash([116]byte(raw[:116]))
+	stepDrop(w, 3, old[:])
+	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[3], Key: w.hashes[1][:], AfterKind: mdbx.AfterLiteral, Literal: w.headers[1][:]})
+	w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.Replay.Target.TipHash = w.hashes[1] })
+	w.step.DiscardV1()
+}
+
+// stepBindingBody frames one first transaction under a mined header at the target position.
+func stepBindingBody(t *testing.T, w *stepWorld, first []byte, timestamp uint64) []byte {
+	t.Helper()
+	_, txid, _, _, err := ParseTx(first)
+	logicalMDBXAssert(t, err == nil, "binding fixture parse: %v", err)
+	root := initial148BlockTaggedRoot([][32]byte{txid}, 0x00, 0x01)
+	raw := append(append(bytes.Clone(w.headers[1][:]), 1), first...)
+	copy(raw[36:68], root[:])
+	return stepFixHeader(t, w, raw, timestamp)
+}
+
+// TestReplayStepMDBXBindingFreshRows owns the header-changing B10 fresh rows: each bound-header copy that fails
+// the complete binding is discarded without an invalidity observation, whatever Q reported.
+func TestReplayStepMDBXBindingFreshRows(t *testing.T) {
+	commit := initial148BlockWitnessCommit(t)
+	sole := bindingAnchor(commit[:], 0)
+	clean := coinbaseTxWithOutputs(1, []testOutput{sole})
+	payload := []byte{0x42}
+	for _, c := range []struct {
+		name  string
+		first []byte
+		late  bool
+		code  ErrorCode
+		msg   string
+	}{
+		{"anchor count 2", coinbaseTxWithOutputs(1, []testOutput{sole, sole}), false, BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+		{"anchor equal distinct", coinbaseTxWithOutputs(1, []testOutput{sole, bindingAnchor(make([]byte, 32), 0)}), false, BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+		{"position-zero chunk witness path", blockStepsChunk(blockStepsIDs[0], 0, payload, sha3_256(payload)), false, BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+		{"position-zero chunk payload pin", bindingChunkAnchored(commit[:]), false, BLOCK_ERR_COINBASE_INVALID, bindingPinMsg},
+		{"Q failure pin dirty", bindingWithWitness(clean), true, BLOCK_ERR_COINBASE_INVALID, bindingPinMsg},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newStepWorld(t, 1, false, inputViewTx(1, Outpoint{Txid: hashWithPrefix(0xb3)}))
+			w.prefix(t, 1)
+			timestamp := w.lastTime + 240
+			if c.late {
+				timestamp = w.lastTime
+			}
+			raw := stepBindingBody(t, w, c.first, timestamp)
+			stepReplaceRaw(t, w, raw)
+			stepBindingFresh(t, w, 1, raw, "binding B10 source disposition", c.name)
+			initial148BlockWantError(t, "binding B10 fresh row cause "+c.name, ValidateBlockBodyCommitments(raw), c.code, c.msg)
+			if c.late {
+				// A pin is outside the header commitments, so this is the same-header good copy.
+				stepBindingInvalid(t, w, replayStepRun(w.step, w.store, w.owner, stepBindingBody(t, w, clean, timestamp)), c.name+" next")
+				return
+			}
+			stepBindingFresh(t, w, 1, raw, "binding B10 source disposition", c.name+" next")
+		})
+	}
+}
+
+// TestReplayStepMDBXBindingLocalInvariant owns the qualify order of B10: the capacity and context sentinels stay
+// local invariants ahead of the Q-failure binding recheck, so a pin-dirty copy cannot turn them into an acquisition.
+func TestReplayStepMDBXBindingLocalInvariant(t *testing.T) {
+	const label = "binding B10 local invariant"
+	commit := initial148BlockWitnessCommit(t)
+	clean := coinbaseTxWithOutputs(1, []testOutput{bindingAnchor(commit[:], 0)})
+	w := newStepWorld(t, 1, false, inputViewTx(1, Outpoint{Txid: hashWithPrefix(0xb3)}))
+	w.prefix(t, 1)
+	raw := stepBindingBody(t, w, bindingWithWitness(clean), w.lastTime+240)
+	direct, ok := any(ValidateBlockBodyCommitments(raw)).(*TxError)
+	logicalMDBXAssert(t, ok && direct.Code == BLOCK_ERR_COINBASE_INVALID && direct.Msg == bindingPinMsg, "%s pin-dirty control: %v", label, direct)
+	oversized := append(bytes.Clone(raw), make([]byte, 68_000_126-len(raw))...)
+	x := hashWithPrefix(0xb4)
+	qualify := func(body []byte, target [32]byte) (*replayStepCall, error) {
+		c := &replayStepCall{body: body, h: 1, x: x, target: target, timestamps: []uint64{w.lastTime}}
+		return c, c.qualify()
+	}
+	for _, row := range []struct {
+		name   string
+		body   []byte
+		target [32]byte
+	}{{"context", raw, [32]byte{}}, {"capacity", oversized, POW_LIMIT}} {
+		t.Run(row.name, func(t *testing.T) {
+			c, err := qualify(row.body, row.target)
+			var f *selectedSideFailure
+			logicalMDBXAssert(t, errors.As(err, &f) && f.result == selectedSideInvariant && f.cause.Error() == "replay qualification context or capacity invariant" && c.needed == nil, "%s %s: %v needed=%+v", label, row.name, err, c.needed)
+		})
+	}
+	c, err := qualify(raw, POW_LIMIT)
+	var f *selectedSideFailure
+	want := ReplayStepNeedV1{Kind: ReplayStepNeedBlockBytesV1, Height: 1, Hash: x}
+	logicalMDBXAssert(t, errors.As(err, &f) && f.result == replayEntryRecovery && c.needed != nil && *c.needed == want, "%s in-range control: %v needed=%+v", label, err, c.needed)
 }

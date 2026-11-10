@@ -608,9 +608,8 @@ func TestInitial148BlockStep13Exclusion(t *testing.T) {
 	if err != nil || summary.TxCount != 2 || summary.BlockHash != sha3.Sum256(canonical[:Initial148HeaderBytes]) {
 		t.Fatalf("initial148 Q excludes step13: summary=%+v/%v", summary, err)
 	}
-	// CANONICAL Section 10.5 requires output_count >= 1. This literal coinbase
-	// parses with zero outputs, so the body entry must reject it as non-canonical
-	// before either the Merkle-root or missing-witness competitors.
+	// This literal coinbase parses with zero outputs. Binding has no output-count
+	// rule: the Merkle root is checked first, then the absent witness commitment.
 	zeroOutputs := initial148Hex(t, "01000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff00000000000000")
 	zeroParsed, _, _, _, err := ParseTx(zeroOutputs)
 	if err != nil || zeroParsed.TxKind != 0 || len(zeroParsed.Outputs) != 0 {
@@ -619,12 +618,14 @@ func TestInitial148BlockStep13Exclusion(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		edit func(*initial148BlockHead)
+		code ErrorCode
+		msg  string
 	}{
-		{"zero outputs correct root", nil},
-		{"zero outputs bad merkle", func(h *initial148BlockHead) { h.merkle = [32]byte{1} }},
+		{"zero outputs correct root", nil, BLOCK_ERR_WITNESS_COMMITMENT, "coinbase witness commitment missing or duplicated"},
+		{"zero outputs bad merkle", func(h *initial148BlockHead) { h.merkle = [32]byte{1} }, BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch"},
 	} {
 		body := initial148BlockFrame(t, [][]byte{zeroOutputs}, c.edit)
-		initial148BlockBodyRefusal(t, "initial148 Q excludes step13", body, BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+		initial148BlockBodyRefusal(t, "binding B09 commitment order: "+c.name, body, c.code, c.msg)
 	}
 	// Body commitment order: the header Merkle root precedes the witness commitment.
 	witnessTxs := [][]byte{coinbaseTxWithOutputs(0, []testOutput{{covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}})}
@@ -642,8 +643,8 @@ func TestInitial148BlockStep13Exclusion(t *testing.T) {
 		body := initial148BlockFrame(t, c.txs, c.edit)
 		initial148BlockBodyRefusal(t, "initial148 body commitment order", body, c.code, c.msg)
 	}
-	// A non-canonical first transaction is still steps1-12-valid; only the
-	// commitment-only entry owns the first-coinbase structure check.
+	// A non-canonical first transaction is still steps1-12-valid and stays
+	// bound: coinbase structure is step 13, outside the commitment-only entry.
 	others := blockStepsPlain(1)
 	commitment := initial148BlockWitnessCommit(t, others...)
 	first := txWithOutputs([]testOutput{{covenantType: COV_TYPE_ANCHOR, covenantData: commitment[:]}})
@@ -657,7 +658,9 @@ func TestInitial148BlockStep13Exclusion(t *testing.T) {
 	if err != nil || summary.TxCount != 2 || summary.BlockHash != sha3.Sum256(raw[:Initial148HeaderBytes]) {
 		t.Fatalf("initial148 Q excludes step13: summary=%+v/%v", summary, err)
 	}
-	initial148BlockBodyRefusal(t, "initial148 Q excludes step13", raw, BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+	if err := ValidateInitial148BlockBodyCommitments(raw); err != nil {
+		t.Fatalf("binding B03 core remains bound: %v", err)
+	}
 }
 
 func TestInitial148BlockCapacity(t *testing.T) {

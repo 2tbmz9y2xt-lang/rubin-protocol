@@ -712,3 +712,37 @@ func TestAddU64_Overflow(t *testing.T) {
 		t.Fatalf("expected overflow error")
 	}
 }
+
+// TestValidateBlockBasic_WitnessCommitmentValues owns the public no-context ordered validator: a second qualified anchor
+// is the step-6 refusal at any value, and a pin-only or core-only coinbase defect alone returns its exact refusal.
+func TestValidateBlockBasic_WitnessCommitmentValues(t *testing.T) {
+	commit := initial148BlockWitnessCommit(t)
+	eq := func(v uint64) testOutput { return bindingAnchor(commit[:], v) }
+	ne := func(v uint64) testOutput { return bindingAnchor(make([]byte, 32), v) }
+	cb := func(outs ...testOutput) []byte { return coinbaseTxWithOutputs(0, outs) }
+	type row struct {
+		name string
+		tx   []byte
+		code ErrorCode
+		msg  string
+	}
+	rows := []row{
+		{"equal/equal second nonzero", cb(eq(0), eq(9)), BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+		{"equal/equal first nonzero", cb(eq(9), eq(0)), BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+		{"equal/distinct second nonzero", cb(eq(0), ne(9)), BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+		{"distinct/equal first nonzero", cb(ne(9), eq(0)), BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+		{"pin only", bindingWithWitness(cb(eq(0))), BLOCK_ERR_COINBASE_INVALID, bindingPinMsg},
+	}
+	for _, core := range bindingCoreEdits() {
+		rows = append(rows, row{"core " + core.name, core.edit(cb(eq(0))), BLOCK_ERR_COINBASE_INVALID, core.msg})
+	}
+	for _, c := range rows {
+		root, err := MerkleRootTxids([][32]byte{testTxID(t, c.tx)})
+		if err != nil {
+			t.Fatalf("MerkleRootTxids: %v", err)
+		}
+		prev, target := hashWithPrefix(0x91), filledHash(0xff)
+		_, err = ValidateBlockBasic(buildBlockBytes(t, prev, root, target, 27, [][]byte{c.tx}), &prev, &target)
+		bindingCheck(t, "binding B05 ordered values "+c.name, err, c.code, c.msg)
+	}
+}
