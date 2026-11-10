@@ -18,15 +18,15 @@ func (s *Service) ScheduleLocalDAPrefetch(daID [32]byte) error {
 		return errServiceClosed
 	}
 	defer s.releaseWork()
-	s.scheduleDAPrefetch("", daID)
+	s.scheduleDAPrefetch(nil, daID)
 	return nil
 }
 
-func (s *Service) scheduleDAPrefetch(peerAddr string, daID [32]byte) {
+func (s *Service) scheduleDAPrefetch(trigger *peer, daID [32]byte) {
 	if !s.canScheduleDAPrefetch() {
 		return
 	}
-	peersByKey, keys := s.daPrefetchPeers(peerAddr)
+	peersByKey, keys := s.daPrefetchPeers(trigger)
 	plans, diagnostic := s.daRelay.PlanPrefetch(daID, keys, s.cfg.Now())
 	reportDAPrefetchDiagnostic(peersByKey, keys, diagnostic)
 	for _, plan := range plans {
@@ -39,45 +39,47 @@ func (s *Service) canScheduleDAPrefetch() bool {
 }
 
 // daPrefetchPeers lists every eligible prefetch peer by quota key and moves the
-// trigger peer's key to the front when it still holds its preference, binding
-// that key's representative in the returned map to the trigger connection so
-// the preferred plan is sent through the session whose score earned it. The
-// local tip height the preference reads is captured once, only when a trigger
-// is named and before peersMu, so no chain lock is taken under a peer lock.
-func (s *Service) daPrefetchPeers(peerAddr string) (map[string]*peer, []string) {
+// trigger connection's key to the front when it still holds its preference,
+// binding that key's representative in the returned map to the trigger connection
+// so the preferred plan is sent through the session whose score earned it. A nil
+// trigger is a peerless call with no preference. The local tip height the
+// preference reads is captured once, only for a trigger and before peersMu, so no
+// chain lock is taken under a peer lock.
+func (s *Service) daPrefetchPeers(trigger *peer) (map[string]*peer, []string) {
 	var height uint64
-	if peerAddr != "" {
+	if trigger != nil {
 		height = s.cfg.SyncEngine.LocalTipHeight()
 	}
 	s.peersMu.RLock()
 	defer s.peersMu.RUnlock()
 	peers, keys := s.allDAPrefetchPeersLocked()
-	if peerAddr == "" {
+	if trigger == nil {
 		return peers, keys
 	}
-	return peers, preferDAPrefetchPeer(keys, s.preferredDAPrefetchPeerKeyLocked(peerAddr, height, peers))
+	return peers, preferDAPrefetchPeer(keys, s.preferredDAPrefetchPeerKeyLocked(trigger, height, peers))
 }
 
-// preferredDAPrefetchPeerKeyLocked returns the trigger's quota key when the peer is
-// present, accepts prefetch, still meets the preference minimum after its quality
-// score drifts to height, and that key is nonempty and present in peersByKey (the
-// contract's fail-closed bound; the production caller's trigger is always listed by
-// allDAPrefetchPeersLocked in the same call, so both arms are defensive); otherwise
-// "" without touching the map. A low score only removes the front-of-list
-// preference: the key stays eligible and the peer stays usable in the ordinary
-// fallback order. On success the only map effect is peersByKey[key] = the trigger
-// pointer, so the preferred key's ephemeral representative is that exact session,
-// not the last same-host session allDAPrefetchPeersLocked visited.
-func (s *Service) preferredDAPrefetchPeerKeyLocked(peerAddr string, height uint64, peersByKey map[string]*peer) string {
-	current := s.peers[peerAddr]
-	if !acceptsDAPrefetch(current) || !current.qualityPreferred(height) {
+// preferredDAPrefetchPeerKeyLocked reads the trigger connection itself, never the
+// connection Service.peers holds under its logical address, which may be a newer
+// one on another socket. It returns the trigger's daQuotaIdentity when the trigger
+// is non-nil, accepts prefetch, still meets the preference minimum after its
+// quality score drifts to height, and that key is nonempty and present in
+// peersByKey (a connection replaced under its logical address may be unlisted, and
+// then keeps no preference); otherwise "" without touching the map. A low score
+// only removes the front-of-list preference: the key stays eligible and the peer
+// stays usable in the ordinary fallback order. On success the only map effect is
+// peersByKey[key] = trigger, so the preferred key's ephemeral representative is
+// that exact session, not the last same-host session allDAPrefetchPeersLocked
+// visited.
+func (s *Service) preferredDAPrefetchPeerKeyLocked(trigger *peer, height uint64, peersByKey map[string]*peer) string {
+	if !acceptsDAPrefetch(trigger) || !trigger.qualityPreferred(height) {
 		return ""
 	}
-	key := peerQuotaKey(current.addr())
+	key := trigger.daQuotaIdentity
 	if _, ok := peersByKey[key]; key == "" || !ok {
 		return ""
 	}
-	peersByKey[key] = current
+	peersByKey[key] = trigger
 	return key
 }
 
@@ -87,7 +89,7 @@ func (s *Service) allDAPrefetchPeersLocked() (map[string]*peer, []string) {
 		if !acceptsDAPrefetch(current) {
 			continue
 		}
-		if key := peerQuotaKey(current.addr()); key != "" {
+		if key := current.daQuotaIdentity; key != "" {
 			peers[key] = current
 		}
 	}

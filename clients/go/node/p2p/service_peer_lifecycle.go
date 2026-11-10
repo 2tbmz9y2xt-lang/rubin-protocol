@@ -39,12 +39,18 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 		return err
 	}
 
+	var remote net.Addr
+	if conn != nil {
+		remote = conn.RemoteAddr()
+	}
+	daQuotaIdentity, _ := daQuotaIdentityForEndpoint(remote)
 	current := &peer{
-		conn:          conn,
-		service:       s,
-		state:         state,
-		qualityScore:  qualityScoreInitial,
-		qualityHeight: s.cfg.SyncEngine.LocalTipHeight(),
+		conn:            conn,
+		service:         s,
+		state:           state,
+		qualityScore:    qualityScoreInitial,
+		qualityHeight:   s.cfg.SyncEngine.LocalTipHeight(),
+		daQuotaIdentity: daQuotaIdentity,
 	}
 	current.state.Addr = peerAddressKey(outboundAddr, current.state.Addr)
 	if err := s.registerPeer(current); err != nil {
@@ -81,21 +87,45 @@ func (s *Service) sendPostHandshakeAnnouncements(current *peer) error {
 }
 
 func (s *Service) registerPeer(p *peer) error {
-	unlockQuota := s.lockPeerQuotaKey(peerQuotaKey(p.addr()))
-	defer unlockQuota()
+	if quotaKey := p.daQuotaIdentity; quotaKey != "" {
+		unlockQuota := s.lockPeerQuotaKey(quotaKey)
+		defer unlockQuota()
+	}
+	addr := p.addr()
+	// One peersMu section admits p to the PeerManager and, only on success, makes it the owner of
+	// its logical address (the newest registration replaces an older one) and installs its alias
+	// unless that key is another connection's logical address.
+	s.peersMu.Lock()
 	if err := s.cfg.PeerManager.AddPeer(&p.state); err != nil {
+		s.peersMu.Unlock()
 		return err
 	}
-	s.peersMu.Lock()
-	s.peers[p.addr()] = p
-	if p.conn != nil {
-		if alias := normalizeNetAddr(p.conn.RemoteAddr().String()); alias != "" && alias != p.addr() {
-			s.peers[alias] = p
-		}
+	s.peerRegistrations++
+	p.registrationOrder = s.peerRegistrations
+	if s.livePeers == nil {
+		s.livePeers = make(map[*peer]struct{})
 	}
+	s.livePeers[p] = struct{}{}
+	s.peers[addr] = p
+	s.installPeerAliasLocked(p, addr)
 	s.peersMu.Unlock()
-	s.resetReconnect(p.addr())
+	s.resetReconnect(addr)
 	return nil
+}
+
+// installPeerAliasLocked points p's remote-address alias at p unless the alias equals addr or is
+// another connection's logical address. The caller holds peersMu for writing.
+func (s *Service) installPeerAliasLocked(p *peer, addr string) {
+	if p.conn == nil {
+		return
+	}
+	alias := normalizeNetAddr(p.conn.RemoteAddr().String())
+	if alias == "" || alias == addr {
+		return
+	}
+	if holder := s.peers[alias]; holder == nil || holder.addr() != alias {
+		s.peers[alias] = p
+	}
 }
 
 func (s *Service) unregisterPeer(p *peer) {
@@ -103,45 +133,110 @@ func (s *Service) unregisterPeer(p *peer) {
 		return
 	}
 	addr := p.addr()
-	quotaKey := peerQuotaKey(addr)
-	unlockQuota := s.lockPeerQuotaKey(quotaKey)
-	defer unlockQuota()
-	remove := s.removePeerEntries(p)
-	if remove {
-		s.cfg.PeerManager.RemovePeer(addr)
-		if err := s.releaseDAQuotaIfInactiveLocked(quotaKey); err != nil {
-			p.setLastError(err.Error())
-		}
+	// An empty daQuotaIdentity (no IP endpoint) never owned DA quota: no key lock, no lock row, no
+	// DA cleanup; ordinary removal still happens exactly once.
+	quotaKey := p.daQuotaIdentity
+	if quotaKey != "" {
+		unlockQuota := s.lockPeerQuotaKey(quotaKey)
+		defer unlockQuota()
 	}
-	if remove {
-		// Lifecycle-exit counter increments here, exactly once per
-		// unregisterPeer call that actually deleted peer entries from
-		// the s.peers map. Repeat calls on the same already-removed
-		// peer leave remove==false above and do not reach this line,
-		// so cleanup retries cannot double-count. atomic.Uint64.Add is
-		// safe to call without peersMu (the lock has been released
-		// above) because the counter is independent of peer-map state.
-		s.peerLifecycleExits.Add(1)
+	remove := s.removePeerEntries(p, addr)
+	if !remove {
+		return
 	}
-	if remove && s.isOutboundAddr(addr) {
+	if err := s.releaseDAQuotaIfInactiveLocked(quotaKey); err != nil {
+		p.setLastError(err.Error())
+	}
+	// Lifecycle-exit counter increments here, exactly once per
+	// exiting live connection (removePeerEntries ended its
+	// liveness). Repeat calls on the same already-removed
+	// peer return above and do not reach this line,
+	// so cleanup retries cannot double-count. atomic.Uint64.Add is
+	// safe to call without peersMu (the lock has been released
+	// above) because the counter is independent of peer-map state.
+	s.peerLifecycleExits.Add(1)
+	if s.isOutboundAddr(addr) {
 		s.scheduleReconnect(addr)
 	}
 }
 
-func (s *Service) removePeerEntries(p *peer) bool {
+// livePeersLocked returns the live connections (R5): the registered set together with any
+// connection still referenced by Service.peers (fixtures that insert there directly; in
+// production the two coincide). The caller holds peersMu.
+func (s *Service) livePeersLocked() map[*peer]struct{} {
+	live := make(map[*peer]struct{}, len(s.livePeers)+len(s.peers))
+	for current := range s.livePeers {
+		live[current] = struct{}{}
+	}
+	for _, current := range s.peers {
+		if current != nil {
+			live[current] = struct{}{}
+		}
+	}
+	return live
+}
+
+// removePeerEntries ends p's liveness and, in the same peersMu section, deletes its Service.peers
+// entries and applies its PeerManager effect for its logical address addr; it reports whether p
+// was live, so a connection's exit takes effect exactly once. Only the logical owner has a
+// PeerManager effect: it hands addr to the live connection with the same logical address and
+// the highest registration order (publishing its current state), or removes addr when none is
+// left; a replaced connection's exit leaves the PeerManager untouched.
+func (s *Service) removePeerEntries(p *peer, addr string) bool {
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
-	remove := false
+	_, live := s.livePeersLocked()[p]
+	owner := s.peers[addr] == p
 	for key, current := range s.peers {
 		if current == p {
 			delete(s.peers, key)
-			remove = true
 		}
 	}
-	return remove
+	delete(s.livePeers, p)
+	if !owner {
+		return live
+	}
+	successor := s.newestLivePeerLocked(addr)
+	if successor == nil {
+		s.cfg.PeerManager.RemovePeer(addr)
+		return live
+	}
+	s.peers[addr] = successor
+	state := successor.snapshotState()
+	_ = s.cfg.PeerManager.UpsertPeer(&state)
+	return live
+}
+
+// newestLivePeerLocked returns the live connection with logical address addr and the highest
+// registration order, nil when none exists. The maximum makes the choice independent of map
+// iteration order. The caller holds peersMu.
+func (s *Service) newestLivePeerLocked(addr string) *peer {
+	var newest *peer
+	for current := range s.livePeersLocked() {
+		if current.addr() == addr && (newest == nil || current.registrationOrder > newest.registrationOrder) {
+			newest = current
+		}
+	}
+	return newest
+}
+
+// publishPeerStateIfOwner publishes p's current state to the PeerManager only while p is the
+// logical owner of its address; the owner check and the state snapshot are taken under peersMu in
+// the same step as the UpsertPeer, so a replaced or removed connection never overwrites or
+// recreates another connection's entry and a handover is not followed by an older snapshot taken
+// before it.
+func (s *Service) publishPeerStateIfOwner(p *peer) {
+	s.peersMu.RLock()
+	defer s.peersMu.RUnlock()
+	if state := p.snapshotState(); s.peers[state.Addr] == p {
+		_ = s.cfg.PeerManager.UpsertPeer(&state)
+	}
 }
 
 func (s *Service) releaseDAQuotaIfInactive(quotaKey string) error {
+	if quotaKey == "" {
+		return nil
+	}
 	unlockQuota := s.lockPeerQuotaKey(quotaKey)
 	defer unlockQuota()
 	return s.releaseDAQuotaIfInactiveLocked(quotaKey)
@@ -149,7 +244,8 @@ func (s *Service) releaseDAQuotaIfInactive(quotaKey string) error {
 
 // releaseDAQuotaIfInactiveLocked releases the retained incomplete DA data owned
 // by quotaKey once no live peer still holds that key, under the caller's per-key
-// peer quota lock.
+// peer quota lock. An empty quotaKey is no DA quota identity and is refused with no
+// node call.
 //
 // The release is best-effort cleanup, so an already-latched engine skips it. If
 // a latch lands after this check, the shared admission fence returns unavailable
@@ -158,7 +254,7 @@ func (s *Service) releaseDAQuotaIfInactive(quotaKey string) error {
 // documented contract, and no constructed Service reaches this gate with a
 // nil engine: validateServiceConfig rejects a nil SyncEngine.
 func (s *Service) releaseDAQuotaIfInactiveLocked(quotaKey string) error {
-	if s.daRelay == nil {
+	if quotaKey == "" || s.daRelay == nil {
 		return nil
 	}
 	s.peersMu.RLock()
@@ -196,8 +292,8 @@ func (s *Service) lockPeerQuotaKey(quotaKey string) func() {
 }
 
 func (s *Service) hasActivePeerQuotaKeyLocked(quotaKey string) bool {
-	for _, current := range s.peers {
-		if current != nil && peerQuotaKey(current.addr()) == quotaKey {
+	for current := range s.livePeersLocked() {
+		if current.daQuotaIdentity == quotaKey {
 			return true
 		}
 	}

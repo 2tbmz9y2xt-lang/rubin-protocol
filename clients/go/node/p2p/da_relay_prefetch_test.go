@@ -45,8 +45,8 @@ func TestDAPrefetchTracksCurrentMissingIndexesAndCompletion(t *testing.T) {
 func TestScheduleLocalDAPrefetchUsesAllEligiblePeers(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	h.service.cfg.EnableCompactReceive = true
-	a := addDAPrefetchTestPeer(h.service, "127.0.0.2:1", nil)
-	b := addDAPrefetchTestPeer(h.service, "127.0.0.3:1", nil)
+	a := addDAPrefetchTestPeer(h.service, "127.0.0.2:1", "127.0.0.2:1", nil)
+	b := addDAPrefetchTestPeer(h.service, "127.0.0.3:1", "127.0.0.3:1", nil)
 	daID := daRelayTestID(0xd1)
 	result, err := h.service.AdmitLocalDA(newDAIngressFixture(t, h).commit(daID, 2))
 	require(t, err == nil && result == (node.DAAdmissionResult{DAID: daID, Disposition: node.DAAdmissionRetained}) && h.service.txSeen.Len() == 0, "local admission=(%+v,%v) txSeen=%d", result, err, h.service.txSeen.Len())
@@ -58,10 +58,10 @@ func TestDAPrefetchSendWritesGetDAChunkFrame(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	h.service.cfg.EnableCompactReceive = true
 	f := newDAIngressFixture(t, h)
-	current := addDAPrefetchTestPeer(h.service, "peer-a", nil)
+	current := addDAPrefetchTestPeer(h.service, "peer-a", "192.0.2.1:19111", nil)
 	daID := daRelayTestID(141)
 	f.admit(f.commit(daID, 2), "127.0.0.9:19119")
-	h.service.scheduleDAPrefetch("peer-a", daID)
+	h.service.scheduleDAPrefetch(current, daID)
 	requests := readScriptedFrames(t, h, current)
 	require(t, len(requests) == 1 && requests[0].DAID == daID && reflect.DeepEqual(requests[0].Indexes, []uint16{0, 1}), "requests=%+v", requests)
 }
@@ -70,12 +70,12 @@ func TestDAPrefetchSendFailureReleasesPlan(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	h.service.cfg.EnableCompactReceive = true
 	f := newDAIngressFixture(t, h)
-	current := addDAPrefetchTestPeer(h.service, "peer-a", errors.New("write failed"))
+	current := addDAPrefetchTestPeer(h.service, "peer-a", "192.0.2.1:19111", errors.New("write failed"))
 	daID := daRelayTestID(132)
 	f.admit(f.commit(daID, 2), "127.0.0.9:19119")
-	h.service.scheduleDAPrefetch("peer-a", daID)
+	h.service.scheduleDAPrefetch(current, daID)
 	require(t, current.snapshotState().BanScore == 0 && current.snapshotState().LastError != "", "state=%+v, want diagnostic without ban", current.snapshotState())
-	retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, h.service.cfg.Now())
+	retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"192.0.2.1"}, h.service.cfg.Now())
 	require(t, len(retry) == 1 && len(retry[0].Indexes) == 2 && diagnostic == "", "released retry plans=%+v diagnostic=%q, want one plan with two indexes", retry, diagnostic)
 }
 
@@ -93,7 +93,7 @@ func TestDAPrefetchMissingPeerReleasesPlan(t *testing.T) {
 
 func TestDAPrefetchReportsDiagnostic(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	current := addDAPrefetchTestPeer(h.service, "peer-a", nil)
+	current := addDAPrefetchTestPeer(h.service, "peer-a", "192.0.2.1:19111", nil)
 	reportDAPrefetchDiagnostic(map[string]*peer{"peer-a": current}, []string{"peer-a"}, "diagnostic")
 	if state := current.snapshotState(); state.LastError != "diagnostic" || state.BanScore != 0 {
 		t.Fatalf("state=%+v, want diagnostic without ban", state)
@@ -108,25 +108,23 @@ func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
 	h := highTipHarness(t, 1440)
 	h.service.cfg.EnableCompactReceive = true
 	f := newDAIngressFixture(t, h)
-	a := addDAPrefetchTestPeer(h.service, "peer-a", nil)
-	b := addDAPrefetchTestPeer(h.service, "peer-b", nil)
-	c := addDAPrefetchTestPeer(h.service, "peer-c", nil)
+	a := addDAPrefetchTestPeer(h.service, "peer-a", "192.0.2.1:19111", nil)
+	b := addDAPrefetchTestPeer(h.service, "peer-b", "192.0.2.2:19111", nil)
+	c := addDAPrefetchTestPeer(h.service, "peer-c", "192.0.2.3:19111", nil)
 	disabled := testPeerForService(h.service, "peer-disabled", 0)
 	disabled.state.Addr = "peer-disabled"
 	h.service.peersMu.Lock()
 	h.service.peers["peer-disabled"], h.service.peers["alias-of-b"] = disabled, b
 	h.service.peersMu.Unlock()
-	expect := func(label, trigger string, want []string) {
+	expect := func(label string, trigger *peer, want []string) {
 		t.Helper()
 		_, keys := h.service.daPrefetchPeers(trigger)
 		require(t, reflect.DeepEqual(keys, want), "%s: keys=%v, want %v", label, keys, want)
 	}
-	all, bFirst := []string{"peer-a", "peer-b", "peer-c"}, []string{"peer-b", "peer-a", "peer-c"}
-	expect("a preferred trigger leads", "peer-b", bFirst)
-	expect("an alias of the preferred trigger", "alias-of-b", bFirst)
-	expect("an absent trigger", "peer-x", all)
-	expect("a compact-disabled trigger", "peer-disabled", all)
-	expect("no trigger", "", all)
+	all, bFirst := []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"}, []string{"192.0.2.2", "192.0.2.1", "192.0.2.3"}
+	expect("a preferred trigger leads", b, bFirst)
+	expect("a compact-disabled trigger", disabled, all)
+	expect("no trigger", nil, all)
 	daID := daRelayTestID(0xb0)
 	f.admit(f.commit(daID, 2), "127.0.0.9:19119") // the first-seen commit, retained without a scheduler entry
 	competitor := f.commit(daID, 2)
@@ -135,7 +133,7 @@ func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
 	}
 	score, anchor := peerQuality(b)
 	require(t, score == 38 && anchor == 1440, "six conflicts: score=%d anchor=%d, want 38 at 1440", score, anchor)
-	expect("score 38 loses the front and nothing else", "peer-b", all)
+	expect("score 38 loses the front and nothing else", b, all)
 	wire := map[*peer][]byte{}
 	demoted := daRelayTestID(0xb1)
 	must(t, b.handleTx(f.commit(demoted, 15)), "a fresh set from the demoted peer")
@@ -143,28 +141,28 @@ func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
 	b.stateMu.Lock()
 	b.qualityScore = 39
 	b.stateMu.Unlock()
-	expect("score 39 loses the front", "peer-b", all)
+	expect("score 39 loses the front", b, all)
 	// A sole low-score peer is still the fallback, two sessions on one host are one key,
 	// and a disabled compact receive leaves no eligible key.
 	h.service.peersMu.Lock()
 	delete(h.service.peers, "peer-a")
 	delete(h.service.peers, "peer-c")
 	h.service.peersMu.Unlock()
-	expect("a sole low-score peer", "peer-b", []string{"peer-b"})
+	expect("a sole low-score peer", b, []string{"192.0.2.2"})
 	sole := daRelayTestID(0xb3)
 	must(t, b.handleTx(f.commit(sole, 2)), "a fresh set with the sole peer")
 	expectPrefetchRequests(t, h, wire, "sole peer", sole, 2, b)
-	addDAPrefetchTestPeer(h.service, "127.0.0.5:1", nil)
-	addDAPrefetchTestPeer(h.service, "127.0.0.5:2", nil)
-	expect("sessions sharing a quota key", "127.0.0.5:2", []string{"127.0.0.5", "peer-b"})
+	addDAPrefetchTestPeer(h.service, "127.0.0.5:1", "127.0.0.5:1", nil)
+	sameHost := addDAPrefetchTestPeer(h.service, "127.0.0.5:2", "127.0.0.5:2", nil)
+	expect("sessions sharing a quota key", sameHost, []string{"127.0.0.5", "192.0.2.2"})
 	h.service.cfg.EnableCompactReceive = false
-	expect("compact receive disabled", "peer-b", []string{})
+	expect("compact receive disabled", b, []string{})
 	// 288 blocks later: a synthetic tip move breaks the owner's tip coherence, so the tuple the
 	// six conflicts produced (38 at 1440) is carried onto a harness at tip 1728, where b normalizes to 40.
 	later := highTipHarness(t, 1728)
 	later.service.cfg.EnableCompactReceive = true
 	lf := newDAIngressFixture(t, later)
-	la, lb, lc := addDAPrefetchTestPeer(later.service, "peer-a", nil), addDAPrefetchTestPeer(later.service, "peer-b", nil), addDAPrefetchTestPeer(later.service, "peer-c", nil)
+	la, lb, lc := addDAPrefetchTestPeer(later.service, "peer-a", "192.0.2.1:19111", nil), addDAPrefetchTestPeer(later.service, "peer-b", "192.0.2.2:19111", nil), addDAPrefetchTestPeer(later.service, "peer-c", "192.0.2.3:19111", nil)
 	lb.stateMu.Lock()
 	lb.qualityScore, lb.qualityHeight = 38, 1440
 	lb.stateMu.Unlock()
@@ -178,19 +176,20 @@ func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
 // TestDAPrefetchPreferredConnectionOwnsQuotaKey pins the representative binding: sessions a
 // and b share host 127.0.0.5 (one quota key), c is another host. After six real conflicts
 // take b to 38, the preference helper called for a replaces the seeded wrong representative
-// b with the exact a pointer, directly and through an alias of a (the seeding makes the
-// assertion independent of map order), and a fresh set from a is requested through a, never
-// b, while c keeps its ordinary round-robin share. The low-score, missing, disabled and
-// empty trigger rows and the absent and empty key rows return "" without touching the map.
+// b with the exact a pointer (the seeding makes the assertion independent of map order), and
+// a fresh set from a is requested through a, never b, while c keeps its ordinary round-robin
+// share. The low-score, no-trigger and disabled rows and the absent and empty key rows
+// return "" without touching the map.
 func TestDAPrefetchPreferredConnectionOwnsQuotaKey(t *testing.T) {
 	h := highTipHarness(t, 1440)
 	h.service.cfg.EnableCompactReceive = true
 	f := newDAIngressFixture(t, h)
-	a := addDAPrefetchTestPeer(h.service, "127.0.0.5:1", nil)
-	b := addDAPrefetchTestPeer(h.service, "127.0.0.5:2", nil)
-	c := addDAPrefetchTestPeer(h.service, "127.0.0.4:1", nil)
-	blank := addDAPrefetchTestPeer(h.service, "blank", nil)
-	blank.state.Addr = "" // an accepting session whose address yields no quota key
+	// Logical names differ from the sockets, so a key derived from the logical name cannot pass.
+	a := addDAPrefetchTestPeer(h.service, "configured-a.example:1", "127.0.0.5:1", nil)
+	b := addDAPrefetchTestPeer(h.service, "configured-b.example:2", "127.0.0.5:2", nil)
+	c := addDAPrefetchTestPeer(h.service, "configured-c.example:1", "127.0.0.4:1", nil)
+	blank := addDAPrefetchTestPeer(h.service, "blank", "remote", nil)
+	blank.state.Addr = "" // an accepting session whose non-IP socket endpoint yields no quota key
 	disabled := testPeerForService(h.service, "peer-disabled", 0)
 	disabled.state.Addr = "peer-disabled"
 	h.service.peersMu.Lock()
@@ -207,31 +206,79 @@ func TestDAPrefetchPreferredConnectionOwnsQuotaKey(t *testing.T) {
 	shared, other := "127.0.0.5", "127.0.0.4"
 	// prefer calls the production helper under peersMu.RLock on a seeded map and pins the
 	// returned key plus the exact pointer per key (maps.Equal compares pointers with ==).
-	prefer := func(label, trigger string, seed, want map[string]*peer, wantKey string) {
+	prefer := func(label string, trigger *peer, seed, want map[string]*peer, wantKey string) {
 		t.Helper()
 		h.service.peersMu.RLock()
 		key := h.service.preferredDAPrefetchPeerKeyLocked(trigger, 1440, seed)
 		h.service.peersMu.RUnlock()
 		require(t, key == wantKey && maps.Equal(seed, want), "%s: key=%q shared=%s other=%s len=%d, want %q shared=%s other=%s len=%d", label, key, peerAddrOrNil(seed[shared]), peerAddrOrNil(seed[other]), len(seed), wantKey, peerAddrOrNil(want[shared]), peerAddrOrNil(want[other]), len(want))
 	}
-	prefer("the preferred session replaces the forced wrong representative", a.addr(), map[string]*peer{shared: b, other: c}, map[string]*peer{shared: a, other: c}, shared)
-	prefer("an alias of the preferred session binds the same pointer", "alias-of-a", map[string]*peer{shared: b, other: c}, map[string]*peer{shared: a, other: c}, shared)
-	prefer("a low-score trigger neither replaces nor leads", b.addr(), map[string]*peer{shared: a, other: c}, map[string]*peer{shared: a, other: c}, "")
-	prefer("a missing trigger", "peer-x", map[string]*peer{shared: b, other: c}, map[string]*peer{shared: b, other: c}, "")
-	prefer("a compact-disabled trigger", "peer-disabled", map[string]*peer{shared: b, other: c}, map[string]*peer{shared: b, other: c}, "")
-	prefer("an empty trigger", "", map[string]*peer{shared: b, other: c}, map[string]*peer{shared: b, other: c}, "")
-	prefer("a trigger whose key is absent from the map", a.addr(), map[string]*peer{other: c}, map[string]*peer{other: c}, "")
-	prefer("a trigger with an empty key", "blank", map[string]*peer{"": b, shared: b, other: c}, map[string]*peer{"": b, shared: b, other: c}, "")
-	peers, keys := h.service.daPrefetchPeers(b.addr())
+	prefer("the preferred session replaces the forced wrong representative", a, map[string]*peer{shared: b, other: c}, map[string]*peer{shared: a, other: c}, shared)
+	prefer("a low-score trigger neither replaces nor leads", b, map[string]*peer{shared: a, other: c}, map[string]*peer{shared: a, other: c}, "")
+	prefer("a compact-disabled trigger", disabled, map[string]*peer{shared: b, other: c}, map[string]*peer{shared: b, other: c}, "")
+	prefer("no trigger", nil, map[string]*peer{shared: b, other: c}, map[string]*peer{shared: b, other: c}, "")
+	prefer("a trigger whose key is absent from the map", a, map[string]*peer{other: c}, map[string]*peer{other: c}, "")
+	prefer("a trigger with an empty key", blank, map[string]*peer{"": b, shared: b, other: c}, map[string]*peer{"": b, shared: b, other: c}, "")
+	peers, keys := h.service.daPrefetchPeers(b)
 	require(t, reflect.DeepEqual(keys, []string{other, shared}) && len(peers) == 2, "low-score b stays an ordinary fallback: keys=%v peers=%d", keys, len(peers))
-	peers, keys = h.service.daPrefetchPeers("alias-of-a")
-	require(t, reflect.DeepEqual(keys, []string{shared, other}) && len(peers) == 2 && peers[shared] == a && peers[other] == c, "alias of a: keys=%v shared=%s, want one key per host led by %s bound to %s", keys, peerAddrOrNil(peers[shared]), shared, a.addr())
+	peers, keys = h.service.daPrefetchPeers(nil)
+	require(t, reflect.DeepEqual(keys, []string{other, shared}) && len(peers) == 2, "no trigger: keys=%v peers=%d, want one key per host in sorted order", keys, len(peers))
+	peers, keys = h.service.daPrefetchPeers(a)
+	require(t, reflect.DeepEqual(keys, []string{shared, other}) && len(peers) == 2 && peers[shared] == a && peers[other] == c, "trigger a: keys=%v shared=%s, want one key per host led by %s bound to %s", keys, peerAddrOrNil(peers[shared]), shared, a.addr())
 	// The real path: a's fresh set is planned round-robin over the two host keys within the
 	// per-key budget (7 chunks each) and the shared key's frames reach a, none reach b.
 	fresh := daRelayTestID(0xc1)
 	must(t, a.handleTx(f.commit(fresh, 14)), "a fresh set from the preferred session")
 	expectPrefetchRequests(t, h, map[*peer][]byte{}, "preferred session", fresh, 14, a, c)
 	require(t, len(b.conn.(*scriptedConn).Bytes()) == 0, "b received %d bytes, want no getdachunk frame on the demoted session", len(b.conn.(*scriptedConn).Bytes()))
+}
+
+// TestDAPrefetchTriggerIsTheConnectionNotItsLogicalAddress (A7): of two live connections sharing a
+// logical address on different socket IPs, the replaced one triggers. Its own socket key leads and
+// its session is that key's representative; the logical owner's key and session take no
+// preference, and the trigger's own low score loses it even while the logical owner's is high.
+// The keys sort other < owner < replaced, so neither the trigger's nor the logical owner's key
+// leads by sort order alone.
+func TestDAPrefetchTriggerIsTheConnectionNotItsLogicalAddress(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h.service.cfg.EnableCompactReceive = true
+	f := newDAIngressFixture(t, h)
+	const addr, otherKey, ownerKey, replacedKey = "configured.example:19130", "192.0.2.10", "192.0.2.11", "192.0.2.12"
+	replaced, owner := compactRegistryPeer(h, addr, replacedKey+":1"), compactRegistryPeer(h, addr, ownerKey+":2")
+	other := compactRegistryPeer(h, "configured-other.example:1", otherKey+":1")
+	mustRegister(t, h, replaced, owner, other)
+	h.service.peersMu.RLock()
+	logicalOwner, listed := h.service.peers[addr], h.service.peers[replacedKey+":1"]
+	h.service.peersMu.RUnlock()
+	require(t, logicalOwner == owner && listed == replaced, "fixture: logical owner=%s alias holder=%s, want the newer connection and the replaced connection's alias", peerAddrOrNil(logicalOwner), peerAddrOrNil(listed))
+	peers, keys := h.service.daPrefetchPeers(replaced)
+	require(t, reflect.DeepEqual(keys, []string{replacedKey, otherKey, ownerKey}) && peers[replacedKey] == replaced && peers[ownerKey] == owner, "replaced trigger: keys=%v representative=%v", keys, peers[replacedKey] == replaced)
+	sibling := compactRegistryPeer(h, "configured-sibling.example:1", replacedKey+":3")
+	seed := map[string]*peer{replacedKey: sibling, ownerKey: owner}
+	h.service.peersMu.RLock()
+	key := h.service.preferredDAPrefetchPeerKeyLocked(replaced, 1, seed)
+	h.service.peersMu.RUnlock()
+	require(t, key == replacedKey && maps.Equal(seed, map[string]*peer{replacedKey: replaced, ownerKey: owner}), "seeded representative: key=%q, want %q bound to the exact trigger session", key, replacedKey)
+	daID := daRelayTestID(0xc8)
+	must(t, replaced.handleTx(f.commit(daID, 3)), "a fresh set from the replaced connection")
+	expectPrefetchRequests(t, h, map[*peer][]byte{}, "replaced trigger", daID, 3, replaced, other, owner)
+	replaced.stateMu.Lock()
+	replaced.qualityScore = 39
+	replaced.stateMu.Unlock()
+	score, _ := peerQuality(owner)
+	require(t, score >= 40, "fixture: logical owner score=%d, want the preference minimum or above", score)
+	_, keys = h.service.daPrefetchPeers(replaced)
+	require(t, reflect.DeepEqual(keys, []string{otherKey, ownerKey, replacedKey}), "low-score trigger with a high-score logical owner: keys=%v, want the sorted list", keys)
+	unlisted := compactRegistryPeer(h, addr, "192.0.2.13:1")
+	_, keys = h.service.daPrefetchPeers(unlisted)
+	require(t, reflect.DeepEqual(keys, []string{otherKey, ownerKey, replacedKey}), "a trigger whose key is unlisted: keys=%v, want the unchanged sorted list", keys)
+}
+
+// compactRegistryPeer is a registryPeer that accepts compact blocks and so is prefetch-eligible.
+func compactRegistryPeer(h *testHarness, addr, endpoint string) *peer {
+	current := registryPeer(h, addr, endpoint)
+	current.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	return current
 }
 
 func peerAddrOrNil(current *peer) string {
@@ -266,10 +313,14 @@ func daRelayTestID(seed byte) (out [32]byte) {
 	return out
 }
 
-func addDAPrefetchTestPeer(svc *Service, addr string, writeErr error) *peer {
+// addDAPrefetchTestPeer registers an accepting session under the logical address addr whose
+// connected socket reports the explicit literal endpoint; its DA quota identity is captured from
+// that RemoteAddr as handleConn does, so a non-IP endpoint captures none.
+func addDAPrefetchTestPeer(svc *Service, addr, endpoint string, writeErr error) *peer {
 	current := testPeerForService(svc, addr, 0)
 	current.state.Addr = addr
-	current.conn = &scriptedConn{writeErr: writeErr}
+	current.conn = &scriptedConn{writeErr: writeErr, remote: stubAddr(endpoint)}
+	current.daQuotaIdentity, _ = daQuotaIdentityForEndpoint(current.conn.RemoteAddr())
 	current.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
 	svc.peersMu.Lock()
 	svc.peers[addr] = current

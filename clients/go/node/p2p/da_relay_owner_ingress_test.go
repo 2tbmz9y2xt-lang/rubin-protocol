@@ -208,7 +208,7 @@ func nowCalls(h *testHarness) *atomic.Int32 { // scheduleDAPrefetch calls cfg.No
 func TestDetachedReorgDAAdmissionEffects(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	h.service.cfg.EnableCompactReceive = true
-	current := addDAPrefetchTestPeer(h.service, "detached-effects-peer", nil)
+	current := addDAPrefetchTestPeer(h.service, "detached-effects-peer", "192.0.2.4:19111", nil)
 	peerBefore := effectsOf(current)
 	f := newDAIngressFixture(t, h)
 	calls, relayPool := nowCalls(h), h.service.cfg.TxPool.(*MemoryTxPool)
@@ -304,7 +304,7 @@ func TestDetachedReorgDAAdmissionEffects(t *testing.T) {
 	t.Run("E6 send failure through combined entry", func(t *testing.T) {
 		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 		h.service.cfg.EnableCompactReceive = true
-		current := addDAPrefetchTestPeer(h.service, "peer-a", errors.New("detached send failure"))
+		current := addDAPrefetchTestPeer(h.service, "peer-a", "192.0.2.1:19111", errors.New("detached send failure"))
 		before := effectsOf(current)
 		f := newDAIngressFixture(t, h)
 		calls, relayPool := nowCalls(h), h.service.cfg.TxPool.(*MemoryTxPool)
@@ -316,7 +316,7 @@ func TestDetachedReorgDAAdmissionEffects(t *testing.T) {
 		f.requireRetained(raw, "send-failure detached admission")
 		after := effectsOf(current)
 		require(t, after.ban == before.ban && after.score == before.score && after.anchor == before.anchor && after.last != "", "send failure peer effects=%+v/%+v", after, before)
-		retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, h.service.cfg.Now())
+		retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"192.0.2.1"}, h.service.cfg.Now())
 		require(t, len(retry) == 1 && len(retry[0].Indexes) == 2 && diagnostic == "", "send failure retry ownership=%+v diagnostic=%q", retry, diagnostic)
 	})
 	t.Run("E6 missing peer releases plan", func(t *testing.T) {
@@ -469,7 +469,7 @@ func TestRemoteDAExitsBeforeEveryStandardAuthority(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	mempool := wireCanonicalMempoolForP2PTest(t, h)
 	f := newDAIngressFixture(t, h)
-	p := daRelayTestPeer(h, "127.0.0.1:19111")
+	p := daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111")
 	frames, closeProbe := registerRelayFrameProbe(t, h.service, "127.0.0.1:19119")
 	defer closeProbe()
 	calls := nowCalls(h)
@@ -494,7 +494,7 @@ func TestRemoteDAExitsBeforeEveryStandardAuthority(t *testing.T) {
 func TestRemoteDAResultEffects(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
-	p, other := daRelayTestPeer(h, "127.0.0.1:19111"), daRelayTestPeer(h, "127.0.0.2:19112")
+	p, other := daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111"), daRelayTestPeer(h, "127.0.0.2:19112", "127.0.0.2:19112")
 	calls := nowCalls(h)
 	daID := daRelayTestID(0x20)
 	commit, chunk := f.commit(daID, 2), f.chunk(daID, 0, []byte("payload-0"))
@@ -600,7 +600,7 @@ func TestRemoteDAResultEffects(t *testing.T) {
 	// rows leave the peer untouched, while malformed bytes keep their earlier +10 refusal.
 	lh := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	lf := newDAIngressFixture(t, lh)
-	lp, wide := daRelayTestPeer(lh, "127.0.0.1:19113"), daRelayTestPeer(lh, strings.Repeat("a", 255)+":12345678")
+	lp, wide := daRelayTestPeer(lh, "127.0.0.1:19113", "127.0.0.1:19113"), daRelayTestPeer(lh, strings.Repeat("a", 255)+":12345678", "127.0.0.2:19113")
 	latchedCommit, latchedCalls := lf.commit(daRelayTestID(0x2a), 2), nowCalls(lh)
 	latchedUtxos := maps.Clone(lh.chainState.Utxos)
 	latchDAHarness(t, lh, newTestHarness(t, 2, "127.0.0.1:0", nil))
@@ -617,13 +617,13 @@ func TestRemoteDAResultEffects(t *testing.T) {
 		go func() { done <- row.peer.handleTx(row.raw) }()
 		requireReturned(t, done, label+": handleTx on the latched engine")
 		row.check(before, effectsOf(row.peer))
-		require(t, quotaKeyFree(lh.service, peerQuotaKey(row.peer.addr())) && latchedCalls.Load() == 0, "%s: quota key held or scheduler entries=%d", label, latchedCalls.Load())
+		require(t, quotaKeyFree(lh.service, row.peer.daQuotaIdentity) && latchedCalls.Load() == 0, "%s: quota key held or scheduler entries=%d", label, latchedCalls.Load())
 	}
 	require(t, reflect.DeepEqual(lh.chainState.Utxos, latchedUtxos), "chainState.Utxos of the latched harness changed after its preparation: %d entries, %d prepared", len(lh.chainState.Utxos), len(latchedUtxos))
 	// REJECTED_REPEAT (RUBIN_COMPACT_BLOCKS.md Section 5.3) on a fresh harness and owner: each row below is
 	// labeled with the entry it observes, and the closing standard tx proves the untouched authorities live.
 	rh := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	rmempool, rf, rp := wireCanonicalMempoolForP2PTest(t, rh), newDAIngressFixture(t, rh), daRelayTestPeer(rh, "127.0.0.1:19114")
+	rmempool, rf, rp := wireCanonicalMempoolForP2PTest(t, rh), newDAIngressFixture(t, rh), daRelayTestPeer(rh, "127.0.0.1:19114", "127.0.0.1:19114")
 	rframes, _ := registerRelayFrameProbe(t, rh.service, "127.0.0.1:19119")
 	calls = nowCalls(rh)
 	valid := rf.commit(daRelayTestID(0x2b), 2)
@@ -663,7 +663,7 @@ func TestRemoteDAResultEffects(t *testing.T) {
 
 func TestRemoteDACompletionCapacityIsPeerNeutral(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	p := daRelayTestPeer(h, "127.0.0.1:19120")
+	p := daRelayTestPeer(h, "127.0.0.1:19120", "127.0.0.1:19120")
 	before := effectsOf(p)
 	err := &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "DA COMPLETE_SET capacity rejected"}
 	if got := p.penalizeDAAdmissionError(err); got != nil || effectsOf(p) != before {
@@ -675,22 +675,29 @@ func TestRemoteDACompletionCapacityIsPeerNeutral(t *testing.T) {
 }
 
 // TestRemoteDAIdentityBoundsPrecedeAdmission pins IDENTITY_BOUNDS_V1 at both limits
-// and one over, and the per-quota serialization on the captured address's key.
+// and one over, and the per-quota serialization on the captured socket endpoint's key.
+// The logical identity bound applies to the logical address over a real IP socket key; a
+// captured socket key is at most 45 bytes, so the quota ceiling rows set the opaque
+// field directly to pin the defense-in-depth bound, not an endpoint derivation.
 func TestRemoteDAIdentityBoundsPrecedeAdmission(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
 	calls := nowCalls(h)
 	for i, row := range []struct {
 		addr     string
+		quota    string
 		admitted bool
 	}{
-		{"", false},
-		{strings.Repeat("a", 255) + ":1234567", true},   // 263 bytes, quota 255
-		{strings.Repeat("a", 255) + ":12345678", false}, // 264 bytes, quota 255
-		{strings.Repeat("b", 255) + ":1", true},         // 257 bytes, quota 255
-		{strings.Repeat("b", 256) + ":1", false},        // 258 bytes, quota 256
+		{"", "", false},
+		{strings.Repeat("a", 255) + ":1234567", "", true},                  // 263 bytes, socket key 192.0.2.10
+		{strings.Repeat("a", 255) + ":12345678", "", false},                // 264 bytes, socket key 192.0.2.10
+		{strings.Repeat("b", 255) + ":1", strings.Repeat("b", 255), true},  // 257 bytes, quota 255
+		{strings.Repeat("b", 256) + ":1", strings.Repeat("b", 256), false}, // 258 bytes, quota 256
 	} {
-		p := daRelayTestPeer(h, row.addr)
+		p := daRelayTestPeer(h, row.addr, "192.0.2.10:19111")
+		if row.quota != "" {
+			p.daQuotaIdentity = row.quota
+		}
 		raw := f.commit(daRelayTestID(0x30+byte(i)), 2)
 		before := effectsOf(p)
 		calls.Store(0)
@@ -705,21 +712,24 @@ func TestRemoteDAIdentityBoundsPrecedeAdmission(t *testing.T) {
 	}
 	// A held quota key parks the handler with nothing retained, a different key proceeds,
 	// and the parked admission's scheduler callback observes its key already released.
-	addr, otherAddr := "127.0.0.1:19140", "127.0.0.2:19141"
+	// The parked session's configured name and IPv4-mapped socket both differ from the key text.
+	otherAddr := "127.0.0.2:19141"
 	held, free := f.commit(daRelayTestID(0x40), 2), f.commit(daRelayTestID(0x41), 2)
-	unlock := h.service.lockPeerQuotaKey(peerQuotaKey(addr))
+	unlock := h.service.lockPeerQuotaKey("127.0.0.1")
 	blocked := make(chan error, 1)
-	go func() { blocked <- daRelayTestPeer(h, addr).handleTx(held) }()
-	waitForPeerQuotaLockRefs(t, h.service, peerQuotaKey(addr), 2)
+	go func() {
+		blocked <- daRelayTestPeer(h, "configured.example:19140", "[::ffff:127.0.0.1]:19140").handleTx(held)
+	}()
+	waitForPeerQuotaLockRefs(t, h.service, "127.0.0.1", 2)
 	requireStillBlocked(t, blocked, "handleTx on a held quota key")
 	inner := h.service.cfg.Now
 	plans, _ := h.service.daRelay.PlanPrefetch(daRelayTestID(0x40), []string{"probe"}, inner())
 	require(t, len(plans) == 0, "the retained image moved while the admission's quota key was held")
 	freed := make(chan error, 1)
-	go func() { freed <- daRelayTestPeer(h, otherAddr).handleTx(free) }()
+	go func() { freed <- daRelayTestPeer(h, otherAddr, otherAddr).handleTx(free) }()
 	requireReturned(t, freed, "handleTx on a different quota key")
 	releasedInScheduler := make(chan bool, 1)
-	h.service.cfg.Now = func() time.Time { releasedInScheduler <- quotaKeyFree(h.service, peerQuotaKey(addr)); return inner() }
+	h.service.cfg.Now = func() time.Time { releasedInScheduler <- quotaKeyFree(h.service, "127.0.0.1"); return inner() }
 	unlock()
 	requireReturned(t, blocked, "handleTx after its quota key was released")
 	f.requireRetained(held, "held-key member")
@@ -744,7 +754,7 @@ func TestRemoteD00ReachableCutoverCases(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	mempool := wireCanonicalMempoolForP2PTest(t, h)
 	f := newDAIngressFixture(t, h)
-	p, stranger := daRelayTestPeer(h, "127.0.0.1:19111"), daRelayTestPeer(h, "127.0.0.3:19118")
+	p, stranger := daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111"), daRelayTestPeer(h, "127.0.0.3:19118", "127.0.0.3:19118")
 	frames, closeProbe := registerRelayFrameProbe(t, h.service, "127.0.0.1:19119")
 	defer closeProbe()
 	calls := nowCalls(h)
@@ -847,7 +857,7 @@ func TestRemoteD00CleanupCases(t *testing.T) {
 			require(t, cases[row.id] != nil, "%s is not frozen", row.id)
 			h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 			f := newDAIngressFixture(t, h)
-			p := daRelayTestPeer(h, "127.0.0.1:19111")
+			p := daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111")
 			must(t, h.service.registerPeer(p), "registerPeer")
 			daID := daRelayTestID(0x60)
 			commit, chunk, detached := f.commit(daID, 3), f.chunk(daID, 0, []byte("chunk-0")), f.chunk(daID, 1, []byte("detached-chunk"))
@@ -883,7 +893,7 @@ func TestRemoteD00CanonicalOrderingCases(t *testing.T) {
 			require(t, p2p["peer_quality_effect"] == "UNCHANGED" && !frozenFlag(p2p, "replay_inventory_publications"), "%s: frozen envelope %+v", id, p2p)
 			h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 			f := newDAIngressFixture(t, h)
-			p := daRelayTestPeer(h, "127.0.0.1:19111")
+			p := daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111")
 			calls := nowCalls(h)
 			commit := f.commit(daRelayTestID(0x70), 2)
 			must(t, p.handleTx(commit), "retain the commit")
@@ -916,7 +926,7 @@ func TestRemoteDAPeerQualityPolicy(t *testing.T) {
 		t.Helper()
 		h := highTipHarness(t, height)
 		f := newDAIngressFixture(t, h)
-		origin, rival := daRelayTestPeer(h, "127.0.0.1:19111"), daRelayTestPeer(h, "127.0.0.2:19112")
+		origin, rival := daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111"), daRelayTestPeer(h, "127.0.0.2:19112", "127.0.0.2:19112")
 		daID := daRelayTestID(0x90)
 		must(t, origin.handleTx(f.commit(daID, 2)), "first-seen commit")
 		competitor := f.commit(daID, 2)
@@ -986,9 +996,9 @@ func TestRemoteDAQualityScoreRace(t *testing.T) {
 	h.service.cfg.EnableCompactReceive = true
 	f := newDAIngressFixture(t, h)
 	daID := daRelayTestID(0xa0)
-	must(t, daRelayTestPeer(h, "127.0.0.3:19113").handleTx(f.commit(daID, 2)), "first-seen commit")
+	must(t, daRelayTestPeer(h, "127.0.0.3:19113", "127.0.0.3:19113").handleTx(f.commit(daID, 2)), "first-seen commit")
 	competitor := f.commit(daID, 2)
-	rivals := []*peer{addDAPrefetchTestPeer(h.service, "127.0.0.1:19111", nil), addDAPrefetchTestPeer(h.service, "127.0.0.1:19112", nil)}
+	rivals := []*peer{addDAPrefetchTestPeer(h.service, "127.0.0.1:19111", "127.0.0.1:19111", nil), addDAPrefetchTestPeer(h.service, "127.0.0.1:19112", "127.0.0.1:19112", nil)}
 	var wg sync.WaitGroup
 	failures := make(chan error, len(rivals)*8) // asserted on the test goroutine: FailNow is not for workers
 	var writersDone atomic.Int32
@@ -1005,7 +1015,7 @@ func TestRemoteDAQualityScoreRace(t *testing.T) {
 		go func(rival *peer) {
 			defer wg.Done()
 			for writersDone.Load() < int32(len(rivals)) {
-				h.service.daPrefetchPeers(rival.addr())
+				h.service.daPrefetchPeers(rival)
 			}
 		}(rival)
 	}
@@ -1293,8 +1303,8 @@ func TestAnnounceTxLocalDAOwnerRouting(t *testing.T) {
 func TestAnnounceTxLocalDAOutcomes(t *testing.T) {
 	l := newLocalDAHarness(t, false)
 	l.service.cfg.EnableCompactReceive = true
-	first, second := addDAPrefetchTestPeer(l.service, "127.0.0.1:19151", nil), addDAPrefetchTestPeer(l.service, "127.0.0.2:19152", nil)
-	require(t, peerQuotaKey(first.addr()) < peerQuotaKey(second.addr()), "the fixture peers do not sort as written")
+	first, second := addDAPrefetchTestPeer(l.service, "127.0.0.1:19151", "127.0.0.1:19151", nil), addDAPrefetchTestPeer(l.service, "127.0.0.2:19152", "127.0.0.2:19152", nil)
+	require(t, first.daQuotaIdentity == "127.0.0.1" && second.daQuotaIdentity == "127.0.0.2", "the fixture peers do not carry the written socket keys")
 	daID := daRelayTestID(0xb2)
 	commit := l.f.commit(daID, 2)
 	before, peersBefore := l.state(), [2]peerEffects{effectsOf(first), effectsOf(second)}
@@ -1347,7 +1357,7 @@ func TestAnnounceTxLocalDAOutcomes(t *testing.T) {
 	t.Run("prefetch send failure keeps the member and releases its plan", func(t *testing.T) {
 		l := newLocalDAHarness(t, false)
 		l.service.cfg.EnableCompactReceive = true
-		current := addDAPrefetchTestPeer(l.service, "127.0.0.3:19153", errors.New("local prefetch send failure"))
+		current := addDAPrefetchTestPeer(l.service, "127.0.0.3:19153", "127.0.0.3:19153", errors.New("local prefetch send failure"))
 		daID := daRelayTestID(0xb4)
 		raw := l.f.commit(daID, 2)
 		before, peerBefore := l.state(), effectsOf(current)
@@ -1356,7 +1366,7 @@ func TestAnnounceTxLocalDAOutcomes(t *testing.T) {
 		require(t, after == scheduled(before, 1) && peerAfter.ban == peerBefore.ban && peerAfter.score == peerBefore.score && peerAfter.anchor == peerBefore.anchor && peerAfter.last != "",
 			"send-failure row: standard state %+v -> %+v peer %+v -> %+v", before, after, peerBefore, peerAfter)
 		l.f.requireRetained(raw, "the member whose prefetch send failed")
-		retry, diagnostic := l.service.daRelay.PlanPrefetch(daID, []string{peerQuotaKey(current.addr())}, time.Unix(1, 0))
+		retry, diagnostic := l.service.daRelay.PlanPrefetch(daID, []string{"127.0.0.3"}, time.Unix(1, 0))
 		require(t, len(retry) == 1 && len(retry[0].Indexes) == 2 && diagnostic == "", "the failed plan was not released: retry=%+v diagnostic=%q", retry, diagnostic)
 	})
 }
@@ -1367,7 +1377,7 @@ func TestAnnounceTxLocalDAOutcomes(t *testing.T) {
 // wrapper, no standard effect, no scheduler entry, and both domains usable afterwards.
 func TestAnnounceTxLocalDAErrorsAndReuse(t *testing.T) {
 	l := newLocalDAHarness(t, false)
-	neutral := addDAPrefetchTestPeer(l.service, "127.0.0.4:19154", nil) // compact receive is off: it can never be planned
+	neutral := addDAPrefetchTestPeer(l.service, "127.0.0.4:19154", "127.0.0.4:19154", nil) // compact receive is off: it can never be planned
 	peerBefore := effectsOf(neutral)
 	f := l.f
 	commit := f.commit(daRelayTestID(0xb5), 2)
@@ -1502,7 +1512,7 @@ func TestAnnounceTxLocalDAErrorsAndReuse(t *testing.T) {
 // teardown that removes that peer's own DA members leaves it retained.
 func TestAnnounceTxLocalDAProvenance(t *testing.T) {
 	l := newLocalDAHarness(t, false)
-	current := daRelayTestPeer(l.testHarness, "127.0.0.6:19156")
+	current := daRelayTestPeer(l.testHarness, "127.0.0.6:19156", "127.0.0.6:19156")
 	must(t, l.service.registerPeer(current), "registerPeer")
 	daID := daRelayTestID(0xbf)
 	peerMember := l.f.chunk(daID, 0, []byte("peer-chunk"))
@@ -1572,7 +1582,7 @@ func TestAnnounceTxLocalDAStructure(t *testing.T) {
 		"announceLocalDA call set=%v, want exactly one owner call, one LOCAL constructor and one scheduler entry", calls)
 	require(t, slices.Equal(guards, []string{"err != nil", "result.Disposition == node.DAAdmissionRetained && !result.SameDAIDCommitConflict"}),
 		"announceLocalDA guards=%q, want the direct error guard and the retained-and-unconflicted membership guard", guards)
-	require(t, scheduler == `s.scheduleDAPrefetch("", result.DAID)`, "announceLocalDA schedules %q, want the empty peerless trigger and the returned da_id", scheduler)
+	require(t, scheduler == `s.scheduleDAPrefetch(nil, result.DAID)`, "announceLocalDA schedules %q, want the nil peerless trigger and the returned da_id", scheduler)
 	require(t, slices.Equal(returns, []string{"err", "nil"}), "announceLocalDA returns=%q, want the owner's own error object and nil", returns)
 }
 
@@ -1594,7 +1604,7 @@ func TestDAIngressAO11OrderAndEffects(t *testing.T) {
 	const nonce = "TX_ERR_TX_NONCE_INVALID: tx_nonce must be >= 1 for non-coinbase"
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
-	p, stranger := daRelayTestPeer(h, "127.0.0.1:19131"), daRelayTestPeer(h, "127.0.0.3:19138")
+	p, stranger := daRelayTestPeer(h, "127.0.0.1:19131", "127.0.0.1:19131"), daRelayTestPeer(h, "127.0.0.3:19138", "127.0.0.3:19138")
 	frames, closeProbe := registerRelayFrameProbe(t, h.service, "127.0.0.1:19139")
 	defer closeProbe()
 	calls := nowCalls(h)
@@ -1624,7 +1634,7 @@ func TestDAIngressAO11OrderAndEffects(t *testing.T) {
 	}{{"commit", p, commit}, {"chunk", p, chunk}, {"unsolicited chunk", stranger, chunk}, {"H1 wrong own-chunk hash", p, zeroBadHash}, {"H1 unsolicited", stranger, zeroBadHash}, {"zero inputs", p, inputless}} {
 		t.Run(row.label, func(t *testing.T) {
 			before := effectsOf(row.peer)
-			require(t, row.peer.handleTx(row.raw) == nil && effectsOf(row.peer) == before && quotaKeyFree(h.service, peerQuotaKey(row.peer.addr())), "peer effects %+v -> %+v or quota key held", before, effectsOf(row.peer))
+			require(t, row.peer.handleTx(row.raw) == nil && effectsOf(row.peer) == before && quotaKeyFree(h.service, row.peer.daQuotaIdentity), "peer effects %+v -> %+v or quota key held", before, effectsOf(row.peer))
 			assertNoRelayFrame(t, frames, row.label)
 			got, err := f.probe(row.raw)
 			requireNonce(t, "probe", got, err)
@@ -1655,7 +1665,7 @@ func TestDAIngressZeroInputOrderAndEffects(t *testing.T) {
 	const parse = "TX_ERR_PARSE: non-coinbase must have at least one input"
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
-	p, stranger := daRelayTestPeer(h, "127.0.0.1:19141"), daRelayTestPeer(h, "127.0.0.3:19148")
+	p, stranger := daRelayTestPeer(h, "127.0.0.1:19141", "127.0.0.1:19141"), daRelayTestPeer(h, "127.0.0.3:19148", "127.0.0.3:19148")
 	frames, closeProbe := registerRelayFrameProbe(t, h.service, "127.0.0.1:19149")
 	defer closeProbe()
 	calls := nowCalls(h)
@@ -1680,7 +1690,7 @@ func TestDAIngressZeroInputOrderAndEffects(t *testing.T) {
 	commit := inputless(f.commit(daRelayTestID(0x73), 2))
 	for _, peer := range []*peer{p, stranger} {
 		before := effectsOf(peer)
-		require(t, peer.handleTx(commit) == nil && effectsOf(peer) == before && quotaKeyFree(h.service, peerQuotaKey(peer.addr())), "zero-input commit: peer effects %+v -> %+v or quota key held", before, effectsOf(peer))
+		require(t, peer.handleTx(commit) == nil && effectsOf(peer) == before && quotaKeyFree(h.service, peer.daQuotaIdentity), "zero-input commit: peer effects %+v -> %+v or quota key held", before, effectsOf(peer))
 	}
 	assertNoRelayFrame(t, frames, "zero-input commit")
 	got, err := f.probe(commit)

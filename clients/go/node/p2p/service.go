@@ -53,8 +53,17 @@ type Service struct {
 	cancel   context.CancelFunc
 	listener net.Listener
 
-	peersMu          sync.RWMutex
-	peers            map[string]*peer
+	peersMu sync.RWMutex
+	peers   map[string]*peer
+	// peerRegistrations is the last registration order handed out by registerPeer; a newer
+	// registration of one logical address owns it, and unregisterPeer hands an exiting owner's
+	// address to the live same-address connection with the highest order. Guarded by peersMu.
+	peerRegistrations uint64
+	// livePeers is the set of registered connections that have not exited (R5): a live
+	// connection can hold no Service.peers entry once a newer registration took its logical
+	// address and its alias equals that address or another connection's logical address.
+	// Mutated only in the registerPeer and unregisterPeer peersMu sections. Guarded by peersMu.
+	livePeers        map[*peer]struct{}
 	peerQuotaLocksMu sync.Mutex
 	peerQuotaLocks   map[string]*peerQuotaLock
 	// closed is set to true by Close. A Service instance is single-use: once
@@ -101,11 +110,11 @@ type Service struct {
 
 	// peerLifecycleExits counts peer lifecycle exits at the single
 	// canonical removal boundary inside unregisterPeer. The counter is
-	// incremented exactly once per unregisterPeer call that actually
-	// deletes one or more entries from the s.peers map (i.e. when the
-	// dedupe flag remove==true). Repeated unregisterPeer calls on the
-	// same already-removed peer leave remove==false and do not bump
-	// the counter. The metric is intentionally unlabeled: the
+	// incremented exactly once per exiting live connection
+	// (removePeerEntries reports true, decided by livePeers together
+	// with s.peers). Repeated unregisterPeer calls on the same
+	// already-removed peer get false from it and do not bump the
+	// counter. The metric is intentionally unlabeled: the
 	// underlying exit cause (remote EOF, protocol error, local
 	// Service.Close ctx cancel, request/send error) is not available
 	// at the unregisterPeer site without plumbing it through, and
@@ -133,6 +142,16 @@ type peer struct {
 	// setLastError and sendcmpct never reset them; zero is a valid score.
 	qualityScore  uint8
 	qualityHeight uint64
+	// daQuotaIdentity is the connection's DA quota identity, derived once by handleConn from the
+	// actual conn.RemoteAddr() via daQuotaIdentityForEndpoint before registerPeer publishes the peer
+	// and immutable for the connection's lifetime. It is never derived from the configured dial
+	// name, PeerState.Addr, an alias or an advertised address. DA provenance, ingress serialization,
+	// prefetch grouping and disconnect release all key on it; empty means no IP endpoint, so the
+	// connection takes no DA admission, DA quota lock, DA cleanup or prefetch candidacy.
+	daQuotaIdentity string
+	// registrationOrder is this connection's Service.peerRegistrations value, set once by
+	// registerPeer under Service.peersMu and read only under it.
+	registrationOrder uint64
 
 	writeMu sync.Mutex
 

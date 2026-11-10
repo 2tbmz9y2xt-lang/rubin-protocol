@@ -920,9 +920,8 @@ func (p *peer) snapshotState() node.PeerState {
 func (p *peer) setLastError(reason string) {
 	p.stateMu.Lock()
 	p.state.LastError = reason
-	state := p.state
 	p.stateMu.Unlock()
-	_ = p.service.cfg.PeerManager.UpsertPeer(&state)
+	p.service.publishPeerStateIfOwner(p)
 }
 
 func (p *peer) applyPostHandshakeDisconnectError(err error) {
@@ -1004,6 +1003,6 @@ func (p *peer) bumpBan(delta int, reason string) bool {
 	p.state.LastError = reason
 	state := p.state
 	p.stateMu.Unlock()
-	_ = p.service.cfg.PeerManager.UpsertPeer(&state)
+	p.service.publishPeerStateIfOwner(p)
 	return state.BanScore >= p.service.cfg.PeerRuntimeConfig.BanThreshold
 }
