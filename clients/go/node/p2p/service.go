@@ -110,10 +110,10 @@ type Service struct {
 
 	// peerLifecycleExits counts peer lifecycle exits at the single
 	// canonical removal boundary inside unregisterPeer. The counter is
-	// incremented exactly once per exiting live connection (the
-	// dedupe flag remove==true, decided by livePeers together with
-	// s.peers). Repeated unregisterPeer calls on the same
-	// already-removed peer leave remove==false and do not bump the
+	// incremented exactly once per exiting live connection
+	// (removePeerEntries reports true, decided by livePeers together
+	// with s.peers). Repeated unregisterPeer calls on the same
+	// already-removed peer get false from it and do not bump the
 	// counter. The metric is intentionally unlabeled: the
 	// underlying exit cause (remote EOF, protocol error, local
 	// Service.Close ctx cancel, request/send error) is not available
