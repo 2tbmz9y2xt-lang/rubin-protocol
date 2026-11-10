@@ -151,6 +151,22 @@ func requireRelayGuardReleased(t *testing.T, guard *admissionMutex, name string)
 	guard.Unlock()
 }
 
+// requireRelayReadGrantHeld proves that a reader already seen parked on
+// owner.mu holds the admission guard in shared mode, with no other holder in
+// the schedule. Call it only after that waiter was observed: the single
+// TryRLock has then already happened, so these probes cannot make it refuse.
+func requireRelayReadGrantHeld(t *testing.T, guard *admissionMutex, name string) {
+	t.Helper()
+	if guard.TryLock() {
+		guard.Unlock()
+		t.Fatalf("%s: the source read runs with no admission grant held", name)
+	}
+	if !guard.TryRLock() {
+		t.Fatalf("%s: the source read runs under an exclusive hold, not a read grant", name)
+	}
+	guard.RUnlock()
+}
+
 // TestRelayAdmissionContextForRelay pins the external relay-cache observer
 // against real native locks: A1-A4 and A6-A9, R1-R3 and H1-H3. A5 lives in
 // TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch.
@@ -256,11 +272,13 @@ func TestRelayAdmissionContextForRelay(t *testing.T) {
 		m, chainState, owner := newRelayObserverFixture(t)
 		want := PendingOutpointAdmissionContext{StableTip: PendingOutpointTip{HasTip: true, Height: 11, Hash: hashB}, Generation: 7}
 
-		// Public path, no writer: contention on owner.mu is waited out, never
-		// reported as unavailability.
+		// Public path, no writer: contention on owner.mu is waited out under
+		// the observer's own read grant, never reported as unavailability.
+		guard := &chainState.admissionMu
 		owner.mu.Lock()
 		done := observeRelayAsync(m)
 		awaitOwnerMutexWaiter(t, "(*Mempool).AdmissionContextForRelay(", done, want, "contended public read")
+		requireRelayReadGrantHeld(t, guard, "contended public read")
 		owner.stableTip, owner.generation = want.StableTip, want.Generation
 		owner.mu.Unlock()
 		requireRelayObservation(t, awaitRelayObservation(t, done, "contended public read"), want, true, "contended public read")
@@ -269,7 +287,6 @@ func TestRelayAdmissionContextForRelay(t *testing.T) {
 		// read waits on owner.mu while a writer registers afterwards; that
 		// registration does not invalidate the tuple actually read, and only
 		// releasing the granted read lets the writer proceed.
-		guard := &chainState.admissionMu
 		guard.RLock()
 		owner.mu.Lock()
 		read := make(chan relayObservation, 1)
@@ -343,6 +360,13 @@ func TestRelayAdmissionContextForRelay(t *testing.T) {
 		chainState.mu.Unlock()
 		m.mu.Unlock()
 		requireRelayObservation(t, got, want, true, "domain locks held")
+
+		// A guard read-held with no writer present still grants read access.
+		guard.RLock()
+		got = awaitRelayObservation(t, observeRelayAsync(m), "guard read-held")
+		guard.RUnlock()
+		requireRelayObservation(t, got, want, true, "guard read-held")
+		requireRelayGuardReleased(t, guard, "guard read-held")
 	})
 
 	t.Run("A9_constructor_binding_is_pointer_identical", func(t *testing.T) {
