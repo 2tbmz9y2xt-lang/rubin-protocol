@@ -140,7 +140,8 @@ func (s *Service) unregisterPeer(p *peer) {
 		unlockQuota := s.lockPeerQuotaKey(quotaKey)
 		defer unlockQuota()
 	}
-	if !s.removePeerEntries(p, addr) {
+	remove := s.removePeerEntries(p, addr)
+	if !remove {
 		return
 	}
 	if err := s.releaseDAQuotaIfInactiveLocked(quotaKey); err != nil {
