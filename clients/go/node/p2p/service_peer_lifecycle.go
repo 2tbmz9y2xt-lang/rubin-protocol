@@ -107,16 +107,25 @@ func (s *Service) registerPeer(p *peer) error {
 	}
 	s.livePeers[p] = struct{}{}
 	s.peers[addr] = p
-	if p.conn != nil {
-		if alias := normalizeNetAddr(p.conn.RemoteAddr().String()); alias != "" && alias != addr {
-			if holder := s.peers[alias]; holder == nil || holder.addr() != alias {
-				s.peers[alias] = p
-			}
-		}
-	}
+	s.installPeerAliasLocked(p, addr)
 	s.peersMu.Unlock()
 	s.resetReconnect(addr)
 	return nil
+}
+
+// installPeerAliasLocked points p's remote-address alias at p unless the alias equals addr or is
+// another connection's logical address. The caller holds peersMu for writing.
+func (s *Service) installPeerAliasLocked(p *peer, addr string) {
+	if p.conn == nil {
+		return
+	}
+	alias := normalizeNetAddr(p.conn.RemoteAddr().String())
+	if alias == "" || alias == addr {
+		return
+	}
+	if holder := s.peers[alias]; holder == nil || holder.addr() != alias {
+		s.peers[alias] = p
+	}
 }
 
 func (s *Service) unregisterPeer(p *peer) {
@@ -131,23 +140,21 @@ func (s *Service) unregisterPeer(p *peer) {
 		unlockQuota := s.lockPeerQuotaKey(quotaKey)
 		defer unlockQuota()
 	}
-	remove := s.removePeerEntries(p, addr)
-	if remove {
-		if err := s.releaseDAQuotaIfInactiveLocked(quotaKey); err != nil {
-			p.setLastError(err.Error())
-		}
+	if !s.removePeerEntries(p, addr) {
+		return
 	}
-	if remove {
-		// Lifecycle-exit counter increments here, exactly once per
-		// exiting live connection (removePeerEntries ended its
-		// liveness). Repeat calls on the same already-removed
-		// peer leave remove==false above and do not reach this line,
-		// so cleanup retries cannot double-count. atomic.Uint64.Add is
-		// safe to call without peersMu (the lock has been released
-		// above) because the counter is independent of peer-map state.
-		s.peerLifecycleExits.Add(1)
+	if err := s.releaseDAQuotaIfInactiveLocked(quotaKey); err != nil {
+		p.setLastError(err.Error())
 	}
-	if remove && s.isOutboundAddr(addr) {
+	// Lifecycle-exit counter increments here, exactly once per
+	// exiting live connection (removePeerEntries ended its
+	// liveness). Repeat calls on the same already-removed
+	// peer return above and do not reach this line,
+	// so cleanup retries cannot double-count. atomic.Uint64.Add is
+	// safe to call without peersMu (the lock has been released
+	// above) because the counter is independent of peer-map state.
+	s.peerLifecycleExits.Add(1)
+	if s.isOutboundAddr(addr) {
 		s.scheduleReconnect(addr)
 	}
 }
@@ -188,12 +195,7 @@ func (s *Service) removePeerEntries(p *peer, addr string) bool {
 	if !owner {
 		return live
 	}
-	var successor *peer
-	for current := range s.livePeersLocked() {
-		if current.addr() == addr && (successor == nil || current.registrationOrder > successor.registrationOrder) {
-			successor = current
-		}
-	}
+	successor := s.newestLivePeerLocked(addr)
 	if successor == nil {
 		s.cfg.PeerManager.RemovePeer(addr)
 		return live
@@ -202,6 +204,19 @@ func (s *Service) removePeerEntries(p *peer, addr string) bool {
 	state := successor.snapshotState()
 	_ = s.cfg.PeerManager.UpsertPeer(&state)
 	return live
+}
+
+// newestLivePeerLocked returns the live connection with logical address addr and the highest
+// registration order, nil when none exists. The maximum makes the choice independent of map
+// iteration order. The caller holds peersMu.
+func (s *Service) newestLivePeerLocked(addr string) *peer {
+	var newest *peer
+	for current := range s.livePeersLocked() {
+		if current.addr() == addr && (newest == nil || current.registrationOrder > newest.registrationOrder) {
+			newest = current
+		}
+	}
+	return newest
 }
 
 // publishPeerStateIfOwner publishes p's current state to the PeerManager only while p is the
