@@ -206,6 +206,12 @@ func TestRelayAdmissionContextForRelay(t *testing.T) {
 		ctx, ok = m.AdmissionContextForRelay()
 		requireRelayObservation(t, relayObservation{ctx, ok}, zero, false, "HasTip=false")
 
+		// An aborted transition advances the generation and leaves no tip: the
+		// source's own value is nonzero here and must not be returned.
+		setRelaySource(owner, PendingOutpointTip{}, 4)
+		ctx, ok = m.AdmissionContextForRelay()
+		requireRelayObservation(t, relayObservation{ctx, ok}, zero, false, "HasTip=false with advanced generation")
+
 		// With owner.mu held, every missing-binding row must still complete:
 		// it reads no owner state.
 		setRelaySource(owner, PendingOutpointTip{HasTip: true, Height: 1, Hash: hashA}, 1)
@@ -310,6 +316,22 @@ func TestRelayAdmissionContextForRelay(t *testing.T) {
 		awaitRelaySignal(t, acquired, "late writer acquisition")
 		close(release)
 		awaitRelaySignal(t, writerDone, "late writer release")
+
+		// Public path, late writer: registration after the observer's own grant
+		// does not make that observation unavailable (N1), and the observer's
+		// return releases the grant to the writer.
+		owner.mu.Lock()
+		publicDone := observeRelayAsync(m)
+		awaitOwnerMutexWaiter(t, "(*Mempool).AdmissionContextForRelay(", publicDone, PendingOutpointAdmissionContext{StableTip: want.StableTip, Generation: 9}, "public late writer")
+		acquired, release, writerDone = startRelayWriter(guard)
+		awaitPendingRelayWriter(t, guard)
+		want.Generation = 9
+		owner.generation = want.Generation
+		owner.mu.Unlock()
+		requireRelayObservation(t, awaitRelayObservation(t, publicDone, "public late writer"), want, true, "public late writer")
+		awaitRelaySignal(t, acquired, "public late writer acquisition")
+		close(release)
+		awaitRelaySignal(t, writerDone, "public late writer release")
 	})
 
 	t.Run("A7_H2_exhausted_generation_is_unavailable_and_releases", func(t *testing.T) {
@@ -327,6 +349,16 @@ func TestRelayAdmissionContextForRelay(t *testing.T) {
 			t.Fatal("exhausted path leaked owner.mu")
 		}
 		owner.mu.Unlock()
+
+		// The source's transition answer maps to the same result, with a valid
+		// tuple present in the owner.
+		setRelaySource(owner, tip, 8)
+		owner.mu.Lock()
+		owner.inTransition = true
+		owner.mu.Unlock()
+		ctx, ok = m.AdmissionContextForRelay()
+		requireRelayObservation(t, relayObservation{ctx, ok}, zero, false, "source in transition")
+		requireRelayGuardReleased(t, &chainState.admissionMu, "source in transition")
 	})
 
 	t.Run("A8_R3_releases_and_takes_no_domain_lock", func(t *testing.T) {
