@@ -1247,7 +1247,7 @@ func TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance(t *testing.T) {
 func TestLatchedEngineSkipsThePeerQuotaRelease(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	latchDAHarness(t, h, newTestHarness(t, 2, "127.0.0.1:0", nil))
-	p := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19111"}}
+	p := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19111"}, daQuotaIdentity: "127.0.0.1"}
 	must(t, h.service.registerPeer(p), "registerPeer")
 	exits := h.service.PeerLifecycleExits()
 	done := make(chan error, 1)
