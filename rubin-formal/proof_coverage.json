@@ -610,10 +610,10 @@
         "RubinFormal.WitnessCommitmentV1.validateBlockBasic_witness_stage": "rubin-formal/RubinFormal/WitnessCommitmentV1.lean",
         "RubinFormal.Conformance.cv_block_basic_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVBlockBasicReplay.lean"
       },
-      "notes": "Active evidence is limited to the canonical executable `checkWitnessCommitment` stage reduction after parse/pow/target/linkage/merkle gates, the coinbase-slot rewrite, and CV-BLOCK-BASIC replay. No registered theorem establishes the exact-one matching-anchor fallback criterion. The merkle-tag anti-alias SHA3 ceiling is tracked separately in `witness_commitment_crypto_residual`.",
+      "notes": "Active evidence is limited to the canonical executable `checkWitnessCommitment` stage reduction after parse/pow/target/linkage/merkle gates, the coinbase-slot rewrite, and CV-BLOCK-BASIC replay. No registered theorem establishes the strict-singleton selection criterion of Section 10.4.1 for all inputs; RUB-1033 owns any re-proof. The merkle-tag anti-alias SHA3 ceiling is tracked separately in `witness_commitment_crypto_residual`.",
       "limitations": [
-        "Executable stage and fixture evidence do not prove the exact-one matching-anchor fallback criterion.",
-        "A formal re-proof of that criterion is deferred under RUB-1033.",
+        "Executable stage and fixture evidence do not prove the strict-singleton selection criterion for all inputs.",
+        "Any formal re-proof of that criterion is owned by RUB-1033; this row claims nothing from the compile-time test cases in rubin-formal/RubinFormal/WitnessCommitmentSelectorCases.lean, which are not registered.",
         "Cross-domain txid/wtxid tagged-root anti-aliasing is not claimed in this row and is tracked separately in `witness_commitment_crypto_residual`.",
         "CV-BLOCK-BASIC replay and the checkWitnessCommitment stage reduction run on BlockBasicV1.parseBlock and 116-byte header vectors; they do not cover the 148-byte Section 10.1 header grammar."
       ],

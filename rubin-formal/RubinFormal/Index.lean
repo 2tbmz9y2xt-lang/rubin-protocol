@@ -103,4 +103,5 @@ import RubinFormal.VaultThresholdBound
 import RubinFormal.WeightBehavioral
 import RubinFormal.WeightSuiteAware
 import RubinFormal.WitnessCommitmentPregate
+import RubinFormal.WitnessCommitmentSelectorCases
 import RubinFormal.WitnessCommitmentV1
