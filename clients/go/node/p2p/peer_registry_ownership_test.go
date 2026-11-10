@@ -159,10 +159,12 @@ func TestPeerRegistryOwnershipAliasNeverDisplacesOwner(t *testing.T) {
 	requireOwner(t, h, "configured.example:19115", aliased, "the aliased connection after the owner's exit")
 	h.service.unregisterPeer(aliased)
 	requireOwner(t, h, "configured.example:19115", nil, "the aliased connection's exit")
-	// Reverse order: the logical owner registered after the alias takes its key.
-	aliased = registryPeer(h, "configured.example:19116", shared)
-	owner = registryPeer(h, shared, shared)
-	mustRegister(t, h, aliased, owner)
+	// Reverse order: a later alias takes a key held only as an alias (R1), and the logical owner registered after both takes it.
+	aliased, owner = registryPeer(h, "configured.example:19116", shared), registryPeer(h, shared, shared)
+	taker := registryPeer(h, "configured.example:19119", shared)
+	mustRegister(t, h, aliased, taker)
+	require(t, h.service.peers[shared] == taker, "alias key held as another connection's alias stayed with that holder, want the later alias")
+	mustRegister(t, h, owner)
 	requireOwner(t, h, shared, owner, "an owner registered after the alias")
 	h.service.unregisterPeer(aliased)
 	requireOwner(t, h, shared, owner, "the alias holder's exit")
