@@ -167,6 +167,29 @@ func requireRelayReadGrantHeld(t *testing.T, guard *admissionMutex, name string)
 	guard.RUnlock()
 }
 
+// requireSourceFalseReleasesRegisteredWriter registers a writer while the public
+// observer holds its own read grant and waits on owner.mu, then makes the source
+// answer false: the observer returns zero/false and its return lets that writer
+// proceed. The exhausted generation is installed only after the waiter is seen,
+// so the false answer comes from the read the observer was parked on.
+func requireSourceFalseReleasesRegisteredWriter(t *testing.T, m *Mempool, owner *PendingOutpointOwner, guard *admissionMutex, tip PendingOutpointTip) {
+	t.Helper()
+	const name = "source false with a registered writer"
+	setRelaySource(owner, tip, 3)
+	owner.mu.Lock()
+	done := observeRelayAsync(m)
+	awaitOwnerMutexWaiter(t, "(*Mempool).AdmissionContextForRelay(", done, PendingOutpointAdmissionContext{StableTip: tip, Generation: math.MaxUint64}, name)
+	requireRelayReadGrantHeld(t, guard, name)
+	acquired, release, writerDone := startRelayWriter(guard)
+	awaitPendingRelayWriter(t, guard)
+	owner.generation = math.MaxUint64
+	owner.mu.Unlock()
+	requireRelayObservation(t, awaitRelayObservation(t, done, name), PendingOutpointAdmissionContext{}, false, name)
+	awaitRelaySignal(t, acquired, name+": writer acquisition")
+	close(release)
+	awaitRelaySignal(t, writerDone, name+": writer release")
+}
+
 // TestRelayAdmissionContextForRelay pins the external relay-cache observer
 // against real native locks: A1-A4 and A6-A9, R1-R3 and H1-H3. A5 lives in
 // TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch.
@@ -365,6 +388,8 @@ func TestRelayAdmissionContextForRelay(t *testing.T) {
 		m, chainState, owner := newRelayObserverFixture(t)
 		guard := &chainState.admissionMu
 		want := PendingOutpointAdmissionContext{StableTip: PendingOutpointTip{HasTip: true, Height: 4, Hash: hashB}, Generation: 2}
+
+		requireSourceFalseReleasesRegisteredWriter(t, m, owner, guard, want.StableTip)
 
 		for _, path := range []struct {
 			name   string
