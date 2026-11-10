@@ -1015,7 +1015,7 @@ func TestRemoteDAQualityScoreRace(t *testing.T) {
 		go func(rival *peer) {
 			defer wg.Done()
 			for writersDone.Load() < int32(len(rivals)) {
-				h.service.daPrefetchPeers(rival.addr())
+				h.service.daPrefetchPeers(rival)
 			}
 		}(rival)
 	}
@@ -1582,7 +1582,7 @@ func TestAnnounceTxLocalDAStructure(t *testing.T) {
 		"announceLocalDA call set=%v, want exactly one owner call, one LOCAL constructor and one scheduler entry", calls)
 	require(t, slices.Equal(guards, []string{"err != nil", "result.Disposition == node.DAAdmissionRetained && !result.SameDAIDCommitConflict"}),
 		"announceLocalDA guards=%q, want the direct error guard and the retained-and-unconflicted membership guard", guards)
-	require(t, scheduler == `s.scheduleDAPrefetch("", result.DAID)`, "announceLocalDA schedules %q, want the empty peerless trigger and the returned da_id", scheduler)
+	require(t, scheduler == `s.scheduleDAPrefetch(nil, result.DAID)`, "announceLocalDA schedules %q, want the nil peerless trigger and the returned da_id", scheduler)
 	require(t, slices.Equal(returns, []string{"err", "nil"}), "announceLocalDA returns=%q, want the owner's own error object and nil", returns)
 }
 

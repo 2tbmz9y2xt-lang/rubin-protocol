@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"reflect"
 	"runtime"
 	"strings"
@@ -204,16 +205,69 @@ func TestPeerRegistryOwnershipSingleConnectionPaths(t *testing.T) {
 	h.service.cfg.PeerManager = h.peerManager
 	first, refused := registryPeer(h, "configured-1.example:1", "198.51.100.20:1"), registryPeer(h, "configured-2.example:2", "198.51.100.21:2")
 	mustRegister(t, h, first)
+	h.service.peersMu.RLock()
+	peersBefore, liveBefore, orderBefore := maps.Clone(h.service.peers), maps.Clone(h.service.livePeers), h.service.peerRegistrations
+	h.service.peersMu.RUnlock()
 	err := h.service.registerPeer(refused)
 	require(t, err != nil && err.Error() == "max peers reached" && !h.service.isConnected("configured-2.example:2") && !h.service.isConnected("198.51.100.21:2"), "refusal err=%v left map entries", err)
+	h.service.peersMu.RLock()
+	peersUnchanged, liveUnchanged, orderAfter := maps.Equal(h.service.peers, peersBefore), maps.Equal(h.service.livePeers, liveBefore), h.service.peerRegistrations
+	_, refusedLive := h.service.livePeers[refused]
+	h.service.peersMu.RUnlock()
+	require(t, peersUnchanged && liveUnchanged && !refusedLive && orderAfter == orderBefore && refused.registrationOrder == 0, "refusal changed registry state: peers unchanged=%v live unchanged=%v refused live=%v order %d -> %d refused order=%d", peersUnchanged, liveUnchanged, refusedLive, orderBefore, orderAfter, refused.registrationOrder)
+	requireOwner(t, h, "configured-2.example:2", nil, "the refused address")
 	requireOwner(t, h, "configured-1.example:1", first, "after the refusal")
 	exits := h.service.PeerLifecycleExits()
 	h.service.unregisterPeer(first)
 	h.service.unregisterPeer(first)
 	require(t, h.service.PeerLifecycleExits() == exits+1, "exits=%d, want exactly one", h.service.PeerLifecycleExits()-exits)
 	requireOwner(t, h, "configured-1.example:1", nil, "after the exit")
+	require(t, h.service.reconnectSnapshot("configured-1.example:1") == (reconnectEntry{}), "an address that is not outbound gained reconnect state %+v", h.service.reconnectSnapshot("configured-1.example:1"))
 	mustRegister(t, h, refused)
 	requireOwner(t, h, "configured-2.example:2", refused, "the refused connection after capacity freed")
+}
+
+// P8/P12/R5(i): reconnect scheduling runs exactly once per exiting connection of an outbound
+// address, whether that connection is the only one, a replaced one that still holds its alias, or
+// a hidden one with no Service.peers entry. A repeated unregister of the same connection, and an
+// exit of a connection that never registered, leave the entry exactly as they found it.
+func TestPeerRegistryOwnershipReconnectOncePerExit(t *testing.T) {
+	const backoff = 5 * time.Second // reconnectBaseDelay at zero failures
+	for _, row := range []struct {
+		name, addr string
+		endpoints  []string
+	}{
+		{"single connection", "configured.example:19122", []string{"198.51.100.50:1"}},
+		{"replaced with alias", "configured.example:19123", []string{"198.51.100.51:1", "198.51.100.52:2"}},
+		{"hidden", "198.51.100.53:9000", []string{"198.51.100.53:9000", "198.51.100.53:9000"}},
+	} {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		h.service.ensureOutboundAddr(row.addr)
+		now := time.Unix(1000, 0)
+		h.service.cfg.Now = func() time.Time { return now }
+		peers := make([]*peer, 0, len(row.endpoints))
+		for _, endpoint := range row.endpoints {
+			peers = append(peers, registryPeer(h, row.addr, endpoint))
+		}
+		mustRegister(t, h, peers...)
+		require(t, h.service.reconnectSnapshot(row.addr) == (reconnectEntry{}), "%s: reconnect state before any exit", row.name)
+		for i, exiting := range peers {
+			now = now.Add(time.Minute)
+			want := now.Add(backoff)
+			exits := h.service.PeerLifecycleExits()
+			h.service.unregisterPeer(exiting)
+			entry := h.service.reconnectSnapshot(row.addr)
+			require(t, entry.nextRetry.Equal(want) && entry.failures == 0 && h.service.PeerLifecycleExits() == exits+1, "%s: exit %d: entry=%+v exits=%d, want nextRetry %v and one exit", row.name, i, entry, h.service.PeerLifecycleExits()-exits, want)
+			now = now.Add(time.Minute)
+			h.service.unregisterPeer(exiting)
+			entry = h.service.reconnectSnapshot(row.addr)
+			require(t, entry.nextRetry.Equal(want) && h.service.PeerLifecycleExits() == exits+1, "%s: repeated exit %d: entry=%+v exits=%d, want the first exit's schedule and count", row.name, i, entry, h.service.PeerLifecycleExits()-exits)
+		}
+		last := h.service.reconnectSnapshot(row.addr)
+		now = now.Add(time.Minute)
+		h.service.unregisterPeer(registryPeer(h, row.addr, row.endpoints[0]))
+		require(t, h.service.reconnectSnapshot(row.addr).nextRetry.Equal(last.nextRetry), "%s: a never-registered connection's exit rescheduled reconnect", row.name)
+	}
 }
 
 // P12: a replaced connection whose alias equals its logical address holds no Service.peers entry

@@ -81,7 +81,7 @@ func (s *Service) announceLocalDA(txBytes []byte) error {
 		return err
 	}
 	if result.Disposition == node.DAAdmissionRetained && !result.SameDAIDCommitConflict {
-		s.scheduleDAPrefetch("", result.DAID)
+		s.scheduleDAPrefetch(nil, result.DAID)
 	}
 	return nil
 }
@@ -116,7 +116,7 @@ func (s *Service) admitDetachedReorgDA(txBytes []byte) (completion func(bool), e
 		consumed = true
 		defer s.releaseWork()
 		if run {
-			s.scheduleDAPrefetch("", daID)
+			s.scheduleDAPrefetch(nil, daID)
 		}
 	}, nil
 }
@@ -134,7 +134,7 @@ func (s *Service) admitDetachedReorgDA(txBytes []byte) (completion func(bool), e
 // nil. A retained completing member reaches this same post-unlock scheduler path.
 func (p *peer) handleRelayDATx(txBytes []byte) error {
 	s := p.service
-	peerIdentity, quotaIdentity, provenance, ok := p.remoteDAProvenance()
+	_, quotaIdentity, provenance, ok := p.remoteDAProvenance()
 	if !ok {
 		return nil
 	}
@@ -146,7 +146,7 @@ func (p *peer) handleRelayDATx(txBytes []byte) error {
 	}
 	switch {
 	case result.Disposition == node.DAAdmissionRetained && !result.SameDAIDCommitConflict:
-		s.scheduleDAPrefetch(peerIdentity, result.DAID)
+		s.scheduleDAPrefetch(p, result.DAID)
 	case result.Disposition == node.DAAdmissionDuplicate && result.SameDAIDCommitConflict:
 		p.applyCompetingCommitScore(s.cfg.SyncEngine.LocalTipHeight())
 	}

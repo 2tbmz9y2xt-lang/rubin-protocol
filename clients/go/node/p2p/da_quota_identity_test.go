@@ -217,6 +217,57 @@ func TestDAQuotaIdentityInvalidEndpointZeroEffects(t *testing.T) {
 	}
 }
 
+// TestDAQuotaIdentityInvalidEndpointThroughHandleConn (A3/H1/H4): through the real handleConn, each
+// listed non-nil invalid socket endpoint, inbound or under a configured name that may itself be a
+// valid IP, leaves the connection registered with no DA key; a valid DA commit is refused with
+// exact equality of the retained DA state and zero peer and scheduler effects, the connection
+// exits exactly once, and no empty-string quota lock is ever taken (a held empty-key lock would
+// park any such acquisition).
+func TestDAQuotaIdentityInvalidEndpointThroughHandleConn(t *testing.T) {
+	h := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	h.service.ctx = context.Background()
+	h.service.cfg.PeerRuntimeConfig.ReadDeadline, h.service.cfg.PeerRuntimeConfig.WriteDeadline = 0, 0
+	f := newDAIngressFixture(t, h)
+	completeID := daRelayTestID(0xd0)
+	retainedCommit, retainedChunk := f.commit(completeID, 1), f.chunk(completeID, 0, completeID[:])
+	f.admit(retainedCommit, "127.0.0.9:19119")
+	f.admit(retainedChunk, "127.0.0.9:19119")
+	const anyPayload = uint64(1) << 40
+	retained := h.service.daRelay.CompleteSetCandidates(anyPayload)
+	require(t, len(retained) == 1, "fixture: complete sets=%d, want the one retained set", len(retained))
+	calls := nowCalls(h)
+	unlockEmpty := h.service.lockPeerQuotaKey("")
+	defer unlockEmpty()
+	for i, row := range []struct{ outbound, endpoint string }{
+		{"198.51.100.8:19111", ""},
+		{"", "remote"},
+		{"configured-remote.example:1", "remote"},
+		{"", "configured.example:19111"},
+		{"configured.example:19112", "configured.example:19111"},
+		{"198.51.100.8:19113", ":19113"},
+		{"peer-a", "localhost:19114"},
+	} {
+		local, stop := startEndpointConn(t, h, row.outbound, stubAddr(row.endpoint))
+		current := waitRegisteredPeerOn(t, h, local)
+		_, _, _, ok := current.remoteDAProvenance()
+		require(t, current.daQuotaIdentity == "" && !ok, "%q: key=%q provenance ok=%v, want no DA identity", row.endpoint, current.daQuotaIdentity, ok)
+		raw, before, exits := f.commit(daRelayTestID(0xd8+byte(i)), 2), effectsOf(current), h.service.PeerLifecycleExits()
+		calls.Store(0)
+		handled := make(chan error, 1)
+		go func() { handled <- current.handleTx(raw) }()
+		requireReturned(t, handled, row.endpoint+": handleTx under a held empty-key lock")
+		require(t, effectsOf(current) == before && calls.Load() == 0 && registeredPeerOn(h, local) == current, "%q: effects %+v -> %+v scheduler=%d registered=%v", row.endpoint, before, effectsOf(current), calls.Load(), registeredPeerOn(h, local) == current)
+		f.requireAbsent(raw, row.endpoint+": the refused commit")
+		f.requireRetained(retainedCommit, row.endpoint+": the retained commit")
+		f.requireRetained(retainedChunk, row.endpoint+": the retained chunk")
+		after := h.service.daRelay.CompleteSetCandidates(anyPayload)
+		require(t, reflect.DeepEqual(after, retained), "%q: complete sets changed: %+v -> %+v", row.endpoint, retained, after)
+		stop()
+		require(t, h.service.PeerLifecycleExits() == exits+1 && registeredPeerOn(h, local) == nil, "%q: exits=%d registered=%v, want one exit and removal", row.endpoint, h.service.PeerLifecycleExits()-exits, registeredPeerOn(h, local) != nil)
+		waitForPeerQuotaLockRefs(t, h.service, "", 1)
+	}
+}
+
 // TestDAQuotaIdentitySameKeyConservation (A4/A8): an IPv4 session and an IPv4-mapped session of the
 // same host on different ports share one State A per-source quota and one provenance key: their
 // combined retained chunks reach the 4 MiB per-peer cap, a distinct host still admits the refused
@@ -297,11 +348,11 @@ func TestDAPrefetchGroupsBySocketQuotaIdentity(t *testing.T) {
 	blank := addDAPrefetchTestPeer(h.service, "198.51.100.9:1", "remote", nil)
 	require(t, blank.daQuotaIdentity == "", "non-IP socket key=%q", blank.daQuotaIdentity)
 	all := []string{"192.0.2.5", "2001:db8::1", "2001:db8::2"}
-	peers, keys := h.service.daPrefetchPeers("")
+	peers, keys := h.service.daPrefetchPeers(nil)
 	require(t, reflect.DeepEqual(keys, all) && len(peers) == 3 && (peers["192.0.2.5"] == v4 || peers["192.0.2.5"] == mapped) && peers["2001:db8::1"] == low && peers["2001:db8::2"] == high, "no trigger: keys=%v peers=%d", keys, len(peers))
-	peers, keys = h.service.daPrefetchPeers(high.addr())
+	peers, keys = h.service.daPrefetchPeers(high)
 	require(t, reflect.DeepEqual(keys, []string{"2001:db8::2", "192.0.2.5", "2001:db8::1"}) && peers["2001:db8::2"] == high, "IPv6 trigger: keys=%v representative=%s", keys, peerAddrOrNil(peers["2001:db8::2"]))
-	peers, keys = h.service.daPrefetchPeers(blank.addr())
+	peers, keys = h.service.daPrefetchPeers(blank)
 	require(t, reflect.DeepEqual(keys, all) && len(peers) == 3, "non-IP trigger: keys=%v peers=%d, want the unpreferred socket keys", keys, len(peers))
 	for _, row := range []struct {
 		trigger *peer
@@ -309,7 +360,7 @@ func TestDAPrefetchGroupsBySocketQuotaIdentity(t *testing.T) {
 	}{{mapped, v4}, {v4, mapped}} {
 		seed := map[string]*peer{"192.0.2.5": row.seeded, "2001:db8::1": low}
 		h.service.peersMu.RLock()
-		key := h.service.preferredDAPrefetchPeerKeyLocked(row.trigger.addr(), 1, seed)
+		key := h.service.preferredDAPrefetchPeerKeyLocked(row.trigger, 1, seed)
 		h.service.peersMu.RUnlock()
 		require(t, key == "192.0.2.5" && maps.Equal(seed, map[string]*peer{"192.0.2.5": row.trigger, "2001:db8::1": low}), "trigger %s: key=%q representative=%s, want the exact trigger session", row.trigger.addr(), key, peerAddrOrNil(seed["192.0.2.5"]))
 	}
