@@ -69,6 +69,55 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	t.Run("D21_D22_optional_absent_and_malformed", retainedCapacityOptionalV1)
 	t.Run("D26_external_drain", retainedCapacityDrainV1)
 	t.Run("D24_completed_key_first_result", retainedCapacityCompletedKeyV1)
+	t.Run("D28_D14_native_qualified_header_slot", retainedCapacityHeaderSlotV1)
+}
+
+// D28 through actual UpdateTreeV1 on the recipe SIDE frame: the qualified
+// HeaderSlot of the bound child x (Pair without a header-x row) contributes 0
+// to the pre 1077 and +148 once to the post 1596 (native_fixture_recipe);
+// the slot inserts x and a fresh enumeration agrees. D14 "Proof nil then
+// HeaderSlot error": a different stored row x makes the native slot refuse
+// after an accepted Proof with StateMismatch -30779 "tree header slot
+// differs" (RUB-1750, tree_stream_cgo.go:117-127) at OLD/Prewrite/-1 with no
+// write; Apply returns nil and invalidates.
+func retainedCapacityHeaderSlotV1(t *testing.T) {
+	for _, differ := range []bool{false, true} {
+		w, child, x := retainedCapacitySideFrameV1(t)
+		other := bytes.Clone(child[:148])
+		other[147] ^= 1
+		if differ {
+			rifSeed(t, w, 3, x[:], other)
+		}
+		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		res := retainedCapacityShapedV1(t, w, a, dst, child, x, false, true, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error {
+			op.Proof = dst.Proof
+			return nil
+		})
+		if dst.pre != 1077 || !dst.accepted || dst.post != 1596 {
+			t.Fatalf("differ=%v slot proof: pre=%d post=%d accepted=%v", differ, dst.pre, dst.post, dst.accepted)
+		}
+		if !differ {
+			res.want(t, 2, 3, -1)
+			logicalMDBXAssert(t, res.err == nil && a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false) == nil && a.valid && a.exactRet == 1596, "slot commit: %v", res.err)
+			equal, err := mdbx.FixtureRawRowEqual(w.s, 3, x[:], child[:148])
+			cold, cerr := riRead(t, w, nil)
+			logicalMDBXAssert(t, err == nil && equal && cerr == nil && cold.exactRet == 1596, "slot insert %v/%v, fresh %d", equal, err, cold.exactRet)
+			continue
+		}
+		res.want(t, 1, 1, -1)
+		var engine *mdbx.EngineError
+		if !errors.As(res.err, &engine) || engine.Class != mdbx.EngineStateMismatch || engine.Code != -30779 || engine.Diagnostic != "tree header slot differs" {
+			t.Fatalf("slot refusal %T %v", res.err, res.err)
+		}
+		if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false); err != nil || a.valid || a.active != nil || !dst.applied {
+			t.Fatalf("slot refusal apply: %v valid=%v", err, a.valid)
+		}
+		// The slot refusal takes the consuming route; the row is read after reopen.
+		_, closed := mdbx.FixtureRawRowEqual(w.s, 3, x[:], other)
+		w.reopen(t)
+		equal, err := mdbx.FixtureRawRowEqual(w.s, 3, x[:], other)
+		logicalMDBXAssert(t, closed != nil && err == nil && equal, "row x after refusal: closed=%v %v", closed, err)
+	}
 }
 
 // T18 (rejected_cases): a W row beside the rolling-prepared pending SIDE.
@@ -149,6 +198,13 @@ func retainedCapacityCommitV1(t *testing.T, w *btWorld, a *RetainedAccountingV1,
 // after a successful Plan: finish installs the Proof or refuses the callback.
 func retainedCapacityTupleV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, child []byte, x [32]byte, lag bool, finish func(*mdbx.Reader, *mdbx.TreeOperationV1) error) btResult {
 	t.Helper()
+	return retainedCapacityShapedV1(t, w, a, dst, child, x, lag, false, finish)
+}
+
+// retainedCapacityShapedV1 builds the bound op; slot replaces the Pair's
+// header insert of x with the qualified HeaderSlot{x, child[:148]}.
+func retainedCapacityShapedV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, child []byte, x [32]byte, lag, slot bool, finish func(*mdbx.Reader, *mdbx.TreeOperationV1) error) btResult {
+	t.Helper()
 	var result btResult
 	err := w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
 		return account.WithReservation(2<<20, func() error {
@@ -167,7 +223,12 @@ func retainedCapacityTupleV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, 
 					companion.Kind, companion.Generation = mdbx.TreeKindLagForwardV1, 2
 					op.Primitives = append(op.Primitives, companion)
 				}
-				op.Pair.Mutations = append(append([]mdbx.Mutation{}, effect.Index[:]...), btMutation(3, bytes.Clone(x[:]), bytes.Clone(child[:148])))
+				op.Pair.Mutations = append([]mdbx.Mutation{}, effect.Index[:]...)
+				if slot {
+					op.HeaderSlot = &mdbx.TreeHeaderSlotV1{Hash: x, Header: [148]byte(child[:148])}
+				} else {
+					op.Pair.Mutations = append(op.Pair.Mutations, btMutation(3, bytes.Clone(x[:]), bytes.Clone(child[:148])))
+				}
 				btSort(op.Pair.Mutations)
 				if err := a.PlanDirectMDBX(dst, r, account, &op); err != nil {
 					return mdbx.TreeOperationV1{}, err
