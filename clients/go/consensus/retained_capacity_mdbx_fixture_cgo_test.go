@@ -149,7 +149,8 @@ func retainedCapacityExactAdmitV1(t *testing.T) {
 
 // Clean witness: a completed pre survives a clean callback refusal only on
 // OLD/Prewrite/-1; changing exactly one literal (NEW, WriteStarted, index 0)
-// with everything else equal retires it.
+// with everything else equal retires it; NEW before the commit, outside the
+// native failure union, is also the local API failure.
 func retainedCapacityWitnessTupleV1(t *testing.T) {
 	for _, c := range []struct {
 		truth mdbx.CommitTruth
@@ -167,7 +168,7 @@ func retainedCapacityWitnessTupleV1(t *testing.T) {
 		refuse := errors.New("callback refusal")
 		res := retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(*mdbx.Reader, *mdbx.TreeOperationV1) error { return refuse })
 		logicalMDBXAssert(t, a.valid && a.exactRet == 1077 && !dst.entered, "completed pre")
-		if err := a.ApplyDirectMDBX(dst, c.truth, c.stage, c.index, res.err, true); err != nil || a.valid != c.keep || a.active != nil {
+		if err := a.ApplyDirectMDBX(dst, c.truth, c.stage, c.index, res.err, true); errors.Is(err, errRetainedApplyAPIV1) != (c.truth == mdbx.CommitTruthNew) || a.valid != c.keep || a.active != nil {
 			t.Fatalf("%+v: %v valid=%v", c, err, a.valid)
 		}
 	}

@@ -1163,9 +1163,11 @@ func TestRetainedCapacityMDBXBodyWindow(t *testing.T) {
 		b, u     uint64
 		excluded *mdbx.InvalidBranchV1
 		ok       bool
-	}{"unchanged": {nil, 5040, 18720, nil, true}, "blocks_span": {span(mdbx.CleanupSpanBlocksV1, 4321, 4880), 5040, 18720, nil, false},
+	}{
+		"unchanged": {nil, 5040, 18720, nil, true}, "blocks_span": {span(mdbx.CleanupSpanBlocksV1, 4321, 4880), 5040, 18720, nil, false},
 		"b_moved": {span(mdbx.CleanupSpanUndoV1, 18720, 18720), 5041, 18721, nil, true}, "b_regressed": {nil, 5039, 18719, nil, false},
-		"excluded_set": {nil, 5040, 18720, excluded, false}} {
+		"excluded_set": {nil, 5040, 18720, excluded, false},
+	} {
 		f.planned.Authority = old
 		f.planned.Authority.B, f.planned.Authority.U, f.planned.Authority.ExcludedInvalidBranch = c.b, c.u, c.excluded
 		if c.spans != nil {
