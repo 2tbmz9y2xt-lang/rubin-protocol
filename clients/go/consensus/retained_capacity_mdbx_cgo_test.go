@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -753,11 +754,13 @@ func TestRetainedCapacityMDBXRollingMerge(t *testing.T) {
 	}
 }
 
-// The promise transfer admits only the exact UNDO span of a U increase.
+// The promise transfer admits only the exact UNDO span of a U increase. Each OLD and planned authority is NONE/STABLE
+// without spans or PRUNE_GC/STABLE with them (MP 1844) and decodes; gap_extend's OLD, whose last UNDO span ends below
+// U0-1 (MP 1327-1328), is the structural-only rejected case the decoder still accepts.
 func TestRetainedCapacityMDBXPromise(t *testing.T) {
 	var read retainedReadV1
 	read.roles[0].generation = 1
-	read.authority.Authority = mdbx.StorageAuthorityV1{Version: mdbx.StorageAuthorityVersionV1, ActiveProfile: mdbx.StorageProfilePrunedV1, U: 10, ActiveGenerationID: 1, NextGenerationID: 2, Phase: mdbx.StoragePhasePruneGCV1, Lifecycle: mdbx.StorageLifecycleStableV1}
+	read.authority.Authority = mdbx.StorageAuthorityV1{Version: mdbx.StorageAuthorityVersionV1, ActiveProfile: mdbx.StorageProfilePrunedV1, U: 10, ActiveGenerationID: 1, NextGenerationID: 2, Lifecycle: mdbx.StorageLifecycleStableV1}
 	f := retainedFiniteV1{read: &read, op: &mdbx.TreeOperationV1{Pair: mdbx.TreePairV1{Mutations: []mdbx.Mutation{btMutation(0, []byte{2}, nil)}}}}
 	undo := func(first, next, last uint64) mdbx.CleanupSpanV1 {
 		return mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanUndoV1, GenerationID: 1, FirstHeight: first, NextHeight: next, LastHeight: last}
@@ -773,17 +776,17 @@ func TestRetainedCapacityMDBXPromise(t *testing.T) {
 		"no_span":   {nil, nil, 12, false},
 		"wider":     {nil, []mdbx.CleanupSpanV1{undo(9, 9, 11)}, 12, false},
 		"regressed": {nil, nil, 9, false},
-		// UNDO(1,5,9)->(1,5,8) with U 10->9 passes spansV1; only the nonregressing U (MP 1288-1290) refuses it.
+		// UNDO(1,4,9,5)->(1,4,8,5) with U 10->9 passes spansV1; only the nonregressing U (MP 1288-1290) refuses it.
 		"u_regressed_span": {[]mdbx.CleanupSpanV1{undo(4, 5, 9)}, []mdbx.CleanupSpanV1{undo(4, 5, 8)}, 9, false},
 		"gap_extend":       {[]mdbx.CleanupSpanV1{undo(4, 5, 8)}, []mdbx.CleanupSpanV1{undo(4, 5, 11)}, 12, false},
 		"drained_old":      {[]mdbx.CleanupSpanV1{undo(4, 5, 9)}, []mdbx.CleanupSpanV1{undo(4, 6, 9)}, 10, false},
 	} {
-		read.authority.Authority.Cleanup = &mdbx.CleanupV1{Spans: c.old}
+		retainedCapacitySpansV1(&read.authority.Authority, c.old)
 		f.planned.Authority = read.authority.Authority
 		f.planned.Authority.U = c.u
-		f.planned.Authority.Cleanup = &mdbx.CleanupV1{Spans: c.planned}
-		if name == "u_regressed_span" {
-			logicalMDBXAssert(t, mdbx.ValidateStorageAuthorityV1(read.authority.Authority) == nil && mdbx.ValidateStorageAuthorityV1(f.planned.Authority) == nil, "B=0 U regression must decode")
+		retainedCapacitySpansV1(&f.planned.Authority, c.planned)
+		if mdbx.ValidateStorageAuthorityV1(read.authority.Authority) != nil || mdbx.ValidateStorageAuthorityV1(f.planned.Authority) != nil {
+			t.Fatalf("%s: authority must decode", name)
 		}
 		if _, err := f.promiseV1(); (err == nil) != c.ok {
 			t.Fatalf("%s: %v", name, err)
@@ -791,10 +794,19 @@ func TestRetainedCapacityMDBXPromise(t *testing.T) {
 	}
 }
 
+// retainedCapacitySpansV1 sets NONE without spans, otherwise PRUNE_GC with them (MP 1844).
+func retainedCapacitySpansV1(a *mdbx.StorageAuthorityV1, spans []mdbx.CleanupSpanV1) {
+	a.Phase, a.Cleanup = mdbx.StoragePhaseNoneV1, nil
+	if len(spans) != 0 {
+		a.Phase, a.Cleanup = mdbx.StoragePhasePruneGCV1, &mdbx.CleanupV1{Spans: spans}
+	}
+}
+
 // W/L transfer (MP 3018-3037): side F=0=H_old holds x@1 (MP 2984-2986) and its child y@2 (298 bytes each). The op publishes
 // x at 1 on the route of MP 3723-3726 (a longer descendant chain applied one D=0,C=1 commit or one bounded phase at a time; y
 // as the winner is C=2 ORDINARY_APPLY, MP 3736-3740): W={x}, L={y}, side cleared, SIDE(3,2,2,2) owing L, SideLink (3,1) and y's
-// unowned header deleted (MP 2550-2557): x's header delta 0, y's 148 leaves E, its body and link stay owed. Deleting L's link or y's body is refused.
+// unowned header deleted (MP 2550-2557): x's header delta 0, y's 148 leaves E, its body and link stay owed; a Pair that keeps that
+// header leaves the same E (no owner keeps it after the transfer, MP 3169). Deleting L's link or y's body is refused.
 // On the lawful-retention OLD (healthy y@1, x's sibling, MP 3047-3058) a W-less SideLink (3,1) deletion (side cleared, with or without SIDE) and y's owned body deletion are refused; the side is kept.
 func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	wl, leave := retainedCapacityWLSideV1(t)
@@ -806,6 +818,7 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 		m  []mdbx.Mutation
 	}{
 		"accepted":                {wl, retainedCapacityWLOpV1(t, wl, 2, 2, leave), nil},
+		"accepted, header kept":   {wl, retainedCapacityWLOpV1(t, wl, 2, 2), nil},
 		"link deletion without W": {w, retainedCapacityWLOpV1(t, w, 1, 1), nil},
 		"non-W row as W":          {w, retainedCapacityWLOpV1(t, w, 1, 0), nil},
 		"L link deletion":         {wl, retainedCapacityWLOpV1(t, wl, 2, 2, leave), []mdbx.Mutation{retainedCapacityLinkDeleteV1(3, 2)}},
@@ -815,10 +828,11 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 		c.op.Pair.Mutations = append(c.op.Pair.Mutations, c.m...)
 		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 		err := retainedCapacityPlanV1(t, c.w, a, dst, c.op, 8192)
-		if name == "accepted" && (err != nil || !dst.prepared || dst.add != 148 || dst.remove != 148+148) {
-			t.Fatalf("leaving side: %v add=%d remove=%d", err, dst.add, dst.remove)
+		accepted := strings.HasPrefix(name, "accepted")
+		if accepted && (err != nil || !dst.prepared || dst.add != 148 || dst.remove != 148+148) {
+			t.Fatalf("%s: %v add=%d remove=%d", name, err, dst.add, dst.remove)
 		}
-		if name != "accepted" && (!errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst) {
+		if !accepted && (!errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
