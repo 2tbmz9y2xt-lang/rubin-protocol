@@ -456,14 +456,16 @@ func retainedCleanRefusalV1(p *DirectRetainedProofV1, truth mdbx.CommitTruth, st
 }
 
 // successV1 advances the cache only for the exact accepted normal success.
+// Another nil-error tuple is impossible and a local API failure; the exact
+// tuple without this attempt's accepted Proof is the missing/foreign proof
+// row: applied, invalidated, nil.
 func (a *RetainedAccountingV1) successV1(p *DirectRetainedProofV1, truth mdbx.CommitTruth, stage mdbx.UpdateStage, index int) error {
-	exact := truth == mdbx.CommitTruthNew && stage == mdbx.UpdateStageCommitMayHaveCrossed && index == -1
-	if !exact || !p.prepared || !p.entered || !p.accepted {
+	if truth != mdbx.CommitTruthNew || stage != mdbx.UpdateStageCommitMayHaveCrossed || index != -1 {
 		a.InvalidateV1()
 		return errRetainedApplyAPIV1
 	}
 	next, ok := p.binding.AfterOneCommitAttemptV1()
-	if !ok {
+	if !ok || !p.prepared || !p.entered || !p.accepted {
 		a.InvalidateV1()
 		return nil
 	}

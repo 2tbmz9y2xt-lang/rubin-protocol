@@ -295,6 +295,13 @@ func retainedCapacityApplyMatrixV1(t *testing.T) {
 	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); !errors.Is(err, errRetainedApplyAPIV1) {
 		t.Fatalf("used token: %v", err)
 	}
+	// T8: the exact success tuple without this attempt's accepted Proof is the
+	// recognized missing/foreign proof row: applied, invalidated, nil.
+	a = retainedCapacityCachedV1()
+	p = retainedCapacityStructuralV1(a)
+	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); err != nil || a.valid || a.active != nil || !p.applied {
+		t.Fatalf("missing proof row: %v valid=%v", err, a.valid)
+	}
 	// An unprepared refused attempt is consumed; a clean refusal keeps a matching completed pre.
 	a = retainedCapacityCachedV1()
 	dst := &DirectRetainedProofV1{}
