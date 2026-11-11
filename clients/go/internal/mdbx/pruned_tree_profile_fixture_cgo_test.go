@@ -87,6 +87,8 @@ func TestPrunedTreeProfileCommit(t *testing.T) {
 	}{
 		{"A6 p4320", 20000, 18561, prunedTreeU64(4320), 4881, prunedTreeU64(4320)},
 		{"A6 p2880", 20000, 18561, prunedTreeU64(2880), 4881, prunedTreeU64(2880)},
+		// b(15500)=0 admits only APPLIED p=0 (PAIR); L_body=1 (LBODY) gives span 0..0.
+		{"A6 p0", 15500, 14061, prunedTreeU64(0), 381, prunedTreeU64(0)},
 		{"A7 pre-genesis lag", 15500, 14061, nil, 381, nil},
 		{"A8 h1000", 1000, 0, nil, 0, nil},
 		{"A8 h5000", 5000, 3561, nil, 0, nil},
