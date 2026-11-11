@@ -273,16 +273,35 @@ func TestPrunedTreeProfileReplacementInvariant(t *testing.T) {
 	}
 }
 
-// TestPrunedTreeProfileConsultedExclusion is A9's exclusion half: the active
-// generation's root binding is seeded and drifted before the write transaction.
-// A plan consulting it refuses with OLD/write snapshot mismatch; this plan commits
-// (the fixture's commit hook then reports ENOSPC with the commit readback NEW).
+// TestPrunedTreeProfileConsultedExclusion is A9's exclusion half (D13 fixes the
+// Consulted list exactly): each row outside it is drifted before the write
+// transaction. A plan consulting the row refuses with OLD/write snapshot mismatch;
+// this plan commits (the fixture's commit hook then reports ENOSPC with the commit
+// readback NEW). Rows: the active generation's binding, the binding of
+// LagGenerationID+1, and meta key 1 (the schema row: its drift leaves 0x7f, so
+// that row skips the durable reopen).
 func TestPrunedTreeProfileConsultedExclusion(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		key    []byte
+		seed   bool
+		reopen bool
+	}{
+		{"active binding", binary.BigEndian.AppendUint64([]byte{0x11}, 1), true, true},
+		{"lag+1 binding", binary.BigEndian.AppendUint64([]byte{0x11}, 3), false, true},
+		{"meta key 1", []byte{1}, false, false},
+	} {
+		t.Run(row.name, func(t *testing.T) { prunedTreeExcluded(t, row.key, row.seed, row.reopen) })
+	}
+}
+
+func prunedTreeExcluded(t *testing.T, key []byte, seed, reopen bool) {
 	sc := newPrunedTreeScene(t, 0, nil, nil, nil)
-	active := binary.BigEndian.AppendUint64([]byte{0x11}, 1)
-	treeNativeSeed(t, sc.s, 0, active, prunedTreeBindingBytes(t, nil))
+	if seed {
+		treeNativeSeed(t, sc.s, 0, key, prunedTreeBindingBytes(t, nil))
+	}
 	var out PrunedTreeProfileOutcomeV1
-	count, err := FixtureWriteSnapshotDrift(sc.s, 0, active, func() { out = sc.s.SelectPrunedTreeProfileV1(true, nil, sc.o) })
+	count, err := FixtureWriteSnapshotDrift(sc.s, 0, key, func() { out = sc.s.SelectPrunedTreeProfileV1(true, nil, sc.o) })
 	mustEnvironment(t, err)
 	want := sc.expected(0, nil)
 	if count != 1 || out.Truth != CommitTruthNew || out.Stage != UpdateStageCommitMayHaveCrossed || out.Authority == nil || !reflect.DeepEqual(*out.Authority, want) {
@@ -293,6 +312,9 @@ func TestPrunedTreeProfileConsultedExclusion(t *testing.T) {
 		t.Fatalf("A9 exclusion commit error %v", out.Err)
 	}
 	_ = sc.s.Close()
+	if !reopen {
+		return
+	}
 	reopened, err := OpenTreeV1(sc.path, environmentConfig(), [32]byte{7})
 	mustEnvironment(t, err)
 	defer func() { _ = reopened.Close() }()

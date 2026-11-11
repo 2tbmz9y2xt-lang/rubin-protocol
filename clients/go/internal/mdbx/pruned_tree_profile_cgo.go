@@ -38,10 +38,12 @@ type PrunedTreeProfileOutcomeV1 struct {
 // evidence plus 656 bytes for the LAG root binding); a capacity refusal is
 // returned unchanged before any index or binding read.
 //
-// The tip witness reads the rank-2 canonical index of ActiveGenerationID: a
-// non-nil tip's row must exist, carry valid work, match BlockHash, and have no
-// row above it; a nil tip requires an empty index. Otherwise the decision is
-// "STALE_LOCAL_PLAN". Three routes return Integrity/get/MDBX_INVALID with the
+// The tip witness reads the rank-2 canonical index of ActiveGenerationID. For a
+// non-nil tip, an absent tip row is "STALE_LOCAL_PLAN"; a present row's work is
+// checked first, and invalid work is the latched "invalid pruned tree profile tip
+// work" below; then a BlockHash mismatch or any row above the tip is
+// "STALE_LOCAL_PLAN". A nil tip requires an empty index, otherwise
+// "STALE_LOCAL_PLAN". Index read errors are returned unchanged. Three routes return Integrity/get/MDBX_INVALID with the
 // named diagnostic and no cause, latched on the Reader so the Store is consumed:
 // "invalid pruned tree profile tip work", "missing pruned tree profile root
 // binding" (no binding at LagGenerationID), and "pruned tree profile promises
