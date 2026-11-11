@@ -185,10 +185,8 @@ func retainedAuthorityMutationV1(op *mdbx.TreeOperationV1) (*mdbx.Mutation, bool
 func retainedRelationV1(read *retainedReadV1, op *mdbx.TreeOperationV1) error {
 	p := &op.Primitives[0]
 	c := p.Coverage
-	if p.Generation != read.authority.Authority.ActiveGenerationID || c.Generation != p.Generation {
-		return errRetainedShapeAPIV1
-	}
-	if c.Block != p.Block || c.Height != p.Height || p.Undo != mdbx.UndoWriteOrReuseV1 && p.Undo != mdbx.UndoTransientV1 {
+	if p.Generation != read.authority.Authority.ActiveGenerationID || c.Generation != p.Generation ||
+		c.Block != p.Block || c.Height != p.Height || p.Undo != mdbx.UndoWriteOrReuseV1 && p.Undo != mdbx.UndoTransientV1 {
 		return errRetainedShapeAPIV1
 	}
 	return nil
@@ -246,13 +244,8 @@ func retainedFactsMatchV1(read *retainedReadV1, cached [2]retainedCompleteV1) bo
 
 // initialV1 checks the initial controls in contract order.
 func (a *RetainedAccountingV1) initialV1(dst *DirectRetainedProofV1, old *mdbx.Reader, account *mdbx.OperationAccount, op *mdbx.TreeOperationV1) error {
-	if retainedPlanNilV1(a, dst, old, account, op) {
-		return errRetainedPlanAPIV1
-	}
-	if a.active != nil || *dst != (DirectRetainedProofV1{}) {
-		return errRetainedPlanAPIV1
-	}
-	if op.Proof != nil || op.Pair.EntryInventory != nil {
+	if retainedPlanNilV1(a, dst, old, account, op) || a.active != nil || *dst != (DirectRetainedProofV1{}) ||
+		op.Proof != nil || op.Pair.EntryInventory != nil {
 		return errRetainedPlanAPIV1
 	}
 	return retainedDirectCountV1(op)
@@ -264,10 +257,7 @@ func retainedPlanNilV1(a *RetainedAccountingV1, dst *DirectRetainedProofV1, old 
 
 // retainedDirectCountV1 admits exactly one primitive and no LAG kind.
 func retainedDirectCountV1(op *mdbx.TreeOperationV1) error {
-	if len(op.Primitives) != 1 {
-		return errRetainedPlanAPIV1
-	}
-	if kind := op.Primitives[0].Kind; kind == mdbx.TreeKindLagForwardV1 || kind == mdbx.TreeKindLagReverseV1 {
+	if len(op.Primitives) != 1 || op.Primitives[0].Kind == mdbx.TreeKindLagForwardV1 || op.Primitives[0].Kind == mdbx.TreeKindLagReverseV1 {
 		return errRetainedPlanAPIV1
 	}
 	return nil
@@ -276,13 +266,8 @@ func retainedDirectCountV1(op *mdbx.TreeOperationV1) error {
 // retainedOpBindingV1 runs the op-only binding refusals before any frame.
 func retainedOpBindingV1(op *mdbx.TreeOperationV1) error {
 	p := &op.Primitives[0]
-	if p.Source == nil || p.Coverage == nil {
-		return errRetainedShapeAPIV1
-	}
-	if p.Direction != mdbx.TreeForwardV1 || p.Kind != mdbx.TreeKindDirectApplyV1 || p.Undo < 1 || p.Undo > 6 {
-		return errRetainedShapeAPIV1
-	}
-	if !retainedCoverageShapeV1(p.Coverage) {
+	if p.Source == nil || p.Coverage == nil || p.Direction != mdbx.TreeForwardV1 || p.Kind != mdbx.TreeKindDirectApplyV1 ||
+		p.Undo < 1 || p.Undo > 6 || !retainedCoverageShapeV1(p.Coverage) {
 		return errRetainedShapeAPIV1
 	}
 	return retainedHeaderSlotV1(op)
@@ -306,10 +291,7 @@ func retainedCoverageShapeV1(c *mdbx.TreeSourceCoverageV1) bool {
 // retainedHeaderSlotV1 qualifies an optional slot; a nil slot is admitted.
 func retainedHeaderSlotV1(op *mdbx.TreeOperationV1) error {
 	slot, p := op.HeaderSlot, &op.Primitives[0]
-	if slot == nil {
-		return nil
-	}
-	if slot.Hash != p.Block || slot.Hash != p.Coverage.Block || p.Coverage.BodyKind != 2 {
+	if slot != nil && (slot.Hash != p.Block || slot.Hash != p.Coverage.Block || p.Coverage.BodyKind != 2) {
 		return errRetainedShapeAPIV1
 	}
 	return nil
@@ -340,22 +322,15 @@ func (p *DirectRetainedProofV1) Proof(report *mdbx.TreeDeltaReportV1) error {
 
 // callableV1 admits only the owner's active prepared attempt, once.
 func (p *DirectRetainedProofV1) callableV1() bool {
-	if p == nil || p.self != p || p.owner == nil || p.owner.active != p {
-		return false
-	}
-	return p.prepared && !p.entered && !p.applied
+	return p != nil && p.self == p && p.owner != nil && p.owner.active == p && p.prepared && !p.entered && !p.applied
 }
 
 // reportShapeV1 admits only the direct report domain of the contract table.
 func (p *DirectRetainedProofV1) reportShapeV1(r *mdbx.TreeDeltaReportV1) bool {
 	c, old := r.Current, p.roles[0]
-	if !c.Present || c.Generation != old.generation || c.BytesBefore != old.s || c.CountBefore != old.n {
-		return false
-	}
-	if r.Lag != (mdbx.TreeRoleDeltaV1{}) || len(r.Undo) != 1 {
-		return false
-	}
-	return validLogicalStateResidualEnvelope(c.BytesAfter, c.CountAfter) && retainedUndoShapeV1(r.Undo[0])
+	return c.Present && c.Generation == old.generation && c.BytesBefore == old.s && c.CountBefore == old.n &&
+		r.Lag == (mdbx.TreeRoleDeltaV1{}) && len(r.Undo) == 1 &&
+		validLogicalStateResidualEnvelope(c.BytesAfter, c.CountAfter) && retainedUndoShapeV1(r.Undo[0])
 }
 
 // retainedUndoShapeV1 bounds the sole record by the per-block envelope.
@@ -649,11 +624,10 @@ func (f *retainedFiniteV1) deletedV1(hash [32]byte, upto int) uint8 {
 }
 
 // obsoleteV1 returns every kind bit when an obsolete generation projects
-// hash: a healthy header names its parent, then the producer's earlier
+// hash in OLD: a healthy header names its parent, then the producer's earlier
 // membership rule takes a positive own forward with that parent despite a
 // FALSE fact and excludes it only under a TRUE fact (FALSE is branch_data).
-// Obsolete namespaces are untouched, so OLD and planned share the projection;
-// a header read error takes OLD's canonical header duty, as projectedV1 does.
+// A header read error takes OLD's canonical header duty, as projectedV1 does.
 func (f *retainedFiniteV1) obsoleteV1(old retainedArtifactV1) (uint8, error) {
 	header, present, err := f.read.headerV1(old.hash)
 	if err != nil {
@@ -665,7 +639,7 @@ func (f *retainedFiniteV1) obsoleteV1(old retainedArtifactV1) (uint8, error) {
 	}
 	k.parent = [32]byte(header[4:36])
 	w := retainedWalkV1{read: f.read, pre: retainedPreImageV1{complete: f.proof.complete}}
-	found, err := w.earlierV1(retainedGenerationsV1(f.read.authority.Authority), k)
+	found, err := w.earlierV1(min(retainedCountV1(f.read.authority.Authority, mdbx.CleanupSpanGenerationV1), 2), k)
 	if err != nil || !found {
 		return 0, err
 	}
@@ -673,8 +647,11 @@ func (f *retainedFiniteV1) obsoleteV1(old retainedArtifactV1) (uint8, error) {
 }
 
 // unionsV1 settles the OLD and planned unions from their seeds and adds the
-// obsolete projection, which owns every kind in both.
-func (f *retainedFiniteV1) unionsV1(old, planned retainedArtifactV1) (retainedArtifactV1, retainedArtifactV1, error) {
+// obsolete projection, which owns every kind. Obsolete namespaces are
+// untouched and the Pair changes no header but a deleted one and x's, whose
+// planned keep owns every kind, so the planned image keeps OLD's projection
+// unless the Pair deletes the header it needs (MP 1717, 2550-2557).
+func (f *retainedFiniteV1) unionsV1(old, planned retainedArtifactV1, deleted uint8) (retainedArtifactV1, retainedArtifactV1, error) {
 	old, err := f.read.unionV1(old)
 	if err != nil {
 		return old, planned, err
@@ -684,12 +661,11 @@ func (f *retainedFiniteV1) unionsV1(old, planned retainedArtifactV1) (retainedAr
 		return old, planned, err
 	}
 	ob, err := f.obsoleteV1(old)
-	old.bits, planned.bits = old.bits|ob, planned.bits|ob
+	old.bits |= ob
+	if deleted&1 == 0 {
+		planned.bits |= ob
+	}
 	return old, planned, err
-}
-
-func retainedGenerationsV1(a mdbx.StorageAuthorityV1) int {
-	return min(retainedCountV1(a, mdbx.CleanupSpanGenerationV1), 2)
 }
 
 // exchangeV1 runs use while read.authority holds the single planned value and
@@ -765,7 +741,7 @@ func (read *retainedReadV1) plannedUnionV1(k retainedArtifactV1) (retainedArtifa
 // and the sole undo projection.
 func (f *retainedFiniteV1) settleXV1(x retainedArtifactV1) error {
 	x.required = 1
-	old, planned, err := f.unionsV1(retainedArtifactV1{hash: x.hash}, x)
+	old, planned, err := f.unionsV1(retainedArtifactV1{hash: x.hash}, x, 0)
 	if err != nil {
 		return err
 	}
@@ -807,7 +783,7 @@ func (f *retainedFiniteV1) settleV1(hash [32]byte, deleted uint8) error {
 	if err != nil {
 		return err
 	}
-	old, planned, err := f.unionsV1(k, k)
+	old, planned, err := f.unionsV1(k, k, deleted)
 	if err != nil {
 		return err
 	}
@@ -932,10 +908,7 @@ func retainedPromiseFixedV1(o, p *mdbx.StorageAuthorityV1) bool {
 // it is never automatically cleared or overwritten (MP 1855-1857), and any
 // other change is an effect this owner does not support.
 func retainedExcludedSameV1(x, y *mdbx.InvalidBranchV1) bool {
-	if x == nil || y == nil {
-		return x == y
-	}
-	return x.FirstInvalidHeight == y.FirstInvalidHeight && x.FirstInvalidBlockHash == y.FirstInvalidBlockHash && bytes.Equal(x.ExactConsensusError, y.ExactConsensusError)
+	return x == y || x != nil && y != nil && x.FirstInvalidHeight == y.FirstInvalidHeight && x.FirstInvalidBlockHash == y.FirstInvalidBlockHash && bytes.Equal(x.ExactConsensusError, y.ExactConsensusError)
 }
 
 // optionalPlanV1 admits unchanged optional descriptors, or the W/L transfer
@@ -1003,31 +976,22 @@ func (f *retainedFiniteV1) wV1(at uint64) (uint64, error) {
 func (f *retainedFiniteV1) sideSpansV1(same bool, l mdbx.CleanupSpanV1) error {
 	o, p := f.read.authority.Authority, f.planned.Authority
 	no, np := retainedCountV1(o, mdbx.CleanupSpanSideV1), retainedCountV1(p, mdbx.CleanupSpanSideV1)
-	add := l.Kind == mdbx.CleanupSpanSideV1 && l.FirstHeight <= l.LastHeight
-	if add {
-		last := retainedNthV1(p, mdbx.CleanupSpanSideV1, no)
-		same = same && np == no+1 && last == l
-	} else {
-		same = same && np == no
+	want := no
+	if l.Kind == mdbx.CleanupSpanSideV1 && l.FirstHeight <= l.LastHeight {
+		want, same = no+1, same && retainedNthV1(p, mdbx.CleanupSpanSideV1, no) == l
 	}
-	if !same || !retainedPrefixV1(o, p, mdbx.CleanupSpanSideV1, no) {
+	if !same || np != want || !retainedPrefixV1(o, p, mdbx.CleanupSpanSideV1, no) {
 		return errRetainedFiniteAPIV1
 	}
 	return nil
 }
 
 func retainedSelectedEqualV1(o, p *mdbx.SelectedSideV1) bool {
-	if o == nil || p == nil {
-		return o == p
-	}
-	return *o == *p
+	return o == p || o != nil && p != nil && *o == *p
 }
 
 func retainedDetachedEqualV1(o, p *mdbx.DetachedSuffixV1) bool {
-	if o == nil || p == nil {
-		return o == p
-	}
-	return o.Cursor == p.Cursor && o.EntryCount == p.EntryCount && o.LogicalBytes == p.LogicalBytes && slices.Equal(o.Entries, p.Entries)
+	return o == p || o != nil && p != nil && o.Cursor == p.Cursor && o.EntryCount == p.EntryCount && o.LogicalBytes == p.LogicalBytes && slices.Equal(o.Entries, p.Entries)
 }
 
 // spansV1 compares one kind's descriptors in place; UNDO admits only the

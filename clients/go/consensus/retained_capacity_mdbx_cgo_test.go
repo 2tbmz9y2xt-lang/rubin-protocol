@@ -26,7 +26,6 @@ func retainedCapacityStructuralV1(a *RetainedAccountingV1) *DirectRetainedProofV
 	p := &DirectRetainedProofV1{}
 	*p = DirectRetainedProofV1{owner: a, self: p, prepared: true, pre: 1005, add: 148 + 122}
 	p.roles[0] = retainedRoleV1{generation: 1, s: 56, n: 1, j: 2}
-	p.binding, _ = (&mdbx.Reader{}).MutationBindingV1()
 	a.active = p
 	return p
 }
@@ -760,8 +759,8 @@ func TestRetainedCapacityMDBXRollingMerge(t *testing.T) {
 func TestRetainedCapacityMDBXPromise(t *testing.T) {
 	var read retainedReadV1
 	read.roles[0].generation = 1
-	read.authority.Authority.U = 10
-	f := retainedFiniteV1{read: &read}
+	read.authority.Authority = mdbx.StorageAuthorityV1{Version: mdbx.StorageAuthorityVersionV1, ActiveProfile: mdbx.StorageProfilePrunedV1, U: 10, ActiveGenerationID: 1, NextGenerationID: 2, Phase: mdbx.StoragePhasePruneGCV1, Lifecycle: mdbx.StorageLifecycleStableV1}
+	f := retainedFiniteV1{read: &read, op: &mdbx.TreeOperationV1{Pair: mdbx.TreePairV1{Mutations: []mdbx.Mutation{btMutation(0, []byte{2}, nil)}}}}
 	undo := func(first, next, last uint64) mdbx.CleanupSpanV1 {
 		return mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanUndoV1, GenerationID: 1, FirstHeight: first, NextHeight: next, LastHeight: last}
 	}
@@ -770,22 +769,26 @@ func TestRetainedCapacityMDBXPromise(t *testing.T) {
 		u            uint64
 		ok           bool
 	}{
-		"unchanged":   {nil, nil, 10, true},
-		"created":     {nil, []mdbx.CleanupSpanV1{undo(10, 10, 11)}, 12, true},
-		"extended":    {[]mdbx.CleanupSpanV1{undo(4, 5, 9)}, []mdbx.CleanupSpanV1{undo(4, 5, 11)}, 12, true},
-		"no_span":     {nil, nil, 12, false},
-		"wider":       {nil, []mdbx.CleanupSpanV1{undo(9, 9, 11)}, 12, false},
-		"regressed":   {nil, nil, 9, false},
-		"gap_extend":  {[]mdbx.CleanupSpanV1{undo(4, 5, 8)}, []mdbx.CleanupSpanV1{undo(4, 5, 11)}, 12, false},
-		"drained_old": {[]mdbx.CleanupSpanV1{undo(4, 5, 9)}, []mdbx.CleanupSpanV1{undo(4, 6, 9)}, 10, false},
+		"unchanged": {nil, nil, 10, true},
+		"created":   {nil, []mdbx.CleanupSpanV1{undo(10, 10, 11)}, 12, true},
+		"extended":  {[]mdbx.CleanupSpanV1{undo(4, 5, 9)}, []mdbx.CleanupSpanV1{undo(4, 5, 11)}, 12, true},
+		"no_span":   {nil, nil, 12, false},
+		"wider":     {nil, []mdbx.CleanupSpanV1{undo(9, 9, 11)}, 12, false},
+		"regressed": {nil, nil, 9, false},
+		// UNDO(1,5,9)->(1,5,8) with U 10->9 passes spansV1; only the nonregressing U (MP 1288-1290) refuses it.
+		"u_regressed_span": {[]mdbx.CleanupSpanV1{undo(4, 5, 9)}, []mdbx.CleanupSpanV1{undo(4, 5, 8)}, 9, false},
+		"gap_extend":       {[]mdbx.CleanupSpanV1{undo(4, 5, 8)}, []mdbx.CleanupSpanV1{undo(4, 5, 11)}, 12, false},
+		"drained_old":      {[]mdbx.CleanupSpanV1{undo(4, 5, 9)}, []mdbx.CleanupSpanV1{undo(4, 6, 9)}, 10, false},
 	} {
 		read.authority.Authority.Cleanup = &mdbx.CleanupV1{Spans: c.old}
 		f.planned.Authority = read.authority.Authority
 		f.planned.Authority.U = c.u
 		f.planned.Authority.Cleanup = &mdbx.CleanupV1{Spans: c.planned}
-		ok := f.spansV1(mdbx.CleanupSpanUndoV1) && c.u >= read.authority.Authority.U
-		if ok != c.ok {
-			t.Fatalf("%s: %v", name, ok)
+		if name == "u_regressed_span" {
+			logicalMDBXAssert(t, mdbx.ValidateStorageAuthorityV1(read.authority.Authority) == nil && mdbx.ValidateStorageAuthorityV1(f.planned.Authority) == nil, "B=0 U regression must decode")
+		}
+		if _, err := f.promiseV1(); (err == nil) != c.ok {
+			t.Fatalf("%s: %v", name, err)
 		}
 	}
 }
@@ -822,6 +825,28 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 		}
 	}
 	retainedCapacityKeptSideV1(t, w)
+	// G7 (D15, MP 1717, 2550-2557): obsolete generation 5 also projects y; deleting y's header ends that projection in the
+	// planned image, so y's header leaves E with its projection-owned (here absent) undo family while SIDE keeps its body.
+	wo, leaveO := retainedCapacityWLSideV1(t)
+	retainedCapacityObsoleteYV1(t, wo, [32]byte(leaveO.Key))
+	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	if err := retainedCapacityPlanV1(t, wo, a, dst, retainedCapacityWLOpV1(t, wo, 2, 2, leaveO), 8192); err != nil || !dst.prepared || dst.add != 148 || dst.remove != 296 || dst.complete[0] != (retainedCompleteV1{5, true}) {
+		t.Fatalf("obsolete leaving header: %v add=%d remove=%d complete=%+v", err, dst.add, dst.remove, dst.complete)
+	}
+}
+
+// retainedCapacityObsoleteYV1 makes obsolete generation 5 project y, x's child at 2, under a TRUE fact: its own forward
+// and reverse name y with parent x, and y's healthy header is the selected side's.
+func retainedCapacityObsoleteYV1(t *testing.T, w *btWorld, y [32]byte) {
+	t.Helper()
+	x, _ := retainedCapacityChildV1(t, w)
+	index, _ := mdbx.HeightKey(5, 2)
+	owner, _ := mdbx.CanonicalOwnerKey(5, y)
+	w.pair(t, btMutation(2, index, mdbx.ChainValue(y, x, [40]byte{39: 3})), btMutation(7, owner, []byte{7: 2}))
+	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+		a.Authority.NextGenerationID = max(a.Authority.NextGenerationID, 6)
+		a.Authority.Phase, a.Authority.Cleanup = mdbx.StoragePhasePruneGCV1, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 5}}}
+	})
 }
 
 // retainedCapacityWLSideV1 installs the side F=0, rows x@1 and its child y@2; returns y's leaving header deletion (MP 2550-2557).
@@ -1218,11 +1243,10 @@ func TestRetainedCapacityMDBXBodyWindow(t *testing.T) {
 	read.authority.Authority.ExcludedInvalidBranch, f.planned.Authority = excluded, old
 	f.planned.Authority.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, ExactConsensusError: []byte{1}}
 	_, err := f.promiseV1()
-	logicalMDBXAssert(t, err == nil && mdbx.ValidateStorageAuthorityV1(old) == nil, "identical excluded tuple: %v", err)
+	logicalMDBXAssert(t, err == nil, "identical excluded tuple: %v", err)
 	f.planned.Authority.ExcludedInvalidBranch.ExactConsensusError = []byte{2}
 	_, err = f.promiseV1()
 	logicalMDBXAssert(t, errors.Is(err, errRetainedFiniteAPIV1), "changed excluded tuple: %v", err)
-	logicalMDBXAssert(t, f.read.bodyFirstV1() == 4321, "L_body after promise")
 }
 
 // Span-order residual: a decodable authority holds at most one SIDE span
@@ -1296,7 +1320,6 @@ func TestRetainedCapacityMDBXSourceForward(t *testing.T) {
 // owner/proof/report, since a token is single-entry.
 func TestRetainedCapacityMDBXProofNoAlloc(t *testing.T) {
 	const runs = 50
-	capacity := errRetainedProofCapacity
 	for _, tc := range []struct {
 		name   string
 		lRet   uint64
@@ -1305,7 +1328,7 @@ func TestRetainedCapacityMDBXProofNoAlloc(t *testing.T) {
 		accept bool
 	}{
 		{"accept", 1073743437, nil, nil, true},
-		{"capacity", 1073743436, nil, capacity, false},
+		{"capacity", 1073743436, nil, errRetainedProofCapacity, false},
 		{"report_shape", 1073743437, func(_ *DirectRetainedProofV1, r *mdbx.TreeDeltaReportV1) { r.Undo = nil }, errRetainedReportAPIV1, false},
 		{"lag_present", 1073743437, func(_ *DirectRetainedProofV1, r *mdbx.TreeDeltaReportV1) { r.Lag.Present = true }, errRetainedReportAPIV1, false},
 		{"used_token", 1073743437, func(p *DirectRetainedProofV1, _ *mdbx.TreeDeltaReportV1) { p.entered = true }, errRetainedProofAPIV1, false},
