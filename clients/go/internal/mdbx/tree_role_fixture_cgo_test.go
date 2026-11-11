@@ -375,7 +375,11 @@ func treeRoleEarlyFaultsV1(t *testing.T) {
 		treeRoleSeededV1(t, s, o, 1, treeRoleAppliedV1, testKA, testKC)
 		evidence, err := FixtureSelectedDamage(s, o, SelectedDamageGetEIO, site[0].(uint8), site[1].([]byte), func() {
 			mustEnvironment(t, treeRoleViewV1(t, s, o, LaneOperation, func(r *Reader, a *OperationAccount) {
-				got, err := treeRoleTryV1(t, r, a, treeRoleReqV1(treeRoleActiveV1(1, 2), TreeRoleCurrentV1), testTreeApplied(6, 9, 37))
+				bound, err := r.ObserveTreeRoleBindingV1(a, treeRoleReqV1(treeRoleActiveV1(1, 2), TreeRoleCurrentV1))
+				if err != nil || bound.Status != TreeRoleBoundV1 {
+					t.Fatalf("binding stage refused the H2 request, so the finite call never ran: status %v, %v", bound.Status, err)
+				}
+				got, err := treeRoleFiniteCallV1(t, r, a, treeRoleFinalReqV1(bound, testTreeApplied(6, 9, 37), nil))
 				if err != nil {
 					t.Fatalf("wrong endpoint did not end the finite call before the EIO-armed rank %d row: %v", site[0], err)
 				}
@@ -807,7 +811,7 @@ func treeRoleAbortV1(t *testing.T) {
 		t.Fatalf("no Qualified pair held from the frame: status %v, reader %v", held.Status, expired != nil)
 	}
 	if startupErr == nil || held.HealthyOn(expired) || reservationLive(o) != 0 {
-		t.Fatalf("abort EIO: startup %v, HealthyOn %v, live %d (fixture %v)", startupErr, held.HealthyOn(expired), reservationLive(o), err)
+		t.Fatalf("abort EIO: startup %v, HealthyOn %v, live %d", startupErr, held.HealthyOn(expired), reservationLive(o))
 	}
 	next := s.View(func(r *Reader) error {
 		if r.RequireCanonicalOwnerVerificationV1() == nil {
