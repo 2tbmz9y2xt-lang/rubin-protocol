@@ -70,6 +70,26 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	t.Run("D26_external_drain", retainedCapacityDrainV1)
 	t.Run("D24_completed_key_first_result", retainedCapacityCompletedKeyV1)
 	t.Run("D28_D14_native_qualified_header_slot", retainedCapacityHeaderSlotV1)
+	t.Run("D3_warm_reads_no_cold_row", retainedCapacityWarmNoColdV1)
+}
+
+// D3 "ZERO cold scanner calls": after a clean callback refusal keeps the
+// completed pre 1077, the next Plan on the same binding commits while a Get
+// EIO is armed on the required genesis body, a row only the cold visit reads
+// (selectivity control: the same arm is the cold first result in
+// D5_D20_D27_H1_canonical_absence_first). The arm is never reached.
+func retainedCapacityWarmNoColdV1(t *testing.T) {
+	w, child, x := retainedCapacitySideFrameV1(t)
+	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	res := retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(*mdbx.Reader, *mdbx.TreeOperationV1) error { return errors.New("refuse") })
+	logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, true) == nil && a.valid && a.exactRet == 1077, "kept pre %d", a.exactRet)
+	genesis := sha3.Sum256(initial148BlockGenesis(t)[:148])
+	next := &DirectRetainedProofV1{}
+	evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 4, genesis[:], func() {
+		res = retainedCapacityCommitV1(t, w, a, next, child, x, false)
+	})
+	res.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, harness != nil && evidence.Faults == 0 && res.err == nil && next.pre == 1077 && next.post == 1596, "warm read a cold row: %+v/%v %v", evidence, harness, res.err)
 }
 
 // D28 through actual UpdateTreeV1 on the recipe SIDE frame: the qualified
