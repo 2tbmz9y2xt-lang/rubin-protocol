@@ -796,32 +796,33 @@ func TestRetainedCapacityMDBXPromise(t *testing.T) {
 	}
 }
 
-// W/L transfer (MP 3018-3037): side F=0=H_old holds x@1 (MP 2984-2986) and its child y@2; the op
-// publishing x at 1 has W={x}, L={y}: side cleared, SIDE(3,2,2,2) owing L, W's SideLink (3,1)
-// deleted. x's header is delta 0 (148 in, 148 out); y's selected header 148 leaves E and its body
-// transfers to SIDE (0). Deleting L's SideLink or y's owed body is refused. On the lawful-retention
-// OLD (healthy y@1, x's sibling, MP 3047-3058) y's owned body deletion is refused; the side is kept.
+// W/L transfer (MP 3018-3037): side F=0=H_old holds x@1 (MP 2984-2986) and its child y@2 (298 bytes each);
+// publishing x at 1 has W={x}, L={y}: side cleared, SIDE(3,2,2,2) owing L, SideLink (3,1) deleted. x's
+// header is delta 0 (148 in, 148 out); y's header 148 leaves E, its body transfers to SIDE (0). Deleting L's
+// SideLink or y's owed body is refused. On the lawful-retention OLD (healthy y@1, x's sibling, MP 3047-3058) a
+// W-less SideLink (3,1) deletion with the side cleared and y's owned body deletion are refused; the side is kept.
 func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	wl, yh := retainedCapacityWLSideV1(t)
-	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-	if err := retainedCapacityPlanV1(t, wl, a, dst, retainedCapacityWLOpV1(t, wl), 8192); err != nil || !dst.prepared || dst.add != 148 || dst.remove != 148+148 {
-		t.Fatalf("leaving side: %v add=%d remove=%d", err, dst.add, dst.remove)
-	}
 	w, _, genesis := riGenesis(t)
-	y := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = genesis, blockStepsMedian+2 })
-	kept := retainedCapacitySelectedV1(t, w, y, 1)
+	kept := retainedCapacitySelectedV1(t, w, initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = genesis, blockStepsMedian+2 }), 1)
 	for name, c := range map[string]struct {
 		w  *btWorld
 		op *mdbx.TreeOperationV1
-		m  mdbx.Mutation
+		m  []mdbx.Mutation
 	}{
-		"L link deletion":    {wl, retainedCapacityWLOpV1(t, wl), retainedCapacityLinkDeleteV1(3, 2)},
-		"owed body deletion": {wl, retainedCapacityWLOpV1(t, wl), mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: yh[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}},
-		"owned deletion":     {w, retainedCapacityBoundOpV1(t, w), mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: kept[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}},
+		"accepted":                {wl, retainedCapacityWLOpV1(t, wl, 2), nil},
+		"link deletion without W": {w, retainedCapacityWLOpV1(t, w, 1), nil},
+		"L link deletion":         {wl, retainedCapacityWLOpV1(t, wl, 2), []mdbx.Mutation{retainedCapacityLinkDeleteV1(3, 2)}},
+		"owed body deletion":      {wl, retainedCapacityWLOpV1(t, wl, 2), []mdbx.Mutation{{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: yh[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}}},
+		"owned deletion":          {w, retainedCapacityBoundOpV1(t, w), []mdbx.Mutation{{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: kept[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}}},
 	} {
-		c.op.Pair.Mutations = append(c.op.Pair.Mutations, c.m)
-		a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-		if err := retainedCapacityPlanV1(t, c.w, a, dst, c.op, 8192); !errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst {
+		c.op.Pair.Mutations = append(c.op.Pair.Mutations, c.m...)
+		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		err := retainedCapacityPlanV1(t, c.w, a, dst, c.op, 8192)
+		if name == "accepted" && (err != nil || !dst.prepared || dst.add != 148 || dst.remove != 148+148) {
+			t.Fatalf("leaving side: %v add=%d remove=%d", err, dst.add, dst.remove)
+		}
+		if name != "accepted" && (!errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
@@ -834,19 +835,18 @@ func retainedCapacityWLSideV1(t *testing.T) (*btWorld, [32]byte) {
 	w, _, genesis := riGenesis(t)
 	child := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent = genesis })
 	x := retainedCapacitySelectedV1(t, w, child, 1)
-	raw := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = x, blockStepsMedian+2 })
-	y := retainedCapacitySelectedV1(t, w, raw, 2)
+	y := retainedCapacitySelectedV1(t, w, initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = x, blockStepsMedian+2 }), 2)
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
-		a.Authority.SelectedSide.F, a.Authority.SelectedSide.RowCount, a.Authority.SelectedSide.LogicalBytes = 0, 2, uint64(len(child)+len(raw))
+		a.Authority.SelectedSide.F, a.Authority.SelectedSide.RowCount, a.Authority.SelectedSide.LogicalBytes = 0, 2, 2*uint64(len(child))
 	})
 	return w, y
 }
 
-// retainedCapacityWLOpV1 publishes x at 1: side cleared, SIDE(3,2,2,2), SideLink (3,1) deleted.
-func retainedCapacityWLOpV1(t *testing.T, w *btWorld) *mdbx.TreeOperationV1 {
+// retainedCapacityWLOpV1 publishes x at 1: side cleared, SIDE(3,f,f,f), SideLink (3,1) deleted.
+func retainedCapacityWLOpV1(t *testing.T, w *btWorld, f uint64) *mdbx.TreeOperationV1 {
 	t.Helper()
 	op := retainedCapacityBoundOpV1(t, w)
-	retainedCapacityClearSideV1(t, w, op, 2, 2)
+	retainedCapacityClearSideV1(t, w, op, f, f)
 	op.Pair.Mutations = append(op.Pair.Mutations, retainedCapacityLinkDeleteV1(3, 1))
 	return op
 }
@@ -1061,7 +1061,7 @@ func retainedCapacityLinkDeleteV1(g, h uint64) mdbx.Mutation {
 // identical accepted proofs on the warm and the cold path.
 func TestRetainedCapacityMDBXTransferWarmCold(t *testing.T) {
 	w, _ := retainedCapacityWLSideV1(t)
-	cold, warm := retainedCapacityTwinsV1(t, w, func() *mdbx.TreeOperationV1 { return retainedCapacityWLOpV1(t, w) })
+	cold, warm := retainedCapacityTwinsV1(t, w, func() *mdbx.TreeOperationV1 { return retainedCapacityWLOpV1(t, w, 2) })
 	if cold.add != 148 || cold.remove != 148+148 {
 		t.Fatalf("transfer capture add=%d remove=%d", cold.add, cold.remove)
 	}
