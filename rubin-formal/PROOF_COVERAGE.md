@@ -126,6 +126,23 @@ changes the bridge, source-manifest disposition or manifest pin. The separate
 publication update in this PR advances `spec_section_hashes_sha3_256` in
 `proof_coverage.json` to the reviewed specification-manifest digest.
 
+The existing `utxo_state_model` row also registers the single
+`RubinFormal.RootPathComparisonV1.root_path_comparison_contract` in
+`RootPathComparisonV1.lean`, a kernel-checked property of a bounded model of the
+proposed comparison of an obtained committed root and committed path nodes of
+U_parent with the outpoints resolved present. Over abstract 288-bit keys,
+positions, node identities and sequences of obtained results, consumptions and
+unavailable reads it states: on a canonical tree holding the key, the canonical
+node and the child on the key's side of every branch with its prefix pass; passing
+positions reach the key's leaf within 288 branches; the listed wrong roots and
+nodes fail; and the first failing obtain or unavailable read decides, unaffected
+by consumptions. It has no bridge to Go or Rust code and does not prove hashing,
+root bytes, the derivation of Root(U_candidate), store reads, how a result comes
+to identify a node or any client behavior. Registration adds one theorem
+reference and one unique theorem name; the row stays
+`proved/compiler_trusted/machine_checked_universal` for its other theorems, and
+the bridge and manifest pin are unchanged.
+
 ## Текущая раскладка evidence levels
 
 - `machine_checked_universal`: 22
