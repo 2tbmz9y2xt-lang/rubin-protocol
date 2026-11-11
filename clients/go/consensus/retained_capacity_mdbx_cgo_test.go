@@ -439,7 +439,7 @@ func retainedCapacityIndexV1(g, h uint64, x, parent [32]byte) []mdbx.Mutation {
 	height := make([]byte, 8)
 	height[7] = byte(h)
 	return []mdbx.Mutation{
-		{DBI: mdbx.TreeSchemaV1DBIs()[2], Key: index, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(x, parent, [40]byte{39: byte(h + 1)})},
+		{DBI: mdbx.TreeSchemaV1DBIs()[2], Key: index, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(x, parent, [40]byte{38: byte((h + 1) >> 8), 39: byte(h + 1)})},
 		{DBI: mdbx.TreeSchemaV1DBIs()[7], Key: owner, AfterKind: mdbx.AfterLiteral, Literal: height},
 	}
 }
@@ -974,9 +974,9 @@ func retainedCapacitySelectedV1(t *testing.T, w *btWorld, raw []byte, h uint64) 
 	t.Helper()
 	hash := sha3.Sum256(raw[:148])
 	key, _ := mdbx.HeightKey(3, h)
-	w.pair(t, btMutation(3, hash[:], raw[:148]), btMutation(4, hash[:], raw), btMutation(6, key, mdbx.ChainValue(hash, [32]byte(raw[4:36]), [40]byte{39: byte(h + 1)})))
+	w.pair(t, btMutation(3, hash[:], raw[:148]), btMutation(4, hash[:], raw), btMutation(6, key, mdbx.ChainValue(hash, [32]byte(raw[4:36]), [40]byte{38: byte((h + 1) >> 8), 39: byte(h + 1)})))
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
-		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: h - 1, TipHeight: h, TipHash: hash, RowCount: 1, LogicalBytes: uint64(len(raw)), CumulativeChainwork: [40]byte{39: byte(h + 1)}}
+		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: h - 1, TipHeight: h, TipHash: hash, RowCount: 1, LogicalBytes: uint64(len(raw)), CumulativeChainwork: [40]byte{38: byte((h + 1) >> 8), 39: byte(h + 1)}}
 	})
 	return hash
 }
