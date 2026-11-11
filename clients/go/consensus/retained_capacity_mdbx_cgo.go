@@ -216,7 +216,7 @@ func retainedFactsMatchV1(read *retainedReadV1, cached [2]retainedCompleteV1) bo
 
 // initialV1 checks the initial controls in contract order.
 func (a *RetainedAccountingV1) initialV1(dst *DirectRetainedProofV1, old *mdbx.Reader, account *mdbx.OperationAccount, op *mdbx.TreeOperationV1) error {
-	if a == nil || dst == nil || old == nil || account == nil || op == nil {
+	if retainedPlanNilV1(a, dst, old, account, op) {
 		return errRetainedPlanAPIV1
 	}
 	if a.active != nil || *dst != (DirectRetainedProofV1{}) {
@@ -228,13 +228,16 @@ func (a *RetainedAccountingV1) initialV1(dst *DirectRetainedProofV1, old *mdbx.R
 	return retainedDirectCountV1(op)
 }
 
+func retainedPlanNilV1(a *RetainedAccountingV1, dst *DirectRetainedProofV1, old *mdbx.Reader, account *mdbx.OperationAccount, op *mdbx.TreeOperationV1) bool {
+	return a == nil || dst == nil || old == nil || account == nil || op == nil
+}
+
 // retainedDirectCountV1 admits exactly one primitive and no LAG kind.
 func retainedDirectCountV1(op *mdbx.TreeOperationV1) error {
 	if len(op.Primitives) != 1 {
 		return errRetainedPlanAPIV1
 	}
-	switch op.Primitives[0].Kind {
-	case mdbx.TreeKindLagForwardV1, mdbx.TreeKindLagReverseV1:
+	if kind := op.Primitives[0].Kind; kind == mdbx.TreeKindLagForwardV1 || kind == mdbx.TreeKindLagReverseV1 {
 		return errRetainedPlanAPIV1
 	}
 	return nil
@@ -286,7 +289,7 @@ func retainedHeaderSlotV1(op *mdbx.TreeOperationV1) error {
 // no Store, Reader or account call, allocates nothing and returns only
 // preinitialized errors.
 func (p *DirectRetainedProofV1) Proof(report *mdbx.TreeDeltaReportV1) error {
-	if p == nil || p.self != p || p.owner == nil || p.owner.active != p || !p.prepared || p.entered || p.applied {
+	if !p.callableV1() {
 		return errRetainedProofAPIV1
 	}
 	p.entered = true
@@ -303,6 +306,14 @@ func (p *DirectRetainedProofV1) Proof(report *mdbx.TreeDeltaReportV1) error {
 	}
 	p.post, p.accepted = post, true
 	return nil
+}
+
+// callableV1 admits only the owner's active prepared attempt, once.
+func (p *DirectRetainedProofV1) callableV1() bool {
+	if p == nil || p.self != p || p.owner == nil || p.owner.active != p {
+		return false
+	}
+	return p.prepared && !p.entered && !p.applied
 }
 
 // reportShapeV1 admits only the direct report domain of the contract table.
@@ -357,6 +368,7 @@ func retainedRoleTermV1(s, n, j uint64) (uint64, bool) {
 func (p *DirectRetainedProofV1) undoTermsV1(u mdbx.TreeUndoChargeV1) (uint64, uint64) {
 	physical := p.undo.oldCharge
 	switch u.Effect {
+	case mdbx.TreeUndoFamilyNoneV1:
 	case mdbx.TreeUndoFamilyDeletedV1:
 		physical = 0
 	case mdbx.TreeUndoFamilyWrittenV1, mdbx.TreeUndoFamilyKeptV1:

@@ -59,7 +59,7 @@ func TestRetainedCapacityMDBX(t *testing.T) {
 	t.Run("D4_LRet_below_R_and_maximal_R", func(t *testing.T) {
 		for _, limits := range []LimitsV1{NewLimitsV1(10, 5), NewLimitsV1(math.MaxUint64, math.MaxUint64)} {
 			p := retainedCapacityStructuralV1(NewRetainedAccountingV1(limits))
-			if err := p.Proof(retainedCapacityReportV1()); err != errRetainedProofCapacity || p.accepted {
+			if err := p.Proof(retainedCapacityReportV1()); !errors.Is(err, errRetainedProofCapacity) || p.accepted {
 				t.Fatalf("limits %v: %v", limits, err)
 			}
 		}
@@ -97,24 +97,24 @@ func retainedCapacityReportShapesV1(t *testing.T) {
 		p := retainedCapacityStructuralV1(NewRetainedAccountingV1(NewLimitsV1(0, math.MaxUint64)))
 		r := retainedCapacityReportV1()
 		m(r)
-		if err := p.Proof(r); err != errRetainedReportAPIV1 || p.accepted || !p.entered {
+		if err := p.Proof(r); !errors.Is(err, errRetainedReportAPIV1) || p.accepted || !p.entered {
 			t.Fatalf("shape %d: %v accepted=%v", i, err, p.accepted)
 		}
 	}
 	p := retainedCapacityStructuralV1(NewRetainedAccountingV1(NewLimitsV1(0, math.MaxUint64)))
-	if err := p.Proof(nil); err != errRetainedReportAPIV1 {
+	if err := p.Proof(nil); !errors.Is(err, errRetainedReportAPIV1) {
 		t.Fatalf("nil report: %v", err)
 	}
-	if err := p.Proof(retainedCapacityReportV1()); err != errRetainedProofAPIV1 {
+	if err := p.Proof(retainedCapacityReportV1()); !errors.Is(err, errRetainedProofAPIV1) {
 		t.Fatalf("second entry: %v", err)
 	}
 	unprepared := retainedCapacityStructuralV1(NewRetainedAccountingV1(NewLimitsV1(0, math.MaxUint64)))
 	unprepared.prepared = false
-	if err := unprepared.Proof(retainedCapacityReportV1()); err != errRetainedProofAPIV1 || unprepared.entered {
+	if err := unprepared.Proof(retainedCapacityReportV1()); !errors.Is(err, errRetainedProofAPIV1) || unprepared.entered {
 		t.Fatalf("unprepared: %v", err)
 	}
 	copied := *retainedCapacityStructuralV1(NewRetainedAccountingV1(NewLimitsV1(0, math.MaxUint64)))
-	if err := copied.Proof(retainedCapacityReportV1()); err != errRetainedProofAPIV1 {
+	if err := copied.Proof(retainedCapacityReportV1()); !errors.Is(err, errRetainedProofAPIV1) {
 		t.Fatalf("copied: %v", err)
 	}
 }
@@ -144,12 +144,12 @@ func retainedCapacityUndoEffectsV1(t *testing.T) {
 	}
 	p := retainedCapacityStructuralV1(NewRetainedAccountingV1(NewLimitsV1(0, math.MaxUint64)))
 	p.remove = p.pre
-	if err := p.Proof(retainedCapacityReportV1()); err != errRetainedProofCapacity {
+	if err := p.Proof(retainedCapacityReportV1()); !errors.Is(err, errRetainedProofCapacity) {
 		t.Fatalf("underflow: %v", err)
 	}
 	p = retainedCapacityStructuralV1(NewRetainedAccountingV1(NewLimitsV1(0, math.MaxUint64)))
 	p.add = math.MaxUint64
-	if err := p.Proof(retainedCapacityReportV1()); err != errRetainedProofCapacity {
+	if err := p.Proof(retainedCapacityReportV1()); !errors.Is(err, errRetainedProofCapacity) {
 		t.Fatalf("overflow: %v", err)
 	}
 }
@@ -187,13 +187,13 @@ func retainedCapacityInitialControlsV1(t *testing.T) {
 		a, op, dst := retainedCapacityCachedV1(), retainedCapacityDirectOpV1(), &DirectRetainedProofV1{}
 		m(op)
 		before := *a
-		if err := a.PlanDirectMDBX(dst, reader, account, op); err != errRetainedPlanAPIV1 {
+		if err := a.PlanDirectMDBX(dst, reader, account, op); !errors.Is(err, errRetainedPlanAPIV1) {
 			t.Fatalf("control %d: %v", i, err)
 		}
 		if *a != before || *dst != (DirectRetainedProofV1{}) {
 			t.Fatalf("control %d changed owner or token", i)
 		}
-		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errors.New("refused"), true); err != errRetainedApplyAPIV1 || a.valid {
+		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errors.New("refused"), true); !errors.Is(err, errRetainedApplyAPIV1) || a.valid {
 			t.Fatalf("control %d apply: %v valid=%v", i, err, a.valid)
 		}
 	}
@@ -208,13 +208,13 @@ func retainedCapacityInitialControlsV1(t *testing.T) {
 			return (*RetainedAccountingV1)(nil).PlanDirectMDBX(&DirectRetainedProofV1{}, reader, account, op)
 		},
 	} {
-		if err := call(); err != errRetainedPlanAPIV1 || !a.valid || a.active != nil {
+		if err := call(); !errors.Is(err, errRetainedPlanAPIV1) || !a.valid || a.active != nil {
 			t.Fatalf("nil control %d: %v", i, err)
 		}
 	}
 	active := &DirectRetainedProofV1{}
 	a.active = active
-	if err := a.PlanDirectMDBX(&DirectRetainedProofV1{}, reader, account, op); err != errRetainedPlanAPIV1 || a.active != active {
+	if err := a.PlanDirectMDBX(&DirectRetainedProofV1{}, reader, account, op); !errors.Is(err, errRetainedPlanAPIV1) || a.active != active {
 		t.Fatalf("active owner: %v", err)
 	}
 }
@@ -240,13 +240,13 @@ func retainedCapacityOpOnlyV1(t *testing.T) {
 	} {
 		a, op, dst := retainedCapacityCachedV1(), retainedCapacityDirectOpV1(), &DirectRetainedProofV1{}
 		m(op)
-		if err := a.PlanDirectMDBX(dst, reader, account, op); err != errRetainedShapeAPIV1 {
+		if err := a.PlanDirectMDBX(dst, reader, account, op); !errors.Is(err, errRetainedShapeAPIV1) {
 			t.Fatalf("op-only %d: %v", i, err)
 		}
 		if a.active != dst || dst.self != dst || dst.prepared || !a.valid {
 			t.Fatalf("op-only %d lost the active token", i)
 		}
-		if err := dst.Proof(retainedCapacityReportV1()); err != errRetainedProofAPIV1 {
+		if err := dst.Proof(retainedCapacityReportV1()); !errors.Is(err, errRetainedProofAPIV1) {
 			t.Fatalf("op-only %d proof: %v", i, err)
 		}
 	}
@@ -282,7 +282,7 @@ func retainedCapacityApplyMatrixV1(t *testing.T) {
 	} {
 		a := retainedCapacityCachedV1()
 		p := accepted(a)
-		if err := a.ApplyDirectMDBX(p, tc.truth, tc.stage, tc.index, tc.err, tc.clean); err != tc.wantErr || a.valid != tc.wantValid {
+		if err := a.ApplyDirectMDBX(p, tc.truth, tc.stage, tc.index, tc.err, tc.clean); !errors.Is(err, tc.wantErr) || a.valid != tc.wantValid {
 			t.Fatalf("row %d: err=%v valid=%v", i, err, a.valid)
 		}
 	}
@@ -292,7 +292,7 @@ func retainedCapacityApplyMatrixV1(t *testing.T) {
 	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); err != nil || a.valid || a.active != nil {
 		t.Fatalf("non-reusable success: %v valid=%v", err, a.valid)
 	}
-	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); err != errRetainedApplyAPIV1 {
+	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); !errors.Is(err, errRetainedApplyAPIV1) {
 		t.Fatalf("used token: %v", err)
 	}
 	// An unprepared refused attempt is consumed; a clean refusal keeps a matching completed pre.
@@ -331,7 +331,7 @@ func TestRetainedCapacityMDBXPlanPre(t *testing.T) {
 	a := NewRetainedAccountingV1(DefaultLimitsV1())
 	run := func() *DirectRetainedProofV1 {
 		dst := &DirectRetainedProofV1{}
-		if err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityDirectOpV1(), 8192); err != errRetainedPendingV1 {
+		if err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityDirectOpV1(), 8192); !errors.Is(err, errRetainedPendingV1) {
 			t.Fatalf("plan: %v", err)
 		}
 		if a.active != dst || dst.prepared || dst.entered {
@@ -367,7 +367,7 @@ func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 	// D8/T1: the op-only refusal precedes the temporary frame; the frame itself is cost-1 denied.
 	a, dst, op := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}, retainedCapacityDirectOpV1()
 	op.Primitives[0].Source = nil
-	if err := retainedCapacityPlanV1(t, w, a, dst, op, denied); err != errRetainedShapeAPIV1 || a.valid || a.active != dst {
+	if err := retainedCapacityPlanV1(t, w, a, dst, op, denied); !errors.Is(err, errRetainedShapeAPIV1) || a.valid || a.active != dst {
 		t.Fatalf("op-only under denied frame: %v", err)
 	}
 	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
@@ -379,7 +379,7 @@ func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 	op = retainedCapacityDirectOpV1()
 	op.Primitives[0].Generation, op.Primitives[0].Coverage.Generation = 9, 9
 	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != errRetainedShapeAPIV1 || a.valid || dst.roles != ([2]retainedRoleV1{}) || a.active != dst {
+	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); !errors.Is(err, errRetainedShapeAPIV1) || a.valid || dst.roles != ([2]retainedRoleV1{}) || a.active != dst {
 		t.Fatalf("relation: %v", err)
 	}
 }
