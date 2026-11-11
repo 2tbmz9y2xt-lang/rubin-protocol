@@ -86,11 +86,8 @@ func (s *Store) SelectPrunedTreeProfileV1(confirmed bool, expectedTip *Authority
 	var planned *TreeAuthorityV1
 	out.Err = reservations.WithOperation(LaneOperation, func(account *OperationAccount) error {
 		var err error
-		out.Truth, out.Stage, _, err = s.UpdateTreeV1(account, func(reader *Reader) (TreeOperationV1, error) {
-			op, a, planErr := prunedTreeCompose(reader, account, confirmed, tip, &decision, sentinel)
-			if planErr == nil {
-				planned = a
-			}
+		out.Truth, out.Stage, _, err = s.UpdateTreeV1(account, func(reader *Reader) (op TreeOperationV1, planErr error) {
+			op, planned, planErr = prunedTreeCompose(reader, account, confirmed, tip, &decision, sentinel)
 			return op, planErr
 		})
 		return err
@@ -167,9 +164,7 @@ func prunedTreeTip(reader *Reader, generation uint64, tip *AuthorityPointV1, sta
 			return nil, err
 		}
 	}
-	var prefix [8]byte
-	binary.BigEndian.PutUint64(prefix[:], generation)
-	page, err := reader.PrefixPage(TreeSchemaV1DBIs()[2], prefix[:], key, 1, 120)
+	page, err := reader.PrefixPage(TreeSchemaV1DBIs()[2], binary.BigEndian.AppendUint64(nil, generation), key, 1, 120)
 	if err != nil {
 		return nil, err
 	}

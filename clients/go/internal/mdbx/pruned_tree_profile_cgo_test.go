@@ -41,26 +41,12 @@ func prunedTreeBindingBytes(t *testing.T, p *uint64) []byte {
 	return encoded
 }
 
-// prunedTreeSameRefusal reports whether got is an *EngineError equal field by
-// field to want, the freshly built *EngineError a direct UpdateTreeV1 call on a
-// closed Store returned.
-func prunedTreeSameRefusal(got, want error) bool {
-	g, gotDirect := directTestEngineError(got)
-	w, wantDirect := directTestEngineError(want)
-	return gotDirect && wantDirect && prunedTreeSameEngineFields(g, w)
-}
-
-func prunedTreeSameEngineFields(g, w *EngineError) bool {
-	type fields struct {
-		class      EngineClass
-		operation  string
-		code       int
-		diagnostic string
-		reopen     bool
-	}
-	gf := fields{g.Class, g.Operation, g.Code, g.Diagnostic, g.ReopenRequired}
-	wf := fields{w.Class, w.Operation, w.Code, w.Diagnostic, w.ReopenRequired}
-	return gf == wf && sameError(g.Cause, w.Cause) && reflect.DeepEqual(g.TreeObservation, w.TreeObservation)
+// prunedTreeSameEngine reports whether got and want are both direct *EngineError
+// values that are deeply equal: the error a separate direct UpdateTreeV1 call returned.
+func prunedTreeSameEngine(got, want error) bool {
+	g, gok := directTestEngineError(got)
+	w, wok := directTestEngineError(want)
+	return gok && wok && reflect.DeepEqual(g, w)
 }
 
 func prunedTreeLagKey() []byte { return binary.BigEndian.AppendUint64([]byte{0x11}, 2) }
@@ -78,11 +64,6 @@ func prunedTreeBytes(t *testing.T, s *Store) []byte {
 	return out
 }
 
-func prunedTreeLow(t *testing.T) *OperationReservationOwner {
-	t.Helper()
-	return reservationOwner(t, MinReservationLimit-1)
-}
-
 func prunedTreeDecision(t *testing.T, out PrunedTreeProfileOutcomeV1, want, marker string) {
 	t.Helper()
 	if out.Decision != want || out.Authority != nil || out.Truth != CommitTruthOld || out.Stage != UpdateStagePrewrite || out.Err != nil {
@@ -97,12 +78,18 @@ func prunedTreeRefusal(t *testing.T, out PrunedTreeProfileOutcomeV1, marker stri
 	}
 }
 
-// prunedTreeLatched asserts the consumed-Store integrity route of R7, R8, R10, X1 and X2.
-func prunedTreeLatched(t *testing.T, s *Store, path string, out PrunedTreeProfileOutcomeV1, before []byte, diagnostic string, owner *OperationReservationOwner) {
+// prunedTreeOpenUnchanged asserts the Store is open and reusable with the envelope bytes unchanged.
+func prunedTreeOpenUnchanged(t *testing.T, s *Store, before []byte, marker string) {
 	t.Helper()
-	if diagnostic != "" {
-		bootstrapRefusal(t, diagnostic, out.Truth, out.Err, EngineIntegrity, operationGet, codeInvalid, diagnostic, nil, true)
+	bootstrapOpenUnchanged(t, s, marker)
+	if !bytes.Equal(prunedTreeBytes(t, s), before) {
+		t.Fatal(marker + ": envelope changed")
 	}
+}
+
+// prunedTreeConsumed asserts the refusal tuple, the CLOSED Store and the same error on reuse.
+func prunedTreeConsumed(t *testing.T, s *Store, out PrunedTreeProfileOutcomeV1, owner *OperationReservationOwner) {
+	t.Helper()
 	prunedTreeRefusal(t, out, "latched tuple")
 	if s.state != storeCLOSED {
 		t.Fatalf("latched store state %s", s.state)
@@ -111,6 +98,15 @@ func prunedTreeLatched(t *testing.T, s *Store, path string, out PrunedTreeProfil
 	if !sameError(again.Err, out.Err) || again.Truth != CommitTruthOld || again.Stage != UpdateStagePrewrite {
 		t.Fatalf("latched reuse: %+v", again)
 	}
+}
+
+// prunedTreeLatched asserts the consumed-Store integrity route of R7, R8, R10, X1 and X2.
+func prunedTreeLatched(t *testing.T, s *Store, path string, out PrunedTreeProfileOutcomeV1, before []byte, diagnostic string, owner *OperationReservationOwner) {
+	t.Helper()
+	if diagnostic != "" {
+		bootstrapRefusal(t, diagnostic, out.Truth, out.Err, EngineIntegrity, operationGet, codeInvalid, diagnostic, nil, true)
+	}
+	prunedTreeConsumed(t, s, out, owner)
 	reopened, err := OpenTreeV1(path, environmentConfig(), [32]byte{7})
 	mustEnvironment(t, err)
 	defer func() { _ = reopened.Close() }()
@@ -121,12 +117,8 @@ func prunedTreeLatched(t *testing.T, s *Store, path string, out PrunedTreeProfil
 
 // A1 holds for every confirmation and tip input: exact empty precedes D4 and D5.
 func TestPrunedTreeProfileExactEmpty(t *testing.T) {
-	for _, low := range []bool{false, true} {
+	for _, owner := range []*OperationReservationOwner{reservationOwner(t, MinReservationLimit), reservationOwner(t, MinReservationLimit-1)} {
 		s, _, _ := treeNativeStore(t)
-		owner := reservationOwner(t, MinReservationLimit)
-		if low {
-			owner = prunedTreeLow(t)
-		}
 		before := reservationLive(owner)
 		for _, confirmed := range []bool{true, false} {
 			for _, tip := range []*AuthorityPointV1{nil, {Height: 0x100000000}} {
@@ -164,24 +156,23 @@ func TestPrunedTreeProfileControl(t *testing.T) {
 		name      string
 		a         TreeAuthorityV1
 		confirmed bool
-		tip       *AuthorityPointV1
 		want      string
 	}{
-		{"A2 archive recovery", recovery, false, nil, "RECOVERY_REQUIRED"},
-		{"A2 pruned recovery", prunedRecovery, false, nil, "RECOVERY_REQUIRED"},
-		{"A2 archive recovery prune gc", recoveryGC, true, nil, "RECOVERY_REQUIRED"},
-		{"A3 pruned none", prunedTreeEnvelope(StorageProfilePrunedV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0), false, nil, "PROFILE_NOOP"},
-		{"A3 pruned gc", busyPruned, false, nil, "PROFILE_NOOP"},
-		{"A4 busy confirmed", busyArchive, true, nil, "LOCAL_BUSY"},
-		{"A4 busy unconfirmed", busyArchive, false, nil, "LOCAL_BUSY"},
-		{"A5 unconfirmed high tip", prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0), false, high, "PROFILE_CONFIRMATION_REQUIRED"},
+		{"A2 archive recovery", recovery, false, "RECOVERY_REQUIRED"},
+		{"A2 pruned recovery", prunedRecovery, false, "RECOVERY_REQUIRED"},
+		{"A2 archive recovery prune gc", recoveryGC, true, "RECOVERY_REQUIRED"},
+		{"A3 pruned none", prunedTreeEnvelope(StorageProfilePrunedV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0), false, "PROFILE_NOOP"},
+		{"A3 pruned gc", busyPruned, false, "PROFILE_NOOP"},
+		{"A4 busy confirmed", busyArchive, true, "LOCAL_BUSY"},
+		{"A4 busy unconfirmed", busyArchive, false, "LOCAL_BUSY"},
+		{"A5 unconfirmed", prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0), false, "PROFILE_CONFIRMATION_REQUIRED"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			s, _, _ := prunedTreeSeed(t, row.a)
 			before := prunedTreeBytes(t, s)
 			// Each decision precedes the D5 tip input check, so it holds with a tip above 0xffffffff too.
-			for _, tip := range []*AuthorityPointV1{row.tip, high} {
-				for _, owner := range []*OperationReservationOwner{reservationOwner(t, MinReservationLimit), prunedTreeLow(t)} {
+			for _, tip := range []*AuthorityPointV1{nil, high} {
+				for _, owner := range []*OperationReservationOwner{reservationOwner(t, MinReservationLimit), reservationOwner(t, MinReservationLimit-1)} {
 					live := reservationLive(owner)
 					prunedTreeDecision(t, s.SelectPrunedTreeProfileV1(row.confirmed, tip, owner), row.want, row.name)
 					if reservationLive(owner) != live || !bytes.Equal(prunedTreeBytes(t, s), before) {
@@ -241,9 +232,7 @@ func TestPrunedTreeProfileStaticRefusals(t *testing.T) {
 		treeNativeError(t, out.Err, operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
 		prunedTreeRefusal(t, out, "R3 busy")
 	}
-	if !bytes.Equal(prunedTreeBytes(t, busy), busyBefore) {
-		t.Fatal("R3 busy envelope changed")
-	}
+	prunedTreeOpenUnchanged(t, busy, busyBefore, "R3 busy")
 	prunedTreeDecision(t, busy.SelectPrunedTreeProfileV1(false, nil, o), "PROFILE_CONFIRMATION_REQUIRED", "R3 busy reusable")
 
 	closed, _, _ := prunedTreeSeed(t, archive)
@@ -255,7 +244,7 @@ func TestPrunedTreeProfileStaticRefusals(t *testing.T) {
 	}))
 	for _, in := range inputs {
 		out = closed.SelectPrunedTreeProfileV1(in.confirmed, in.tip, o)
-		if !prunedTreeSameRefusal(out.Err, direct.err) {
+		if !prunedTreeSameEngine(out.Err, direct.err) {
 			t.Fatalf("R3 closed: %+v vs %+v", out, direct)
 		}
 		if out.Truth != direct.truth || out.Stage != direct.stage || out.Decision != "" || out.Authority != nil {
@@ -267,19 +256,16 @@ func TestPrunedTreeProfileStaticRefusals(t *testing.T) {
 func TestPrunedTreeProfileTipInput(t *testing.T) {
 	s, _, o := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0))
 	before := prunedTreeBytes(t, s)
-	out := s.SelectPrunedTreeProfileV1(true, &AuthorityPointV1{Height: 0x100000000}, prunedTreeLow(t))
+	out := s.SelectPrunedTreeProfileV1(true, &AuthorityPointV1{Height: 0x100000000}, reservationOwner(t, MinReservationLimit-1))
 	treeNativeError(t, out.Err, operationUpdate, EngineInvalidInput, codeEINVAL, "invalid pruned tree profile tip", nil)
 	prunedTreeRefusal(t, out, "R4 tip")
 	// Height 0xffffffff is not above the bound: it passes D5 and reaches D6's refusal.
-	edge := s.SelectPrunedTreeProfileV1(true, &AuthorityPointV1{Height: 0xffffffff}, prunedTreeLow(t))
+	edge := s.SelectPrunedTreeProfileV1(true, &AuthorityPointV1{Height: 0xffffffff}, reservationOwner(t, MinReservationLimit-1))
 	if !IsOperationReservationCapacity(edge.Err) {
 		t.Fatalf("R4 boundary 0xffffffff: %+v", edge)
 	}
 	prunedTreeRefusal(t, edge, "R4 boundary")
-	bootstrapOpenUnchanged(t, s, "R4 tip")
-	if !bytes.Equal(prunedTreeBytes(t, s), before) {
-		t.Fatal("R4 envelope changed")
-	}
+	prunedTreeOpenUnchanged(t, s, before, "R4 tip")
 	prunedTreeDecision(t, s.SelectPrunedTreeProfileV1(true, &AuthorityPointV1{BlockHash: modelHash(1)}, o), "STALE_LOCAL_PLAN", "R4 reusable")
 }
 
@@ -288,15 +274,12 @@ func TestPrunedTreeProfileCapacity(t *testing.T) {
 	for _, tip := range []*AuthorityPointV1{nil, {BlockHash: modelHash(1)}} {
 		s, path, o := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0))
 		before := prunedTreeBytes(t, s)
-		out := s.SelectPrunedTreeProfileV1(true, tip, prunedTreeLow(t))
+		out := s.SelectPrunedTreeProfileV1(true, tip, reservationOwner(t, MinReservationLimit-1))
 		if !IsOperationReservationCapacity(out.Err) {
 			t.Fatalf("R5 capacity: %+v", out)
 		}
 		prunedTreeRefusal(t, out, "R5 capacity")
-		bootstrapOpenUnchanged(t, s, "R5 capacity")
-		if !bytes.Equal(prunedTreeBytes(t, s), before) {
-			t.Fatal("R5 envelope changed")
-		}
+		prunedTreeOpenUnchanged(t, s, before, "R5 capacity")
 		out = s.SelectPrunedTreeProfileV1(true, tip, o)
 		if tip != nil {
 			prunedTreeDecision(t, out, "STALE_LOCAL_PLAN", "R5 follow-up stale")
@@ -320,15 +303,13 @@ func TestPrunedTreeProfileCapacity(t *testing.T) {
 	}
 }
 
-// TestPrunedTreeProfileMissingBinding is R10; U=1 also differs from the nil
-// tip's promise 0 (R8), and D8 refuses the missing binding before D9.
+// TestPrunedTreeProfileMissingBinding is R10 (Capacity's nil-tip follow-up covers U=0);
+// U=1 also differs from the nil tip's promise 0 (R8), and D8 refuses the missing binding before D9.
 func TestPrunedTreeProfileMissingBinding(t *testing.T) {
-	for _, u := range []uint64{0, 1} {
-		s, path, o := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, u))
-		before := prunedTreeBytes(t, s)
-		out := s.SelectPrunedTreeProfileV1(true, nil, o)
-		prunedTreeLatched(t, s, path, out, before, "missing pruned tree profile root binding", o)
-	}
+	s, path, o := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 1))
+	before := prunedTreeBytes(t, s)
+	out := s.SelectPrunedTreeProfileV1(true, nil, o)
+	prunedTreeLatched(t, s, path, out, before, "missing pruned tree profile root binding", o)
 }
 
 // TestPrunedTreeProfileSizeBound is R11 (the tip row is paired with its rank-7
@@ -340,10 +321,9 @@ func TestPrunedTreeProfileSizeBound(t *testing.T) {
 		over bool
 		p    uint64
 	}{{false, 4320}, {true, 4320}, {true, 4881}} {
-		over := row.over
 		// authoritySize before the call: 40 + 44 + len(error); after: +1+9+24.
 		n := MaxMetadataBytes - 27 - 84 - 34
-		if over {
+		if row.over {
 			n++
 		}
 		a := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 18561)
@@ -352,10 +332,9 @@ func TestPrunedTreeProfileSizeBound(t *testing.T) {
 		tip := &AuthorityPointV1{Height: 20000, BlockHash: modelHash(20000)}
 		key, err := HeightKey(1, 20000)
 		mustEnvironment(t, err)
-		p := row.p
 		dbis := TreeSchemaV1DBIs()
 		op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{
-			{DBI: dbis[0], Key: prunedTreeLagKey(), AfterKind: AfterLiteral, Literal: prunedTreeBindingBytes(t, &p)},
+			{DBI: dbis[0], Key: prunedTreeLagKey(), AfterKind: AfterLiteral, Literal: prunedTreeBindingBytes(t, &row.p)},
 			{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: ChainValue(tip.BlockHash, [32]byte{}, modelWork(false))},
 			{DBI: dbis[7], Key: append(binary.BigEndian.AppendUint64(nil, 1), tip.BlockHash[:]...), AfterKind: AfterLiteral, Literal: binary.BigEndian.AppendUint64(nil, 20000)},
 		}}}
@@ -364,24 +343,22 @@ func TestPrunedTreeProfileSizeBound(t *testing.T) {
 		mustEnvironment(t, r.err)
 		before := prunedTreeBytes(t, s)
 		out := s.SelectPrunedTreeProfileV1(true, tip, o)
-		if !over {
+		if !row.over {
 			if out.Err != nil || out.Truth != CommitTruthNew || out.Authority == nil || len(prunedTreeBytes(t, s)) != MaxMetadataBytes {
 				t.Fatalf("R11 control at the bound: %+v", out)
 			}
 			continue
 		}
-		if p == 4881 {
+		if row.p == 4881 {
 			treeNativeError(t, out.Err, operationUpdate, EngineLocalInvariant, codeProblem, "invalid pruned tree profile replacement", nil)
 			prunedTreeRefusal(t, out, "R11 validity before size")
-			bootstrapOpenUnchanged(t, s, "R11 validity before size")
+			prunedTreeOpenUnchanged(t, s, before, "R11 validity before size")
 			continue
 		}
 		bootstrapRefusal(t, "R11 size bound", out.Truth, out.Err, EngineCapacity, operationUpdate, codeTooLarge, "Update Batch exceeds bound", nil, false)
-		if out.Stage != UpdateStagePrewrite || out.Authority != nil || out.Decision != "" || s.state != storeOPEN {
-			t.Fatalf("R11 size bound: %+v state %s", out, s.state)
+		if out.Stage != UpdateStagePrewrite || out.Authority != nil || out.Decision != "" {
+			t.Fatalf("R11 size bound: %+v", out)
 		}
-		if !bytes.Equal(prunedTreeBytes(t, s), before) {
-			t.Fatal("R11 envelope changed")
-		}
+		prunedTreeOpenUnchanged(t, s, before, "R11 size bound")
 	}
 }

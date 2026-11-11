@@ -211,12 +211,6 @@ func prunedTreeEngineDrift(t *testing.T, tip *AuthorityPointV1, u uint64, p *uin
 	return r.truth, r.stage, r.err
 }
 
-func prunedTreeSameEngine(got, want error) bool {
-	g, gok := directTestEngineError(got)
-	w, wok := directTestEngineError(want)
-	return gok && wok && reflect.DeepEqual(g, w)
-}
-
 func TestPrunedTreeProfileStale(t *testing.T) {
 	for _, name := range []string{"absent row", "hash differs", "row above tip", "nil tip nonempty"} {
 		t.Run(name, func(t *testing.T) {
@@ -238,10 +232,7 @@ func TestPrunedTreeProfileStale(t *testing.T) {
 			}
 			before := prunedTreeBytes(t, sc.s)
 			prunedTreeDecision(t, sc.s.SelectPrunedTreeProfileV1(true, call, sc.o), "STALE_LOCAL_PLAN", "R6 "+name)
-			bootstrapOpenUnchanged(t, sc.s, "R6 "+name)
-			if !bytes.Equal(prunedTreeBytes(t, sc.s), before) {
-				t.Fatal("R6 envelope changed")
-			}
+			prunedTreeOpenUnchanged(t, sc.s, before, "R6 "+name)
 		})
 	}
 }
@@ -321,14 +312,7 @@ func TestPrunedTreeProfileLatched(t *testing.T) {
 // cannot decode: OpenTreeV1 still refuses the same corrupt bytes, so nothing committed.
 func prunedTreeCorruptEnvelope(t *testing.T, sc *prunedTreeScene, out PrunedTreeProfileOutcomeV1) {
 	t.Helper()
-	prunedTreeRefusal(t, out, "D3 envelope read failure")
-	if sc.s.state != storeCLOSED {
-		t.Fatalf("D3 envelope store state %s", sc.s.state)
-	}
-	again := sc.s.SelectPrunedTreeProfileV1(true, nil, sc.o)
-	if !sameError(again.Err, out.Err) || again.Truth != CommitTruthOld || again.Stage != UpdateStagePrewrite {
-		t.Fatalf("D3 envelope reuse: %+v", again)
-	}
+	prunedTreeConsumed(t, sc.s, out, sc.o)
 	reopened, err := OpenTreeV1(sc.path, environmentConfig(), [32]byte{7})
 	engine, direct := directTestEngineError(err)
 	if reopened != nil || !direct || engine.Class != EngineIntegrity || engine.Diagnostic != "invalid tree native representation" {
@@ -342,10 +326,7 @@ func TestPrunedTreeProfileReplacementInvariant(t *testing.T) {
 	out := sc.s.SelectPrunedTreeProfileV1(true, sc.tip, sc.o)
 	treeNativeError(t, out.Err, operationUpdate, EngineLocalInvariant, codeProblem, "invalid pruned tree profile replacement", nil)
 	prunedTreeRefusal(t, out, "R9")
-	bootstrapOpenUnchanged(t, sc.s, "R9")
-	if !bytes.Equal(prunedTreeBytes(t, sc.s), before) {
-		t.Fatal("R9 envelope changed")
-	}
+	prunedTreeOpenUnchanged(t, sc.s, before, "R9")
 }
 
 // TestPrunedTreeProfileConsultedExclusion is A9's exclusion half (D13 fixes the
