@@ -7,11 +7,9 @@ import "testing"
 func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	t.Run("D6_D25_undo_projection_reads_actual_family", func(t *testing.T) {
 		w, _, _ := riGenesis(t)
-		op := retainedCapacityDirectOpV1()
-		op.Primitives[0].Height = 1
-		op.Primitives[0].Coverage.Height = 1
+		op := retainedCapacityBoundOpV1(t, w)
 		// Two native 20-byte entries charge 36+20 each; the 33-byte manifest key is not an entry.
-		rifFamily(t, w, op.Primitives[0].Block, 1, 2, "")
+		rifFamily(t, w, op.Primitives[0].Block, op.Primitives[0].Height, 2, "")
 		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 		if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != errRetainedPendingV1 {
 			t.Fatalf("plan: %v", err)
