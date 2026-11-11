@@ -721,3 +721,49 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 		t.Fatalf("owned deletion: %v", err)
 	}
 }
+
+// retainedCapacityObsoleteV1 stores x's healthy header under an obsolete
+// generation 5 with an empty or a paired index/reverse image naming x at 1.
+func retainedCapacityObsoleteV1(t *testing.T, w *btWorld, member bool) {
+	t.Helper()
+	genesis := sha3.Sum256(initial148BlockGenesis(t)[:148])
+	child := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent = genesis })
+	x := sha3.Sum256(child[:148])
+	rows := []mdbx.Mutation{btMutation(3, x[:], child[:148])}
+	if member {
+		index, _ := mdbx.HeightKey(5, 1)
+		owner, _ := mdbx.CanonicalOwnerKey(5, x)
+		rows = append(rows, btMutation(2, index, mdbx.ChainValue(x, genesis, [40]byte{39: 1})), btMutation(7, owner, []byte{7: 1}))
+	}
+	w.pair(t, rows...)
+	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+		a.Authority.NextGenerationID = max(a.Authority.NextGenerationID, 6)
+		a.Authority.Phase, a.Authority.Cleanup = mdbx.StoragePhasePruneGCV1, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 5}}}
+	})
+}
+
+// D10/D28 under a TRUE fact: an x projected by an obsolete generation
+// through a positive own forward and a healthy matching-parent header
+// transfers to canonical: its header leaves E (-148) as the canonical term
+// adds 148, its body and undo stay owned. A negative membership under the
+// TRUE fact excludes x: its stored body is added and its header (owned by
+// nobody in OLD) is not removed. The FALSE-fact rows are tagged fixtures.
+func TestRetainedCapacityMDBXObsoleteX(t *testing.T) {
+	for name, c := range map[string]struct {
+		member      bool
+		add, remove uint64
+	}{
+		"positive_true": {true, 148, 148},
+		"negative_true": {false, 148 + 298, 0},
+	} {
+		w, _, _ := riGenesis(t)
+		retainedCapacityChildV1(t, w)
+		retainedCapacityObsoleteV1(t, w, c.member)
+		op := retainedCapacityBoundOpV1(t, w)
+		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+		if err != nil || !dst.prepared || dst.add != c.add || dst.remove != c.remove || dst.undo.oldOwned != c.member || !dst.undo.postOwned || dst.complete[0] != (retainedCompleteV1{5, true}) {
+			t.Fatalf("%s: %v add=%d remove=%d undo=%+v complete=%+v", name, err, dst.add, dst.remove, dst.undo, dst.complete)
+		}
+	}
+}

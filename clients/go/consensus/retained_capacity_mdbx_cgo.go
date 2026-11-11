@@ -744,7 +744,7 @@ func (f *retainedFiniteV1) settleXV1(x retainedArtifactV1) error {
 	if err != nil {
 		return err
 	}
-	if err := f.addV1(RetainedHeaderChargeV1); err != nil {
+	if err := retainedSumV1(&f.proof.add, RetainedHeaderChargeV1); err != nil {
 		return err
 	}
 	if err := f.chargeV1(old, planned, 1, 0); err != nil {
@@ -771,7 +771,7 @@ func (f *retainedFiniteV1) bodyXV1(old, planned retainedArtifactV1) error {
 		return errRetainedFiniteAPIV1
 	}
 	if planned.bits&2 != 0 {
-		return f.addV1(uint64(len(c.CurrentBody)))
+		return retainedSumV1(&f.proof.add, uint64(len(c.CurrentBody)))
 	}
 	return nil
 }
@@ -819,9 +819,9 @@ func (f *retainedFiniteV1) chargeV1(old, planned retainedArtifactV1, bit, delete
 		return err
 	}
 	if o {
-		return f.removeV1(w.pre.exactRet)
+		return retainedSumV1(&f.proof.remove, w.pre.exactRet)
 	}
-	return f.addV1(w.pre.exactRet)
+	return retainedSumV1(&f.proof.add, w.pre.exactRet)
 }
 
 // pairRowsV1 settles each other identity whose header or body row the Pair
@@ -1041,20 +1041,12 @@ func retainedPrefixV1(o, p mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1,
 	return true
 }
 
-func (f *retainedFiniteV1) addV1(n uint64) error {
-	v, ok := retainedAddV1(f.proof.add, n)
+// retainedSumV1 adds n to the proof's add or remove scalar with checked arithmetic.
+func retainedSumV1(dst *uint64, n uint64) error {
+	v, ok := retainedAddV1(*dst, n)
 	if !ok {
 		return errRetainedProofCapacity
 	}
-	f.proof.add = v
-	return nil
-}
-
-func (f *retainedFiniteV1) removeV1(n uint64) error {
-	v, ok := retainedAddV1(f.proof.remove, n)
-	if !ok {
-		return errRetainedProofCapacity
-	}
-	f.proof.remove = v
+	*dst = v
 	return nil
 }
