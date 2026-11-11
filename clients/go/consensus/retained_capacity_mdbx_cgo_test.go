@@ -841,6 +841,13 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.prepared || dst.add != 148+298 || dst.remove != 148 {
 		t.Fatalf("leaving side: %v add=%d remove=%d", err, dst.add, dst.remove)
 	}
+	// A SideLink deletion at x's height without a W row is refused.
+	op = retainedCapacityBoundOpV1(t, w)
+	op.Pair.Mutations = append([]mdbx.Mutation{meta}, append(op.Pair.Mutations, retainedCapacityLinkDeleteV1(3, op.Primitives[0].Height))...)
+	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); !errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst {
+		t.Fatalf("link deletion without W: %v", err)
+	}
 	op = retainedCapacityBoundOpV1(t, w)
 	op.Pair.Mutations = append([]mdbx.Mutation{meta}, append(op.Pair.Mutations, del(4))...)
 	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
@@ -989,7 +996,8 @@ func retainedCapacityClearSideV1(t *testing.T, w *btWorld, op *mdbx.TreeOperatio
 // T4 (D2): x is the selected-side W row at the first side height. A nil-slot
 // W promotion passes lateHeader nil; x's selected header 148 leaves E as the
 // canonical term adds 148 (delta-header(x)=0), its selected body stays owned
-// (0) and its absent undo family becomes owned.
+// (0) and its absent undo family becomes owned. The publication deletes the W
+// SideLink (3,1); without that deletion the Pair is refused.
 func TestRetainedCapacityMDBXWPromotion(t *testing.T) {
 	w, _, genesis := riGenesis(t)
 	child := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent = genesis })
@@ -997,10 +1005,22 @@ func TestRetainedCapacityMDBXWPromotion(t *testing.T) {
 	op := retainedCapacityBoundOpV1(t, w)
 	logicalMDBXAssert(t, op.Primitives[0].Block == x && op.Primitives[0].Height == 1 && op.HeaderSlot == nil, "W op")
 	retainedCapacityClearSideV1(t, w, op, 1, 0)
+	bare, link := op.Pair.Mutations, retainedCapacityLinkDeleteV1(3, 1)
+	op.Pair.Mutations = append(append([]mdbx.Mutation(nil), bare...), link)
 	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.prepared || dst.add != 148 || dst.remove != 148 || dst.undo.oldOwned || !dst.undo.postOwned {
 		t.Fatalf("W promotion: %v add=%d remove=%d undo=%+v", err, dst.add, dst.remove, dst.undo)
 	}
+	op.Pair.Mutations = bare
+	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); !errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst {
+		t.Fatalf("W promotion without its SideLink deletion: %v", err)
+	}
+}
+
+func retainedCapacityLinkDeleteV1(g, h uint64) mdbx.Mutation {
+	key, _ := mdbx.HeightKey(g, h)
+	return mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[6], Key: key, BeforePresent: true, AfterKind: mdbx.AfterAbsent}
 }
 
 // T10 (D15/D3/D13): one W/L-transfer op gives identical finite captures and
@@ -1137,7 +1157,7 @@ func TestRetainedCapacityMDBXReusableUnaccepted(t *testing.T) {
 func TestRetainedCapacityMDBXBodyWindow(t *testing.T) {
 	for _, p := range []uint64{4320, 3600} {
 		var read retainedReadV1
-		read.authority.Authority = mdbx.StorageAuthorityV1{ActiveProfile: mdbx.StorageProfilePrunedV1, B: 4881, U: 19000}
+		read.authority.Authority = mdbx.StorageAuthorityV1{ActiveProfile: mdbx.StorageProfilePrunedV1, B: 4881, U: 4881 + 13680}
 		read.endpoints[1] = mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointAppliedV1, Height: p}
 		below, at := read.keepV1(retainedArtifactV1{height: p}), read.keepV1(retainedArtifactV1{height: p + 1})
 		if read.bodyFirstV1() != p+1 || below.bits&2 != 0 || at.bits&2 == 0 || at.bits&4 != 0 {

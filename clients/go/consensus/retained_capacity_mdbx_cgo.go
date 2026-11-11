@@ -555,8 +555,8 @@ func (f *retainedFiniteV1) pairV1() (retainedArtifactV1, error) {
 
 // mutationV1 admits one mutation of the direct CURRENT domain and reports
 // whether it is x's CURRENT canonical index insert. CURRENT state, x's undo
-// family, CURRENT tree-node and counter/root rows are reduced from the
-// native report; every other namespace or generation is refused.
+// family, CURRENT tree-node and counter/root rows are reduced from the native
+// report; every other namespace, generation or SideLink effect is refused.
 func (f *retainedFiniteV1) mutationV1(m *mdbx.Mutation) (bool, bool) {
 	switch m.DBI.Rank {
 	case 0:
@@ -571,9 +571,24 @@ func (f *retainedFiniteV1) mutationV1(m *mdbx.Mutation) (bool, bool) {
 		return retainedInsertV1(m) && bytes.Equal(m.Key, key), false
 	case 3, 4:
 		return f.artifactRowV1(m), false
+	case 6:
+		return f.wLinkV1(m), false
 	}
 	return false, false
 }
+
+// wLinkV1 admits only the deletion of the cleared side's SideLink at x's
+// height; restV1 requires it exactly for a W row x (MP 1480-1483, 2559-2561).
+func (f *retainedFiniteV1) wLinkV1(m *mdbx.Mutation) bool {
+	s := f.read.authority.Authority.SelectedSide
+	if s == nil || !f.changedV1() || f.planned.Authority.SelectedSide != nil {
+		return false
+	}
+	key, _ := mdbx.HeightKey(s.GenerationID, f.op.Primitives[0].Height)
+	return m.BeforePresent && m.AfterKind == mdbx.AfterAbsent && bytes.Equal(m.Key, key)
+}
+
+func retainedLinkV1(m mdbx.Mutation) bool { return m.DBI.Rank == 6 }
 
 func retainedInsertV1(m *mdbx.Mutation) bool {
 	return !m.BeforePresent && m.AfterKind == mdbx.AfterLiteral
@@ -642,13 +657,12 @@ func (f *retainedFiniteV1) deletedV1(hash [32]byte, upto int) uint8 {
 // Obsolete namespaces are untouched, so OLD and planned share the projection;
 // a header read error takes OLD's canonical header duty, as projectedV1 does.
 func (f *retainedFiniteV1) obsoleteV1(old retainedArtifactV1) (uint8, error) {
-	hash := old.hash
-	header, present, err := f.read.headerV1(hash)
+	header, present, err := f.read.headerV1(old.hash)
 	if err != nil {
 		return 0, retainedSourceV1(err, old.required&1 != 0)
 	}
-	k := retainedArtifactV1{hash: hash, generation: f.read.roles[0].generation}
-	if !present || len(header) != 148 || !retainedHeaderV1(header, retainedArtifactV1{hash: hash}) {
+	k := retainedArtifactV1{hash: old.hash, generation: f.read.roles[0].generation}
+	if !present || len(header) != 148 || !retainedHeaderV1(header, retainedArtifactV1{hash: old.hash}) {
 		return 0, nil
 	}
 	k.parent = [32]byte(header[4:36])
@@ -916,8 +930,9 @@ func retainedPromiseFixedV1(o, p *mdbx.StorageAuthorityV1) bool {
 	return same && retainedExcludedSameV1(o.ExcludedInvalidBranch, p.ExcludedInvalidBranch)
 }
 
-// retainedExcludedSameV1: a direct op never sets, clears or overwrites the
-// excluded_invalid_branch slot (MP 1855-1861).
+// retainedExcludedSameV1 requires an unchanged excluded_invalid_branch slot:
+// it is never automatically cleared or overwritten (MP 1855-1857), and any
+// other change is an effect this owner does not support.
 func retainedExcludedSameV1(x, y *mdbx.InvalidBranchV1) bool {
 	if x == nil || y == nil {
 		return x == y
@@ -953,7 +968,8 @@ func (f *retainedFiniteV1) optionalPlanV1() (bool, error) {
 }
 
 // restV1 returns the SIDE span owing L: the selected rows except a W row x
-// at the first side height. A W row elsewhere is refused.
+// at the first side height. A W row elsewhere, or a W row without its
+// SideLink deletion or that deletion without a W row, is refused.
 func (f *retainedFiniteV1) restV1() (mdbx.CleanupSpanV1, error) {
 	s, prim := f.read.authority.Authority.SelectedSide, &f.op.Primitives[0]
 	l := mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: s.GenerationID, FirstHeight: selectedSideFirst(s), LastHeight: s.TipHeight}
@@ -965,6 +981,9 @@ func (f *retainedFiniteV1) restV1() (mdbx.CleanupSpanV1, error) {
 		l.FirstHeight += w
 	}
 	l.NextHeight = l.FirstHeight
+	if (l.FirstHeight != selectedSideFirst(s)) != slices.ContainsFunc(f.op.Pair.Mutations, retainedLinkV1) {
+		return l, errRetainedFiniteAPIV1
+	}
 	return l, nil
 }
 
