@@ -171,6 +171,7 @@ def Event.isConsume : Event → Bool
 
 /-! Key lemmas. -/
 
+/-- Bit `i` of `mask k d` is bit `i` of `k` when `i < d` and false otherwise. -/
 theorem bit_mask (k : Key) (d i : Nat) : bit (mask k d) i = (decide (i < d) && bit k i) := by
   induction k generalizing d i with
   | nil => cases d <;> cases i <;> simp [mask, bit]
@@ -182,23 +183,27 @@ theorem bit_mask (k : Key) (d i : Nat) : bit (mask k d) i = (decide (i < d) && b
       | zero => simp [mask, bit]
       | succ i => simp [mask, bit, ih, Nat.succ_lt_succ_iff]
 
+/-- Keys with equal `mask` at depth `d` have equal bits below `d`. -/
 theorem bit_eq_of_mask_eq {a b : Key} {d i : Nat} (h : mask a d = mask b d) (hi : i < d) :
     bit a i = bit b i := by
   have := congrArg (fun k => bit k i) h
   simpa [bit_mask, hi] using this
 
+/-- Every tree has at least one key. -/
 theorem keys_nonempty : (t : Tree) → ∃ k, k ∈ t.keys
   | .leaf k => ⟨k, by simp [Tree.keys]⟩
   | .branch _ _ l _ =>
     let ⟨k, hk⟩ := keys_nonempty l
     ⟨k, by simp [Tree.keys, hk]⟩
 
+/-- Every key of a subtree is a key of the tree. -/
 theorem sub_keys {s t : Tree} (h : Sub s t) {k : Key} (hk : k ∈ s.keys) : k ∈ t.keys := by
   induction h with
   | refl => exact hk
   | zero _ ih => simp [Tree.keys, ih]
   | one _ ih => simp [Tree.keys, ih]
 
+/-- A subtree of a canonical tree is canonical. -/
 theorem sub_canonical {w : Nat} {s t : Tree} (h : Sub s t) (ht : Canonical w t) : Canonical w s := by
   induction h with
   | refl => exact ht
@@ -287,6 +292,7 @@ theorem mem_of_sub_prefix {w : Nat} {K : Key} {s t : Tree} (h : Sub s t) :
 
 /-! Part (a): soundness on the canonical tree. -/
 
+/-- For a key `K` of a canonical tree, the tree's node passes `nodePasses` for `K` at TOP. -/
 theorem top_passes {w : Nat} {K : Key} {t : Tree} (hc : Canonical w t) (hK : K ∈ t.keys) :
     nodePasses w K .top t.node = true := by
   cases t with
@@ -299,6 +305,8 @@ theorem top_passes {w : Nat} {K : Key} {t : Tree} (hc : Canonical w t) (hK : K �
     have hp : p = mask K d := (hc.2.1 K hK).symm
     simp [nodePasses, nodeOk, Tree.node, hd, hp]
 
+/-- For a canonical tree `c` holding `K` whose node, if a branch, is deeper than `d`,
+`nodeOk` for `K` with parent depth `d` holds for its node. -/
 theorem child_nodeOk {w d : Nat} {K : Key} {c : Tree} (hcc : Canonical w c) (hKc : K ∈ c.keys)
     (hdeep : ∀ d' p' cl cr, c = .branch d' p' cl cr → d < d') :
     nodeOk w K (some d) c.node = true := by
@@ -313,6 +321,8 @@ theorem child_nodeOk {w d : Nat} {K : Key} {c : Tree} (hcc : Canonical w c) (hKc
     have hp' : p' = mask K d' := (hcc.2.1 K hKc).symm
     simp [nodeOk, Tree.node, hlt, hd', hp']
 
+/-- In a canonical branch holding `K` with prefix `mask K d`, the node of the child on side
+`bit K d` passes `nodePasses` for `K` at that CHILD. -/
 theorem child_passes {w : Nat} {K : Key} {d : Nat} {p : Key} {l r : Tree}
     (hc : Canonical w (.branch d p l r)) (hK : K ∈ (Tree.branch d p l r).keys)
     (hp : p = mask K d) :
@@ -342,6 +352,8 @@ theorem child_passes {w : Nat} {K : Key} {d : Nat} {p : Key} {l r : Tree}
   simp only [nodePasses, hcmp, Bool.not_true, Bool.false_or]
   exact child_nodeOk hcc hKc hdeep
 
+/-- Part (a): for a key `K` of a canonical tree, its node passes at TOP and, at every branch
+subtree with prefix `mask K d`, the child on side `bit K d` passes at that CHILD. -/
 theorem soundness {w : Nat} {K : Key} {t : Tree} (hc : Canonical w t) (hK : K ∈ t.keys) :
     nodePasses w K .top t.node = true ∧
     ∀ d p l r, Sub (.branch d p l r) t → p = mask K d →
@@ -352,6 +364,8 @@ theorem soundness {w : Nat} {K : Key} {t : Tree} (hc : Canonical w t) (hK : K �
 
 /-! Part (b): progress along the path of `K`. -/
 
+/-- The path position at step `i + 1` is the CHILD, on side `bit K d0`, of a branch of depth
+`d0` that the assignment gives at the step-`i` position. -/
 theorem pathAt_succ {K : Key} {f : Pos → Node} {i : Nat} {pos : Pos}
     (h : pathAt K f (i + 1) = some pos) :
     ∃ pos0 d0 p0, pathAt K f i = some pos0 ∧ f pos0 = .branch d0 p0 ∧
@@ -372,6 +386,8 @@ theorem pathAt_succ {K : Key} {f : Pos → Node} {i : Nat} {pos : Pos}
       rw [hf] at h
       exact ⟨pos0, d0, p0, rfl, hf, (Option.some.inj h).symm⟩
 
+/-- If every path position passes, a branch of depth `d` and prefix `p` at step `i` has
+`i ≤ d`, `d ≤ w - 1` and `p = mask K d`. -/
 theorem path_branch_depth {w : Nat} {K : Key} {f : Pos → Node}
     (hpass : ∀ i pos, pathAt K f i = some pos → nodePasses w K pos (f pos) = true) :
     ∀ i pos d p, pathAt K f i = some pos → f pos = .branch d p →
@@ -399,6 +415,7 @@ theorem path_branch_depth {w : Nat} {K : Key} {f : Pos → Node}
     obtain ⟨⟨hlt, hd⟩, hp⟩ := this
     exact ⟨by omega, hd, hp⟩
 
+/-- If every path position passes, each path position is TOP or a CHILD compared for `K`. -/
 theorem path_compared {w : Nat} {K : Key} {f : Pos → Node}
     (hpass : ∀ i pos, pathAt K f i = some pos → nodePasses w K pos (f pos) = true)
     {i : Nat} {pos : Pos} (hpos : pathAt K f i = some pos) :
@@ -415,6 +432,7 @@ theorem path_compared {w : Nat} {K : Key} {f : Pos → Node}
 def BranchAt (K : Key) (f : Pos → Node) (j : Nat) : Prop :=
   ∃ pos d p, pathAt K f j = some pos ∧ f pos = .branch d p
 
+/-- If every step below `n` holds a branch, the path has a position at step `n`. -/
 theorem path_some_of_branches {K : Key} {f : Pos → Node} :
     ∀ n, (∀ j, j < n → BranchAt K f j) → ∃ pos, pathAt K f n = some pos := by
   intro n
@@ -426,6 +444,7 @@ theorem path_some_of_branches {K : Key} {f : Pos → Node} :
     refine ⟨.child d p (bit K d), ?_⟩
     simp [pathAt, hpos, step, hf]
 
+/-- Every step below `n` holds a branch, or some `m < n` is the first step without one. -/
 theorem branches_or_stop (K : Key) (f : Pos → Node) :
     ∀ n, (∀ j, j < n → BranchAt K f j) ∨
       ∃ m, m < n ∧ (∀ j, j < m → BranchAt K f j) ∧ ¬ BranchAt K f m := by
@@ -443,6 +462,8 @@ theorem branches_or_stop (K : Key) (f : Pos → Node) :
       · right; exact ⟨n, Nat.lt_succ_self n, hall, hb⟩
     · right; exact ⟨m, Nat.lt_succ_of_lt hm, hpre, hnot⟩
 
+/-- Part (b): for `0 < w`, if every path position passes, the first `n ≤ w` positions hold
+branches and the position at step `n` holds the leaf `K`. -/
 theorem progress {w : Nat} (hw : 0 < w) (K : Key) (f : Pos → Node)
     (hpass : ∀ i pos, pathAt K f i = some pos → nodePasses w K pos (f pos) = true) :
     ∃ n, n ≤ w ∧ (∀ i, i < n → ∃ pos d p, pathAt K f i = some pos ∧ f pos = .branch d p) ∧
@@ -472,6 +493,7 @@ theorem progress {w : Nat} (hw : 0 < w) (K : Key) (f : Pos → Node)
 
 /-! Part (c): refusal. -/
 
+/-- If `K ∈ present` and `r` fails for `K`, then `resultPasses w present r` is false. -/
 theorem fails_of_member {w : Nat} {present : List Key} {K : Key} {r : Result}
     (hK : K ∈ present) (h : resultPassesFor w K r = false) : resultPasses w present r = false := by
   cases hr : resultPasses w present r with
@@ -483,6 +505,7 @@ theorem fails_of_member {w : Nat} {present : List Key} {K : Key} {r : Result}
     rw [h] at this
     exact Bool.noConfusion this
 
+/-- At a position compared for `K`, a node with `nodeOk w K none n = false` fails `nodePasses`. -/
 theorem compared_node_fails {w : Nat} {K : Key} {pos : Pos} (hpos : Compared w K pos)
     {n : Node} (hn : nodeOk w K none n = false) : nodePasses w K pos n = false := by
   rcases hpos with rfl | ⟨d, hd, rfl⟩
@@ -496,6 +519,8 @@ theorem compared_node_fails {w : Nat} {K : Key} {pos : Pos} (hpos : Compared w K
       simp only [nodeOk, Bool.true_and] at hn
       simp only [nodeOk, hn, Bool.and_false, Bool.and_assoc]
 
+/-- Part (c): with `K ∈ present`, the empty-map root and each listed wrong node at a position
+compared for `K` fail `resultPasses`. -/
 theorem refusal {w : Nat} {present : List Key} {K : Key} (hK : K ∈ present) :
     resultPasses w present (.root true) = false ∧
     (∀ pos, Compared w K pos →
@@ -523,10 +548,12 @@ theorem refusal {w : Nat} {present : List Key} {K : Key} (hK : K ∈ present) :
 
 /-! Part (d): point of the failed check. -/
 
+/-- `FailsFirst` does not hold for the empty event list. -/
 theorem failsFirst_nil {w : Nat} {present : List Key} : ¬ FailsFirst w present [] := by
   rintro ⟨pre, r, post, h, _, _⟩
   cases pre <;> simp at h
 
+/-- `UnavailableFirst` does not hold for the empty event list. -/
 theorem unavailableFirst_nil {w : Nat} {present : List Key} : ¬ UnavailableFirst w present [] := by
   rintro ⟨pre, post, h, _⟩
   cases pre <;> simp at h
@@ -553,6 +580,8 @@ theorem failsFirst_cons_skip {w : Nat} {present : List Key} {e : Event} {es : Li
     · exact he h.symm
     · exact hu h
 
+/-- An event that is not unavailable and not the obtain of a failing result keeps
+`UnavailableFirst` equal to that of the remainder. -/
 theorem unavailableFirst_cons_skip {w : Nat} {present : List Key} {e : Event} {es : List Event}
     (he : e ≠ .unavailable) (hskip : ∀ r, e = .obtain r → resultPasses w present r = true) :
     UnavailableFirst w present (e :: es) ↔ UnavailableFirst w present es := by
@@ -571,6 +600,8 @@ theorem unavailableFirst_cons_skip {w : Nat} {present : List Key} {e : Event} {e
     · exact hskip r h.symm
     · exact hr r h
 
+/-- Part (d): `firstFinding` is the failed check iff `FailsFirst`, the unavailable read iff
+`UnavailableFirst`, and none iff neither holds. -/
 theorem finding_characterization (w : Nat) (present : List Key) :
     ∀ es : List Event,
       (firstFinding w present es = some .failedCheck ↔ FailsFirst w present es) ∧
@@ -621,6 +652,7 @@ theorem finding_characterization (w : Nat) (present : List Key) :
             rw [hr] at this; exact Bool.noConfusion this
         simp [firstFinding, hr, hf, hu]
 
+/-- Removing every consume event from a list leaves `firstFinding` unchanged. -/
 theorem finding_drop_consumes (w : Nat) (present : List Key) :
     ∀ es : List Event,
       firstFinding w present (es.filter (fun e => !e.isConsume)) = firstFinding w present es := by
