@@ -79,8 +79,7 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 		logicalMDBXAssert(t, err == nil && dst.prepared && dst.add == 148 && dst.remove == 296+2*(36+20), "plan: %v add=%d remove=%d", err, dst.add, dst.remove)
 		logicalMDBXAssert(t, dst.Proof(retainedCapacityGrowV1(dst, mdbx.TreeUndoChargeV1{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56})) == nil && dst.accepted, "proof")
 	})
-	t.Run("D14_D18_native_callback_refusal_witness", retainedCapacityCallbackRefusalV1)
-	t.Run("D14_native_proof_panic", retainedCapacityProofPanicV1)
+	t.Run("D3_D14_D18_native_callback_refusal_witness_warm_no_cold_row", retainedCapacityCallbackRefusalV1)
 	t.Run("D14_native_fault_tuples", retainedCapacityFaultTuplesV1)
 	t.Run("D14_native_unwinds", retainedCapacityUnwindsV1)
 	t.Run("D5_D20_D27_H1_canonical_absence_first", retainedCapacityAbsentFirstV1)
@@ -88,7 +87,6 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	t.Run("D26_external_drain", retainedCapacityDrainV1)
 	t.Run("D24_completed_key_first_result", retainedCapacityCompletedKeyV1)
 	t.Run("D28_D14_native_qualified_header_slot", retainedCapacityHeaderSlotV1)
-	t.Run("D3_warm_reads_no_cold_row", retainedCapacityWarmNoColdV1)
 	t.Run("D3_D13_reopen_reconstructs", retainedCapacityReopenV1)
 	t.Run("D16_planned_aggregate_1440", retainedCapacityAggregateV1)
 	t.Run("D3_warm_ARCHIVE16385_no_cold_row", retainedCapacityWarmArchiveV1)
@@ -225,24 +223,6 @@ func retainedCapacityReopenV1(t *testing.T) {
 	res = retainedCapacityCommitV1(t, w, a, next, child, x, false)
 	res.want(t, 2, 3, -1)
 	logicalMDBXAssert(t, res.err == nil && next.pre == 1077 && next.post == 1596, "after reopen: %v pre=%d", res.err, next.pre)
-}
-
-// D3 "ZERO cold scanner calls": after a clean callback refusal keeps the completed pre 1077, the
-// next Plan on the same binding commits while a Get EIO is armed on the required genesis body, a
-// row only the cold visit reads (selectivity control: the same arm is the cold first result in
-// D5_D20_D27_H1_canonical_absence_first). The arm is never reached.
-func retainedCapacityWarmNoColdV1(t *testing.T) {
-	w, child, x := retainedCapacitySideFrameV1(t)
-	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-	res := retainedCapacityShapedV1(t, w, a, dst, child, x, false, false, func(*mdbx.Reader, *mdbx.TreeOperationV1) error { return errors.New("refuse") })
-	logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, true) == nil && a.valid && a.exactRet == 1077, "kept pre %d", a.exactRet)
-	genesis := sha3.Sum256(initial148BlockGenesis(t)[:148])
-	next := &DirectRetainedProofV1{}
-	evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 4, genesis[:], func() {
-		res = retainedCapacityCommitV1(t, w, a, next, child, x, false)
-	})
-	res.want(t, 2, 3, -1)
-	logicalMDBXAssert(t, harness != nil && evidence.Faults == 0 && res.err == nil && next.pre == 1077 && next.post == 1596, "warm read a cold row: %+v/%v %v", evidence, harness, res.err)
 }
 
 // D28 through actual UpdateTreeV1 on the recipe SIDE frame: the qualified HeaderSlot of the bound
@@ -680,7 +660,10 @@ func retainedCapacitySideFrameV1(t *testing.T) (*btWorld, []byte, [32]byte) {
 // witness": Plan completes inside the actual UpdateTreeV1 callback, then the callback refuses with
 // E. The raw tuple is OLD/Prewrite/-1/E with no write. Under the trusted clean witness Apply
 // consumes the token and keeps the completed cold pre 1077 (the next Plan reads a marked cached
-// value: no cold visit); without it the cache is gone.
+// value: no cold visit); without it the cache is gone. D3 "ZERO cold scanner calls": that next Plan
+// commits while a Get EIO is armed on the required genesis body, a row only the cold visit reads
+// (selectivity control: the same arm is the cold first result in D5_D20_D27_H1_canonical_absence_first).
+// The arm is never reached.
 func retainedCapacityCallbackRefusalV1(t *testing.T) {
 	refuse := errors.New("callback refusal")
 	for _, clean := range []bool{true, false} {
@@ -700,47 +683,15 @@ func retainedCapacityCallbackRefusalV1(t *testing.T) {
 		}
 		logicalMDBXAssert(t, a.exactRet == 1077, "kept pre %d", a.exactRet)
 		a.exactRet = 1077 + 7
-		next := &DirectRetainedProofV1{}
-		res = retainedCapacityCommitV1(t, w, a, next, child, x, false)
+		next, genesis := &DirectRetainedProofV1{}, sha3.Sum256(initial148BlockGenesis(t)[:148])
+		evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 4, genesis[:], func() {
+			res = retainedCapacityCommitV1(t, w, a, next, child, x, false)
+		})
 		res.want(t, 2, 3, -1)
-		if res.err != nil || next.pre != 1077+7 || next.post != 1596+7 {
-			t.Fatalf("reuse after clean refusal: %v pre=%d post=%d", res.err, next.pre, next.post)
+		if harness == nil || evidence.Faults != 0 || res.err != nil || next.pre != 1077+7 || next.post != 1596+7 {
+			t.Fatalf("reuse after clean refusal: %+v/%v %v pre=%d post=%d", evidence, harness, res.err, next.pre, next.post)
 		}
 	}
-}
-
-// D14 row "Proof panic": the installed Proof accepts and then panics. The
-// native writer-position unwind writes nothing, leaves the Store OPEN and
-// resumes the panic; the caller retires the attempt with InvalidateV1 and the
-// stored image is still the pre 1077.
-func retainedCapacityProofPanicV1(t *testing.T) {
-	w, child, x := retainedCapacitySideFrameV1(t)
-	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-	type sentinel struct{}
-	var proofErr error
-	got := func() (v any) {
-		defer func() { v = recover() }()
-		retainedCapacityShapedV1(t, w, a, dst, child, x, false, false, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error {
-			op.Proof = func(r *mdbx.TreeDeltaReportV1) error {
-				proofErr = dst.Proof(r)
-				panic(sentinel{})
-			}
-			return nil
-		})
-		return nil
-	}()
-	if got != (sentinel{}) || proofErr != nil || !dst.entered || !dst.accepted || dst.post != 1596 || a.active != dst {
-		t.Fatalf("panic %v entered=%v accepted=%v post=%d", got, dst.entered, dst.accepted, dst.post)
-	}
-	btReservationsReleased(t, w.owner)
-	a.InvalidateV1()
-	logicalMDBXAssert(t, a.active == nil && !a.valid && a.exactRet == 0, "invalidate after unwind")
-	pre, err := riRead(t, w, nil)
-	logicalMDBXAssert(t, err == nil && pre.exactRet == 1077, "no write after unwind: %d %v", pre.exactRet, err)
-	next := &DirectRetainedProofV1{}
-	res := retainedCapacityCommitV1(t, w, a, next, child, x, false)
-	res.want(t, 2, 3, -1)
-	logicalMDBXAssert(t, res.err == nil && next.pre == 1077 && next.post == 1596, "store OPEN after unwind: %v", res.err)
 }
 
 // D14 rows "callback nil/E/wrappedE with ReaderF", "Proof nil then write error or commit crossed
@@ -830,19 +781,22 @@ func retainedCapacityCausesV1(t *testing.T, err error, shape int, refuse error) 
 	}
 }
 
-// D14 rows "callback panic or Goexit" and the Goexit half of "Proof
-// panic/Goexit": the native unwind resumes after clean cleanup with no write,
-// the active token stays until the caller retires it with InvalidateV1, no post
-// is cached and the Store stays OPEN for the next cold attempt.
+// D14 rows "callback panic or Goexit" and "Proof panic/Goexit" (the Proof accepts the post 1596
+// first): the native writer-position unwind resumes the exact panic value after clean cleanup with
+// no write, the active token stays until the caller retires it with InvalidateV1, no post is cached
+// and the Store stays OPEN for the next cold attempt.
 func retainedCapacityUnwindsV1(t *testing.T) {
+	type sentinel struct{}
 	for _, c := range []struct {
 		name  string
 		proof bool
 		end   func()
+		want  any
 	}{
-		{"callback_panic", false, func() { panic("callback") }},
-		{"callback_goexit", false, runtime.Goexit},
-		{"proof_goexit", true, runtime.Goexit},
+		{"callback_panic", false, func() { panic("callback") }, "callback"},
+		{"callback_goexit", false, runtime.Goexit, nil},
+		{"proof_panic", true, func() { panic(sentinel{}) }, sentinel{}},
+		{"proof_goexit", true, runtime.Goexit, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w, child, x := retainedCapacitySideFrameV1(t)
@@ -861,7 +815,7 @@ func retainedCapacityUnwindsV1(t *testing.T) {
 				returned = true
 			}()
 			got := <-done
-			if returned || proofErr != nil || (got == nil) != (c.name != "callback_panic") || !dst.prepared || dst.entered != c.proof || dst.accepted != c.proof || a.active != dst {
+			if returned || proofErr != nil || got != c.want || !dst.prepared || dst.entered != c.proof || dst.accepted != c.proof || c.proof && dst.post != 1596 || a.active != dst {
 				t.Fatalf("unwind %v returned=%v entered=%v accepted=%v", got, returned, dst.entered, dst.accepted)
 			}
 			btReservationsReleased(t, w.owner)

@@ -471,6 +471,14 @@ func TestRetainedCapacityMDBXPlanPre(t *testing.T) {
 		return dst
 	}
 	first := run()
+	// T11: x's planned canonical identity comes from the Pair insert; the OLD
+	// Reader reports x as not owned, so reading it would lose the planned bits.
+	err = w.s.View(func(reader *mdbx.Reader) error {
+		o, err := reader.CanonicalOwnerV1(first.op.Primitives[0].Generation, first.op.Primitives[0].Block)
+		logicalMDBXAssert(t, err == nil && !o.Owned, "x OLD owner: %v %+v", err, o)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "view: %v", err)
 	if first.undo.block != first.op.Primitives[0].Block || first.undo.oldCharge != 0 {
 		t.Fatalf("absent OLD family projection: %+v", first.undo)
 	}
@@ -507,8 +515,8 @@ func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 		t.Fatalf("denied frame: %v pre=%d", err, dst.pre)
 	}
 	// D12 exact/cost-1: a relation refusal runs inside the frame after the
-	// initializer, so with lane 402653184 minus the 4480400 frame held it is the
-	// result (frame admitted); one byte less denies the frame first.
+	// initializer and before roles or cold work, so with lane 402653184 minus the
+	// 4480400 frame held it is the result (frame admitted); one byte less denies the frame first.
 	for _, c := range []struct {
 		held  uint64
 		admit bool
@@ -517,16 +525,9 @@ func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 		op.Primitives[0].Generation, op.Primitives[0].Coverage.Generation = 9, 9
 		a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 		err = retainedCapacityPlanV1(t, w, a, dst, op, c.held)
-		if errors.Is(err, errRetainedShapeAPIV1) != c.admit || mdbx.IsOperationReservationCapacity(err) == c.admit || a.valid || a.active != dst {
+		if errors.Is(err, errRetainedShapeAPIV1) != c.admit || mdbx.IsOperationReservationCapacity(err) == c.admit || a.valid || a.active != dst || dst.roles != ([2]retainedRoleV1{}) {
 			t.Fatalf("held %d: %v", c.held, err)
 		}
-	}
-	// Relation refusals run after the initializer and before roles or cold work.
-	op = retainedCapacityDirectOpV1()
-	op.Primitives[0].Generation, op.Primitives[0].Coverage.Generation = 9, 9
-	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); !errors.Is(err, errRetainedShapeAPIV1) || a.valid || dst.roles != ([2]retainedRoleV1{}) || a.active != dst {
-		t.Fatalf("relation: %v", err)
 	}
 	// D8: the role relations run after the cold quantity entry, which stores
 	// its completed pre tuple first; the clean witness then preserves it.
@@ -585,6 +586,12 @@ func TestRetainedCapacityMDBXFinite(t *testing.T) {
 			op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[3], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 148)})
 		},
 		"qualified_slot": func(op *mdbx.TreeOperationV1) { op.HeaderSlot = &mdbx.TreeHeaderSlotV1{Hash: op.Primitives[0].Block} },
+		// A BodyKind 1 current body literal is owned after at its exact length.
+		"current_body": func(op *mdbx.TreeOperationV1) {
+			c, x := op.Primitives[0].Coverage, op.Primitives[0].Block
+			c.BodyKind, c.CurrentBody = 1, make([]byte, 298)
+			op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: c.CurrentBody})
+		},
 		"bodykind1_nil_slot_insert": func(op *mdbx.TreeOperationV1) {
 			c, x := op.Primitives[0].Coverage, op.Primitives[0].Block
 			c.BodyKind, c.CurrentBody = 1, make([]byte, 298)
@@ -598,19 +605,9 @@ func TestRetainedCapacityMDBXFinite(t *testing.T) {
 			t.Fatalf("%s: %v add=%d remove=%d", name, err, dst.add, dst.remove)
 		}
 	}
-	// A BodyKind 1 current body literal is owned after at its exact length.
-	_, dst, err := plan(func(op *mdbx.TreeOperationV1) {
-		c := op.Primitives[0].Coverage
-		c.BodyKind, c.CurrentBody = 1, make([]byte, 298)
-		x := op.Primitives[0].Block
-		op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: c.CurrentBody})
-	})
-	if err != nil || !dst.prepared || dst.add != 148+298 {
-		t.Fatalf("current body: %v add=%d", err, dst.add)
-	}
 	// The prepared finite capture reduces an actual-shaped report exactly:
 	// CURRENT +S56,N+1 (Tree +170 or +68 from N0), J+1, header 148, family.
-	_, dst, err = plan(func(*mdbx.TreeOperationV1) {})
+	_, dst, err := plan(func(*mdbx.TreeOperationV1) {})
 	logicalMDBXAssert(t, err == nil && dst.prepared, "plan: %v", err)
 	r, report := dst.roles[0], retainedCapacityGrowV1(dst, mdbx.TreeUndoChargeV1{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56})
 	oldTree, _ := RetainedTreeChargeV1(r.n)
@@ -619,23 +616,6 @@ func TestRetainedCapacityMDBXFinite(t *testing.T) {
 		t.Fatalf("proof: %v post=%d pre=%d", err, dst.post, dst.pre)
 	}
 	retainedCapacityKeptSideV1(t, w)
-}
-
-// T11: x's planned canonical identity comes from the Pair insert; the OLD
-// Reader reports x as not owned, so reading it would lose the planned bits.
-func TestRetainedCapacityMDBXPlannedX(t *testing.T) {
-	w, _, _ := riGenesis(t)
-	op := retainedCapacityBoundOpV1(t, w)
-	err := w.s.View(func(reader *mdbx.Reader) error {
-		o, err := reader.CanonicalOwnerV1(op.Primitives[0].Generation, op.Primitives[0].Block)
-		logicalMDBXAssert(t, err == nil && !o.Owned, "x OLD owner: %v %+v", err, o)
-		return nil
-	})
-	logicalMDBXAssert(t, err == nil, "view: %v", err)
-	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.undo.postOwned || dst.undo.oldOwned || dst.add != 148+298 {
-		t.Fatalf("planned x: %v %+v add=%d", err, dst.undo, dst.add)
-	}
 }
 
 // T12: the exchange restores OLD on return, error, panic and Goexit.
@@ -931,28 +911,17 @@ func retainedCapacityObsoleteV1(t *testing.T, w *btWorld, member bool) {
 	})
 }
 
-// D10/D28 under a TRUE fact: an x projected by an obsolete generation through a positive own
-// forward and a healthy matching-parent header transfers to canonical: its header leaves E (-148)
-// as the canonical term adds 148, its body and undo stay owned. A negative membership under the
-// TRUE fact excludes x: its stored body is added and its header (owned by nobody in OLD) is not
-// removed. The FALSE-fact rows are tagged fixtures.
+// D10/D28 under a TRUE fact: a negative membership excludes x: its stored body is added and its
+// header (owned by nobody in OLD) is not removed. The positive row is ObsoleteWarmCold's capture;
+// the FALSE-fact rows are tagged fixtures.
 func TestRetainedCapacityMDBXObsoleteX(t *testing.T) {
-	for name, c := range map[string]struct {
-		member      bool
-		add, remove uint64
-	}{
-		"positive_true": {true, 148, 148},
-		"negative_true": {false, 148 + 298, 0},
-	} {
-		w, _, _ := riGenesis(t)
-		retainedCapacityChildV1(t, w)
-		retainedCapacityObsoleteV1(t, w, c.member)
-		op := retainedCapacityBoundOpV1(t, w)
-		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-		err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
-		if err != nil || !dst.prepared || dst.add != c.add || dst.remove != c.remove || dst.undo.oldOwned != c.member || !dst.undo.postOwned || dst.complete[0] != (retainedCompleteV1{5, true}) {
-			t.Fatalf("%s: %v add=%d remove=%d undo=%+v complete=%+v", name, err, dst.add, dst.remove, dst.undo, dst.complete)
-		}
+	w, _, _ := riGenesis(t)
+	retainedCapacityChildV1(t, w)
+	retainedCapacityObsoleteV1(t, w, false)
+	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityBoundOpV1(t, w), 8192)
+	if err != nil || !dst.prepared || dst.add != 148+298 || dst.remove != 0 || dst.undo.oldOwned || !dst.undo.postOwned || dst.complete[0] != (retainedCompleteV1{5, true}) {
+		t.Fatalf("negative_true: %v add=%d remove=%d undo=%+v complete=%+v", err, dst.add, dst.remove, dst.undo, dst.complete)
 	}
 }
 
@@ -1103,7 +1072,9 @@ func TestRetainedCapacityMDBXObsoleteWarmCold(t *testing.T) {
 	retainedCapacityObsoleteV1(t, w, true)
 	op := func() *mdbx.TreeOperationV1 { return retainedCapacityBoundOpV1(t, w) }
 	cold, warm := retainedCapacityTwinsV1(t, w, op)
-	if cold.complete[0] != (retainedCompleteV1{5, true}) || cold.add != 148 || cold.remove != 148 {
+	// D10/D28 TRUE positive: x's own forward and healthy matching-parent header transfer it to
+	// canonical: its header leaves E (-148) as the canonical term adds 148, body and undo stay owned.
+	if cold.complete[0] != (retainedCompleteV1{5, true}) || cold.add != 148 || cold.remove != 148 || !cold.undo.oldOwned || !cold.undo.postOwned {
 		t.Fatalf("obsolete capture: %+v", cold)
 	}
 	retainedCapacityAgreeV1(t, cold, warm)
