@@ -491,7 +491,7 @@ func retainedCapacityFaultTuplesV1(t *testing.T) {
 	read := func(ret int) func(*mdbx.Reader, *mdbx.TreeOperationV1) error {
 		return func(r *mdbx.Reader, _ *mdbx.TreeOperationV1) error {
 			_, _, f := r.Get(mdbx.TreeSchemaV1DBIs()[3], absent)
-			return [](error){nil, refuse, fmt.Errorf("wrapped: %w", f), f}[ret]
+			return []error{nil, refuse, fmt.Errorf("wrapped: %w", f), f}[ret]
 		}
 	}
 	install := func(*mdbx.Reader, *mdbx.TreeOperationV1) error { return nil }
