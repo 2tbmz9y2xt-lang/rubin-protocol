@@ -54,6 +54,41 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 		})
 	}
 	t.Run("D4_D23_native_commit_and_companion", retainedCapacityNativeCommitV1)
+	t.Run("T18_w_row_beside_pending_side", retainedCapacityWBesidePendingV1)
+}
+
+// T18 (rejected_cases): a W row beside the rolling-prepared pending SIDE.
+// The stored selected side of generation 3 has one row at 5 (F 4, f 5) whose
+// SideLink names x; the OLD authority in this read carries the pending
+// SIDE(3,4,4,4) structurally (MP 1422-1426; the shape is structural-only, MP
+// 2984-2986, 3047-3056, 1408-1411). restV1 reads the actual SideLink through
+// optionalAtV1, finds x as W, and the L merge is refused; the same read with
+// a non-W block admits the merge SIDE(3,4,5,4) (selectivity control).
+func retainedCapacityWBesidePendingV1(t *testing.T) {
+	w, _, genesis := riGenesis(t)
+	raw := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent = genesis })
+	x := retainedCapacitySelectedV1(t, w, raw, 5)
+	span := func(first, last uint64) mdbx.CleanupSpanV1 {
+		return mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: first, NextHeight: 4, LastHeight: last}
+	}
+	for name, c := range map[string]struct {
+		block [32]byte
+		ok    bool
+	}{"w_row": {x, false}, "no_w": {[32]byte{1}, true}} {
+		err := riContext(t, w, nil, func(read *retainedReadV1) error {
+			old := read.authority
+			defer func() { read.authority = old }()
+			read.authority.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{span(4, 4)}}
+			fin := retainedFiniteV1{read: read, op: &mdbx.TreeOperationV1{Primitives: []mdbx.TreePrimitiveV1{{Height: 5, Block: c.block}}}}
+			fin.planned.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{span(4, 5)}}
+			transfer, err := fin.optionalPlanV1()
+			if (err == nil) != c.ok || err != nil && !errors.Is(err, errRetainedFiniteAPIV1) || transfer != c.ok {
+				t.Fatalf("%s: transfer=%v err=%v", name, transfer, err)
+			}
+			return nil
+		})
+		logicalMDBXAssert(t, err == nil, "%s context: %v", name, err)
+	}
 }
 
 // retainedCapacityNativeChildV1 is the recipe child of genesis: the genesis
