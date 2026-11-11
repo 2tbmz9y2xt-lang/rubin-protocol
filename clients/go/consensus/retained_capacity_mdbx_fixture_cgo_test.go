@@ -16,19 +16,24 @@ import (
 )
 
 func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
-	t.Run("D6_D25_undo_projection_reads_actual_family", func(t *testing.T) {
-		w, _, _ := riGenesis(t)
-		op := retainedCapacityBoundOpV1(t, w)
-		// Two native 20-byte entries charge 36+20 each; the 33-byte manifest key is not an entry.
-		rifFamily(t, w, op.Primitives[0].Block, op.Primitives[0].Height, 2, "")
-		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-		if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.prepared {
-			t.Fatalf("plan: %v", err)
-		}
-		if dst.undo.block != op.Primitives[0].Block || dst.undo.oldCharge != 2*(36+20) {
-			t.Fatalf("family projection %+v", dst.undo)
-		}
-	})
+	// Two native 20-byte entries charge 36+20 each; the 33-byte manifest key is
+	// not an entry. The producer's "113" family (one 21-byte entry) is its
+	// actual whole-family charge 113 (retained_image_mdbx_fixture_cgo_test.go
+	// rifUndo/whole-family), read once into the sole projection.
+	for variant, want := range map[string]uint64{"": 2 * (36 + 20), "113": 113} {
+		t.Run("D6_D25_undo_projection_reads_actual_family"+variant, func(t *testing.T) {
+			w, _, _ := riGenesis(t)
+			op := retainedCapacityBoundOpV1(t, w)
+			rifFamily(t, w, op.Primitives[0].Block, op.Primitives[0].Height, 2, variant)
+			a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+			if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.prepared {
+				t.Fatalf("plan: %v", err)
+			}
+			if dst.undo.block != op.Primitives[0].Block || dst.undo.oldCharge != want {
+				t.Fatalf("family projection %+v", dst.undo)
+			}
+		})
+	}
 	// D10/D28 under a FALSE fact: a raw index row (5,2) without reverse
 	// leaves generation 5 incomplete. A positive own forward with a healthy
 	// matching-parent header still transfers x; a negative membership is
