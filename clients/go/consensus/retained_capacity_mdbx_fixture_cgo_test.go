@@ -58,6 +58,8 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	t.Run("T18_w_row_beside_pending_side", retainedCapacityWBesidePendingV1)
 	t.Run("D4_native_frame_R_boundaries", retainedCapacityNativeBoundsV1)
 	t.Run("T19_rolling_merge_full_plan_proof", retainedCapacityRollingMergeV1)
+	t.Run("D14_D18_native_callback_refusal_witness", retainedCapacityCallbackRefusalV1)
+	t.Run("D14_native_proof_panic", retainedCapacityProofPanicV1)
 }
 
 // T18 (rejected_cases): a W row beside the rolling-prepared pending SIDE.
@@ -128,6 +130,16 @@ func retainedCapacityRolesV1(t *testing.T, w *btWorld) ([2]retainedRoleV1, [2]md
 // admissible LagForward companion at j=1.
 func retainedCapacityCommitV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, child []byte, x [32]byte, lag bool) btResult {
 	t.Helper()
+	return retainedCapacityTupleV1(t, w, a, dst, child, x, lag, func(op *mdbx.TreeOperationV1) error {
+		op.Proof = dst.Proof
+		return nil
+	})
+}
+
+// retainedCapacityTupleV1 is retainedCapacityCommitV1 with the caller's step
+// after a successful Plan: finish installs the Proof or refuses the callback.
+func retainedCapacityTupleV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, child []byte, x [32]byte, lag bool, finish func(*mdbx.TreeOperationV1) error) btResult {
+	t.Helper()
 	var result btResult
 	err := w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
 		return account.WithReservation(2<<20, func() error {
@@ -151,7 +163,9 @@ func retainedCapacityCommitV1(t *testing.T, w *btWorld, a *RetainedAccountingV1,
 				if err := a.PlanDirectMDBX(dst, r, account, &op); err != nil {
 					return mdbx.TreeOperationV1{}, err
 				}
-				op.Proof = dst.Proof
+				if err := finish(&op); err != nil {
+					return mdbx.TreeOperationV1{}, err
+				}
 				return op, nil
 			})
 			return nil
@@ -393,4 +407,71 @@ func retainedCapacitySideFrameV1(t *testing.T) (*btWorld, []byte, [32]byte) {
 		a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: 1, NextHeight: 1, LastHeight: 1}}}
 	})
 	return w, child, x
+}
+
+// D14/D18 rows "callback E, no Reader failure, clean abort; completed pre"
+// and "false/absent clean witness": Plan completes inside the actual
+// UpdateTreeV1 callback, then the callback refuses with E. The raw tuple is
+// OLD/Prewrite/-1/E with no write. Under the trusted clean witness Apply
+// consumes the token and keeps the completed cold pre 1077 (the next Plan
+// reads a marked cached value: no cold visit); without it the cache is gone.
+func retainedCapacityCallbackRefusalV1(t *testing.T) {
+	refuse := errors.New("callback refusal")
+	for _, clean := range []bool{true, false} {
+		w, child, x := retainedCapacitySideFrameV1(t)
+		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		res := retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(*mdbx.TreeOperationV1) error { return refuse })
+		res.want(t, 1, 1, -1)
+		if res.err != refuse || !dst.prepared || dst.entered || dst.pre != 1077 || a.active != dst || !a.valid {
+			t.Fatalf("clean=%v refusal: %v prepared=%v entered=%v pre=%d", clean, res.err, dst.prepared, dst.entered, dst.pre)
+		}
+		if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, clean); err != nil || a.active != nil || !dst.applied || a.valid != clean {
+			t.Fatalf("clean=%v apply: %v valid=%v", clean, err, a.valid)
+		}
+		if !clean {
+			logicalMDBXAssert(t, a.exactRet == 0, "invalidated cache keeps %d", a.exactRet)
+			continue
+		}
+		logicalMDBXAssert(t, a.exactRet == 1077, "kept pre %d", a.exactRet)
+		a.exactRet = 1077 + 7
+		next := &DirectRetainedProofV1{}
+		res = retainedCapacityCommitV1(t, w, a, next, child, x, false)
+		res.want(t, 2, 3, -1)
+		if res.err != nil || next.pre != 1077+7 || next.post != 1596+7 {
+			t.Fatalf("reuse after clean refusal: %v pre=%d post=%d", res.err, next.pre, next.post)
+		}
+	}
+}
+
+// D14 row "Proof panic": the installed Proof accepts and then panics. The
+// native writer-position unwind writes nothing, leaves the Store OPEN and
+// resumes the panic; the caller retires the attempt with InvalidateV1 and the
+// stored image is still the pre 1077.
+func retainedCapacityProofPanicV1(t *testing.T) {
+	w, child, x := retainedCapacitySideFrameV1(t)
+	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	type sentinel struct{}
+	got := func() (v any) {
+		defer func() { v = recover() }()
+		retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(op *mdbx.TreeOperationV1) error {
+			op.Proof = func(r *mdbx.TreeDeltaReportV1) error {
+				_ = dst.Proof(r)
+				panic(sentinel{})
+			}
+			return nil
+		})
+		return nil
+	}()
+	if got != (sentinel{}) || !dst.entered || !dst.accepted || dst.post != 1596 || a.active != dst {
+		t.Fatalf("panic %v entered=%v accepted=%v post=%d", got, dst.entered, dst.accepted, dst.post)
+	}
+	btReservationsReleased(t, w.owner)
+	a.InvalidateV1()
+	logicalMDBXAssert(t, a.active == nil && !a.valid && a.exactRet == 0, "invalidate after unwind")
+	pre, err := riRead(t, w, nil)
+	logicalMDBXAssert(t, err == nil && pre.exactRet == 1077, "no write after unwind: %d %v", pre.exactRet, err)
+	next := &DirectRetainedProofV1{}
+	res := retainedCapacityCommitV1(t, w, a, next, child, x, false)
+	res.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, res.err == nil && next.pre == 1077 && next.post == 1596, "store OPEN after unwind: %v", res.err)
 }

@@ -1136,3 +1136,41 @@ func TestRetainedCapacityMDBXSideOrder(t *testing.T) {
 	})
 	logicalMDBXAssert(t, err == nil, "view: %v", err)
 }
+
+// D5/D19/D20: the producer's first source result is forwarded unchanged by
+// Plan. A selected row (3,1) under the live side F=0 stores a body whose
+// anchor pair fails the complete binding (the producer's riBindingDefects
+// anchor-pair row, re-parented to genesis). The cold quantity entry returns
+// selected_damage carrying generation/height/hash, Artifact body and the
+// original *TxError cause; Plan does no finite work, keeps the active
+// unprepared token and caches no partial pre; Apply under a clean witness
+// still invalidates (no completed pre to keep).
+func TestRetainedCapacityMDBXSourceForward(t *testing.T) {
+	w, _, genesis := riGenesis(t)
+	commit := initial148BlockWitnessCommit(t)
+	pairTx := coinbaseTxWithOutputs(0, []testOutput{bindingAnchor(commit[:], 0), bindingAnchor(make([]byte, 32), 0)})
+	pair := initial148BlockFrame(t, [][]byte{pairTx}, func(h *initial148BlockHead) { h.parent = genesis })
+	hash := sha3.Sum256(pair[:148])
+	key, _ := mdbx.HeightKey(3, 1)
+	w.pair(t, btMutation(3, hash[:], pair[:148]), btMutation(4, hash[:], pair), btMutation(6, key, mdbx.ChainValue(hash, genesis, [40]byte{39: 2})))
+	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 0, TipHeight: 1, TipHash: hash, RowCount: 1, LogicalBytes: uint64(len(pair)), CumulativeChainwork: [40]byte{39: 2}}
+	})
+	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityBoundOpV1(t, w), 8192)
+	var failure *RetainedProofFailureV1
+	if !errors.As(err, &failure) || failure.Resource != "selected_damage" || failure.Damage == nil {
+		t.Fatalf("forwarded result: %T %v", err, err)
+	}
+	d := failure.Damage
+	cause, ok := any(d.Cause).(*TxError)
+	if d.Generation != 3 || d.Height != 1 || d.Hash != hash || d.Artifact != "body" || !ok || cause.Code != BLOCK_ERR_WITNESS_COMMITMENT || cause.Msg != bindingWitnessMsg || any(failure.Cause) != any(d.Cause) {
+		t.Fatalf("damage %+v cause %v", d, d.Cause)
+	}
+	if dst.prepared || a.active != dst || dst.pre != 0 || dst.add != 0 || dst.remove != 0 || a.valid {
+		t.Fatalf("after forward: prepared=%v pre=%d add=%d valid=%v", dst.prepared, dst.pre, dst.add, a.valid)
+	}
+	if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, true); err != nil || a.valid || a.active != nil || !dst.applied {
+		t.Fatalf("apply forwarded refusal: %v valid=%v", err, a.valid)
+	}
+}
