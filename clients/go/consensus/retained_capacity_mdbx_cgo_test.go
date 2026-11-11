@@ -5,6 +5,7 @@ package consensus
 import (
 	"crypto/sha3"
 	"errors"
+	"fmt"
 	"math"
 	"runtime"
 	"testing"
@@ -71,6 +72,31 @@ func TestRetainedCapacityMDBX(t *testing.T) {
 	t.Run("D8_initial_controls", retainedCapacityInitialControlsV1)
 	t.Run("D8_op_only_refusals_keep_token", retainedCapacityOpOnlyV1)
 	t.Run("D14_D18_apply_matrix", retainedCapacityApplyMatrixV1)
+	t.Run("D2_D23_equal_digest_roles_distinct", retainedCapacityEqualDigestV1)
+}
+
+// D2/D23 "equal digest roles distinct": in the actual empty pair both role
+// bindings carry the same empty RootDigest (riEmptyRole); the roles stay
+// two (generations 1 and 2, fresh 32*2), each owning its empty Tree(0)=32
+// (TREE root32), so Ret(pre) is 64, not one shared 32. A Proof over two
+// equal role terms replaces only CURRENT and keeps the LAG term (D1 1613).
+func retainedCapacityEqualDigestV1(t *testing.T) {
+	w := riNew(t)
+	err := riContext(t, w, nil, func(read *retainedReadV1) error {
+		if err := readRetainedRolesV1(read); err != nil {
+			return err
+		}
+		if read.roles[0] != (retainedRoleV1{generation: 1}) || read.roles[1] != (retainedRoleV1{generation: 2}) {
+			return fmt.Errorf("roles %+v", read.roles)
+		}
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "two roles: %v", err)
+	pre, err := riRead(t, w, nil)
+	logicalMDBXAssert(t, err == nil && pre.exactRet == 64, "equal-digest pre %d: %v", pre.exactRet, err)
+	p := retainedCapacityStructuralV1(NewRetainedAccountingV1(DefaultLimitsV1()))
+	p.roles[1] = retainedRoleV1{generation: 2, s: 56, n: 1, j: 2}
+	logicalMDBXAssert(t, p.Proof(retainedCapacityReportV1()) == nil && p.post == 1613, "equal role terms post %d", p.post)
 }
 
 func retainedCapacityReportShapesV1(t *testing.T) {
