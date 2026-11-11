@@ -1174,3 +1174,44 @@ func TestRetainedCapacityMDBXSourceForward(t *testing.T) {
 		t.Fatalf("apply forwarded refusal: %v valid=%v", err, a.valid)
 	}
 }
+
+// D12: Proof allocates nothing on acceptance and on every refusal class, and
+// each refusal is one preinitialized error value (the same identity on every
+// call, no factory or formatter). Each measured call gets its own prebuilt
+// owner/proof/report, since a token is single-entry.
+func TestRetainedCapacityMDBXProofNoAlloc(t *testing.T) {
+	const runs = 50
+	capacity := errRetainedProofCapacity
+	for _, tc := range []struct {
+		name   string
+		lRet   uint64
+		edit   func(*DirectRetainedProofV1, *mdbx.TreeDeltaReportV1)
+		want   error
+		accept bool
+	}{
+		{"accept", 1073743437, nil, nil, true},
+		{"capacity", 1073743436, nil, capacity, false},
+		{"report_shape", 1073743437, func(_ *DirectRetainedProofV1, r *mdbx.TreeDeltaReportV1) { r.Undo = nil }, errRetainedReportAPIV1, false},
+		{"lag_present", 1073743437, func(_ *DirectRetainedProofV1, r *mdbx.TreeDeltaReportV1) { r.Lag.Present = true }, errRetainedReportAPIV1, false},
+		{"used_token", 1073743437, func(p *DirectRetainedProofV1, _ *mdbx.TreeDeltaReportV1) { p.entered = true }, errRetainedProofAPIV1, false},
+	} {
+		proofs := make([]*DirectRetainedProofV1, runs+1)
+		reports := make([]*mdbx.TreeDeltaReportV1, runs+1)
+		for i := range proofs {
+			proofs[i], reports[i] = retainedCapacityStructuralV1(NewRetainedAccountingV1(NewLimitsV1(1073741824, tc.lRet))), retainedCapacityReportV1()
+			if tc.edit != nil {
+				tc.edit(proofs[i], reports[i])
+			}
+		}
+		next := 0
+		allocs := testing.AllocsPerRun(runs, func() {
+			if err := proofs[next].Proof(reports[next]); err != tc.want {
+				t.Fatalf("%s call %d: %v", tc.name, next, err)
+			}
+			next++
+		})
+		if allocs != 0 || next != runs+1 || proofs[runs].accepted != tc.accept {
+			t.Fatalf("%s: allocs=%v calls=%d accepted=%v", tc.name, allocs, next, proofs[runs].accepted)
+		}
+	}
+}
