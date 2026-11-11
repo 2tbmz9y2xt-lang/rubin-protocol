@@ -593,20 +593,42 @@ func TestRetainedCapacityMDBXExchange(t *testing.T) {
 	}
 }
 
-// T14: a planned SIDE span outside the OLD SideLink key set refuses before
-// any read (the nil Reader would panic on a read).
-func TestRetainedCapacityMDBXSideKeys(t *testing.T) {
-	var read retainedReadV1
-	read.authority.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, TipHeight: 6, RowCount: 2}
-	read.authority.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, NextHeight: 7, LastHeight: 8}}}
-	f := retainedFiniteV1{read: &read}
-	for _, c := range []struct {
-		g, next, last uint64
-		ok            bool
-	}{{3, 5, 8, true}, {3, 6, 7, true}, {3, 4, 5, false}, {3, 8, 9, false}, {4, 5, 5, false}} {
-		f.planned.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: c.g, NextHeight: c.next, LastHeight: c.last}}}
-		if err := f.sideKeysV1(); (err == nil) != c.ok {
-			t.Fatalf("span %+v: %v", c, err)
+// T14: the optional plan admits only unchanged descriptors or the W/L
+// transfer (side cleared, detached unchanged, one appended SIDE span owing
+// exactly L); x outside the side range needs no read (the nil Reader would
+// panic on one).
+func TestRetainedCapacityMDBXOptionalPlan(t *testing.T) {
+	side := &mdbx.SelectedSideV1{GenerationID: 3, TipHeight: 6, RowCount: 2}
+	pending := mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: 1, NextHeight: 2, LastHeight: 3}
+	l := mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: 5, NextHeight: 5, LastHeight: 6}
+	detached := &mdbx.DetachedSuffixV1{EntryCount: 1, Entries: []mdbx.DetachedSuffixEntryV1{{Height: 2}}}
+	op := &mdbx.TreeOperationV1{Primitives: []mdbx.TreePrimitiveV1{{Height: 9}}}
+	for name, c := range map[string]struct {
+		oldSide, plannedSide *mdbx.SelectedSideV1
+		plannedDetached      *mdbx.DetachedSuffixV1
+		planned              []mdbx.CleanupSpanV1
+		transfer, ok         bool
+	}{
+		"unchanged":        {side, &mdbx.SelectedSideV1{GenerationID: 3, TipHeight: 6, RowCount: 2}, detached, []mdbx.CleanupSpanV1{pending}, false, true},
+		"none":             {nil, nil, detached, []mdbx.CleanupSpanV1{pending}, false, true},
+		"transfer":         {side, nil, detached, []mdbx.CleanupSpanV1{pending, l}, true, true},
+		"side_changed":     {side, &mdbx.SelectedSideV1{GenerationID: 3, TipHeight: 7, RowCount: 3}, detached, []mdbx.CleanupSpanV1{pending}, false, false},
+		"side_created":     {nil, side, detached, []mdbx.CleanupSpanV1{pending}, false, false},
+		"detached_changed": {side, side, &mdbx.DetachedSuffixV1{EntryCount: 1, Entries: []mdbx.DetachedSuffixEntryV1{{Height: 3}}}, []mdbx.CleanupSpanV1{pending}, false, false},
+		"span_added":       {side, side, detached, []mdbx.CleanupSpanV1{pending, l}, false, false},
+		"l_missing":        {side, nil, detached, []mdbx.CleanupSpanV1{pending}, true, false},
+		"l_wider":          {side, nil, detached, []mdbx.CleanupSpanV1{pending, {Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: 4, NextHeight: 4, LastHeight: 6}}, true, false},
+		"pending_drained":  {side, nil, detached, []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: 1, NextHeight: 3, LastHeight: 3}, l}, true, false},
+	} {
+		var read retainedReadV1
+		read.authority.Authority.SelectedSide, read.authority.Authority.DetachedSuffix = c.oldSide, detached
+		read.authority.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{pending}}
+		f := retainedFiniteV1{read: &read, op: op}
+		f.planned.Authority.SelectedSide, f.planned.Authority.DetachedSuffix = c.plannedSide, c.plannedDetached
+		f.planned.Authority.Cleanup = &mdbx.CleanupV1{Spans: c.planned}
+		transfer, err := f.optionalPlanV1()
+		if (err == nil) != c.ok || err != nil && !errors.Is(err, errRetainedFiniteAPIV1) || c.ok && transfer != c.transfer {
+			t.Fatalf("%s: transfer=%v err=%v", name, transfer, err)
 		}
 	}
 }
@@ -645,9 +667,10 @@ func TestRetainedCapacityMDBXPromise(t *testing.T) {
 	}
 }
 
-// W/L transfer: a selected-side row y leaves (the planned authority drops the
-// selected side and the Pair deletes y's header and body). y's OLD optional
-// header 148 and body 298 leave E while x adds 148+298; the cold pre counts y.
+// W/L transfer (MP 3018-3058): the planned authority clears the selected
+// side and appends the SIDE span owing L={y}. y's selected header 148 leaves
+// E, its body transfers to SIDE (0), and x adds 148+298. Deleting y's body
+// while SIDE still owes it is an unsupported effect.
 func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	w, _, genesis := riGenesis(t)
 	y := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = genesis, blockStepsMedian+2 })
@@ -665,6 +688,10 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 			return err
 		}
 		a.Authority.SelectedSide = nil
+		if a.Authority.Cleanup == nil {
+			a.Authority.Phase, a.Authority.Cleanup = mdbx.StoragePhasePruneGCV1, &mdbx.CleanupV1{}
+		}
+		a.Authority.Cleanup.Spans = append(a.Authority.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: 5, NextHeight: 5, LastHeight: 5})
 		planned, err = a.Encode()
 		return err
 	})
@@ -674,10 +701,17 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	del := func(rank int) mdbx.Mutation {
 		return mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[rank], Key: yh[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}
 	}
-	op.Pair.Mutations = append([]mdbx.Mutation{meta}, append(op.Pair.Mutations, del(3), del(4))...)
+	base := op.Pair.Mutations
+	op.Pair.Mutations = append([]mdbx.Mutation{meta}, base...)
 	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.prepared || dst.add != 148+298 || dst.remove != 148+uint64(len(y)) {
+	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.prepared || dst.add != 148+298 || dst.remove != 148 {
 		t.Fatalf("leaving side: %v add=%d remove=%d", err, dst.add, dst.remove)
+	}
+	op = retainedCapacityBoundOpV1(t, w)
+	op.Pair.Mutations = append([]mdbx.Mutation{meta}, append(op.Pair.Mutations, del(4))...)
+	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); !errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst {
+		t.Fatalf("owed body deletion: %v", err)
 	}
 	// Keeping y owned while deleting its body is an unsupported effect.
 	op2 := retainedCapacityBoundOpV1(t, w)

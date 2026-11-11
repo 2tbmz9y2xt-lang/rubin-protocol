@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"slices"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
@@ -489,18 +490,16 @@ func (a *RetainedAccountingV1) successV1(p *DirectRetainedProofV1, truth mdbx.Co
 }
 
 // deltaV1 captures the complete finite delta: x, every other Pair header or
-// body identity and, when the authority changes, every OLD or planned
-// optional owner, each settled once between its OLD and planned union.
+// body identity and, under a W/L transfer, every OLD selected row, each
+// settled once between its OLD and planned union.
 func (f *retainedFiniteV1) deltaV1() error {
 	x, err := f.pairV1()
 	if err != nil {
 		return err
 	}
 	f.post = [2]mdbx.TreeEndpointV1{f.op.Primitives[0].Endpoint, f.read.endpoints[1]}
-	if err := f.promiseV1(); err != nil {
-		return err
-	}
-	if err := f.obsoleteV1(x); err != nil {
+	transfer, err := f.promiseV1()
+	if err != nil {
 		return err
 	}
 	if err := f.settleXV1(x); err != nil {
@@ -509,7 +508,10 @@ func (f *retainedFiniteV1) deltaV1() error {
 	if err := f.pairRowsV1(x.hash); err != nil {
 		return err
 	}
-	return f.optionalSetV1(x.hash)
+	if transfer {
+		return f.transferV1(x.hash)
+	}
+	return nil
 }
 
 // changedV1 reports whether the Pair carries a planned authority value.
@@ -622,19 +624,43 @@ func (f *retainedFiniteV1) deletedV1(hash [32]byte, upto int) uint8 {
 	return bits
 }
 
-// obsoleteV1 refuses an x already owned by an obsolete generation through the
-// producer's earlier-membership rule; a FALSE fact without positive evidence
-// is the producer's branch_data refusal.
-func (f *retainedFiniteV1) obsoleteV1(x retainedArtifactV1) error {
-	w := retainedWalkV1{read: f.read, pre: retainedPreImageV1{complete: f.proof.complete}}
-	found, err := w.earlierV1(retainedGenerationsV1(f.read.authority.Authority), x)
+// obsoleteV1 returns every kind bit when an obsolete generation projects
+// hash: a healthy header names its parent, then the producer's earlier
+// membership rule takes a positive own forward with that parent despite a
+// FALSE fact and excludes it only under a TRUE fact (FALSE is branch_data).
+// Obsolete namespaces are untouched, so OLD and planned share the projection.
+func (f *retainedFiniteV1) obsoleteV1(hash [32]byte) (uint8, error) {
+	header, present, err := f.read.headerV1(hash)
 	if err != nil {
-		return err
+		return 0, retainedSourceV1(err, false)
 	}
-	if found {
-		return errRetainedFiniteAPIV1
+	k := retainedArtifactV1{hash: hash, generation: f.read.roles[0].generation}
+	if !present || len(header) != 148 || !retainedHeaderV1(header, retainedArtifactV1{hash: hash}) {
+		return 0, nil
 	}
-	return nil
+	k.parent = [32]byte(header[4:36])
+	w := retainedWalkV1{read: f.read, pre: retainedPreImageV1{complete: f.proof.complete}}
+	found, err := w.earlierV1(retainedGenerationsV1(f.read.authority.Authority), k)
+	if err != nil || !found {
+		return 0, err
+	}
+	return 7, nil
+}
+
+// unionsV1 settles the OLD and planned unions from their seeds and adds the
+// obsolete projection, which owns every kind in both.
+func (f *retainedFiniteV1) unionsV1(old, planned retainedArtifactV1) (retainedArtifactV1, retainedArtifactV1, error) {
+	old, err := f.read.unionV1(old)
+	if err != nil {
+		return old, planned, err
+	}
+	planned, err = f.plannedOwnersV1(planned)
+	if err != nil {
+		return old, planned, err
+	}
+	ob, err := f.obsoleteV1(old.hash)
+	old.bits, planned.bits = old.bits|ob, planned.bits|ob
+	return old, planned, err
 }
 
 func retainedGenerationsV1(a mdbx.StorageAuthorityV1) int {
@@ -664,9 +690,9 @@ func (read *retainedReadV1) keepV1(k retainedArtifactV1) retainedArtifactV1 {
 }
 
 // unionV1 adds the optional owners of k.hash in read.authority order; it
-// stops once every kind is owned.
+// stops once header and body, the only optional kinds, are owned.
 func (read *retainedReadV1) unionV1(k retainedArtifactV1) (retainedArtifactV1, error) {
-	for at := uint64(0); k.bits != 7 && at < 1440; at++ {
+	for at := uint64(0); k.bits&3 != 3 && at < 1440; at++ {
 		item, present, err := read.optionalAtV1(at)
 		if err != nil || !present {
 			return k, err
@@ -713,12 +739,8 @@ func (read *retainedReadV1) plannedUnionV1(k retainedArtifactV1) (retainedArtifa
 // settleXV1 settles x: canonical header term once, E header/body by union,
 // and the sole undo projection.
 func (f *retainedFiniteV1) settleXV1(x retainedArtifactV1) error {
-	old, err := f.read.unionV1(retainedArtifactV1{hash: x.hash})
-	if err != nil {
-		return err
-	}
 	x.required = 1
-	planned, err := f.plannedOwnersV1(x)
+	old, planned, err := f.unionsV1(retainedArtifactV1{hash: x.hash}, x)
 	if err != nil {
 		return err
 	}
@@ -760,11 +782,7 @@ func (f *retainedFiniteV1) settleV1(hash [32]byte, deleted uint8) error {
 	if err != nil {
 		return err
 	}
-	old, err := f.read.unionV1(k)
-	if err != nil {
-		return err
-	}
-	planned, err := f.plannedOwnersV1(k)
+	old, planned, err := f.unionsV1(k, k)
 	if err != nil {
 		return err
 	}
@@ -825,78 +843,26 @@ func (f *retainedFiniteV1) pairRowsV1(x [32]byte) error {
 	return nil
 }
 
-// optionalSetV1 settles every OLD and planned optional owner once when the
-// authority changes; an unchanged authority keeps every optional duty.
-func (f *retainedFiniteV1) optionalSetV1(x [32]byte) error {
-	if !f.changedV1() {
-		return nil
-	}
-	if err := f.sideKeysV1(); err != nil {
-		return err
-	}
-	if err := f.optionalItemsV1(x, false); err != nil {
-		return err
-	}
-	return f.optionalItemsV1(x, true)
-}
-
-// optionalItemsV1 settles each item of the OLD or the planned optional order.
-func (f *retainedFiniteV1) optionalItemsV1(x [32]byte, planned bool) error {
-	for at := uint64(0); at < 1440; at++ {
-		item, present, err := f.optionalAtV1(at, planned)
-		if err != nil || !present {
+// transferV1 settles each OLD selected row once, other than x and the
+// identities the Pair rows settle.
+func (f *retainedFiniteV1) transferV1(x [32]byte) error {
+	for at := uint64(0); at < uint64(f.read.authority.Authority.SelectedSide.RowCount); at++ {
+		item, _, err := f.read.optionalAtV1(at)
+		if err != nil {
 			return err
 		}
-		if err := f.settleOnceV1(x, item.hash, at, planned); err != nil {
+		if item.hash == x || f.deletedV1(item.hash, len(f.op.Pair.Mutations)) != 0 {
+			continue
+		}
+		seen, err := f.read.indexOfV1(item.hash, at)
+		if err == nil && !seen {
+			err = f.settleV1(item.hash, 0)
+		}
+		if err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// optionalAtV1 reads one item of the OLD order, or of the planned order
-// under the authority exchange.
-func (f *retainedFiniteV1) optionalAtV1(at uint64, planned bool) (retainedArtifactV1, bool, error) {
-	if !planned {
-		return f.read.optionalAtV1(at)
-	}
-	var item retainedArtifactV1
-	var present bool
-	err := f.exchangeV1(func() error {
-		var err error
-		item, present, err = f.read.optionalAtV1(at)
-		return err
-	})
-	return item, present, err
-}
-
-// settleOnceV1 settles hash unless x, a Pair row or an earlier OLD (or, for
-// a planned item, any OLD or earlier planned) owner already settled it.
-func (f *retainedFiniteV1) settleOnceV1(x, hash [32]byte, at uint64, planned bool) error {
-	if hash == x || f.deletedV1(hash, len(f.op.Pair.Mutations)) != 0 {
-		return nil
-	}
-	seen, err := f.seenV1(hash, at, planned)
-	if err != nil || seen {
-		return err
-	}
-	return f.settleV1(hash, 0)
-}
-
-func (f *retainedFiniteV1) seenV1(hash [32]byte, at uint64, planned bool) (bool, error) {
-	limit := at
-	if planned {
-		limit = 1440
-	}
-	k, err := f.read.indexOfV1(hash, limit)
-	if err != nil || k || !planned {
-		return k, err
-	}
-	err = f.exchangeV1(func() error {
-		k, err = f.read.indexOfV1(hash, at)
-		return err
-	})
-	return k, err
 }
 
 func (read *retainedReadV1) indexOfV1(hash [32]byte, limit uint64) (bool, error) {
@@ -912,23 +878,104 @@ func (read *retainedReadV1) indexOfV1(hash [32]byte, limit uint64) (bool, error)
 	return false, nil
 }
 
-// promiseV1 admits only the direct promise transfer: unchanged profile, B,
-// next generation, BLOCKS and GENERATION spans, and a U increase U0->U1 that
-// creates or extends exactly UNDO(CURRENT,U0,U1-1,U0).
-func (f *retainedFiniteV1) promiseV1() error {
+// promiseV1 admits only the descriptor changes of a direct op: unchanged
+// profile, B, next generation, BLOCKS and GENERATION spans, a U increase
+// U0->U1 that creates or extends exactly UNDO(CURRENT,U0,U1-1,U0), and the
+// optional plan; it reports a W/L transfer.
+func (f *retainedFiniteV1) promiseV1() (bool, error) {
 	if !f.changedV1() {
-		return nil
+		return false, nil
 	}
 	o, p := &f.read.authority.Authority, &f.planned.Authority
 	if o.ActiveProfile != p.ActiveProfile || o.B != p.B || o.NextGenerationID != p.NextGenerationID || p.U < o.U {
-		return errRetainedFiniteAPIV1
+		return false, errRetainedFiniteAPIV1
 	}
 	for _, kind := range [3]mdbx.CleanupSpanKindV1{mdbx.CleanupSpanBlocksV1, mdbx.CleanupSpanGenerationV1, mdbx.CleanupSpanUndoV1} {
 		if !f.spansV1(kind) {
-			return errRetainedFiniteAPIV1
+			return false, errRetainedFiniteAPIV1
 		}
 	}
+	return f.optionalPlanV1()
+}
+
+// optionalPlanV1 admits unchanged optional descriptors, or the W/L transfer
+// of a live selected side (MP 3018-3058): side cleared, detached suffix
+// unchanged and one appended SIDE span of the side generation owing exactly
+// L, whose SideLinks keep their association (MP 1473-1478, 2672-2674).
+func (f *retainedFiniteV1) optionalPlanV1() (bool, error) {
+	o, p := f.read.authority.Authority, f.planned.Authority
+	if !retainedDetachedEqualV1(o.DetachedSuffix, p.DetachedSuffix) {
+		return false, errRetainedFiniteAPIV1
+	}
+	if o.SelectedSide == nil || p.SelectedSide != nil {
+		return false, f.sideSpansV1(retainedSelectedEqualV1(o.SelectedSide, p.SelectedSide), mdbx.CleanupSpanV1{})
+	}
+	l, err := f.restV1()
+	if err != nil {
+		return false, err
+	}
+	return true, f.sideSpansV1(true, l)
+}
+
+// restV1 returns the SIDE span owing L: the selected rows except a W row x
+// at the first side height. A W row elsewhere is refused.
+func (f *retainedFiniteV1) restV1() (mdbx.CleanupSpanV1, error) {
+	s, prim := f.read.authority.Authority.SelectedSide, &f.op.Primitives[0]
+	l := mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: s.GenerationID, FirstHeight: selectedSideFirst(s), LastHeight: s.TipHeight}
+	if s.RowCount != 0 && prim.Height >= l.FirstHeight && prim.Height <= l.LastHeight {
+		w, err := f.wV1(prim.Height - l.FirstHeight)
+		if err != nil {
+			return l, err
+		}
+		l.FirstHeight += w
+	}
+	l.NextHeight = l.FirstHeight
+	return l, nil
+}
+
+// wV1 returns 1 when the selected row at index at is x, the W row, which
+// must be the first side row; else 0.
+func (f *retainedFiniteV1) wV1(at uint64) (uint64, error) {
+	item, _, err := f.read.optionalAtV1(at)
+	if err != nil || item.hash != f.op.Primitives[0].Block {
+		return 0, err
+	}
+	if at != 0 {
+		return 0, errRetainedFiniteAPIV1
+	}
+	return 1, nil
+}
+
+// sideSpansV1 requires the planned SIDE spans to equal OLD, plus l appended
+// when it owes a nonempty L; same is false for an unsupported change.
+func (f *retainedFiniteV1) sideSpansV1(same bool, l mdbx.CleanupSpanV1) error {
+	o, p := f.read.authority.Authority, f.planned.Authority
+	no, np := retainedCountV1(o, mdbx.CleanupSpanSideV1), retainedCountV1(p, mdbx.CleanupSpanSideV1)
+	add := l.Kind == mdbx.CleanupSpanSideV1 && l.FirstHeight <= l.LastHeight
+	if add {
+		last, _ := retainedNthV1(p, mdbx.CleanupSpanSideV1, no)
+		same = same && np == no+1 && last == l
+	} else {
+		same = same && np == no
+	}
+	if !same || !retainedPrefixV1(o, p, mdbx.CleanupSpanSideV1, no) {
+		return errRetainedFiniteAPIV1
+	}
 	return nil
+}
+
+func retainedSelectedEqualV1(o, p *mdbx.SelectedSideV1) bool {
+	if o == nil || p == nil {
+		return o == p
+	}
+	return *o == *p
+}
+
+func retainedDetachedEqualV1(o, p *mdbx.DetachedSuffixV1) bool {
+	if o == nil || p == nil {
+		return o == p
+	}
+	return o.Cursor == p.Cursor && o.EntryCount == p.EntryCount && o.LogicalBytes == p.LogicalBytes && slices.Equal(o.Entries, p.Entries)
 }
 
 // spansV1 compares one kind's descriptors in place; UNDO admits only the
@@ -992,55 +1039,6 @@ func retainedPrefixV1(o, p mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1,
 		}
 	}
 	return true
-}
-
-// sideKeysV1 requires every SideLink key the planned descriptors read to lie
-// in the key set the OLD descriptors cover; admitted Pairs never touch the
-// staged SideLink namespace, so those keys are neither deleted nor changed.
-func (f *retainedFiniteV1) sideKeysV1() error {
-	p := f.planned.Authority
-	if s := p.SelectedSide; s != nil && s.RowCount != 0 && !f.coveredV1(s.GenerationID, selectedSideFirst(s), s.TipHeight) {
-		return errRetainedFiniteAPIV1
-	}
-	for _, s := range retainedSpansV1(p) {
-		if s.Kind == mdbx.CleanupSpanSideV1 && !f.coveredV1(s.GenerationID, s.NextHeight, s.LastHeight) {
-			return errRetainedFiniteAPIV1
-		}
-	}
-	return nil
-}
-
-// coveredV1 walks [first,last] through the OLD SideLink ranges of g.
-func (f *retainedFiniteV1) coveredV1(g, first, last uint64) bool {
-	for h := first; h <= last; {
-		end, ok := f.oldEndV1(g, h)
-		if !ok {
-			return false
-		}
-		if end >= last {
-			return true
-		}
-		h = end + 1
-	}
-	return true
-}
-
-// oldEndV1 returns the end of an OLD SideLink range of g containing h.
-func (f *retainedFiniteV1) oldEndV1(g, h uint64) (uint64, bool) {
-	o := f.read.authority.Authority
-	if retainedSelectedHasV1(o.SelectedSide, g, h) {
-		return o.SelectedSide.TipHeight, true
-	}
-	for _, s := range retainedSpansV1(o) {
-		if s.Kind == mdbx.CleanupSpanSideV1 && s.GenerationID == g && h >= s.NextHeight && h <= s.LastHeight {
-			return s.LastHeight, true
-		}
-	}
-	return 0, false
-}
-
-func retainedSelectedHasV1(s *mdbx.SelectedSideV1, g, h uint64) bool {
-	return s != nil && s.RowCount != 0 && s.GenerationID == g && h >= selectedSideFirst(s) && h <= s.TipHeight
 }
 
 func (f *retainedFiniteV1) addV1(n uint64) error {
