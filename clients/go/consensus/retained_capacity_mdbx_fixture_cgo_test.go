@@ -29,9 +29,11 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 			if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.prepared {
 				t.Fatalf("plan: %v", err)
 			}
-			if dst.undo.block != op.Primitives[0].Block || dst.undo.oldCharge != want {
-				t.Fatalf("family projection %+v", dst.undo)
+			if dst.undo.block != op.Primitives[0].Block || dst.undo.oldCharge != want || dst.add != 148+298 {
+				t.Fatalf("family projection %+v add=%d", dst.undo, dst.add)
 			}
+			// None record: x's family is acquired once (S+56, Tree 100->270, J+112, header 148, body 298, family).
+			logicalMDBXAssert(t, dst.Proof(retainedCapacityGrowV1(dst, mdbx.TreeUndoChargeV1{})) == nil && dst.post == dst.pre+784+want, "post %d pre %d", dst.post, dst.pre)
 		})
 	}
 	// D10/D28 under a FALSE fact: a raw index row (5,2) without reverse
@@ -136,12 +138,7 @@ func retainedCapacityExactAdmitV1(t *testing.T) {
 			t.Fatalf("held %d: plan=%v again=%v prepared=%v", held, plan, again, dst.prepared)
 		}
 		if exact {
-			r := dst.roles[0]
-			report := &mdbx.TreeDeltaReportV1{
-				Current: mdbx.TreeRoleDeltaV1{Present: true, Generation: r.generation, BytesBefore: r.s, CountBefore: r.n, BytesAfter: r.s + 56, CountAfter: r.n + 1, IndexAdded: 1},
-				Undo:    []mdbx.TreeUndoChargeV1{{}},
-			}
-			logicalMDBXAssert(t, dst.Proof(report) == nil && dst.accepted, "proof after Plan returned")
+			logicalMDBXAssert(t, dst.Proof(retainedCapacityGrowV1(dst, mdbx.TreeUndoChargeV1{})) == nil && dst.accepted, "proof after Plan returned")
 		}
 	}
 }
@@ -252,10 +249,7 @@ func retainedCapacityHeaderSlotV1(t *testing.T) {
 			rifSeed(t, w, 3, x[:], other)
 		}
 		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-		res := retainedCapacityShapedV1(t, w, a, dst, child, x, false, true, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error {
-			op.Proof = dst.Proof
-			return nil
-		})
+		res := retainedCapacityShapedV1(t, w, a, dst, child, x, false, true, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error { op.Proof = dst.Proof; return nil })
 		if dst.pre != 1077 || !dst.accepted || dst.post != 1596 {
 			t.Fatalf("differ=%v slot proof: pre=%d post=%d accepted=%v", differ, dst.pre, dst.post, dst.accepted)
 		}
@@ -281,6 +275,31 @@ func retainedCapacityHeaderSlotV1(t *testing.T) {
 		equal, err := mdbx.FixtureRawRowEqual(w.s, 3, x[:], other)
 		logicalMDBXAssert(t, closed != nil && err == nil && equal, "row x after refusal: closed=%v %v", closed, err)
 	}
+	// D28 "no stored header x through initializer/finite/shared probes": a one-shot Get EIO armed on headers-v1 x. The slot
+	// op proves 1596 with no Plan read of x, and the native slot read after Proof meets the fault (OLD/Prewrite/-1, EIO); the
+	// nil-slot op's Pair inserts x, so Plan's ordinary route reads it first: that EIO, no Proof (selectivity control).
+	for _, slot := range []bool{true, false} {
+		w, child, x := retainedCapacitySideFrameV1(t)
+		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		var res btResult
+		evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 3, x[:], func() {
+			res = retainedCapacityShapedV1(t, w, a, dst, child, x, false, slot, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error { op.Proof = dst.Proof; return nil })
+		})
+		var engine *mdbx.EngineError
+		read := harness == nil && evidence.Faults == 1 && res.truth == 1 && res.stage == 1 && res.index == -1 && errors.As(res.err, &engine) && engine.Class == mdbx.EngineIO
+		if !read || dst.pre != 1077 || dst.accepted != slot || dst.prepared != slot || evidence.BeginWrite != map[bool]uint64{true: 1}[slot] || slot && dst.post != 1596 {
+			t.Fatalf("slot=%v header x read: %+v/%v %v accepted=%v post=%d", slot, evidence, harness, res.err, dst.accepted, dst.post)
+		}
+	}
+	// D28/direct-shape: a BodyKind 1 literal of x whose body is SIDE-owned before is a redundant write, refused.
+	w, child, x := retainedCapacitySideFrameV1(t)
+	op := retainedCapacityBoundOpV1(t, w)
+	p := &op.Primitives[0]
+	p.Block, p.Coverage.Block, p.Coverage.BodyKind, p.Coverage.CurrentBody = x, x, 1, child
+	op.Pair.Mutations = append(retainedCapacityIndexV1(1, 1, x, [32]byte(child[4:36])), btMutation(4, x[:], child))
+	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+	logicalMDBXAssert(t, errors.Is(err, errRetainedFiniteAPIV1) && dst.pre == 1077 && !dst.prepared && a.active == dst, "redundant SIDE body literal: %v pre=%d", err, dst.pre)
 }
 
 // T18 (rejected_cases): a W row beside the rolling-prepared pending SIDE. The stored selected side of generation 3 has one
@@ -349,10 +368,7 @@ func retainedCapacityRolesV1(t *testing.T, w *btWorld) ([2]retainedRoleV1, [2]md
 // admissible LagForward companion at j=1.
 func retainedCapacityCommitV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, child []byte, x [32]byte, lag bool) btResult {
 	t.Helper()
-	return retainedCapacityTupleV1(t, w, a, dst, child, x, lag, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error {
-		op.Proof = dst.Proof
-		return nil
-	})
+	return retainedCapacityTupleV1(t, w, a, dst, child, x, lag, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error { op.Proof = dst.Proof; return nil })
 }
 
 // retainedCapacityTupleV1 is retainedCapacityCommitV1 with the caller's step
@@ -567,12 +583,7 @@ func retainedCapacityRollingMergeV1(t *testing.T) {
 			if err != nil || !dst.prepared || dst.add != 148 || dst.remove != 148*1439 {
 				t.Fatalf("merge plan: %v add=%d remove=%d", err, dst.add, dst.remove)
 			}
-			r := dst.roles[0]
-			report := &mdbx.TreeDeltaReportV1{
-				Current: mdbx.TreeRoleDeltaV1{Present: true, Generation: r.generation, BytesBefore: r.s, CountBefore: r.n, BytesAfter: r.s + 56, CountAfter: r.n + 1, IndexAdded: 1},
-				Undo:    []mdbx.TreeUndoChargeV1{{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56}},
-			}
-			if err := dst.Proof(report); err != nil || !dst.accepted {
+			if err := dst.Proof(retainedCapacityGrowV1(dst, mdbx.TreeUndoChargeV1{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56})); err != nil || !dst.accepted {
 				t.Fatalf("merge proof: %v", err)
 			}
 		})
@@ -774,10 +785,7 @@ func retainedCapacityFaultTuplesV1(t *testing.T) {
 				key = x[:] // the Pair's header insert of x and its readback
 			}
 			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, c.scen, c.rank, key, func() {
-				res = retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(r *mdbx.Reader, op *mdbx.TreeOperationV1) error {
-					op.Proof = dst.Proof
-					return c.finish(r, op)
-				})
+				res = retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(r *mdbx.Reader, op *mdbx.TreeOperationV1) error { op.Proof = dst.Proof; return c.finish(r, op) })
 			})
 			faults := uint64(1) // the commit fault plus the readback get fault for Unreadable
 			if c.scen == mdbx.SelectedDamageCommitUnreadable {

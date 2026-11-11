@@ -38,6 +38,12 @@ func retainedCapacityReportV1() *mdbx.TreeDeltaReportV1 {
 	}
 }
 
+// retainedCapacityGrowV1 is p's actual-shaped report of one new CURRENT entry (S+56, N+1, J+1) with the sole undo record u.
+func retainedCapacityGrowV1(p *DirectRetainedProofV1, u mdbx.TreeUndoChargeV1) *mdbx.TreeDeltaReportV1 {
+	r := p.roles[0]
+	return &mdbx.TreeDeltaReportV1{Current: mdbx.TreeRoleDeltaV1{Present: true, Generation: r.generation, BytesBefore: r.s, CountBefore: r.n, BytesAfter: r.s + 56, CountAfter: r.n + 1, IndexAdded: 1}, Undo: []mdbx.TreeUndoChargeV1{u}}
+}
+
 func TestRetainedCapacityMDBX(t *testing.T) {
 	t.Run("D1_D25_structural_post_and_R_boundary", func(t *testing.T) {
 		for _, tc := range []struct {
@@ -170,7 +176,7 @@ func retainedCapacityUndoEffectsV1(t *testing.T) {
 		}
 	}
 	p := retainedCapacityStructuralV1(NewRetainedAccountingV1(NewLimitsV1(0, math.MaxUint64)))
-	p.remove = p.pre
+	p.remove = p.pre + 1<<20 // wraps past every later add: only the subtract check refuses
 	if err := p.Proof(retainedCapacityReportV1()); !errors.Is(err, errRetainedProofCapacity) {
 		t.Fatalf("underflow: %v", err)
 	}
@@ -608,11 +614,7 @@ func TestRetainedCapacityMDBXFinite(t *testing.T) {
 	// CURRENT +S56,N+1 (Tree +170 or +68 from N0), J+1, header 148, family.
 	_, dst, err = plan(func(*mdbx.TreeOperationV1) {})
 	logicalMDBXAssert(t, err == nil && dst.prepared, "plan: %v", err)
-	r := dst.roles[0]
-	report := &mdbx.TreeDeltaReportV1{
-		Current: mdbx.TreeRoleDeltaV1{Present: true, Generation: r.generation, BytesBefore: r.s, CountBefore: r.n, BytesAfter: r.s + 56, CountAfter: r.n + 1, IndexAdded: 1},
-		Undo:    []mdbx.TreeUndoChargeV1{{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56}},
-	}
+	r, report := dst.roles[0], retainedCapacityGrowV1(dst, mdbx.TreeUndoChargeV1{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56})
 	oldTree, _ := RetainedTreeChargeV1(r.n)
 	newTree, _ := RetainedTreeChargeV1(r.n + 1)
 	if err := dst.Proof(report); err != nil || dst.post != dst.pre+56+newTree-oldTree+RetainedIndexChargeV1+148+298+56 {
@@ -649,18 +651,12 @@ func TestRetainedCapacityMDBXExchange(t *testing.T) {
 	if err := f.exchangeV1(use); !errors.Is(err, errRetainedFiniteAPIV1) || inside != 2 || read.authority.Authority.U != 1 || f.planned.Authority.U != 2 {
 		t.Fatalf("error exit: %v inside=%d old=%d planned=%d", err, inside, read.authority.Authority.U, f.planned.Authority.U)
 	}
-	func() {
-		defer func() { _ = recover() }()
-		_ = f.exchangeV1(func() error { panic("probe") })
-	}()
+	func() { defer func() { _ = recover() }(); _ = f.exchangeV1(func() error { panic("probe") }) }()
 	if read.authority.Authority.U != 1 || f.planned.Authority.U != 2 {
 		t.Fatalf("panic exit: old=%d planned=%d", read.authority.Authority.U, f.planned.Authority.U)
 	}
 	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = f.exchangeV1(func() error { runtime.Goexit(); return nil })
-	}()
+	go func() { defer close(done); _ = f.exchangeV1(func() error { runtime.Goexit(); return nil }) }()
 	<-done
 	if read.authority.Authority.U != 1 || f.planned.Authority.U != 2 {
 		t.Fatalf("Goexit exit: old=%d planned=%d", read.authority.Authority.U, f.planned.Authority.U)
@@ -953,13 +949,8 @@ func retainedCapacityAgreeV1(t *testing.T, cold, warm *DirectRetainedProofV1) {
 	if !same || cold.undo != warm.undo || cold.roles != warm.roles || cold.complete != warm.complete {
 		t.Fatalf("warm/cold capture: %+v / %+v", cold, warm)
 	}
-	r := cold.roles[0]
 	for _, p := range []*DirectRetainedProofV1{cold, warm} {
-		report := &mdbx.TreeDeltaReportV1{
-			Current: mdbx.TreeRoleDeltaV1{Present: true, Generation: r.generation, BytesBefore: r.s, CountBefore: r.n, BytesAfter: r.s + 56, CountAfter: r.n + 1, IndexAdded: 1},
-			Undo:    []mdbx.TreeUndoChargeV1{{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56}},
-		}
-		if err := p.Proof(report); err != nil || !p.accepted {
+		if err := p.Proof(retainedCapacityGrowV1(p, mdbx.TreeUndoChargeV1{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56})); err != nil || !p.accepted {
 			t.Fatalf("proof: %v", err)
 		}
 	}
