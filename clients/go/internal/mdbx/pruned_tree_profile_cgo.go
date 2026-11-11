@@ -41,10 +41,11 @@ type PrunedTreeProfileOutcomeV1 struct {
 // The tip witness reads the rank-2 canonical index of ActiveGenerationID: a
 // non-nil tip's row must exist, carry valid work, match BlockHash, and have no
 // row above it; a nil tip requires an empty index. Otherwise the decision is
-// "STALE_LOCAL_PLAN". Three routes are latched as tree integrity on the Reader,
-// consuming the Store: "invalid pruned tree profile tip work", "missing pruned
-// tree profile root binding" (no binding at LagGenerationID), and "pruned tree
-// profile promises disagree with tip" (U differs from the tip's promise).
+// "STALE_LOCAL_PLAN". Three routes return Integrity/get/MDBX_INVALID with the
+// named diagnostic and no cause, latched on the Reader so the Store is consumed:
+// "invalid pruned tree profile tip work", "missing pruned tree profile root
+// binding" (no binding at LagGenerationID), and "pruned tree profile promises
+// disagree with tip" (U differs from the tip's promise).
 //
 // The replacement sets ActiveProfile PRUNED and B to the PRUNED promise of the
 // tip. L_body is 0 for a PRE_GENESIS LAG endpoint, otherwise its height plus one;
