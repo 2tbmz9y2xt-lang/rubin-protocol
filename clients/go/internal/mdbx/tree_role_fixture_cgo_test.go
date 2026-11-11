@@ -787,7 +787,7 @@ func treeRoleAbortV1(t *testing.T) {
 	var held TreePairQualificationV1
 	var expired *Reader
 	var startupErr error
-	_, err := FixtureSelectedDamage(s, o, SelectedDamageAbortEIO, 0, nil, func() {
+	evidence, err := FixtureSelectedDamage(s, o, SelectedDamageAbortEIO, 0, nil, func() {
 		mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 			startupErr, _ = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 				_, final, _ := treeRoleFullChainV1(t, r, a, treeRoleActiveV1(1, 2))
@@ -800,6 +800,12 @@ func treeRoleAbortV1(t *testing.T) {
 			return nil
 		}))
 	})
+	if err != nil || evidence.Faults != 1 {
+		t.Fatalf("abort EIO not hit as armed: fixture %v, faults %d", err, evidence.Faults)
+	}
+	if expired == nil || held.Status != TreePairQualifiedV1 {
+		t.Fatalf("no Qualified pair held from the frame: status %v, reader %v", held.Status, expired != nil)
+	}
 	if startupErr == nil || held.HealthyOn(expired) || reservationLive(o) != 0 {
 		t.Fatalf("abort EIO: startup %v, HealthyOn %v, live %d (fixture %v)", startupErr, held.HealthyOn(expired), reservationLive(o), err)
 	}
