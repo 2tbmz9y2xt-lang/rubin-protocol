@@ -41,13 +41,10 @@ func prunedTreeBindingBytes(t *testing.T, p *uint64) []byte {
 	return encoded
 }
 
-// prunedTreeSameRefusal reports whether got is the error a direct UpdateTreeV1
-// call returned: the same retained error value, or an *EngineError equal field
-// by field to a freshly built *EngineError want.
+// prunedTreeSameRefusal reports whether got is an *EngineError equal field by
+// field to want, the freshly built *EngineError a direct UpdateTreeV1 call on a
+// closed Store returned.
 func prunedTreeSameRefusal(got, want error) bool {
-	if want != nil && sameError(got, want) {
-		return true
-	}
 	g, gotDirect := directTestEngineError(got)
 	w, wantDirect := directTestEngineError(want)
 	return gotDirect && wantDirect && prunedTreeSameEngineFields(g, w)

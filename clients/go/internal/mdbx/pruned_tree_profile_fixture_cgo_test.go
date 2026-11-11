@@ -397,7 +397,8 @@ func prunedTreeExcluded(t *testing.T, key []byte, seed, reopen bool) {
 	if again.Truth != CommitTruthNew || again.Stage != UpdateStagePrewrite || again.Err == nil || again.Decision != "" || again.Authority != nil || direct.truth != again.Truth || direct.stage != again.Stage {
 		t.Fatalf("D2 retained truth refusal: %+v, direct %+v", again, direct)
 	}
-	if !prunedTreeSameRefusal(again.Err, direct.err) {
+	// The terminal Store's refusal is its retained error value itself.
+	if direct.err == nil || !sameError(again.Err, direct.err) {
 		t.Fatalf("D2 retained truth refusal error: %v vs %v", again.Err, direct.err)
 	}
 	_ = sc.s.Close()
