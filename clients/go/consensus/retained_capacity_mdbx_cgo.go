@@ -953,7 +953,7 @@ func (f *retainedFiniteV1) sideSpansV1(same bool, l mdbx.CleanupSpanV1) error {
 	no, np := retainedCountV1(o, mdbx.CleanupSpanSideV1), retainedCountV1(p, mdbx.CleanupSpanSideV1)
 	add := l.Kind == mdbx.CleanupSpanSideV1 && l.FirstHeight <= l.LastHeight
 	if add {
-		last, _ := retainedNthV1(p, mdbx.CleanupSpanSideV1, no)
+		last := retainedNthV1(p, mdbx.CleanupSpanSideV1, no)
 		same = same && np == no+1 && last == l
 	} else {
 		same = same && np == no
@@ -988,7 +988,7 @@ func (f *retainedFiniteV1) spansV1(kind mdbx.CleanupSpanKindV1) bool {
 	}
 	u := mdbx.CleanupSpanV1{Kind: kind, GenerationID: f.read.roles[0].generation, FirstHeight: o.U, NextHeight: o.U, LastHeight: p.U - 1}
 	if np == no+1 {
-		last, _ := retainedNthV1(p, kind, no)
+		last := retainedNthV1(p, kind, no)
 		return last == u && retainedPrefixV1(o, p, kind, no)
 	}
 	return retainedExtendedV1(o, p, u, no, np)
@@ -999,8 +999,8 @@ func retainedExtendedV1(o, p mdbx.StorageAuthorityV1, u mdbx.CleanupSpanV1, no, 
 	if no == 0 || np != no || !retainedPrefixV1(o, p, u.Kind, no-1) {
 		return false
 	}
-	e, _ := retainedNthV1(o, u.Kind, no-1)
-	t, _ := retainedNthV1(p, u.Kind, no-1)
+	e := retainedNthV1(o, u.Kind, no-1)
+	t := retainedNthV1(p, u.Kind, no-1)
 	ok := e.LastHeight+1 == u.FirstHeight && e.GenerationID == u.GenerationID
 	e.LastHeight = u.LastHeight
 	return ok && e == t
@@ -1017,23 +1017,23 @@ func retainedCountV1(a mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1) int
 }
 
 // retainedNthV1 returns the i-th descriptor of kind without copying spans.
-func retainedNthV1(a mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1, i int) (mdbx.CleanupSpanV1, bool) {
+func retainedNthV1(a mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1, i int) mdbx.CleanupSpanV1 {
 	for _, s := range retainedSpansV1(a) {
 		if s.Kind != kind {
 			continue
 		}
 		if i == 0 {
-			return s, true
+			return s
 		}
 		i--
 	}
-	return mdbx.CleanupSpanV1{}, false
+	return mdbx.CleanupSpanV1{}
 }
 
 func retainedPrefixV1(o, p mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1, n int) bool {
 	for i := 0; i < n; i++ {
-		a, _ := retainedNthV1(o, kind, i)
-		b, _ := retainedNthV1(p, kind, i)
+		a := retainedNthV1(o, kind, i)
+		b := retainedNthV1(p, kind, i)
 		if a != b {
 			return false
 		}

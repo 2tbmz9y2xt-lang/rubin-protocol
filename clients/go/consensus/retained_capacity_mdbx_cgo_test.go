@@ -589,7 +589,7 @@ func TestRetainedCapacityMDBXExchange(t *testing.T) {
 	f.planned.Authority.U = 2
 	inside := uint64(0)
 	use := func() error { inside = read.authority.Authority.U; return errRetainedFiniteAPIV1 }
-	if err := f.exchangeV1(use); err != errRetainedFiniteAPIV1 || inside != 2 || read.authority.Authority.U != 1 || f.planned.Authority.U != 2 {
+	if err := f.exchangeV1(use); !errors.Is(err, errRetainedFiniteAPIV1) || inside != 2 || read.authority.Authority.U != 1 || f.planned.Authority.U != 2 {
 		t.Fatalf("error exit: %v inside=%d old=%d planned=%d", err, inside, read.authority.Authority.U, f.planned.Authority.U)
 	}
 	func() {
