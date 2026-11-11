@@ -4,6 +4,8 @@ package mdbx
 
 import (
 	"bytes"
+	"crypto/sha3"
+	"encoding/binary"
 	"testing"
 )
 
@@ -25,6 +27,20 @@ func prunedTreeSeed(t *testing.T, a TreeAuthorityV1) (*Store, string, *Operation
 	mustEnvironment(t, r.err)
 	return s, path, o
 }
+
+// prunedTreeBindingBytes encodes the LAG root binding; a nil p is PRE_GENESIS.
+func prunedTreeBindingBytes(t *testing.T, p *uint64) []byte {
+	t.Helper()
+	root := RootBindingV1{DatabaseID: [32]byte{7}, CommitmentVersion: 1, RootDigest: sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")), Assurance: TreeAssuranceV1{Kind: TreeAssuranceFullHistoryV1}}
+	if p != nil {
+		root.Endpoint = TreeEndpointV1{Kind: TreeEndpointAppliedV1, Height: *p, BlockHash: modelHash(*p), CumulativeChainwork: modelWork(false)}
+	}
+	encoded, err := root.Encode()
+	mustEnvironment(t, err)
+	return encoded
+}
+
+func prunedTreeLagKey() []byte { return binary.BigEndian.AppendUint64([]byte{0x11}, 2) }
 
 func prunedTreeBytes(t *testing.T, s *Store) []byte {
 	t.Helper()
@@ -224,4 +240,48 @@ func TestPrunedTreeProfileMissingBinding(t *testing.T) {
 	before := prunedTreeBytes(t, s)
 	out := s.SelectPrunedTreeProfileV1(true, nil, o)
 	prunedTreeLatched(t, s, path, out, before, "missing pruned tree profile root binding", o)
+}
+
+// TestPrunedTreeProfileSizeBound is R11 (the tip row is paired with its rank-7
+// owner row, as the canonical pairing rule requires): the BLOCKS span (34 encoded bytes) moves
+// an Encode-accepted envelope past MaxMetadataBytes-27; one byte less commits.
+func TestPrunedTreeProfileSizeBound(t *testing.T) {
+	for _, over := range []bool{false, true} {
+		// authoritySize before the call: 40 + 44 + len(error); after: +1+9+24.
+		n := MaxMetadataBytes - 27 - 84 - 34
+		if over {
+			n++
+		}
+		a := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 18561)
+		a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 20001, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: bytes.Repeat([]byte{1}, n)}
+		s, _, o := prunedTreeSeed(t, a)
+		tip := &AuthorityPointV1{Height: 20000, BlockHash: modelHash(20000)}
+		key, err := HeightKey(1, 20000)
+		mustEnvironment(t, err)
+		p := uint64(4320)
+		dbis := TreeSchemaV1DBIs()
+		op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{
+			{DBI: dbis[0], Key: prunedTreeLagKey(), AfterKind: AfterLiteral, Literal: prunedTreeBindingBytes(t, &p)},
+			{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: ChainValue(tip.BlockHash, [32]byte{}, modelWork(false))},
+			{DBI: dbis[7], Key: append(binary.BigEndian.AppendUint64(nil, 1), tip.BlockHash[:]...), AfterKind: AfterLiteral, Literal: binary.BigEndian.AppendUint64(nil, 20000)},
+		}}}
+		r := tsRun(t, s, o, LaneOperation, op)
+		r.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+		mustEnvironment(t, r.err)
+		before := prunedTreeBytes(t, s)
+		out := s.SelectPrunedTreeProfileV1(true, tip, o)
+		if !over {
+			if out.Err != nil || out.Truth != CommitTruthNew || out.Authority == nil || len(prunedTreeBytes(t, s)) != MaxMetadataBytes {
+				t.Fatalf("R11 control at the bound: %+v", out)
+			}
+			continue
+		}
+		bootstrapRefusal(t, "R11 size bound", out.Truth, out.Err, EngineCapacity, operationUpdate, codeTooLarge, "Update Batch exceeds bound", nil, false)
+		if out.Stage != UpdateStagePrewrite || out.Authority != nil || out.Decision != "" || s.state != storeOPEN {
+			t.Fatalf("R11 size bound: %+v state %s", out, s.state)
+		}
+		if !bytes.Equal(prunedTreeBytes(t, s), before) {
+			t.Fatal("R11 envelope changed")
+		}
+	}
 }

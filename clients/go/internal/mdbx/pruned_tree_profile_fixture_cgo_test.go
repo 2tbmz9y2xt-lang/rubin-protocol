@@ -4,8 +4,6 @@ package mdbx
 
 import (
 	"bytes"
-	"crypto/sha3"
-	"encoding/binary"
 	"reflect"
 	"testing"
 )
@@ -19,20 +17,6 @@ type prunedTreeScene struct {
 	key   []byte
 	value []byte
 }
-
-// prunedTreeBindingBytes encodes the LAG root binding; a nil p is PRE_GENESIS.
-func prunedTreeBindingBytes(t *testing.T, p *uint64) []byte {
-	t.Helper()
-	root := RootBindingV1{DatabaseID: [32]byte{7}, CommitmentVersion: 1, RootDigest: sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")), Assurance: TreeAssuranceV1{Kind: TreeAssuranceFullHistoryV1}}
-	if p != nil {
-		root.Endpoint = TreeEndpointV1{Kind: TreeEndpointAppliedV1, Height: *p, BlockHash: modelHash(*p), CumulativeChainwork: modelWork(false)}
-	}
-	encoded, err := root.Encode()
-	mustEnvironment(t, err)
-	return encoded
-}
-
-func prunedTreeLagKey() []byte { return binary.BigEndian.AppendUint64([]byte{0x11}, 2) }
 
 // newPrunedTreeScene seeds ARCHIVE NONE/STABLE with U, an optional tip row and an optional binding.
 func newPrunedTreeScene(t *testing.T, u uint64, tip *AuthorityPointV1, p *uint64, edit func(*TreeAuthorityV1)) *prunedTreeScene {
@@ -155,11 +139,47 @@ func TestPrunedTreeProfileConsulted(t *testing.T) {
 			if count != 1 || out.Err == nil || out.Truth == CommitTruthNew || out.Authority != nil || out.Decision != "" {
 				t.Fatalf("%s: drift%d %+v", row.name, count, out)
 			}
+			truth, stage, engineErr := prunedTreeEngineDrift(t, row.tip, u, p, row.rank, row.key)
+			if out.Truth != truth || out.Stage != stage || !prunedTreeSameEngine(out.Err, engineErr) {
+				t.Fatalf("X4 %s: method %s/%d %v, engine %s/%d %v", row.name, out.Truth, out.Stage, out.Err, truth, stage, engineErr)
+			}
 			if sc.s.state == storeOPEN && !bytes.Equal(prunedTreeBytes(t, sc.s), before) {
 				t.Fatal(row.name + ": envelope changed")
 			}
 		})
 	}
+}
+
+// prunedTreeEngineDrift runs the same drift on a twin scene against a direct
+// UpdateTreeV1 call whose pair plan is built from spec literals (X4 oracle).
+func prunedTreeEngineDrift(t *testing.T, tip *AuthorityPointV1, u uint64, p *uint64, rank uint8, key func(*prunedTreeScene) []byte) (CommitTruth, UpdateStage, error) {
+	t.Helper()
+	sc := newPrunedTreeScene(t, u, tip, p, nil)
+	want := sc.expected(0, nil)
+	if tip != nil {
+		want = sc.expected(4881, prunedTreeU64(4320))
+	}
+	encoded, err := want.Encode()
+	mustEnvironment(t, err)
+	dbis := TreeSchemaV1DBIs()
+	consulted := []ConsultedRow{{DBI: dbis[0], Key: prunedTreeLagKey()}}
+	if tip != nil {
+		consulted = append(consulted, ConsultedRow{DBI: dbis[2], Key: sc.key})
+	}
+	op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: dbis[0], Key: []byte{2}, BeforePresent: true, AfterKind: AfterLiteral, Literal: encoded}}, Consulted: consulted}}
+	var r tsResult
+	count, err := FixtureWriteSnapshotDrift(sc.s, rank, key(sc), func() { r = tsRun(t, sc.s, sc.o, LaneOperation, op) })
+	mustEnvironment(t, err)
+	if count != 1 || r.err == nil {
+		t.Fatalf("engine drift%d %+v", count, r)
+	}
+	return r.truth, r.stage, r.err
+}
+
+func prunedTreeSameEngine(got, want error) bool {
+	g, gok := directTestEngineError(got)
+	w, wok := directTestEngineError(want)
+	return gok && wok && reflect.DeepEqual(g, w)
 }
 
 func TestPrunedTreeProfileStale(t *testing.T) {
