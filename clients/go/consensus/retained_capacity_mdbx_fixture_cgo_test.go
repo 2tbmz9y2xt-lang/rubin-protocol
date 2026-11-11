@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"errors"
+	"fmt"
 	"math"
+	"runtime"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -60,6 +62,8 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	t.Run("T19_rolling_merge_full_plan_proof", retainedCapacityRollingMergeV1)
 	t.Run("D14_D18_native_callback_refusal_witness", retainedCapacityCallbackRefusalV1)
 	t.Run("D14_native_proof_panic", retainedCapacityProofPanicV1)
+	t.Run("D14_native_fault_tuples", retainedCapacityFaultTuplesV1)
+	t.Run("D14_native_unwinds", retainedCapacityUnwindsV1)
 }
 
 // T18 (rejected_cases): a W row beside the rolling-prepared pending SIDE.
@@ -130,7 +134,7 @@ func retainedCapacityRolesV1(t *testing.T, w *btWorld) ([2]retainedRoleV1, [2]md
 // admissible LagForward companion at j=1.
 func retainedCapacityCommitV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, child []byte, x [32]byte, lag bool) btResult {
 	t.Helper()
-	return retainedCapacityTupleV1(t, w, a, dst, child, x, lag, func(op *mdbx.TreeOperationV1) error {
+	return retainedCapacityTupleV1(t, w, a, dst, child, x, lag, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error {
 		op.Proof = dst.Proof
 		return nil
 	})
@@ -138,7 +142,7 @@ func retainedCapacityCommitV1(t *testing.T, w *btWorld, a *RetainedAccountingV1,
 
 // retainedCapacityTupleV1 is retainedCapacityCommitV1 with the caller's step
 // after a successful Plan: finish installs the Proof or refuses the callback.
-func retainedCapacityTupleV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, child []byte, x [32]byte, lag bool, finish func(*mdbx.TreeOperationV1) error) btResult {
+func retainedCapacityTupleV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, child []byte, x [32]byte, lag bool, finish func(*mdbx.Reader, *mdbx.TreeOperationV1) error) btResult {
 	t.Helper()
 	var result btResult
 	err := w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
@@ -163,7 +167,7 @@ func retainedCapacityTupleV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, 
 				if err := a.PlanDirectMDBX(dst, r, account, &op); err != nil {
 					return mdbx.TreeOperationV1{}, err
 				}
-				if err := finish(&op); err != nil {
+				if err := finish(r, &op); err != nil {
 					return mdbx.TreeOperationV1{}, err
 				}
 				return op, nil
@@ -420,7 +424,7 @@ func retainedCapacityCallbackRefusalV1(t *testing.T) {
 	for _, clean := range []bool{true, false} {
 		w, child, x := retainedCapacitySideFrameV1(t)
 		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-		res := retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(*mdbx.TreeOperationV1) error { return refuse })
+		res := retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(*mdbx.Reader, *mdbx.TreeOperationV1) error { return refuse })
 		res.want(t, 1, 1, -1)
 		if res.err != refuse || !dst.prepared || dst.entered || dst.pre != 1077 || a.active != dst || !a.valid {
 			t.Fatalf("clean=%v refusal: %v prepared=%v entered=%v pre=%d", clean, res.err, dst.prepared, dst.entered, dst.pre)
@@ -453,7 +457,7 @@ func retainedCapacityProofPanicV1(t *testing.T) {
 	type sentinel struct{}
 	got := func() (v any) {
 		defer func() { v = recover() }()
-		retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(op *mdbx.TreeOperationV1) error {
+		retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error {
 			op.Proof = func(r *mdbx.TreeDeltaReportV1) error {
 				_ = dst.Proof(r)
 				panic(sentinel{})
@@ -474,4 +478,140 @@ func retainedCapacityProofPanicV1(t *testing.T) {
 	res := retainedCapacityCommitV1(t, w, a, next, child, x, false)
 	res.want(t, 2, 3, -1)
 	logicalMDBXAssert(t, res.err == nil && next.pre == 1077 && next.post == 1596, "store OPEN after unwind: %v", res.err)
+}
+
+// D14 rows "callback nil/E/wrappedE with ReaderF", "Proof nil then write error
+// or commit crossed error", "definite OLD, equality OLD/NEW with error,
+// UNKNOWN" and "any cleanup failure" under one armed native scenario each.
+// Every tuple is the raw native one; Apply consumes the token, returns nil,
+// keeps no successor and retires the cache. A Reader or cleanup failure never
+// carries the clean witness (false is passed), so a completed pre is lost.
+func retainedCapacityFaultTuplesV1(t *testing.T) {
+	refuse, absent := errors.New("callback refusal"), make([]byte, 32)
+	read := func(ret int) func(*mdbx.Reader, *mdbx.TreeOperationV1) error {
+		return func(r *mdbx.Reader, _ *mdbx.TreeOperationV1) error {
+			_, _, f := r.Get(mdbx.TreeSchemaV1DBIs()[3], absent)
+			return [](error){nil, refuse, fmt.Errorf("wrapped: %w", f), f}[ret]
+		}
+	}
+	install := func(*mdbx.Reader, *mdbx.TreeOperationV1) error { return nil }
+	for _, c := range []struct {
+		name               string
+		scen               mdbx.SelectedDamageScenario
+		rank               uint8
+		key                []byte
+		finish             func(*mdbx.Reader, *mdbx.TreeOperationV1) error
+		truth, stage, errs int // errs: native causes in order (1 engine, 2 E+F join, 3 wrapped+F join)
+	}{
+		{"D14_4_nil_readerF", mdbx.SelectedDamageGetEIO, 3, absent, read(0), 1, 1, 1},
+		{"D14_5_E_readerF", mdbx.SelectedDamageGetEIO, 3, absent, read(1), 1, 1, 2},
+		{"D14_5_wrappedE_readerF", mdbx.SelectedDamageGetEIO, 3, absent, read(2), 1, 1, 3},
+		{"D14_5_identical_readerF", mdbx.SelectedDamageGetEIO, 3, absent, read(3), 1, 1, 1},
+		{"D14_12_abortEIO_after_E", mdbx.SelectedDamageAbortEIO, 0, nil, func(*mdbx.Reader, *mdbx.TreeOperationV1) error { return refuse }, 1, 1, 2},
+		{"D14_9_write_error", mdbx.SelectedDamagePutEIO, 3, nil, install, 1, 2, 1},
+		{"D14_9_commit_new", mdbx.SelectedDamageCommitNew, 0, nil, install, 2, 3, 0},
+		{"D14_10_commit_old", mdbx.SelectedDamageCommitOld, 0, nil, install, 1, 3, 0},
+		// The third writer's meta-02 byte is not a row this readback consults: equality NEW with error.
+		{"D14_10_commit_third_equality_new", mdbx.SelectedDamageCommitThird, 0, nil, install, 2, 3, 0},
+		{"D14_10_commit_unreadable", mdbx.SelectedDamageCommitUnreadable, 3, nil, install, 3, 3, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w, child, x := retainedCapacitySideFrameV1(t)
+			a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+			var res btResult
+			key := c.key
+			if c.rank == 3 && c.key == nil {
+				key = x[:] // the Pair's header insert of x and its readback
+			}
+			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, c.scen, c.rank, key, func() {
+				res = retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(r *mdbx.Reader, op *mdbx.TreeOperationV1) error {
+					op.Proof = dst.Proof
+					return c.finish(r, op)
+				})
+			})
+			faults := uint64(1) // the commit fault plus the readback get fault for Unreadable
+			if c.scen == mdbx.SelectedDamageCommitUnreadable {
+				faults = 2
+			}
+			logicalMDBXAssert(t, err == nil && evidence.Faults == faults, "site %+v: %v", evidence, err)
+			res.want(t, uint8(c.truth), uint8(c.stage), -1)
+			retainedCapacityCausesV1(t, res.err, c.errs, refuse)
+			proved := c.stage > 1
+			if !dst.prepared || dst.entered != proved || dst.accepted != proved || a.active != dst || !a.valid || a.exactRet != 1077 {
+				t.Fatalf("before apply: entered=%v accepted=%v valid=%v ret=%d", dst.entered, dst.accepted, a.valid, a.exactRet)
+			}
+			if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false); err != nil || a.active != nil || !dst.applied || a.valid || a.exactRet != 0 || a.binding != (mdbx.MutationBindingV1{}) {
+				t.Fatalf("apply: %v valid=%v ret=%d", err, a.valid, a.exactRet)
+			}
+		})
+	}
+}
+
+// retainedCapacityCausesV1 pins the raw error shape: 0 a CommitError, 1 one
+// direct EngineError, 2 the join [E, F], 3 the join [wrapped F, F].
+func retainedCapacityCausesV1(t *testing.T, err error, shape int, refuse error) {
+	t.Helper()
+	var engine *mdbx.EngineError
+	var commit *mdbx.CommitError
+	joined, isJoin := err.(interface{ Unwrap() []error })
+	switch shape {
+	case 0:
+		logicalMDBXAssert(t, errors.As(err, &commit), "commit error %T %v", err, err)
+	case 1:
+		_, direct := err.(*mdbx.EngineError)
+		logicalMDBXAssert(t, direct, "direct engine error %T %v", err, err)
+	default:
+		parts := []error{}
+		if isJoin {
+			parts = joined.Unwrap()
+		}
+		first := len(parts) == 2 && (shape == 2 && parts[0] == refuse || shape == 3 && errors.As(parts[0], &engine) && parts[0] != engine)
+		logicalMDBXAssert(t, first && errors.As(parts[1], &engine) && engine.Class == mdbx.EngineIO, "join order %v", err)
+	}
+}
+
+// D14 rows "callback panic or Goexit" and the Goexit half of "Proof
+// panic/Goexit": the native unwind resumes after clean cleanup with no write,
+// the active token stays until the caller retires it with InvalidateV1, no post
+// is cached and the Store stays OPEN for the next cold attempt.
+func retainedCapacityUnwindsV1(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		proof bool
+		end   func()
+	}{
+		{"callback_panic", false, func() { panic("callback") }},
+		{"callback_goexit", false, runtime.Goexit},
+		{"proof_goexit", true, runtime.Goexit},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w, child, x := retainedCapacitySideFrameV1(t)
+			a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+			returned, done := false, make(chan any)
+			go func() {
+				defer func() { done <- recover() }()
+				retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error {
+					if !c.proof {
+						c.end()
+					}
+					op.Proof = func(r *mdbx.TreeDeltaReportV1) error { _ = dst.Proof(r); c.end(); return nil }
+					return nil
+				})
+				returned = true
+			}()
+			got := <-done
+			if returned || (got == nil) != (c.name != "callback_panic") || !dst.prepared || dst.entered != c.proof || dst.accepted != c.proof || a.active != dst {
+				t.Fatalf("unwind %v returned=%v entered=%v accepted=%v", got, returned, dst.entered, dst.accepted)
+			}
+			btReservationsReleased(t, w.owner)
+			a.InvalidateV1()
+			logicalMDBXAssert(t, a.active == nil && !a.valid && a.exactRet == 0, "invalidate after unwind")
+			pre, err := riRead(t, w, nil)
+			logicalMDBXAssert(t, err == nil && pre.exactRet == 1077, "no write after unwind: %d %v", pre.exactRet, err)
+			next := &DirectRetainedProofV1{}
+			res := retainedCapacityCommitV1(t, w, a, next, child, x, false)
+			res.want(t, 2, 3, -1)
+			logicalMDBXAssert(t, res.err == nil && next.pre == 1077 && next.post == 1596, "store OPEN after unwind: %v", res.err)
+		})
+	}
 }
