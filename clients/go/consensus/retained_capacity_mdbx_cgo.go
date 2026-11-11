@@ -4,8 +4,8 @@ package consensus
 
 import (
 	"bytes"
+	"encoding/binary"
 	"math"
-	"reflect"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
@@ -488,88 +488,138 @@ func (a *RetainedAccountingV1) successV1(p *DirectRetainedProofV1, truth mdbx.Co
 	return nil
 }
 
-// deltaV1 captures the complete finite delta of the sole primitive x. Its
-// supported domain is a Pair whose only ownership effects are x's canonical
-// index/owner insert, an optional x header insert (nil slot), a BodyKind 1 x
-// body literal and an authority literal equal to OLD; every other finite
-// effect is refused as a local API failure before Proof.
+// deltaV1 captures the complete finite delta: x, every other Pair header or
+// body identity and, when the authority changes, every OLD or planned
+// optional owner, each settled once between its OLD and planned union.
 func (f *retainedFiniteV1) deltaV1() error {
-	parent, err := f.pairV1()
+	x, err := f.pairV1()
 	if err != nil {
 		return err
 	}
 	f.post = [2]mdbx.TreeEndpointV1{f.op.Primitives[0].Endpoint, f.read.endpoints[1]}
-	x := retainedArtifactV1{hash: f.op.Primitives[0].Block, parent: parent, height: f.op.Primitives[0].Height, generation: f.read.roles[0].generation}
+	if err := f.promiseV1(); err != nil {
+		return err
+	}
 	if err := f.obsoleteV1(x); err != nil {
 		return err
 	}
-	old, err := f.read.ownersV1(x.hash, 1440)
-	if err != nil {
+	if err := f.settleXV1(x); err != nil {
 		return err
 	}
-	if old.required != 0 || old.bits&4 != 0 {
-		return errRetainedFiniteAPIV1
-	}
-	if err := f.headerV1(x, old.bits&1 != 0); err != nil {
+	if err := f.pairRowsV1(x.hash); err != nil {
 		return err
 	}
-	if err := f.bodyV1(x, old.bits&2 != 0); err != nil {
-		return err
-	}
-	return f.undoV1()
+	return f.optionalSetV1(x.hash)
 }
 
-// authorityV1 returns the planned authority: OLD when the Pair keeps it.
-func (f *retainedFiniteV1) authorityV1() *mdbx.TreeAuthorityV1 {
-	if _, ok := retainedAuthorityMutationV1(f.op); ok {
-		return &f.planned
-	}
-	return &f.read.authority
+// changedV1 reports whether the Pair carries a planned authority value.
+func (f *retainedFiniteV1) changedV1() bool {
+	_, ok := retainedAuthorityMutationV1(f.op)
+	return ok
 }
 
 // pairV1 classifies every Pair mutation and returns x's planned canonical
-// parent from its CURRENT index insert.
-func (f *retainedFiniteV1) pairV1() ([32]byte, error) {
-	var parent [32]byte
+// identity from its CURRENT index insert.
+func (f *retainedFiniteV1) pairV1() (retainedArtifactV1, error) {
+	prim := &f.op.Primitives[0]
+	x := retainedArtifactV1{hash: prim.Block, height: prim.Height, generation: f.read.roles[0].generation}
 	found := false
 	for i := range f.op.Pair.Mutations {
 		m := &f.op.Pair.Mutations[i]
 		ok, index := f.mutationV1(m)
 		if !ok {
-			return parent, errRetainedFiniteAPIV1
+			return x, errRetainedFiniteAPIV1
 		}
 		if index {
-			parent, found = [32]byte(m.Literal[32:64]), true
+			x.parent, found = [32]byte(m.Literal[32:64]), true
 		}
 	}
-	if !found || !reflect.DeepEqual(*f.authorityV1(), f.read.authority) {
-		return parent, errRetainedFiniteAPIV1
+	if !found {
+		return x, errRetainedFiniteAPIV1
 	}
-	return parent, nil
+	return x, nil
 }
 
-// mutationV1 admits one mutation of the supported finite domain and reports
-// whether it is x's CURRENT canonical index insert. CURRENT state, undo,
-// tree-node and counter/root rows are reduced from the native report.
+// mutationV1 admits one mutation of the direct CURRENT domain and reports
+// whether it is x's CURRENT canonical index insert. CURRENT state, x's undo
+// family, CURRENT tree-node and counter/root rows are reduced from the
+// native report; every other namespace or generation is refused.
 func (f *retainedFiniteV1) mutationV1(m *mdbx.Mutation) (bool, bool) {
-	x := &f.op.Primitives[0]
-	insert := !m.BeforePresent && m.AfterKind == mdbx.AfterLiteral
 	switch m.DBI.Rank {
-	case 0, 1, 5, 8:
-		return true, false
+	case 0:
+		return f.metaV1(m), false
+	case 1, 5, 8:
+		return f.currentKeyV1(m), false
 	case 2:
-		key, _ := mdbx.HeightKey(f.read.roles[0].generation, x.Height)
-		ok := insert && bytes.Equal(m.Key, key) && len(m.Literal) == 104 && [32]byte(m.Literal[:32]) == x.Block
+		ok := f.indexV1(m)
 		return ok, ok
 	case 7:
-		key, _ := mdbx.CanonicalOwnerKey(f.read.roles[0].generation, x.Block)
-		return insert && bytes.Equal(m.Key, key), false
-	case 3:
-		return insert && f.op.HeaderSlot == nil && bytes.Equal(m.Key, x.Block[:]), false
-	case 4:
-		return insert && x.Coverage.BodyKind == 1 && bytes.Equal(m.Key, x.Block[:]), false
+		key, _ := mdbx.CanonicalOwnerKey(f.read.roles[0].generation, f.op.Primitives[0].Block)
+		return retainedInsertV1(m) && bytes.Equal(m.Key, key), false
+	case 3, 4:
+		return f.artifactRowV1(m), false
 	}
 	return false, false
+}
+
+func retainedInsertV1(m *mdbx.Mutation) bool {
+	return !m.BeforePresent && m.AfterKind == mdbx.AfterLiteral
+}
+
+// metaV1 admits the authority literal and the CURRENT counter/root rows.
+func (f *retainedFiniteV1) metaV1(m *mdbx.Mutation) bool {
+	if len(m.Key) == 1 {
+		return m.Key[0] == 2
+	}
+	if len(m.Key) != 9 || m.Key[0] != 0x10 && m.Key[0] != 0x11 {
+		return false
+	}
+	return binary.BigEndian.Uint64(m.Key[1:]) == f.read.roles[0].generation
+}
+
+// currentKeyV1 admits a state or tree-node row of the CURRENT generation
+// and a row of x's own undo family.
+func (f *retainedFiniteV1) currentKeyV1(m *mdbx.Mutation) bool {
+	g := f.read.roles[0].generation
+	switch m.DBI.Rank {
+	case 1:
+		return len(m.Key) == 44 && binary.BigEndian.Uint64(m.Key) == g
+	case 5:
+		return len(m.Key) >= 32 && [32]byte(m.Key[:32]) == f.op.Primitives[0].Block
+	}
+	ng, _, err := mdbx.DecodeTreeNodeKey(m.Key)
+	return err == nil && ng == g
+}
+
+func (f *retainedFiniteV1) indexV1(m *mdbx.Mutation) bool {
+	x := &f.op.Primitives[0]
+	key, _ := mdbx.HeightKey(f.read.roles[0].generation, x.Height)
+	return retainedInsertV1(m) && bytes.Equal(m.Key, key) && len(m.Literal) == 104 && [32]byte(m.Literal[:32]) == x.Block
+}
+
+// artifactRowV1 admits x's nil-slot header insert and BodyKind 1 body
+// literal, and a deletion of another identity's header or body row.
+func (f *retainedFiniteV1) artifactRowV1(m *mdbx.Mutation) bool {
+	x := &f.op.Primitives[0]
+	if !bytes.Equal(m.Key, x.Block[:]) {
+		return len(m.Key) == 32 && m.BeforePresent && m.AfterKind == mdbx.AfterAbsent
+	}
+	if m.DBI.Rank == 3 {
+		return retainedInsertV1(m) && f.op.HeaderSlot == nil
+	}
+	return retainedInsertV1(m) && x.Coverage.BodyKind == 1
+}
+
+// deletedV1 returns the kind bits whose row the Pair deletes for hash.
+func (f *retainedFiniteV1) deletedV1(hash [32]byte, upto int) uint8 {
+	var bits uint8
+	for i := range f.op.Pair.Mutations[:upto] {
+		m := &f.op.Pair.Mutations[i]
+		if (m.DBI.Rank == 3 || m.DBI.Rank == 4) && m.AfterKind == mdbx.AfterAbsent && bytes.Equal(m.Key, hash[:]) {
+			bits |= m.DBI.Rank - 2
+		}
+	}
+	return bits
 }
 
 // obsoleteV1 refuses an x already owned by an obsolete generation through the
@@ -588,73 +638,409 @@ func (f *retainedFiniteV1) obsoleteV1(x retainedArtifactV1) error {
 }
 
 func retainedGenerationsV1(a mdbx.StorageAuthorityV1) int {
+	return min(retainedCountV1(a, mdbx.CleanupSpanGenerationV1), 2)
+}
+
+// exchangeV1 runs use while read.authority holds the single planned value and
+// restores OLD on every return, error, panic or Goexit.
+func (f *retainedFiniteV1) exchangeV1(use func() error) error {
+	f.read.authority, f.planned = f.planned, f.read.authority
+	defer func() { f.read.authority, f.planned = f.planned, f.read.authority }()
+	return use()
+}
+
+// keepV1 applies the producer's keep windows of read.authority to a canonical
+// point at height h: header always, body and undo by their windows.
+func (read *retainedReadV1) keepV1(k retainedArtifactV1) retainedArtifactV1 {
+	a := read.authority.Authority
+	k.bits, k.required = 1, 1
+	if k.height >= read.bodyFirstV1() || retainedOwedV1(a, k.height, mdbx.CleanupSpanBlocksV1) {
+		k.bits, k.required = k.bits|2, k.required|2
+	}
+	if k.height >= a.U || retainedOwedV1(a, k.height, mdbx.CleanupSpanUndoV1) {
+		k.bits, k.required = k.bits|4, k.required|4
+	}
+	return k
+}
+
+// unionV1 adds the optional owners of k.hash in read.authority order; it
+// stops once every kind is owned.
+func (read *retainedReadV1) unionV1(k retainedArtifactV1) (retainedArtifactV1, error) {
+	for at := uint64(0); k.bits != 7 && at < 1440; at++ {
+		item, present, err := read.optionalAtV1(at)
+		if err != nil || !present {
+			return k, err
+		}
+		if item.hash == k.hash {
+			k = retainedMergeV1(k, item)
+		}
+	}
+	return k, nil
+}
+
+func retainedMergeV1(k, item retainedArtifactV1) retainedArtifactV1 {
+	if k.bits == 0 {
+		return item
+	}
+	k.bits |= item.bits
+	k.selected = k.selected || item.selected
+	return k
+}
+
+// plannedOwnersV1 settles the planned union of an identity: its canonical
+// point under the planned keep and its planned optional owners.
+func (f *retainedFiniteV1) plannedOwnersV1(k retainedArtifactV1) (retainedArtifactV1, error) {
+	if !f.changedV1() {
+		return f.read.plannedUnionV1(k)
+	}
+	err := f.exchangeV1(func() error {
+		var err error
+		k, err = f.read.plannedUnionV1(k)
+		return err
+	})
+	return k, err
+}
+
+// plannedUnionV1 applies read.authority's keep to a canonical point, then
+// adds its optional owners.
+func (read *retainedReadV1) plannedUnionV1(k retainedArtifactV1) (retainedArtifactV1, error) {
+	if k.required&1 != 0 {
+		k = read.keepV1(k)
+	}
+	return read.unionV1(k)
+}
+
+// settleXV1 settles x: canonical header term once, E header/body by union,
+// and the sole undo projection.
+func (f *retainedFiniteV1) settleXV1(x retainedArtifactV1) error {
+	old, err := f.read.unionV1(retainedArtifactV1{hash: x.hash})
+	if err != nil {
+		return err
+	}
+	x.required = 1
+	planned, err := f.plannedOwnersV1(x)
+	if err != nil {
+		return err
+	}
+	if err := f.addV1(RetainedHeaderChargeV1); err != nil {
+		return err
+	}
+	if err := f.chargeV1(old, planned, 1, 0); err != nil {
+		return err
+	}
+	if err := f.bodyXV1(old, planned); err != nil {
+		return err
+	}
+	if err := f.proof.undoChargeV1(f.read); err != nil {
+		return err
+	}
+	f.proof.undo.oldOwned, f.proof.undo.postOwned = old.bits&4 != 0, planned.bits&4 != 0
+	return nil
+}
+
+// bodyXV1 settles x's body: a BodyKind 1 literal never rewrites an owned
+// body; a stored body follows the union.
+func (f *retainedFiniteV1) bodyXV1(old, planned retainedArtifactV1) error {
+	c := f.op.Primitives[0].Coverage
+	if c.BodyKind != 1 {
+		return f.chargeV1(old, planned, 2, 0)
+	}
+	if old.bits&2 != 0 {
+		return errRetainedFiniteAPIV1
+	}
+	if planned.bits&2 != 0 {
+		return f.addV1(uint64(len(c.CurrentBody)))
+	}
+	return nil
+}
+
+// settleV1 settles one non-x identity from its one OLD canonical observation.
+func (f *retainedFiniteV1) settleV1(hash [32]byte, deleted uint8) error {
+	k, err := f.read.canonicalOwnerV1(hash)
+	if err != nil {
+		return err
+	}
+	old, err := f.read.unionV1(k)
+	if err != nil {
+		return err
+	}
+	planned, err := f.plannedOwnersV1(k)
+	if err != nil {
+		return err
+	}
+	for _, bit := range [3]uint8{1, 2, 4} {
+		if err := f.chargeV1(old, planned, bit, deleted); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// retainedEOwnedV1 excludes the canonical header, charged by the header term.
+func retainedEOwnedV1(k retainedArtifactV1, bit uint8) bool {
+	return k.bits&bit != 0 && (bit != 1 || k.required&1 == 0)
+}
+
+// chargeV1 removes or adds one kind's actual OLD bytes when its E ownership
+// changes; a deleted row may not stay owned.
+func (f *retainedFiniteV1) chargeV1(old, planned retainedArtifactV1, bit, deleted uint8) error {
+	o, p := retainedEOwnedV1(old, bit), retainedEOwnedV1(planned, bit)
+	if deleted&bit != 0 && planned.bits&bit != 0 {
+		return errRetainedFiniteAPIV1
+	}
+	if o == p {
+		return nil
+	}
+	item := planned
+	if o {
+		item = old
+	}
+	item.bits, item.required = bit, item.required&bit
+	w := retainedWalkV1{read: f.read}
+	if err := w.artifactsV1(item); err != nil {
+		return err
+	}
+	if o {
+		return f.removeV1(w.pre.exactRet)
+	}
+	return f.addV1(w.pre.exactRet)
+}
+
+// pairRowsV1 settles each other identity whose header or body row the Pair
+// deletes, once per hash.
+func (f *retainedFiniteV1) pairRowsV1(x [32]byte) error {
+	for i := range f.op.Pair.Mutations {
+		m := &f.op.Pair.Mutations[i]
+		if m.DBI.Rank != 3 && m.DBI.Rank != 4 || bytes.Equal(m.Key, x[:]) {
+			continue
+		}
+		hash := [32]byte(m.Key)
+		if f.deletedV1(hash, i) != 0 {
+			continue
+		}
+		if err := f.settleV1(hash, f.deletedV1(hash, len(f.op.Pair.Mutations))); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// optionalSetV1 settles every OLD and planned optional owner once when the
+// authority changes; an unchanged authority keeps every optional duty.
+func (f *retainedFiniteV1) optionalSetV1(x [32]byte) error {
+	if !f.changedV1() {
+		return nil
+	}
+	if err := f.sideKeysV1(); err != nil {
+		return err
+	}
+	if err := f.optionalItemsV1(x, false); err != nil {
+		return err
+	}
+	return f.optionalItemsV1(x, true)
+}
+
+// optionalItemsV1 settles each item of the OLD or the planned optional order.
+func (f *retainedFiniteV1) optionalItemsV1(x [32]byte, planned bool) error {
+	for at := uint64(0); at < 1440; at++ {
+		item, present, err := f.optionalAtV1(at, planned)
+		if err != nil || !present {
+			return err
+		}
+		if err := f.settleOnceV1(x, item.hash, at, planned); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// optionalAtV1 reads one item of the OLD order, or of the planned order
+// under the authority exchange.
+func (f *retainedFiniteV1) optionalAtV1(at uint64, planned bool) (retainedArtifactV1, bool, error) {
+	if !planned {
+		return f.read.optionalAtV1(at)
+	}
+	var item retainedArtifactV1
+	var present bool
+	err := f.exchangeV1(func() error {
+		var err error
+		item, present, err = f.read.optionalAtV1(at)
+		return err
+	})
+	return item, present, err
+}
+
+// settleOnceV1 settles hash unless x, a Pair row or an earlier OLD (or, for
+// a planned item, any OLD or earlier planned) owner already settled it.
+func (f *retainedFiniteV1) settleOnceV1(x, hash [32]byte, at uint64, planned bool) error {
+	if hash == x || f.deletedV1(hash, len(f.op.Pair.Mutations)) != 0 {
+		return nil
+	}
+	seen, err := f.seenV1(hash, at, planned)
+	if err != nil || seen {
+		return err
+	}
+	return f.settleV1(hash, 0)
+}
+
+func (f *retainedFiniteV1) seenV1(hash [32]byte, at uint64, planned bool) (bool, error) {
+	limit := at
+	if planned {
+		limit = 1440
+	}
+	k, err := f.read.indexOfV1(hash, limit)
+	if err != nil || k || !planned {
+		return k, err
+	}
+	err = f.exchangeV1(func() error {
+		k, err = f.read.indexOfV1(hash, at)
+		return err
+	})
+	return k, err
+}
+
+func (read *retainedReadV1) indexOfV1(hash [32]byte, limit uint64) (bool, error) {
+	for at := uint64(0); at < limit; at++ {
+		item, present, err := read.optionalAtV1(at)
+		if err != nil || !present {
+			return false, err
+		}
+		if item.hash == hash {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// promiseV1 admits only the direct promise transfer: unchanged profile, B,
+// next generation, BLOCKS and GENERATION spans, and a U increase U0->U1 that
+// creates or extends exactly UNDO(CURRENT,U0,U1-1,U0).
+func (f *retainedFiniteV1) promiseV1() error {
+	if !f.changedV1() {
+		return nil
+	}
+	o, p := &f.read.authority.Authority, &f.planned.Authority
+	if o.ActiveProfile != p.ActiveProfile || o.B != p.B || o.NextGenerationID != p.NextGenerationID || p.U < o.U {
+		return errRetainedFiniteAPIV1
+	}
+	for _, kind := range [3]mdbx.CleanupSpanKindV1{mdbx.CleanupSpanBlocksV1, mdbx.CleanupSpanGenerationV1, mdbx.CleanupSpanUndoV1} {
+		if !f.spansV1(kind) {
+			return errRetainedFiniteAPIV1
+		}
+	}
+	return nil
+}
+
+// spansV1 compares one kind's descriptors in place; UNDO admits only the
+// span a U increase U0->U1 creates or extends.
+func (f *retainedFiniteV1) spansV1(kind mdbx.CleanupSpanKindV1) bool {
+	o, p := f.read.authority.Authority, f.planned.Authority
+	no, np := retainedCountV1(o, kind), retainedCountV1(p, kind)
+	if kind != mdbx.CleanupSpanUndoV1 || o.U == p.U {
+		return no == np && retainedPrefixV1(o, p, kind, no)
+	}
+	u := mdbx.CleanupSpanV1{Kind: kind, GenerationID: f.read.roles[0].generation, FirstHeight: o.U, NextHeight: o.U, LastHeight: p.U - 1}
+	if np == no+1 {
+		last, _ := retainedNthV1(p, kind, no)
+		return last == u && retainedPrefixV1(o, p, kind, no)
+	}
+	return retainedExtendedV1(o, p, u, no, np)
+}
+
+// retainedExtendedV1 admits the last OLD UNDO span extended from U0-1 to U1-1.
+func retainedExtendedV1(o, p mdbx.StorageAuthorityV1, u mdbx.CleanupSpanV1, no, np int) bool {
+	if no == 0 || np != no || !retainedPrefixV1(o, p, u.Kind, no-1) {
+		return false
+	}
+	e, _ := retainedNthV1(o, u.Kind, no-1)
+	t, _ := retainedNthV1(p, u.Kind, no-1)
+	ok := e.LastHeight+1 == u.FirstHeight && e.GenerationID == u.GenerationID
+	e.LastHeight = u.LastHeight
+	return ok && e == t
+}
+
+func retainedCountV1(a mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1) int {
 	n := 0
 	for _, s := range retainedSpansV1(a) {
-		if s.Kind == mdbx.CleanupSpanGenerationV1 {
+		if s.Kind == kind {
 			n++
 		}
 	}
-	return min(n, 2)
+	return n
 }
 
-// headerV1 adds the canonical header term once and removes x's OLD optional
-// header charge; the qualified slot omits x before and reads nothing.
-func (f *retainedFiniteV1) headerV1(x retainedArtifactV1, owned bool) error {
-	p := f.proof
-	p.add = RetainedHeaderChargeV1
-	if !owned {
-		return nil
+// retainedNthV1 returns the i-th descriptor of kind without copying spans.
+func retainedNthV1(a mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1, i int) (mdbx.CleanupSpanV1, bool) {
+	for _, s := range retainedSpansV1(a) {
+		if s.Kind != kind {
+			continue
+		}
+		if i == 0 {
+			return s, true
+		}
+		i--
 	}
-	header, present, err := f.read.headerV1(x.hash)
-	if err != nil {
-		return retainedSourceV1(err, false)
+	return mdbx.CleanupSpanV1{}, false
+}
+
+func retainedPrefixV1(o, p mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1, n int) bool {
+	for i := 0; i < n; i++ {
+		a, _ := retainedNthV1(o, kind, i)
+		b, _ := retainedNthV1(p, kind, i)
+		if a != b {
+			return false
+		}
 	}
-	if present && !retainedHeaderV1(header, retainedArtifactV1{hash: x.hash}) {
+	return true
+}
+
+// sideKeysV1 requires every SideLink key the planned descriptors read to lie
+// in the key set the OLD descriptors cover; admitted Pairs never touch the
+// staged SideLink namespace, so those keys are neither deleted nor changed.
+func (f *retainedFiniteV1) sideKeysV1() error {
+	p := f.planned.Authority
+	if s := p.SelectedSide; s != nil && s.RowCount != 0 && !f.coveredV1(s.GenerationID, selectedSideFirst(s), s.TipHeight) {
 		return errRetainedFiniteAPIV1
 	}
-	if present {
-		p.remove = RetainedHeaderChargeV1
-	}
-	return nil
-}
-
-// bodyV1 settles x's body between its OLD optional owner and its planned
-// canonical keep; a stored body is read only when ownership changes.
-func (f *retainedFiniteV1) bodyV1(x retainedArtifactV1, oldOwned bool) error {
-	a := &f.authorityV1().Authority
-	postOwned := x.height >= f.read.bodyFirstV1() || retainedOwedV1(*a, x.height, mdbx.CleanupSpanBlocksV1)
-	c := f.op.Primitives[0].Coverage
-	if c.BodyKind == 1 {
-		if postOwned {
-			return f.addV1(uint64(len(c.CurrentBody)))
+	for _, s := range retainedSpansV1(p) {
+		if s.Kind == mdbx.CleanupSpanSideV1 && !f.coveredV1(s.GenerationID, s.NextHeight, s.LastHeight) {
+			return errRetainedFiniteAPIV1
 		}
-		return nil
 	}
-	if oldOwned == postOwned {
-		return nil
-	}
-	w := retainedWalkV1{read: f.read}
-	x.bits = 2
-	if err := w.bodyV1(x); err != nil {
-		return err
-	}
-	if postOwned {
-		return f.addV1(w.pre.exactRet)
-	}
-	return f.removeV1(w.pre.exactRet)
+	return nil
 }
 
-// undoV1 captures the sole family projection: OLD unowned in the supported
-// domain, planned owned iff x is at or above planned U or owed by UNDO.
-func (f *retainedFiniteV1) undoV1() error {
-	p := f.proof
-	if err := p.undoChargeV1(f.read); err != nil {
-		return err
+// coveredV1 walks [first,last] through the OLD SideLink ranges of g.
+func (f *retainedFiniteV1) coveredV1(g, first, last uint64) bool {
+	for h := first; h <= last; {
+		end, ok := f.oldEndV1(g, h)
+		if !ok {
+			return false
+		}
+		if end >= last {
+			return true
+		}
+		h = end + 1
 	}
-	a := &f.authorityV1().Authority
-	h := f.op.Primitives[0].Height
-	p.undo.postOwned = h >= a.U || retainedOwedV1(*a, h, mdbx.CleanupSpanUndoV1)
-	return nil
+	return true
+}
+
+// oldEndV1 returns the end of an OLD SideLink range of g containing h.
+func (f *retainedFiniteV1) oldEndV1(g, h uint64) (uint64, bool) {
+	o := f.read.authority.Authority
+	if retainedSelectedHasV1(o.SelectedSide, g, h) {
+		return o.SelectedSide.TipHeight, true
+	}
+	for _, s := range retainedSpansV1(o) {
+		if s.Kind == mdbx.CleanupSpanSideV1 && s.GenerationID == g && h >= s.NextHeight && h <= s.LastHeight {
+			return s.LastHeight, true
+		}
+	}
+	return 0, false
+}
+
+func retainedSelectedHasV1(s *mdbx.SelectedSideV1, g, h uint64) bool {
+	return s != nil && s.RowCount != 0 && s.GenerationID == g && h >= selectedSideFirst(s) && h <= s.TipHeight
 }
 
 func (f *retainedFiniteV1) addV1(n uint64) error {

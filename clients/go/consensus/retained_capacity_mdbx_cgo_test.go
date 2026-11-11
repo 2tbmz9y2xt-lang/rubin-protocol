@@ -3,8 +3,10 @@
 package consensus
 
 import (
+	"crypto/sha3"
 	"errors"
 	"math"
+	"runtime"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -336,6 +338,7 @@ func retainedCapacityPlanV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, d
 func retainedCapacityBoundOpV1(t *testing.T, w *btWorld) *mdbx.TreeOperationV1 {
 	t.Helper()
 	op := retainedCapacityDirectOpV1()
+	x, parent := retainedCapacityChildV1(t, w)
 	err := w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
 		return account.WithReservation(retainedPlanFrameV1, func() error {
 			return w.s.View(func(reader *mdbx.Reader) error {
@@ -346,9 +349,10 @@ func retainedCapacityBoundOpV1(t *testing.T, w *btWorld) *mdbx.TreeOperationV1 {
 				if err := readRetainedRolesV1(&read); err != nil {
 					return err
 				}
+				op.Primitives[0].Block, op.Primitives[0].Coverage.Block = x, x
 				op.Primitives[0].Coverage.DatabaseID, op.Primitives[0].Height = read.origin.database, read.roles[0].j
 				op.Primitives[0].Coverage.Height = read.roles[0].j
-				op.Pair.Mutations = retainedCapacityIndexV1(read.roles[0].generation, read.roles[0].j, op.Primitives[0].Block)
+				op.Pair.Mutations = retainedCapacityIndexV1(read.roles[0].generation, read.roles[0].j, x, parent)
 				return nil
 			})
 		})
@@ -357,15 +361,35 @@ func retainedCapacityBoundOpV1(t *testing.T, w *btWorld) *mdbx.TreeOperationV1 {
 	return op
 }
 
+// retainedCapacityChildV1 is a healthy child of the stored genesis whose
+// 298-byte body is stored, unowned, under its identity x (BodyKind 2 source).
+func retainedCapacityChildV1(t *testing.T, w *btWorld) ([32]byte, [32]byte) {
+	t.Helper()
+	genesis := sha3.Sum256(initial148BlockGenesis(t)[:148])
+	child := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent = genesis })
+	x := sha3.Sum256(child[:148])
+	present := false
+	err := w.s.View(func(reader *mdbx.Reader) error {
+		var err error
+		_, present, err = reader.Get(mdbx.TreeSchemaV1DBIs()[4], x[:])
+		return err
+	})
+	logicalMDBXAssert(t, err == nil && ValidateInitial148BlockBodyCommitments(child) == nil, "child body: %v", err)
+	if !present {
+		w.pair(t, btMutation(4, x[:], child))
+	}
+	return x, genesis
+}
+
 // retainedCapacityIndexV1 is x's planned CURRENT canonical index and owner
 // insert, the only Pair source of x's planned canonical identity.
-func retainedCapacityIndexV1(g, h uint64, x [32]byte) []mdbx.Mutation {
+func retainedCapacityIndexV1(g, h uint64, x, parent [32]byte) []mdbx.Mutation {
 	index, _ := mdbx.HeightKey(g, h)
 	owner, _ := mdbx.CanonicalOwnerKey(g, x)
 	height := make([]byte, 8)
 	height[7] = byte(h)
 	return []mdbx.Mutation{
-		{DBI: mdbx.TreeSchemaV1DBIs()[2], Key: index, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(x, [32]byte{1}, [40]byte{})},
+		{DBI: mdbx.TreeSchemaV1DBIs()[2], Key: index, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(x, parent, [40]byte{})},
 		{DBI: mdbx.TreeSchemaV1DBIs()[7], Key: owner, AfterKind: mdbx.AfterLiteral, Literal: height},
 	}
 }
@@ -380,9 +404,9 @@ func TestRetainedCapacityMDBXPlanPre(t *testing.T) {
 		if err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityBoundOpV1(t, w), 8192); err != nil {
 			t.Fatalf("plan: %v", err)
 		}
-		// x is absent and unowned before: canonical header +148, stored
-		// absent body 0, family unowned before and owned after.
-		if a.active != dst || !dst.prepared || dst.entered || dst.add != 148 || dst.remove != 0 || dst.undo.oldOwned || !dst.undo.postOwned {
+		// x is unowned before: canonical header +148, its stored 298-byte
+		// body becomes canonically owned, family unowned before and owned after.
+		if a.active != dst || !dst.prepared || dst.entered || dst.add != 148+298 || dst.remove != 0 || dst.undo.oldOwned || !dst.undo.postOwned {
 			t.Fatalf("prepared finite capture: %+v", dst)
 		}
 		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errors.New("callback"), true); err != nil {
@@ -493,7 +517,7 @@ func TestRetainedCapacityMDBXFinite(t *testing.T) {
 		},
 	} {
 		_, dst, err := plan(mutate)
-		if err != nil || !dst.prepared || dst.add != 148 || dst.remove != 0 {
+		if err != nil || !dst.prepared || dst.add != 148+298 || dst.remove != 0 {
 			t.Fatalf("%s: %v add=%d remove=%d", name, err, dst.add, dst.remove)
 		}
 	}
@@ -518,7 +542,148 @@ func TestRetainedCapacityMDBXFinite(t *testing.T) {
 	}
 	oldTree, _ := RetainedTreeChargeV1(r.n)
 	newTree, _ := RetainedTreeChargeV1(r.n + 1)
-	if err := dst.Proof(report); err != nil || dst.post != dst.pre+56+newTree-oldTree+RetainedIndexChargeV1+148+56 {
+	if err := dst.Proof(report); err != nil || dst.post != dst.pre+56+newTree-oldTree+RetainedIndexChargeV1+148+298+56 {
 		t.Fatalf("proof: %v post=%d pre=%d", err, dst.post, dst.pre)
+	}
+}
+
+// T11: x's planned canonical identity comes from the Pair insert; the OLD
+// Reader reports x as not owned, so reading it would lose the planned bits.
+func TestRetainedCapacityMDBXPlannedX(t *testing.T) {
+	w, _, _ := riGenesis(t)
+	op := retainedCapacityBoundOpV1(t, w)
+	err := w.s.View(func(reader *mdbx.Reader) error {
+		o, err := reader.CanonicalOwnerV1(op.Primitives[0].Generation, op.Primitives[0].Block)
+		logicalMDBXAssert(t, err == nil && !o.Owned, "x OLD owner: %v %+v", err, o)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "view: %v", err)
+	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.undo.postOwned || dst.undo.oldOwned || dst.add != 148+298 {
+		t.Fatalf("planned x: %v %+v add=%d", err, dst.undo, dst.add)
+	}
+}
+
+// T12: the exchange restores OLD on return, error, panic and Goexit.
+func TestRetainedCapacityMDBXExchange(t *testing.T) {
+	var read retainedReadV1
+	read.authority.Authority.U = 1
+	f := retainedFiniteV1{read: &read}
+	f.planned.Authority.U = 2
+	inside := uint64(0)
+	use := func() error { inside = read.authority.Authority.U; return errRetainedFiniteAPIV1 }
+	if err := f.exchangeV1(use); err != errRetainedFiniteAPIV1 || inside != 2 || read.authority.Authority.U != 1 || f.planned.Authority.U != 2 {
+		t.Fatalf("error exit: %v inside=%d old=%d planned=%d", err, inside, read.authority.Authority.U, f.planned.Authority.U)
+	}
+	func() {
+		defer func() { _ = recover() }()
+		_ = f.exchangeV1(func() error { panic("probe") })
+	}()
+	if read.authority.Authority.U != 1 || f.planned.Authority.U != 2 {
+		t.Fatalf("panic exit: old=%d planned=%d", read.authority.Authority.U, f.planned.Authority.U)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = f.exchangeV1(func() error { runtime.Goexit(); return nil })
+	}()
+	<-done
+	if read.authority.Authority.U != 1 || f.planned.Authority.U != 2 {
+		t.Fatalf("Goexit exit: old=%d planned=%d", read.authority.Authority.U, f.planned.Authority.U)
+	}
+}
+
+// T14: a planned SIDE span outside the OLD SideLink key set refuses before
+// any read (the nil Reader would panic on a read).
+func TestRetainedCapacityMDBXSideKeys(t *testing.T) {
+	var read retainedReadV1
+	read.authority.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, TipHeight: 6, RowCount: 2}
+	read.authority.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, NextHeight: 7, LastHeight: 8}}}
+	f := retainedFiniteV1{read: &read}
+	for _, c := range []struct {
+		g, next, last uint64
+		ok            bool
+	}{{3, 5, 8, true}, {3, 6, 7, true}, {3, 4, 5, false}, {3, 8, 9, false}, {4, 5, 5, false}} {
+		f.planned.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: c.g, NextHeight: c.next, LastHeight: c.last}}}
+		if err := f.sideKeysV1(); (err == nil) != c.ok {
+			t.Fatalf("span %+v: %v", c, err)
+		}
+	}
+}
+
+// The promise transfer admits only the exact UNDO span of a U increase.
+func TestRetainedCapacityMDBXPromise(t *testing.T) {
+	var read retainedReadV1
+	read.roles[0].generation = 1
+	read.authority.Authority.U = 10
+	f := retainedFiniteV1{read: &read}
+	undo := func(first, next, last uint64) mdbx.CleanupSpanV1 {
+		return mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanUndoV1, GenerationID: 1, FirstHeight: first, NextHeight: next, LastHeight: last}
+	}
+	for name, c := range map[string]struct {
+		old, planned []mdbx.CleanupSpanV1
+		u            uint64
+		ok           bool
+	}{
+		"unchanged":   {nil, nil, 10, true},
+		"created":     {nil, []mdbx.CleanupSpanV1{undo(10, 10, 11)}, 12, true},
+		"extended":    {[]mdbx.CleanupSpanV1{undo(4, 5, 9)}, []mdbx.CleanupSpanV1{undo(4, 5, 11)}, 12, true},
+		"no_span":     {nil, nil, 12, false},
+		"wider":       {nil, []mdbx.CleanupSpanV1{undo(9, 9, 11)}, 12, false},
+		"regressed":   {nil, nil, 9, false},
+		"gap_extend":  {[]mdbx.CleanupSpanV1{undo(4, 5, 8)}, []mdbx.CleanupSpanV1{undo(4, 5, 11)}, 12, false},
+		"drained_old": {[]mdbx.CleanupSpanV1{undo(4, 5, 9)}, []mdbx.CleanupSpanV1{undo(4, 6, 9)}, 10, false},
+	} {
+		read.authority.Authority.Cleanup = &mdbx.CleanupV1{Spans: c.old}
+		f.planned.Authority = read.authority.Authority
+		f.planned.Authority.U = c.u
+		f.planned.Authority.Cleanup = &mdbx.CleanupV1{Spans: c.planned}
+		ok := f.spansV1(mdbx.CleanupSpanUndoV1) && c.u >= read.authority.Authority.U
+		if ok != c.ok {
+			t.Fatalf("%s: %v", name, ok)
+		}
+	}
+}
+
+// W/L transfer: a selected-side row y leaves (the planned authority drops the
+// selected side and the Pair deletes y's header and body). y's OLD optional
+// header 148 and body 298 leave E while x adds 148+298; the cold pre counts y.
+func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
+	w, _, genesis := riGenesis(t)
+	y := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = genesis, blockStepsMedian+2 })
+	yh := sha3.Sum256(y[:148])
+	key, _ := mdbx.HeightKey(3, 5)
+	w.pair(t, btMutation(3, yh[:], y[:148]), btMutation(4, yh[:], y), btMutation(6, key, mdbx.ChainValue(yh, genesis, [40]byte{39: 1})))
+	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 4, TipHeight: 5, TipHash: yh, RowCount: 1, LogicalBytes: uint64(len(y)), CumulativeChainwork: [40]byte{39: 1}}
+	})
+	op := retainedCapacityBoundOpV1(t, w)
+	var planned []byte
+	err := w.s.View(func(reader *mdbx.Reader) error {
+		a, _, err := reader.ReadTreeAuthorityV1()
+		if err != nil {
+			return err
+		}
+		a.Authority.SelectedSide = nil
+		planned, err = a.Encode()
+		return err
+	})
+	logicalMDBXAssert(t, err == nil, "planned authority: %v", err)
+	meta := btMutation(0, []byte{2}, planned)
+	meta.BeforePresent = true
+	del := func(rank int) mdbx.Mutation {
+		return mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[rank], Key: yh[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}
+	}
+	op.Pair.Mutations = append([]mdbx.Mutation{meta}, append(op.Pair.Mutations, del(3), del(4))...)
+	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.prepared || dst.add != 148+298 || dst.remove != 148+uint64(len(y)) {
+		t.Fatalf("leaving side: %v add=%d remove=%d", err, dst.add, dst.remove)
+	}
+	// Keeping y owned while deleting its body is an unsupported effect.
+	op2 := retainedCapacityBoundOpV1(t, w)
+	op2.Pair.Mutations = append(op2.Pair.Mutations, del(4))
+	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	if err := retainedCapacityPlanV1(t, w, a, dst, op2, 8192); !errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst {
+		t.Fatalf("owned deletion: %v", err)
 	}
 }
