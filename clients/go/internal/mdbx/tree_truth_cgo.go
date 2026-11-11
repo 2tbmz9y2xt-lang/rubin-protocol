@@ -332,6 +332,13 @@ func (t *treeSectionV1) pairPreflightV1(pair []ownedMutation, consulted []ownedC
 	return err
 }
 
+// pairPreflightContextV1 is pairPreflightV1 with the admitted context window as one more consulted domain (D4 site 1).
+func (t *treeSectionV1) pairPreflightContextV1(pair []ownedMutation, consulted []ownedConsulted, window CanonicalContextWindowV1) error {
+	references, err := updateNativePreflight(t.old, t.write, t.handles, pair, consulted, contextTreeScopeV1(window))
+	t.references = references
+	return err
+}
+
 // pairEmitV1 writes the Pair after the last primitive: all deletes, then all puts (legacy order).
 func (t *treeSectionV1) pairEmitV1(pair []ownedMutation) error {
 	err := updateNativeDeletes(t.write, t.handles, pair, &t.reached)
@@ -497,6 +504,27 @@ func (t *treeSectionV1) finalV1(pair []ownedMutation, consulted []ownedConsulted
 	return nil
 }
 
+// finalContextV1 is finalV1 with the admitted context window compared after the Consulted rows (D4 site 2).
+func (t *treeSectionV1) finalContextV1(pair []ownedMutation, consulted []ownedConsulted, window CanonicalContextWindowV1) error {
+	const diagnostic = "final update image mismatch"
+	for _, entry := range t.pw.entries {
+		err := t.finalEntryV1(entry, diagnostic)
+		if err != nil {
+			return err
+		}
+	}
+	err := updateNativeVerify(t.old, t.write, t.handles, pair, t.references)
+	if err != nil {
+		return err
+	}
+	err = updateNativeScopedMatch(t.old, t.write, t.handles, pair, consulted, diagnostic, contextTreeScopeV1(window))
+	if err != nil {
+		return err
+	}
+	t.pw = treeProjectionV1{}
+	return nil
+}
+
 func (t *treeSectionV1) finalEntryV1(entry treeEntryV1, diagnostic string) error {
 	handle := t.handles[entry.dbi.Rank]
 	if entry.kind == treeEntryReferenceV1 {
@@ -521,6 +549,12 @@ func (t *treeSectionV1) abortV1(primary error) updateNativeOutcome {
 func (t *treeSectionV1) commitV1(pair []ownedMutation, consulted []ownedConsulted, truth treeTruthV1) updateNativeOutcome {
 	t.ended = true
 	return updateNativeCommit(t.env, t.handles, pair, consulted, t.old, t.write, t.reached, truth)
+}
+
+// commitContextV1 is commitV1 with the admitted context window forwarded to the pair-only readback (D4 site 4).
+func (t *treeSectionV1) commitContextV1(pair []ownedMutation, consulted []ownedConsulted, truth treeTruthV1, window CanonicalContextWindowV1) updateNativeOutcome {
+	t.ended = true
+	return updateNativeCommit(t.env, t.handles, pair, consulted, t.old, t.write, t.reached, truth, contextTreeScopeV1(window))
 }
 
 // treeWriterEmitterV1 is the writer-position emitter over one section.
@@ -612,7 +646,7 @@ func (r *treeReadbackStateV1) recordV1(dbi DBI, key []byte, kind uint8, value []
 
 // verdictV1 completes both predicates over P_r, references, the Pair targets and Consulted rows even after one is false:
 // OLD if OLD matches, else NEW, else UNKNOWN (MEMPOOL L5408-5414). Pair rows carry no AfterOldValueRef (D14-5, D14-11).
-func (r *treeReadbackStateV1) verdictV1(pair []ownedMutation, consulted []ownedConsulted) (CommitTruth, error) {
+func (r *treeReadbackStateV1) verdictV1(pair []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) (CommitTruth, error) {
 	if r.failed != nil {
 		return CommitTruthUnknown, r.failed
 	}
@@ -620,7 +654,7 @@ func (r *treeReadbackStateV1) verdictV1(pair []ownedMutation, consulted []ownedC
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
-	oldImage, newImage, err = r.foldPairV1(pair, consulted, oldImage, newImage)
+	oldImage, newImage, err = r.foldPairV1(pair, consulted, oldImage, newImage, scopes...)
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
@@ -666,7 +700,7 @@ func (r *treeReadbackStateV1) planEqualV1(handle C.MDBX_dbi, entry treeEntryV1) 
 }
 
 // foldPairV1 folds the Pair targets and Consulted rows with the legacy readback helpers (scoped, legacy law).
-func (r *treeReadbackStateV1) foldPairV1(pair []ownedMutation, consulted []ownedConsulted, oldImage, newImage bool) (bool, bool, error) {
+func (r *treeReadbackStateV1) foldPairV1(pair []ownedMutation, consulted []ownedConsulted, oldImage, newImage bool, scopes ...largeImageScope) (bool, bool, error) {
 	references, err := updateNativeImages(r.old, r.handles, pair)
 	if err != nil {
 		return false, false, err
@@ -679,7 +713,7 @@ func (r *treeReadbackStateV1) foldPairV1(pair []ownedMutation, consulted []owned
 	if err != nil {
 		return false, false, err
 	}
-	return updateNativeReadbackScoped(r.old, r.read, r.handles, pair, consulted, oldImage, newImage)
+	return updateNativeReadbackScoped(r.old, r.read, r.handles, pair, consulted, oldImage, newImage, scopes...)
 }
 
 // treeReadbackEmitterV1 is the readback-position emitter: it draws from the carried budget and never writes MDBX.
