@@ -46,7 +46,7 @@ func prunedTreeBindingBytes(t *testing.T, p *uint64) []byte {
 func prunedTreeSameEngine(got, want error) bool {
 	g, gok := directTestEngineError(got)
 	w, wok := directTestEngineError(want)
-	return gok && wok && reflect.DeepEqual(g, w)
+	return gok && wok && reflect.DeepEqual(*g, *w)
 }
 
 func prunedTreeLagKey() []byte { return binary.BigEndian.AppendUint64([]byte{0x11}, 2) }
