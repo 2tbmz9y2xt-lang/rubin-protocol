@@ -504,6 +504,22 @@ func treeRoleImportEditV1(t *testing.T) {
 		if c.Binding.Assurance.Import == nil || c.Binding.Assurance.Import == again.Binding.Assurance.Import {
 			t.Fatal("separately returned Bound roles share one public Import allocation")
 		}
+		// Positive control: the same three calls on the unedited role are
+		// admitted, so each refusal below is attributable to the Import edit.
+		// No evidence row is seeded: the C, F pair is Defective, Affected Current.
+		pair, err := r.QualifyTreePairAssuranceV1(a, c, l)
+		mustEnvironment(t, err)
+		if pair.Status != TreePairDefectiveV1 || pair.Affected != TreePairAffectedCurrentV1 || pair.Defect != TreePairEvidenceAbsentV1 {
+			t.Fatalf("unedited pair %+v, want Defective, Affected Current, EvidenceAbsent", pair)
+		}
+		fin, err := treeRoleFiniteCallV1(t, r, a, treeRoleFinalReqV1(c, TreeEndpointV1{}, nil))
+		mustEnvironment(t, err)
+		if fin.Status != TreeRoleQualifiedV1 {
+			t.Fatalf("unedited finite call %+v, want Qualified", fin)
+		}
+		wrong, err := treeRoleFiniteCallV1(t, r, a, treeRoleFinalReqV1(c, treeRoleAppliedV1, nil))
+		mustEnvironment(t, err)
+		treeRoleWantPositiveV1(t, wrong, TreeRoleCurrentV1, 1, TreeRoleAtBindingV1, TreeRoleWrongIdentityV1)
 		c.Binding.Assurance.Import.OriginalCurrentID++
 		_, err = r.QualifyTreePairAssuranceV1(a, c, l)
 		treeRoleWantInvalidV1(t, err)

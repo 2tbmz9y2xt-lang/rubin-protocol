@@ -576,7 +576,7 @@ func treeRoleEvidenceSeedV1(t *testing.T, s *Store, id [32]byte, value []byte) {
 // table resolves through evidence; no counter, node or point read), the whole
 // account ceiling held for every evidence-free row (zero temporary
 // reservation), and every binding and evidence row unchanged afterwards
-// (FixtureRawRowEqual). Payload is never returned.
+// (FixtureRawRowEqual).
 func treeRolePairsV1(t *testing.T) {
 	s, _, o := tsNew(t)
 	refCur, value := treeRoleImportV1(TreeOriginalCurrentV1, 8)
@@ -812,9 +812,10 @@ func treeRoleAbortV1(t *testing.T) {
 }
 
 // treeRoleImageTargetsV1 is A2's IMAGE COMPLETE row with a resolving
-// reference and R1's malformed target binding: the target pair is Qualified
-// and HealthyOn; a malformed TargetCurrent binding is Positive Malformed at
-// Binding, unrecorded, and the same Store handle serves a following View.
+// reference and R1's malformed target bindings: the target pair is Qualified
+// and HealthyOn; a malformed TargetCurrent and, separately, a malformed
+// TargetLag binding is Positive Malformed at Binding, unrecorded, and the
+// same Store handle serves a following View.
 func treeRoleImageTargetsV1(t *testing.T) {
 	s, _, o := tsNew(t)
 	ref, value := treeRoleImportV1(TreeOriginalCurrentV1, 8)
