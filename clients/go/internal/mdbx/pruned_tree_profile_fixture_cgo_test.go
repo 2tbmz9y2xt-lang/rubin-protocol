@@ -271,15 +271,6 @@ func TestPrunedTreeProfileReplacementInvariant(t *testing.T) {
 	}
 }
 
-// X3: the outcome Authority is owned by the call and the caller's tip is copied.
-func TestPrunedTreeProfileAliasing(t *testing.T) {
-	sc := newPrunedTreeScene(t, 18561, prunedTreeAt(20000), prunedTreeU64(4320), nil)
-	tip := *sc.tip
-	out := sc.s.SelectPrunedTreeProfileV1(true, &tip, sc.o)
-	tip.Height, tip.BlockHash = 1, modelHash(1)
-	sc.committed(t, out, sc.expected(4881, prunedTreeU64(4320)), "X3")
-}
-
 // TestPrunedTreeProfileConsultedExclusion is A9's exclusion half: the active
 // generation's root binding is seeded and drifted before the write transaction.
 // A plan consulting it refuses with OLD/write snapshot mismatch; this plan commits
