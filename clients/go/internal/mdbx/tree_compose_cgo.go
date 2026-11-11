@@ -41,6 +41,7 @@ type treePlanV1 struct {
 	report     *TreeDeltaReportV1             // step-5 charged backing, filled at the writer; nil without proof
 	slot       []byte                         // step-5 owned TreeOperationV1.HeaderSlot as Hash||Header; nil without a slot
 	inventory  *entryInventoryStateV1
+	context    CanonicalContextWindowV1 // owned Pair.ContextConsulted; Count 0 encodes no window
 }
 
 // treeScopeV1 is one position's slots (op or the truth evaluator, D30, D35): the Reader slot, the recorder slot and
@@ -384,6 +385,8 @@ func (c *treeComposeV1) releaseV1() {
 	}
 }
 
+func treeCoveredV1(p []TreePrimitiveV1) bool { return len(p) != 0 && p[0].Coverage != nil }
+
 // runV1 checks preflight, applies the plan and preserves the first failure or unwind.
 func (c *treeComposeV1) runV1() {
 	w := c.writer
@@ -393,8 +396,13 @@ func (c *treeComposeV1) runV1() {
 		return
 	}
 	w.t = t
-	t.covered = len(w.plan.primitives) != 0 && w.plan.primitives[0].Coverage != nil
-	err := t.pairPreflightV1(w.plan.pair, w.plan.consulted)
+	t.covered = treeCoveredV1(w.plan.primitives)
+	var err error
+	if w.plan.context.Count != 0 {
+		err = t.pairPreflightContextV1(w.plan.pair, w.plan.consulted, w.plan.context)
+	} else {
+		err = t.pairPreflightV1(w.plan.pair, w.plan.consulted)
+	}
 	if err == nil {
 		err = c.entryMatchV1("OLD/write snapshot mismatch")
 	}
@@ -434,7 +442,11 @@ func (c *treeComposeV1) holdV1() error {
 	if err != nil {
 		return err
 	}
-	err = w.t.finalV1(w.plan.pair, w.plan.consulted)
+	if w.plan.context.Count != 0 {
+		err = w.t.finalContextV1(w.plan.pair, w.plan.consulted, w.plan.context)
+	} else {
+		err = w.t.finalV1(w.plan.pair, w.plan.consulted)
+	}
 	if err != nil {
 		return err
 	}
@@ -466,6 +478,9 @@ func (c *treeComposeV1) coveredHoldV1() error {
 	err = w.t.flushV1(w.plan.pair)
 	if err != nil {
 		return err
+	}
+	if w.plan.context.Count != 0 {
+		return w.t.finalContextV1(w.plan.pair, w.plan.consulted, w.plan.context)
 	}
 	return w.t.finalV1(w.plan.pair, w.plan.consulted)
 }
@@ -516,7 +531,11 @@ func (c *treeComposeV1) commitV1() {
 		truth = c.entryTruthV1
 	}
 	c.committed = true
-	c.outcome = w.t.commitV1(w.plan.pair, w.plan.consulted, truth)
+	if w.plan.context.Count != 0 {
+		c.outcome = w.t.commitContextV1(w.plan.pair, w.plan.consulted, truth, w.plan.context)
+	} else {
+		c.outcome = w.t.commitV1(w.plan.pair, w.plan.consulted, truth)
+	}
 	c.index, c.done = -1, true
 }
 
@@ -557,6 +576,9 @@ func (c *treeComposeV1) readbackV1(e *treeScopeV1, read *C.MDBX_txn) (CommitTrut
 	if stopped, err := e.loopV1(); stopped {
 		c.unwind = e.unwind
 		return CommitTruthUnknown, err
+	}
+	if e.plan.context.Count != 0 {
+		return rb.verdictV1(e.plan.pair, e.plan.consulted, contextTreeScopeV1(e.plan.context))
 	}
 	return rb.verdictV1(e.plan.pair, e.plan.consulted)
 }

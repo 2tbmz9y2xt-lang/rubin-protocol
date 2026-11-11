@@ -88,7 +88,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: true
           cache-dependency-path: |
             clients/go/go.mod
@@ -101,11 +101,11 @@ jobs:
       - name: Install Semgrep
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install semgrep==1.180.0
+          python3 -m pip install semgrep==1.185.0
 
       - name: Install gosec + govulncheck
         run: |
-          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@d2b649ec01825c20bd101ec584e559adb287e578
+          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@5eb1d104ef85ff2c905c877eb600e8c1dee33a22 # v2.30.0
           GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
@@ -114,11 +114,11 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-${{ runner.os }}-v0.22.2
+          key: cargo-audit-${{ runner.os }}-v0.23.0
 
       - name: Install cargo-audit
         if: steps.cache-cargo-audit-sec.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit@0.22.2 --locked
+        run: cargo install cargo-audit@0.23.0 --locked
 
       - name: Prepare OpenSSL bundle
         uses: ./.github/actions/openssl-bundle
@@ -335,7 +335,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.test_gate.outputs.run_test == 'true'
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
@@ -501,7 +501,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
@@ -594,7 +594,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.formal_gate.outputs.run_formal == 'true'
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
@@ -659,7 +659,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: true
           cache-dependency-path: |
             clients/go/go.sum

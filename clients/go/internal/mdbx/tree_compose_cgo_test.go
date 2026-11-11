@@ -3,6 +3,8 @@
 package mdbx
 
 import (
+	"bytes"
+	"crypto/sha3"
 	"errors"
 	"fmt"
 	"os"
@@ -2233,4 +2235,56 @@ func tcPoisonedChild(t *testing.T) {
 	mustEnvironment(t, fixtureLargeRelease(s.store))
 	s.settled(t)
 	s.reopen(t, s.newRows(t)...)
+}
+
+// ctxTreeSeam seeds a raw complete generation-7 window at heights 100..101 and returns the plan with it set directly.
+func ctxTreeSeam(t *testing.T, s *tcScene, window bool) *treePlanV1 {
+	t.Helper()
+	for h := uint64(100); h < 102; h++ {
+		header := ctxTreeHeader(t, 7, h)
+		hash := sha3.Sum256(header)
+		treeNativeSeed(t, s.store, 2, ctxTreeIndexKey(7, h), append(bytes.Clone(hash[:]), make([]byte, 72)...))
+		treeNativeSeed(t, s.store, 3, hash[:], header)
+	}
+	plan := s.plan()
+	if window {
+		plan.context = CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 2}
+	}
+	return plan
+}
+
+func TestCtxTreeComposeSeamV1(t *testing.T) {
+	t.Run("A6-hold", func(t *testing.T) {
+		var logs [2][]string
+		for i, window := range []bool{false, true} {
+			s := tcNew(t, 1)
+			var r tcResult
+			r.truth, r.stage, r.index, r.unwind, r.err = fixtureTreeComposeV1(s.store, s.ledger, ctxTreeSeam(t, s, window), nil)
+			r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+			mustEnvironment(t, r.err)
+			logs[i] = slices.Clone(s.ledger.log)
+		}
+		if !slices.Equal(logs[0], logs[1]) || tcLastCharge(logs[1]) == "" {
+			t.Fatalf("A6 ledger without window %v, with window %v", logs[0], logs[1])
+		}
+	})
+	t.Run("R6-write-snapshot", func(t *testing.T) {
+		s := tcNew(t, 2)
+		plan := ctxTreeSeam(t, s, true)
+		var r tcResult
+		r.truth, r.stage, r.index, r.unwind, r.err = fixtureTreeComposeV1(s.store, s.ledger, plan, func() {
+			treeNativeSeed(t, s.store, 2, ctxTreeIndexKey(7, 101), make([]byte, 104))
+		})
+		r.check(t, CommitTruthOld, UpdateStagePrewrite, -1)
+		for _, p := range s.prims {
+			if p.calls[1] != 0 {
+				t.Errorf("%s called", p.name)
+			}
+		}
+		if len(s.ledger.log) != 0 {
+			t.Errorf("ledger touched: %v", s.ledger.log)
+		}
+		ttMismatch(t, r.err, "OLD/write snapshot mismatch")
+		s.consumed(t, CommitTruthOld, r.err)
+	})
 }

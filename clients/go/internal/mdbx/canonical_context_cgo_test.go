@@ -403,3 +403,15 @@ func contextShape(t *testing.T) {
 		t.Fatal("optional Batch context field")
 	}
 }
+
+// A7/D5: the zero-value selector keeps the legacy 116-byte header; the tree scope selects 148 (RUBIN_L1_CANONICAL §10.1).
+func TestCtxTreeHeaderWidthV1(t *testing.T) {
+	window := CanonicalContextWindowV1{Generation: 3, FirstHeight: 4, Count: 5}
+	if contextHeaderWidth(largeImageScope{context: window, contextPresent: true}) != 116 {
+		t.Fatal("legacy header width changed")
+	}
+	scope := contextTreeScopeV1(window)
+	if contextHeaderWidth(scope) != 148 || scope.context != window || !scope.contextPresent || scope.selectors != nil || scope.consulted != nil || scope.tip != nil {
+		t.Fatalf("tree context scope %+v", scope)
+	}
+}
