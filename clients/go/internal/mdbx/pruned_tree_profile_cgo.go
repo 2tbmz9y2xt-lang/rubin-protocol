@@ -29,7 +29,8 @@ type PrunedTreeProfileOutcomeV1 struct {
 // at Prewrite and OLD, except that a state refusal of a closed or terminal Store
 // carries that Store's retained truth. Each has empty Decision and nil Authority.
 //
-// Inside the callback an exact-empty store returns Decision "not eligible". On
+// Inside the callback a ReadTreeAuthorityV1 error is returned unchanged and an
+// exact-empty store returns Decision "not eligible". On
 // the decoded envelope, in order: Lifecycle not STABLE is "RECOVERY_REQUIRED",
 // ActiveProfile PRUNED is "PROFILE_NOOP", Phase PRUNE_GC is "LOCAL_BUSY", and
 // confirmed false is "PROFILE_CONFIRMATION_REQUIRED". A tip above 0xffffffff
@@ -44,6 +45,11 @@ type PrunedTreeProfileOutcomeV1 struct {
 // work" below; then a BlockHash mismatch or any row above the tip is
 // "STALE_LOCAL_PLAN". A nil tip requires an empty index, otherwise
 // "STALE_LOCAL_PLAN". Index read errors are returned unchanged.
+//
+// The LAG root binding is read with ReadTreeRootBindingV1(LagGenerationID); its
+// read error is returned unchanged. A native read or decode failure of the
+// envelope, index or binding read is recorded raw on the Reader by that read,
+// so the Store is consumed.
 //
 // Three routes return Integrity/get/MDBX_INVALID with the named diagnostic and
 // no cause, latched on the Reader so the Store is consumed:

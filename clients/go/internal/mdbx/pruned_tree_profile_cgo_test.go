@@ -171,37 +171,53 @@ func TestPrunedTreeProfileControl(t *testing.T) {
 }
 
 func TestPrunedTreeProfileStaticRefusals(t *testing.T) {
+	// Each static refusal is checked with a confirmed call, an unconfirmed call
+	// and a tip above 0xffffffff: D2 precedes D4 confirmation and D5.
+	high := &AuthorityPointV1{Height: 0x100000000}
+	inputs := []struct {
+		confirmed bool
+		tip       *AuthorityPointV1
+	}{{true, nil}, {false, nil}, {true, high}}
 	var nilStore *Store
-	out := nilStore.SelectPrunedTreeProfileV1(true, nil, nil)
-	treeNativeError(t, out.Err, operationUpdate, EngineInvalidInput, codeEINVAL, "nil Store", nil)
-	prunedTreeRefusal(t, out, "R1 nil Store")
+	var out PrunedTreeProfileOutcomeV1
+	for _, in := range inputs {
+		out = nilStore.SelectPrunedTreeProfileV1(in.confirmed, in.tip, nil)
+		treeNativeError(t, out.Err, operationUpdate, EngineInvalidInput, codeEINVAL, "nil Store", nil)
+		prunedTreeRefusal(t, out, "R1 nil Store")
+	}
 
 	archive := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0)
 	s, _, o := prunedTreeSeed(t, archive)
 	for _, owner := range []*OperationReservationOwner{nil, {}} {
-		out = s.SelectPrunedTreeProfileV1(true, nil, owner)
-		if !sameError(out.Err, errOperationReservationInput) {
-			t.Fatalf("R2 owner refusal: %+v", out)
+		for _, in := range inputs {
+			out = s.SelectPrunedTreeProfileV1(in.confirmed, in.tip, owner)
+			if !sameError(out.Err, errOperationReservationInput) {
+				t.Fatalf("R2 owner refusal: %+v", out)
+			}
+			prunedTreeRefusal(t, out, "R2 owner")
 		}
-		prunedTreeRefusal(t, out, "R2 owner")
 	}
 	prunedTreeDecision(t, s.SelectPrunedTreeProfileV1(false, nil, o), "PROFILE_CONFIRMATION_REQUIRED", "R2 reusable")
 
 	v2, _, _, _ := prunedStore(t, modelBase(2, 0, 0), nil, modelWork(false))
 	v2Before := prunedImage(t, v2, nil)
-	out = v2.SelectPrunedTreeProfileV1(true, nil, o)
-	treeNativeError(t, out.Err, operationUpdate, EngineStateMismatch, -30779, "typed tree operation requires tree store", nil)
-	prunedTreeRefusal(t, out, "R3 format 2")
+	for _, in := range inputs {
+		out = v2.SelectPrunedTreeProfileV1(in.confirmed, in.tip, o)
+		treeNativeError(t, out.Err, operationUpdate, EngineStateMismatch, -30779, "typed tree operation requires tree store", nil)
+		prunedTreeRefusal(t, out, "R3 format 2")
+	}
 	prunedUnchanged(t, v2, nil, v2Before, "R3 format 2")
 	prunedDecision(t, v2.SelectPrunedProfileV1(false, nil, o), "PROFILE_CONFIRMATION_REQUIRED", "R3 format-2 owner")
 
 	busy, _, _ := prunedTreeSeed(t, archive)
 	busyBefore := prunedTreeBytes(t, busy)
-	busy.operations.Lock()
-	out = busy.SelectPrunedTreeProfileV1(true, nil, o)
-	busy.operations.Unlock()
-	treeNativeError(t, out.Err, operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
-	prunedTreeRefusal(t, out, "R3 busy")
+	for _, in := range inputs {
+		busy.operations.Lock()
+		out = busy.SelectPrunedTreeProfileV1(in.confirmed, in.tip, o)
+		busy.operations.Unlock()
+		treeNativeError(t, out.Err, operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
+		prunedTreeRefusal(t, out, "R3 busy")
+	}
 	if !bytes.Equal(prunedTreeBytes(t, busy), busyBefore) {
 		t.Fatal("R3 busy envelope changed")
 	}
@@ -209,17 +225,19 @@ func TestPrunedTreeProfileStaticRefusals(t *testing.T) {
 
 	closed, _, _ := prunedTreeSeed(t, archive)
 	mustEnvironment(t, closed.Close())
-	out = closed.SelectPrunedTreeProfileV1(true, nil, o)
 	var direct tsResult
 	mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 		direct = tsInvoke(closed, a, func(*Reader) (TreeOperationV1, error) { return TreeOperationV1{}, nil })
 		return nil
 	}))
-	if !sameError(out.Err, direct.err) && (out.Err == nil || direct.err == nil || out.Err.Error() != direct.err.Error()) {
-		t.Fatalf("R3 closed: %+v vs %+v", out, direct)
-	}
-	if out.Truth != direct.truth || out.Stage != direct.stage || out.Decision != "" || out.Authority != nil {
-		t.Fatalf("R3 closed tuple: %+v vs %+v", out, direct)
+	for _, in := range inputs {
+		out = closed.SelectPrunedTreeProfileV1(in.confirmed, in.tip, o)
+		if !sameError(out.Err, direct.err) && (out.Err == nil || direct.err == nil || out.Err.Error() != direct.err.Error()) {
+			t.Fatalf("R3 closed: %+v vs %+v", out, direct)
+		}
+		if out.Truth != direct.truth || out.Stage != direct.stage || out.Decision != "" || out.Authority != nil {
+			t.Fatalf("R3 closed tuple: %+v vs %+v", out, direct)
+		}
 	}
 }
 
