@@ -55,6 +55,7 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	}
 	t.Run("D4_D23_native_commit_and_companion", retainedCapacityNativeCommitV1)
 	t.Run("T18_w_row_beside_pending_side", retainedCapacityWBesidePendingV1)
+	t.Run("T19_rolling_merge_full_plan_proof", retainedCapacityRollingMergeV1)
 }
 
 // T18 (rejected_cases): a W row beside the rolling-prepared pending SIDE.
@@ -212,5 +213,82 @@ func retainedCapacityNativeCommitV1(t *testing.T) {
 	}
 	if rolesBefore[0].s != 89 || rolesBefore[0].n != 1 || rolesAfter[0].s != 178 || rolesAfter[0].n != 2 || rolesAfter[0].generation != rolesBefore[0].generation {
 		t.Fatalf("CURRENT %+v -> %+v", rolesBefore[0], rolesAfter[0])
+	}
+}
+
+// T19 (D2/D15/D17): the rolling-prepared OLD shape of the RUB-1594 A1
+// witness: H_old=F=0, live one-slot selected side [2,1440] (1439 rows, f 2
+// >= F+2, MP 1408-1411) and pending SIDE(3,1,1,1) owing the candidate x at
+// f-1 (MP 1422-1426). The direct op at 1 has W empty and merges L=[2,1440]
+// into SIDE(3,1,1440,1) with first and next kept (MP 2539-2541, DIRECT
+// 3800-3805), and the full Plan/Proof path accepts it. x's header is the
+// canonical +148; each of the 1439 L headers leaves the selected owner
+// (SIDE body only), so remove is 148*1439; bodies stay owned. SIDE(3,2,1440,2)
+// and SIDE(3,1,1440,2) are refused.
+func retainedCapacityRollingMergeV1(t *testing.T) {
+	for name, c := range map[string]struct {
+		first, next uint64
+		ok          bool
+	}{"merge": {1, 1, true}, "first_moved": {2, 2, false}, "next_moved": {1, 2, false}} {
+		t.Run(name, func(t *testing.T) {
+			w, _, genesis := riGenesis(t)
+			x, _ := retainedCapacityChildV1(t, w)
+			link, _ := mdbx.HeightKey(3, 1)
+			rows := []mdbx.Mutation{btMutation(6, link, mdbx.ChainValue(x, genesis, [40]byte{39: 1}))}
+			parent, tip := x, [32]byte{}
+			for h := uint64(2); h <= 1440; h++ {
+				y := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(b *initial148BlockHead) { b.parent, b.timestamp = parent, blockStepsMedian+h })
+				tip = sha3.Sum256(y[:148])
+				key, _ := mdbx.HeightKey(3, h)
+				id := bytes.Clone(tip[:])
+				rows = append(rows, btMutation(3, id, y[:148]), btMutation(4, id, y), btMutation(6, key, mdbx.ChainValue(tip, parent, [40]byte{39: 1})))
+				parent = tip
+			}
+			for len(rows) > 0 {
+				n := min(len(rows), 1024)
+				w.pair(t, rows[:n]...)
+				rows = rows[n:]
+			}
+			riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+				a.Authority.Phase = mdbx.StoragePhasePruneGCV1
+				a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 0, TipHeight: 1440, TipHash: tip, RowCount: 1439, LogicalBytes: 1439 * 298, CumulativeChainwork: [40]byte{39: 1}}
+				a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: 1, NextHeight: 1, LastHeight: 1}}}
+			})
+			op := retainedCapacityBoundOpV1(t, w)
+			logicalMDBXAssert(t, op.Primitives[0].Block == x && op.Primitives[0].Height == 1, "candidate op")
+			var auth mdbx.TreeAuthorityV1
+			err := w.s.View(func(reader *mdbx.Reader) error {
+				var err error
+				auth, _, err = reader.ReadTreeAuthorityV1()
+				return err
+			})
+			logicalMDBXAssert(t, err == nil, "authority: %v", err)
+			auth.Authority.SelectedSide = nil
+			auth.Authority.Cleanup.Spans = []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: c.first, NextHeight: c.next, LastHeight: 1440}}
+			encoded, err := auth.Encode()
+			logicalMDBXAssert(t, err == nil, "planned encode: %v", err)
+			meta := btMutation(0, []byte{2}, encoded)
+			meta.BeforePresent = true
+			op.Pair.Mutations = append([]mdbx.Mutation{meta}, op.Pair.Mutations...)
+			a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+			err = retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+			if !c.ok {
+				if !errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst {
+					t.Fatalf("refusal: %v prepared=%v", err, dst.prepared)
+				}
+				return
+			}
+			if err != nil || !dst.prepared || dst.add != 148 || dst.remove != 148*1439 {
+				t.Fatalf("merge plan: %v add=%d remove=%d", err, dst.add, dst.remove)
+			}
+			r := dst.roles[0]
+			report := &mdbx.TreeDeltaReportV1{
+				Current: mdbx.TreeRoleDeltaV1{Present: true, Generation: r.generation, BytesBefore: r.s, CountBefore: r.n, BytesAfter: r.s + 56, CountAfter: r.n + 1, IndexAdded: 1},
+				Undo:    []mdbx.TreeUndoChargeV1{{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56}},
+			}
+			if err := dst.Proof(report); err != nil || !dst.accepted {
+				t.Fatalf("merge proof: %v", err)
+			}
+		})
 	}
 }
