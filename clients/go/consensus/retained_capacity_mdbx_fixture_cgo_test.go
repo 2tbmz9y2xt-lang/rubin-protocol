@@ -935,12 +935,12 @@ func retainedCapacityOptionalRawV1(t *testing.T) []byte {
 	return initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = genesis, blockStepsMedian+5 })
 }
 
-// retainedCapacityOptionalFrameV1 commits the recipe child x1 at 1 and returns
-// its child x at 2 (unowned body, a third 89-byte entry) beside an optional
-// SIDE(4,1,1,1) and a detached entry (1,y) on y, x1's sibling under genesis
-// (the reorg genesis->y to genesis->x1: F=0, H_new=1>F, MP 3039-3044, 3736),
-// whose header is stored and whose body is absent (bodyLen 0), malformed (149)
-// or healthy (298).
+// retainedCapacityOptionalFrameV1 commits the recipe child x1 at 1 and returns its child x at 2
+// (unowned body, a third 89-byte entry) beside a detached entry (1,y) on y, x1's sibling under
+// genesis (the reorg genesis->y to genesis->x1: F=0, H_new=1>F, MP 3039-3044, 3736). The SIDE(4,1,1,1)
+// whose SideLink names the same y mirrors the merged producer recipe riOptional "detached+SIDE"
+// (retained_image_mdbx_cgo_test.go:447). y's header is stored; its body is absent (bodyLen 0),
+// malformed (149) or healthy (298).
 func retainedCapacityOptionalFrameV1(t *testing.T, bodyLen int) (*btWorld, []byte, [32]byte, [32]byte, []byte) {
 	t.Helper()
 	w, _, genesis := riGenesis(t)
