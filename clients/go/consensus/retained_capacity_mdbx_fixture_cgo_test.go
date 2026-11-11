@@ -78,6 +78,99 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	t.Run("D3_warm_reads_no_cold_row", retainedCapacityWarmNoColdV1)
 	t.Run("D3_D13_reopen_reconstructs", retainedCapacityReopenV1)
 	t.Run("D16_planned_aggregate_1440", retainedCapacityAggregateV1)
+	t.Run("D3_warm_ARCHIVE16385_no_cold_row", retainedCapacityWarmArchiveV1)
+	t.Run("D12_exact_admission_success_restores", retainedCapacityExactAdmitV1)
+	t.Run("D14_clean_witness_tuple_conjuncts", retainedCapacityWitnessTupleV1)
+}
+
+// retainedCapacityWarmCacheV1 installs the producer's completed cold pre
+// (binding, Ret, facts) as the cache, marked by +7.
+func retainedCapacityWarmCacheV1(t *testing.T, w *btWorld, a *RetainedAccountingV1) uint64 {
+	t.Helper()
+	pre, err := riRead(t, w, nil)
+	logicalMDBXAssert(t, err == nil, "cold pre: %v", err)
+	a.binding, a.exactRet, a.complete, a.valid = pre.binding, pre.exactRet+7, pre.complete, true
+	return pre.exactRet
+}
+
+// D3 on the producer's ARCHIVE 16385-height store (riArchive, scalar
+// 9143051): the warm Plan uses the cached value and never reaches the
+// genesis body, a row only the cold visit reads (arm unreached).
+func retainedCapacityWarmArchiveV1(t *testing.T) {
+	w := riChain(t, 16385)
+	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) { a.Authority.ActiveProfile, a.Authority.U = 2, 16385 })
+	op := retainedCapacityBoundOpV1(t, w)
+	a := NewRetainedAccountingV1(DefaultLimitsV1())
+	cold := retainedCapacityWarmCacheV1(t, w, a)
+	logicalMDBXAssert(t, cold == 9143051, "ARCHIVE scalar %d", cold)
+	genesis := sha3.Sum256(initial148BlockGenesis(t)[:148])
+	dst := &DirectRetainedProofV1{}
+	evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 4, genesis[:], func() {
+		_ = retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+	})
+	logicalMDBXAssert(t, harness != nil && evidence.Faults == 0 && dst.pre == 9143051+7, "warm ARCHIVE: %+v/%v pre=%d", evidence, harness, dst.pre)
+}
+
+// D12 exact/cost-1 with a successful warm Plan: the caller holds lane
+// 402653184 minus the temporary frame 4480400 and the shared body frame
+// 136463310 (resource_boundary); Plan succeeds, both are free again when Plan
+// returns (the same grant fits beside the held cost) and the returned proof
+// stays callable. One byte more held is denied.
+func retainedCapacityExactAdmitV1(t *testing.T) {
+	const exactHeld = 402653184 - 4480400 - 136463310
+	for _, held := range []uint64{exactHeld, exactHeld + 1} {
+		w, _, _ := riGenesis(t)
+		op := retainedCapacityBoundOpV1(t, w)
+		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		retainedCapacityWarmCacheV1(t, w, a)
+		var plan, again error
+		err := w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
+			return account.WithReservation(held, func() error {
+				err := w.s.View(func(r *mdbx.Reader) error { plan = a.PlanDirectMDBX(dst, r, account, op); return nil })
+				again = account.WithReservation(4480400+136463310, func() error { return nil })
+				return err
+			})
+		})
+		btReservationsReleased(t, w.owner)
+		exact := held == exactHeld
+		if err != nil || (plan == nil) != exact || dst.prepared != exact || (again == nil) != exact {
+			t.Fatalf("held %d: plan=%v again=%v prepared=%v", held, plan, again, dst.prepared)
+		}
+		if exact {
+			r := dst.roles[0]
+			report := &mdbx.TreeDeltaReportV1{
+				Current: mdbx.TreeRoleDeltaV1{Present: true, Generation: r.generation, BytesBefore: r.s, CountBefore: r.n, BytesAfter: r.s + 56, CountAfter: r.n + 1, IndexAdded: 1},
+				Undo:    []mdbx.TreeUndoChargeV1{{}},
+			}
+			logicalMDBXAssert(t, dst.Proof(report) == nil && dst.accepted, "proof after Plan returned")
+		}
+	}
+}
+
+// Clean witness: a completed pre survives a clean callback refusal only on
+// OLD/Prewrite/-1; changing exactly one literal (NEW, WriteStarted, index 0)
+// with everything else equal retires it.
+func retainedCapacityWitnessTupleV1(t *testing.T) {
+	for _, c := range []struct {
+		truth mdbx.CommitTruth
+		stage mdbx.UpdateStage
+		index int
+		keep  bool
+	}{
+		{mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, true},
+		{mdbx.CommitTruthNew, mdbx.UpdateStagePrewrite, -1, false},
+		{mdbx.CommitTruthOld, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, -1, false},
+		{mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, 0, false},
+	} {
+		w, child, x := retainedCapacitySideFrameV1(t)
+		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		refuse := errors.New("callback refusal")
+		res := retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(*mdbx.Reader, *mdbx.TreeOperationV1) error { return refuse })
+		logicalMDBXAssert(t, a.valid && a.exactRet == 1077 && !dst.entered, "completed pre")
+		if err := a.ApplyDirectMDBX(dst, c.truth, c.stage, c.index, res.err, true); err != nil || a.valid != c.keep || a.active != nil {
+			t.Fatalf("%+v: %v valid=%v", c, err, a.valid)
+		}
+	}
 }
 
 // D16: a planned authority whose detached count field says 1441 (> the
