@@ -102,7 +102,22 @@ func (p *DirectRetainedProofV1) planV1(old *mdbx.Reader, account *mdbx.Operation
 	if err := p.owner.preV1(p, &read); err != nil {
 		return err
 	}
+	if err := p.undoChargeV1(&read); err != nil {
+		return err
+	}
 	return errRetainedPendingV1
+}
+
+// undoChargeV1 captures the sole primitive's actual OLD physical family
+// charge through the producer's header-independent raw family read.
+func (p *DirectRetainedProofV1) undoChargeV1(read *retainedReadV1) error {
+	prim := &p.op.Primitives[0]
+	w := retainedWalkV1{read: read}
+	if err := w.undoV1(retainedArtifactV1{hash: prim.Block, height: prim.Height}); err != nil {
+		return err
+	}
+	p.undo.block, p.undo.oldCharge = prim.Block, w.pre.exactRet
+	return nil
 }
 
 // retainedLateV1 returns a private copy of a qualified slot hash or nil.

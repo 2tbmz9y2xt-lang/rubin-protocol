@@ -824,7 +824,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	logicalMDBXAssert(t, requiredReadErr == nil, "required state fixture read: %v", requiredReadErr)
 	requiredExpression, requiredParseErr := constraint.Parse(strings.SplitN(string(requiredFixture), "\n", 2)[0])
 	logicalMDBXAssert(t, requiredParseErr == nil && requiredExpression.String() == "rubin_mdbx_fixture && "+logicalMDBXConstraint, "required state fixture constraint: %v/%v", requiredExpression, requiredParseErr)
-	for _, name := range []string{"retained_image_mdbx_cgo.go", "retained_artifact_mdbx_cgo.go", "retained_capacity_mdbx_cgo.go", "retained_image_mdbx_cgo_test.go", "retained_image_mdbx_fixture_cgo_test.go"} {
+	for _, name := range []string{"retained_image_mdbx_cgo.go", "retained_artifact_mdbx_cgo.go", "retained_capacity_mdbx_cgo.go", "retained_capacity_mdbx_cgo_test.go", "retained_capacity_mdbx_fixture_cgo_test.go", "retained_image_mdbx_cgo_test.go", "retained_image_mdbx_fixture_cgo_test.go"} {
 		source, readErr := os.ReadFile(name)
 		logicalMDBXAssert(t, readErr == nil, "retained source read: %v", readErr)
 		expression, parseErr := constraint.Parse(strings.SplitN(string(source), "\n", 2)[0])

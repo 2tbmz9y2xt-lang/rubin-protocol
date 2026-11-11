@@ -343,6 +343,9 @@ func TestRetainedCapacityMDBXPlanPre(t *testing.T) {
 		return dst
 	}
 	first := run()
+	if first.undo.block != first.op.Primitives[0].Block || first.undo.oldCharge != 0 {
+		t.Fatalf("absent OLD family projection: %+v", first.undo)
+	}
 	if first.pre != cold.exactRet || !a.valid || a.exactRet != cold.exactRet || first.roles[0].generation == 0 {
 		t.Fatalf("cold pre %d cache %d/%v want %d", first.pre, a.exactRet, a.valid, cold.exactRet)
 	}
