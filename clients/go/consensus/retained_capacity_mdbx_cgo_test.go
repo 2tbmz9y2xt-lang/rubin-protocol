@@ -1016,6 +1016,13 @@ func TestRetainedCapacityMDBXWPromotion(t *testing.T) {
 	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); !errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst {
 		t.Fatalf("W promotion without its SideLink deletion: %v", err)
 	}
+	unchanged := retainedCapacityBoundOpV1(t, w)
+	for _, m := range [][]mdbx.Mutation{append(bare[:len(bare):len(bare)], retainedCapacityLinkDeleteV1(3, 2)), append(unchanged.Pair.Mutations, link)} {
+		op.Pair.Mutations, a, dst = m, NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); !errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared {
+			t.Fatalf("stray SideLink deletion: %v", err)
+		}
+	}
 }
 
 func retainedCapacityLinkDeleteV1(g, h uint64) mdbx.Mutation {
