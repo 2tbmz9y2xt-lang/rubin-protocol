@@ -5,6 +5,7 @@ package consensus
 import (
 	"bytes"
 	"crypto/sha3"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -64,6 +65,10 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	t.Run("D14_native_proof_panic", retainedCapacityProofPanicV1)
 	t.Run("D14_native_fault_tuples", retainedCapacityFaultTuplesV1)
 	t.Run("D14_native_unwinds", retainedCapacityUnwindsV1)
+	t.Run("D5_D20_D27_H1_canonical_absence_first", retainedCapacityAbsentFirstV1)
+	t.Run("D21_D22_optional_absent_and_malformed", retainedCapacityOptionalV1)
+	t.Run("D26_external_drain", retainedCapacityDrainV1)
+	t.Run("D24_completed_key_first_result", retainedCapacityCompletedKeyV1)
 }
 
 // T18 (rejected_cases): a W row beside the rolling-prepared pending SIDE.
@@ -219,7 +224,7 @@ func retainedCapacityCompanionV1(t *testing.T, w *btWorld, a *RetainedAccounting
 	refused := &DirectRetainedProofV1{}
 	res := retainedCapacityCommitV1(t, w, a, refused, child, x, true)
 	res.want(t, 1, 1, -1)
-	if res.err != errRetainedPlanAPIV1 || a.active != nil || refused.owner != nil || refused.entered || refused.pre != 0 || refused.roles != ([2]retainedRoleV1{}) {
+	if !retainedCapacitySameErrV1(res.err, errRetainedPlanAPIV1) || a.active != nil || refused.owner != nil || refused.entered || refused.pre != 0 || refused.roles != ([2]retainedRoleV1{}) {
 		t.Fatalf("companion: %v active=%v", res.err, a.active)
 	}
 	if err := a.ApplyDirectMDBX(refused, res.truth, res.stage, res.index, res.err, true); !errors.Is(err, errRetainedApplyAPIV1) || a.valid {
@@ -426,7 +431,7 @@ func retainedCapacityCallbackRefusalV1(t *testing.T) {
 		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 		res := retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(*mdbx.Reader, *mdbx.TreeOperationV1) error { return refuse })
 		res.want(t, 1, 1, -1)
-		if res.err != refuse || !dst.prepared || dst.entered || dst.pre != 1077 || a.active != dst || !a.valid {
+		if !retainedCapacitySameErrV1(res.err, refuse) || !dst.prepared || dst.entered || dst.pre != 1077 || a.active != dst || !a.valid {
 			t.Fatalf("clean=%v refusal: %v prepared=%v entered=%v pre=%d", clean, res.err, dst.prepared, dst.entered, dst.pre)
 		}
 		if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, clean); err != nil || a.active != nil || !dst.applied || a.valid != clean {
@@ -481,8 +486,10 @@ func retainedCapacityProofPanicV1(t *testing.T) {
 }
 
 // D14 rows "callback nil/E/wrappedE with ReaderF", "Proof nil then write error
-// or commit crossed error", "definite OLD, equality OLD/NEW with error,
-// UNKNOWN" and "any cleanup failure" under one armed native scenario each.
+// or commit crossed error", "equality OLD/NEW with error, UNKNOWN" and "any
+// cleanup failure" under one armed native scenario each. The commit hook
+// returns ENOSPC, so commit_old is the readback equality OLD, not the definite
+// attempted OLD (that tuple is pinned in the unit apply matrix).
 // Every tuple is the raw native one; Apply consumes the token, returns nil,
 // keeps no successor and retires the cache. A Reader or cleanup failure never
 // carries the clean witness (false is passed), so a completed pre is lost.
@@ -558,14 +565,13 @@ func retainedCapacityCausesV1(t *testing.T, err error, shape int, refuse error) 
 	case 0:
 		logicalMDBXAssert(t, errors.As(err, &commit), "commit error %T %v", err, err)
 	case 1:
-		_, direct := err.(*mdbx.EngineError)
-		logicalMDBXAssert(t, direct, "direct engine error %T %v", err, err)
+		logicalMDBXAssert(t, errors.As(err, &engine) && retainedCapacitySameErrV1(err, engine), "direct engine error %T %v", err, err)
 	default:
 		parts := []error{}
 		if isJoin {
 			parts = joined.Unwrap()
 		}
-		first := len(parts) == 2 && (shape == 2 && parts[0] == refuse || shape == 3 && errors.As(parts[0], &engine) && parts[0] != engine)
+		first := len(parts) == 2 && (shape == 2 && retainedCapacitySameErrV1(parts[0], refuse) || shape == 3 && errors.As(parts[0], &engine) && !retainedCapacitySameErrV1(parts[0], engine))
 		logicalMDBXAssert(t, first && errors.As(parts[1], &engine) && engine.Class == mdbx.EngineIO, "join order %v", err)
 	}
 }
@@ -614,4 +620,166 @@ func retainedCapacityUnwindsV1(t *testing.T) {
 			logicalMDBXAssert(t, res.err == nil && next.pre == 1077 && next.post == 1596, "store OPEN after unwind: %v", res.err)
 		})
 	}
+}
+
+// retainedCapacityForwardedV1 checks a producer first result forwarded by
+// Plan inside UpdateTreeV1: OLD/Prewrite/-1, no Proof entry, no finite work,
+// the unprepared token kept and no cache; Apply under the clean witness
+// still invalidates (no completed pre exists).
+func retainedCapacityForwardedV1(t *testing.T, a *RetainedAccountingV1, dst *DirectRetainedProofV1, res btResult) {
+	t.Helper()
+	res.want(t, 1, 1, -1)
+	if dst.prepared || dst.entered || a.active != dst || a.valid || dst.pre != 0 || dst.add != 0 || dst.remove != 0 {
+		t.Fatalf("forwarded first result: prepared=%v entered=%v valid=%v pre=%d", dst.prepared, dst.entered, a.valid, dst.pre)
+	}
+	if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, true); err != nil || a.valid || a.active != nil || !dst.applied {
+		t.Fatalf("apply forwarded: %v valid=%v", err, a.valid)
+	}
+}
+
+// D5/D20/D27/H1 (the producer's rifSources body-absent-before-SIDE at this
+// consumer): the required genesis body is absent and the healthy SIDE-owned
+// body y (not the subject, whose source read precedes Plan) is armed with a
+// Get EIO. The first result is the typed StoreIntegrity absence with a
+// non-native cause and the SIDE row is never read (arm unreached); no row is
+// repaired or drained. With the genesis body present (selectivity control)
+// the same arm fires and the SIDE transient is the first result.
+func retainedCapacityAbsentFirstV1(t *testing.T) {
+	genesis := sha3.Sum256(initial148BlockGenesis(t)[:148])
+	for _, absent := range []bool{true, false} {
+		w, child, x, y, _ := retainedCapacityOptionalFrameV1(t, 298)
+		if absent {
+			logicalMDBXAssert(t, mdbx.FixtureStartupDeleteRow(w.s, 4, genesis[:]) == nil, "delete required body")
+		}
+		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		var res btResult
+		evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 4, y[:], func() {
+			res = retainedCapacityCommitV1(t, w, a, dst, child, x, false)
+		})
+		var integrity *logicalStateFailure
+		var engine *mdbx.EngineError
+		if !absent {
+			logicalMDBXAssert(t, harness == nil && evidence.Faults == 1 && errors.As(res.err, &engine) && engine.Class == mdbx.EngineIO, "SIDE transient control: %+v/%v %v", evidence, harness, res.err)
+			retainedCapacityForwardedV1(t, a, dst, res)
+			continue
+		}
+		logicalMDBXAssert(t, harness != nil && evidence.Faults == 0, "SIDE row was read: %+v/%v", evidence, harness)
+		if !errors.As(res.err, &integrity) || integrity.kind != logicalStateFailureStoreIntegrity || integrity.cause == nil || errors.As(integrity.cause, &engine) {
+			t.Fatalf("first integrity result: %T %v", res.err, res.err)
+		}
+		retainedCapacityForwardedV1(t, a, dst, res)
+		for key, want := range map[[32]byte][]byte{genesis: nil, x: child, y: retainedCapacityOptionalRawV1(t)} {
+			equal, err := mdbx.FixtureRawRowEqual(w.s, 4, key[:], want)
+			logicalMDBXAssert(t, err == nil && equal, "body %x changed: %v", key[:4], err)
+		}
+		logicalMDBXAssert(t, w.s.View(func(*mdbx.Reader) error { return nil }) == nil, "store not OPEN")
+	}
+	// D5 transient-before-positive: a Get EIO on the required genesis body is
+	// the producer's canonical_artifact_read with that native cause.
+	w, child, x, _, _ := retainedCapacityOptionalFrameV1(t, 298)
+	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	var res btResult
+	evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 4, genesis[:], func() {
+		res = retainedCapacityCommitV1(t, w, a, dst, child, x, false)
+	})
+	var engine *mdbx.EngineError
+	failure := riResource(t, res.err, "canonical_artifact_read")
+	logicalMDBXAssert(t, harness == nil && evidence.Faults == 1 && errors.As(failure.Cause, &engine) && engine.Class == mdbx.EngineIO, "required transient: %+v/%v %v", evidence, harness, res.err)
+	retainedCapacityForwardedV1(t, a, dst, res)
+}
+
+func retainedCapacityOptionalRawV1(t *testing.T) []byte {
+	genesis := sha3.Sum256(initial148BlockGenesis(t)[:148])
+	return initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = genesis, blockStepsMedian+5 })
+}
+
+// retainedCapacityOptionalFrameV1 is the recipe child x (unowned body) beside
+// an optional SIDE(4,5,5,5) and detached entry (generation 3) on one hash y
+// whose header is stored and whose body is absent (bodyLen 0), malformed
+// (149) or healthy (298).
+func retainedCapacityOptionalFrameV1(t *testing.T, bodyLen int) (*btWorld, []byte, [32]byte, [32]byte, []byte) {
+	t.Helper()
+	w, _, genesis := riGenesis(t)
+	child, x := retainedCapacityNativeChildV1(t, w, genesis)
+	raw := retainedCapacityOptionalRawV1(t)
+	y := sha3.Sum256(raw[:148])
+	link, _ := mdbx.HeightKey(4, 5)
+	rows := []mdbx.Mutation{btMutation(3, y[:], raw[:148]), btMutation(6, link, mdbx.ChainValue(y, genesis, [40]byte{39: 1}))}
+	if bodyLen != 0 {
+		rows = append(rows, btMutation(4, y[:], raw[:bodyLen]))
+	}
+	w.pair(t, rows...)
+	encoded := riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+		a.Authority.Phase = mdbx.StoragePhasePruneGCV1
+		a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 3}, {Kind: mdbx.CleanupSpanSideV1, GenerationID: 4, FirstHeight: 5, NextHeight: 5, LastHeight: 5}}}
+		a.Authority.DetachedSuffix = &mdbx.DetachedSuffixV1{Entries: []mdbx.DetachedSuffixEntryV1{{Height: 5, Hash: y, BlockBytesLen: 298}}, Cursor: mdbx.AuthorityPointV1{Height: 5, BlockHash: y}, EntryCount: 1, LogicalBytes: 298}
+	})
+	return w, child, x, y, encoded
+}
+
+// D21: the absent optional body counts 0 under SIDE and detached, the
+// detached header 148 (riOptional detached+SIDE header-only): cold pre
+// 779+148=927, Proof post 927+817=1744 (D4 frame delta), NEW/nil commit,
+// successor cached, and the authority bytes are unchanged. D22: the same
+// frame with a present malformed body refuses storage_capacity first.
+func retainedCapacityOptionalV1(t *testing.T) {
+	for _, malformed := range []bool{false, true} {
+		w, child, x, _, encoded := retainedCapacityOptionalFrameV1(t, map[bool]int{false: 0, true: 149}[malformed])
+		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		res := retainedCapacityCommitV1(t, w, a, dst, child, x, false)
+		if malformed {
+			failure := riResource(t, res.err, "storage_capacity")
+			logicalMDBXAssert(t, failure.Damage == nil, "capacity carries damage")
+			retainedCapacityForwardedV1(t, a, dst, res)
+			continue
+		}
+		res.want(t, 2, 3, -1)
+		if res.err != nil || dst.pre != 927 || !dst.accepted || dst.post != 1744 {
+			t.Fatalf("optional absent commit: %v pre=%d post=%d", res.err, dst.pre, dst.post)
+		}
+		logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false) == nil && a.valid && a.exactRet == 1744, "successor %d", a.exactRet)
+		cold, err := riRead(t, w, nil)
+		logicalMDBXAssert(t, err == nil && cold.exactRet == 1744, "fresh post %d: %v", cold.exactRet, err)
+		w.read(t, 0, []byte{2}, encoded)
+	}
+}
+
+// D26: a clean callback refusal keeps the completed pre 1077 and the helper
+// drains nothing (the stored image is still 1077 with its SIDE). A separate
+// external commit then drains the SIDE descriptor; the next Plan sees a
+// non-reusable binding and reconstructs the fresh pre 779 (x unowned), not the
+// cached 1077, and proves post 1596.
+func retainedCapacityDrainV1(t *testing.T) {
+	w, child, x := retainedCapacitySideFrameV1(t)
+	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	refuse := errors.New("callback refusal")
+	res := retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(*mdbx.Reader, *mdbx.TreeOperationV1) error { return refuse })
+	logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, true) == nil && a.valid && a.exactRet == 1077, "kept pre %d", a.exactRet)
+	still, err := riRead(t, w, nil)
+	logicalMDBXAssert(t, err == nil && still.exactRet == 1077, "helper drained: %d %v", still.exactRet, err)
+	riAuthority(t, w, func(auth *mdbx.TreeAuthorityV1) {
+		auth.Authority.Phase, auth.Authority.Cleanup = mdbx.StoragePhaseNoneV1, nil
+	})
+	fresh, err := riRead(t, w, nil)
+	logicalMDBXAssert(t, err == nil && fresh.exactRet == 779, "drained image %d: %v", fresh.exactRet, err)
+	next := &DirectRetainedProofV1{}
+	res = retainedCapacityCommitV1(t, w, a, next, child, x, false)
+	res.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, res.err == nil && next.pre == 779 && next.post == 1596, "reconstruction after drain: %v pre=%d post=%d", res.err, next.pre, next.post)
+}
+
+// D24: the producer's completed malformed node key (rifKinds malformed-key:
+// the bare obsolete generation-3 prefix in tree-node-v1, on the D21 frame
+// that alone commits) is its first result inside the
+// actual UpdateTreeV1 callback: storage_capacity forwarded with no Proof, no
+// post and no cache advance, and no native write.
+func retainedCapacityCompletedKeyV1(t *testing.T) {
+	w, child, x, _, _ := retainedCapacityOptionalFrameV1(t, 0)
+	rifSeed(t, w, 8, binary.BigEndian.AppendUint64(nil, 3), []byte{1})
+	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	res := retainedCapacityCommitV1(t, w, a, dst, child, x, false)
+	riResource(t, res.err, "storage_capacity")
+	retainedCapacityForwardedV1(t, a, dst, res)
+	equal, err := mdbx.FixtureRawRowEqual(w.s, 3, x[:], nil)
+	logicalMDBXAssert(t, err == nil && equal, "native write after refusal: %v", err)
 }

@@ -266,6 +266,7 @@ func retainedCapacityOpOnlyV1(t *testing.T) {
 
 func retainedCapacityApplyMatrixV1(t *testing.T) {
 	boom := errors.New("native")
+	definiteOld := &mdbx.EngineError{Class: mdbx.EngineTransaction, Operation: "update", Code: -1}
 	accepted := func(a *RetainedAccountingV1) *DirectRetainedProofV1 {
 		p := retainedCapacityStructuralV1(a)
 		if err := p.Proof(retainedCapacityReportV1()); err != nil {
@@ -291,10 +292,16 @@ func retainedCapacityApplyMatrixV1(t *testing.T) {
 		{mdbx.CommitTruthOld, 0, -1, boom, false, errRetainedApplyAPIV1, false},
 		{mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, 1, boom, false, errRetainedApplyAPIV1, false},
 		{mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -2, boom, false, errRetainedApplyAPIV1, false},
+		// Definite attempted OLD: updateNativeCommit maps RESULT_TRUE/PANIC/EPERM/...
+		// to OLD with the commit EngineError at the section's reached stage
+		// (internal/mdbx/mdbx_cgo.go:2135-2140, tree_truth_cgo.go:523), which is
+		// WriteStarted once a Pair row was put (mdbx_cgo.go:1881,1901); index -1.
+		{mdbx.CommitTruthOld, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, -1, definiteOld, false, nil, false},
+		{mdbx.CommitTruthOld, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, -1, definiteOld, true, nil, false},
 	} {
 		a := retainedCapacityCachedV1()
 		p := accepted(a)
-		if err := a.ApplyDirectMDBX(p, tc.truth, tc.stage, tc.index, tc.err, tc.clean); !errors.Is(err, tc.wantErr) || a.valid != tc.wantValid {
+		if err := a.ApplyDirectMDBX(p, tc.truth, tc.stage, tc.index, tc.err, tc.clean); !errors.Is(err, tc.wantErr) || a.valid != tc.wantValid || a.exactRet != 0 || a.active != nil {
 			t.Fatalf("row %d: err=%v valid=%v", i, err, a.valid)
 		}
 	}
