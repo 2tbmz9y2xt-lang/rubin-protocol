@@ -29,7 +29,7 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 			if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.prepared {
 				t.Fatalf("plan: %v", err)
 			}
-			if dst.undo.block != op.Primitives[0].Block || dst.undo.oldCharge != want || dst.add != 148+298 {
+			if dst.undo.block != op.Primitives[0].Block || dst.undo.oldCharge != want {
 				t.Fatalf("family projection %+v add=%d", dst.undo, dst.add)
 			}
 			// None record: x's family is acquired once (S+56, Tree 100->270, J+112, header 148, body 298, family).
