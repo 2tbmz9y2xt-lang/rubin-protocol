@@ -77,6 +77,33 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	t.Run("D28_D14_native_qualified_header_slot", retainedCapacityHeaderSlotV1)
 	t.Run("D3_warm_reads_no_cold_row", retainedCapacityWarmNoColdV1)
 	t.Run("D3_D13_reopen_reconstructs", retainedCapacityReopenV1)
+	t.Run("D16_planned_aggregate_1440", retainedCapacityAggregateV1)
+}
+
+// D16: a planned authority whose detached count field says 1441 (> the
+// selected/detached/SIDE aggregate 1440, authority_decode.go count16) is
+// refused by the single planned decode before any finite work or extra
+// grant; the unchanged planned bytes (control) prove.
+func retainedCapacityAggregateV1(t *testing.T) {
+	for _, over := range []bool{false, true} {
+		w, _, _, y, encoded := retainedCapacityOptionalFrameV1(t, 298)
+		at := bytes.Index(encoded, append(binary.BigEndian.AppendUint64([]byte{0, 1}, 5), y[:]...))
+		logicalMDBXAssert(t, at > 0, "detached count field")
+		planned := bytes.Clone(encoded)
+		if over {
+			binary.BigEndian.PutUint16(planned[at:], 1441)
+		}
+		op := retainedCapacityBoundOpV1(t, w)
+		meta := btMutation(0, []byte{2}, planned)
+		meta.BeforePresent = true
+		op.Pair.Mutations = append([]mdbx.Mutation{meta}, op.Pair.Mutations...)
+		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+		refused := errors.Is(err, errRetainedShapeAPIV1) && dst.pre == 0 && dst.roles == [2]retainedRoleV1{}
+		if over != refused || over == (err == nil) || dst.prepared == over || a.active != dst {
+			t.Fatalf("over=%v: %v prepared=%v", over, err, dst.prepared)
+		}
+	}
 }
 
 // D3/D13 "reopen": a kept pre (marked 1077+7) does not survive a reopen of
