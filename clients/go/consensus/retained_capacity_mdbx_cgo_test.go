@@ -661,10 +661,12 @@ func TestRetainedCapacityMDBXOptionalPlan(t *testing.T) {
 // transfer with W empty merges L into that span, SIDE(g,f-1,tip,f-1), and
 // every other SIDE descriptor is refused (MP 2539-2541). "witness" is the
 // RUB-1594 A1 tuple: H_old=F=0, rows 2..1440, SIDE(7,1,1,1), candidate at 1.
-// The op height lies below f, so W is empty with no read. A second planned
+// Both rows are legal direct pre-states: H_old=F, candidate at F+1 below f,
+// so W is empty with no read. A second planned
 // SIDE span is shown refused here although DecodeTreeAuthorityV1 refuses it
 // before the consumer. "w_row" is the span restV1 builds for a W row at
-// index 0 (L=[f+1,tip]); beside the pending SIDE every plan refuses.
+// index 0 (L=[f+1,tip]); beside the pending SIDE retainedExtendedV1 refuses
+// every plan.
 // Consumer-branch cases: this OLD shape is produced natively only by RUB-1508.
 func TestRetainedCapacityMDBXRollingMerge(t *testing.T) {
 	span := func(g mdbx.GenerationIDV1, first, last, next uint64) mdbx.CleanupSpanV1 {
@@ -673,7 +675,7 @@ func TestRetainedCapacityMDBXRollingMerge(t *testing.T) {
 	for _, geo := range []struct {
 		g          mdbx.GenerationIDV1
 		F, tip, op uint64
-	}{{7, 0, 1440, 1}, {9, 5, 1500, 61}} {
+	}{{7, 0, 1440, 1}, {9, 5, 1500, 6}} {
 		side := &mdbx.SelectedSideV1{GenerationID: geo.g, F: geo.F, TipHeight: geo.tip, RowCount: 1439}
 		f, g, tip := geo.tip-1438, geo.g, geo.tip
 		for name, c := range map[string]struct {
@@ -699,8 +701,8 @@ func TestRetainedCapacityMDBXRollingMerge(t *testing.T) {
 				t.Fatalf("g%d %s: transfer=%v err=%v", g, name, transfer, err)
 			}
 			w := span(g, f+1, tip, f+1)
-			if err := fin.sideMergeV1(w, 1); !errors.Is(err, errRetainedFiniteAPIV1) {
-				t.Fatalf("g%d %s w_row: %v", g, name, err)
+			if retainedExtendedV1(read.authority.Authority, fin.planned.Authority, w, 1, retainedCountV1(fin.planned.Authority, mdbx.CleanupSpanSideV1)) {
+				t.Fatalf("g%d %s w_row admitted", g, name)
 			}
 		}
 	}

@@ -902,6 +902,8 @@ func (f *retainedFiniteV1) promiseV1() (bool, error) {
 // of a live selected side (MP 3018-3058): side cleared, detached suffix
 // unchanged and L appended as, or merged into, the side generation's SIDE
 // span, whose SideLinks keep their association (MP 1473-1478, 2672-2674).
+// From the rolling-prepared OLD shape (MP 1422-1426) L merges into the pending
+// SIDE with first and next kept (MP 2539-2541); a W row breaks the adjacency.
 func (f *retainedFiniteV1) optionalPlanV1() (bool, error) {
 	o, p := f.read.authority.Authority, f.planned.Authority
 	if !retainedDetachedEqualV1(o.DetachedSuffix, p.DetachedSuffix) {
@@ -915,19 +917,12 @@ func (f *retainedFiniteV1) optionalPlanV1() (bool, error) {
 		return false, err
 	}
 	if n := retainedCountV1(o, mdbx.CleanupSpanSideV1); n != 0 {
-		return true, f.sideMergeV1(l, n)
+		if !retainedExtendedV1(o, p, l, n, retainedCountV1(p, mdbx.CleanupSpanSideV1)) {
+			return false, errRetainedFiniteAPIV1
+		}
+		return true, nil
 	}
 	return true, f.sideSpansV1(true, l)
-}
-
-// sideMergeV1 admits the transfer from the rolling-prepared OLD shape (MP
-// 1422-1426) only as L merged into the pending same-generation SIDE with its
-// first and next heights kept (MP 2539-2541); a W row breaks the adjacency.
-func (f *retainedFiniteV1) sideMergeV1(l mdbx.CleanupSpanV1, n int) error {
-	if !retainedExtendedV1(f.read.authority.Authority, f.planned.Authority, l, n, retainedCountV1(f.planned.Authority, mdbx.CleanupSpanSideV1)) {
-		return errRetainedFiniteAPIV1
-	}
-	return nil
 }
 
 // restV1 returns the SIDE span owing L: the selected rows except a W row x
