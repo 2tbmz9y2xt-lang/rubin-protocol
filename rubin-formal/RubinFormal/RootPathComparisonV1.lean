@@ -714,7 +714,13 @@ example :
       .obtain (.atPos childA5 (.leaf kX))] = some .failedCheck ∧
     firstFinding 10 [kC] [.obtain (.atPos .top (.branch 3 (mask kA 3))),
       .obtain (.atPos (.child 3 (mask kA 3) (bit kA 3)) (.branch 5 (mask kA 5))),
-      .obtain (.atPos childA5 (.leaf kX))] = none := by
+      .obtain (.atPos childA5 (.leaf kX))] = none ∧
+    firstFinding 10 [kA, kC] [.obtain (.atPos .top (.branch 3 (mask kA 3))),
+      .obtain (.atPos (.child 3 (mask kA 3) (bit kA 3)) (.branch 5 (mask kA 5))),
+      .obtain (.atPos childA5 (.leaf kX))] = some .failedCheck ∧
+    firstFinding 10 [kA, kC] [.obtain (.atPos .top (.branch 3 (mask kA 3))),
+      .obtain (.atPos (.child 3 (mask kA 3) (bit kA 3)) (.branch 5 (mask kA 5))),
+      .obtain (.atPos childA5 (.leaf kA))] = none := by
   decide
 -- N14
 example :

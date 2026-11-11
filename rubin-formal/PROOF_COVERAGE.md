@@ -140,8 +140,10 @@ by consumptions. It has no bridge to Go or Rust code and does not prove hashing,
 root bytes, the derivation of Root(U_candidate), store reads, how a result comes
 to identify a node or any client behavior. Registration adds one theorem
 reference and one unique theorem name; the row stays
-`proved/compiler_trusted/machine_checked_universal` for its other theorems, and
-the bridge and manifest pin are unchanged.
+`proved/compiler_trusted/machine_checked_universal` for its other theorems. The
+critical operations of the refinement bridge and the pin
+`spec_section_hashes_sha3_256` are unchanged; both manifest copies carry the hash
+of the edited registry-truth checker.
 
 ## Текущая раскладка evidence levels
 
