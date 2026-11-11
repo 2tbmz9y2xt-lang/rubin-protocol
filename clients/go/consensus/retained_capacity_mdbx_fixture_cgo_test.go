@@ -543,8 +543,8 @@ func retainedCapacityLagKeptV1(t *testing.T, w *btWorld, rolesBefore [2]retained
 // one-slot selected side [2,1440] (1439 rows, f 2 >= F+2, MP 1408-1411) and pending SIDE(3,1,1,1)
 // owing the candidate x at f-1 (MP 1422-1426). The direct op at 1 has W empty and merges L=[2,1440]
 // into SIDE(3,1,1440,1) with first and next kept (MP 2539-2541, DIRECT 3800-3805), and the full
-// Plan/Proof path accepts it. x's header is the canonical +148; each of the 1439 L headers leaves
-// the selected owner (SIDE body only), so remove is 148*1439; bodies stay owned. SIDE(3,2,1440,2)
+// Plan/Proof path accepts it. x's header is the canonical +148; each of the 1439 L headers leaves the selected
+// owner (SIDE body only) and is deleted in the Pair (MP 2550-2557), so remove is 148*1439; bodies stay owned. SIDE(3,2,1440,2)
 // and SIDE(3,1,1440,2) are refused.
 func retainedCapacityRollingMergeV1(t *testing.T) {
 	for name, c := range map[string]struct {
@@ -552,10 +552,11 @@ func retainedCapacityRollingMergeV1(t *testing.T) {
 		ok          bool
 	}{"merge": {1, 1, true}, "first_moved": {2, 2, false}, "next_moved": {1, 2, false}} {
 		t.Run(name, func(t *testing.T) {
-			w, x := retainedCapacityRollingV1(t)
+			w, x, leave := retainedCapacityRollingV1(t)
 			op := retainedCapacityBoundOpV1(t, w)
 			logicalMDBXAssert(t, op.Primitives[0].Block == x && op.Primitives[0].Height == 1, "candidate op")
 			retainedCapacityMergeAuthorityV1(t, w, op, c.first, c.next)
+			op.Pair.Mutations = append(op.Pair.Mutations, leave...)
 			a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 			err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
 			if !c.ok {
@@ -579,21 +580,22 @@ func retainedCapacityRollingMergeV1(t *testing.T) {
 	}
 }
 
-// retainedCapacityRollingV1 stores the candidate x's body and SideLink (3,1)
-// and the 1439 chained selected rows 2..1440, then the OLD authority.
-func retainedCapacityRollingV1(t *testing.T) (*btWorld, [32]byte) {
+// retainedCapacityRollingV1 stores the candidate x's body and SideLink (3,1), the 1439 chained selected rows 2..1440
+// (W_h=h+1, MP 1462-1464, 2817) and the OLD authority; it returns the L header deletions the merge owes (MP 2550-2557).
+func retainedCapacityRollingV1(t *testing.T) (*btWorld, [32]byte, []mdbx.Mutation) {
 	t.Helper()
 	w, _, genesis := riGenesis(t)
 	x, _ := retainedCapacityChildV1(t, w)
 	link, _ := mdbx.HeightKey(3, 1)
-	rows := []mdbx.Mutation{btMutation(6, link, mdbx.ChainValue(x, genesis, [40]byte{39: 1}))}
-	parent, tip := x, [32]byte{}
+	rows := []mdbx.Mutation{btMutation(6, link, mdbx.ChainValue(x, genesis, [40]byte{39: 2}))}
+	parent, tip, leave := x, [32]byte{}, []mdbx.Mutation(nil)
 	for h := uint64(2); h <= 1440; h++ {
 		y := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(b *initial148BlockHead) { b.parent, b.timestamp = parent, blockStepsMedian+h })
 		tip = sha3.Sum256(y[:148])
 		key, _ := mdbx.HeightKey(3, h)
 		id := bytes.Clone(tip[:])
-		rows = append(rows, btMutation(3, id, y[:148]), btMutation(4, id, y), btMutation(6, key, mdbx.ChainValue(tip, parent, [40]byte{39: 1})))
+		rows = append(rows, btMutation(3, id, y[:148]), btMutation(4, id, y), btMutation(6, key, mdbx.ChainValue(tip, parent, [40]byte{38: byte((h + 1) >> 8), 39: byte(h + 1)})))
+		leave = append(leave, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[3], Key: id, BeforePresent: true, AfterKind: mdbx.AfterAbsent})
 		parent = tip
 	}
 	for len(rows) > 0 {
@@ -603,10 +605,10 @@ func retainedCapacityRollingV1(t *testing.T) (*btWorld, [32]byte) {
 	}
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
 		a.Authority.Phase = mdbx.StoragePhasePruneGCV1
-		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 0, TipHeight: 1440, TipHash: tip, RowCount: 1439, LogicalBytes: 1439 * 298, CumulativeChainwork: [40]byte{39: 1}}
+		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 0, TipHeight: 1440, TipHash: tip, RowCount: 1439, LogicalBytes: 1439 * 298, CumulativeChainwork: [40]byte{38: 5, 39: 0xa1}}
 		a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: 1, NextHeight: 1, LastHeight: 1}}}
 	})
-	return w, x
+	return w, x, leave
 }
 
 // retainedCapacityMergeAuthorityV1 prepends the planned authority: side
@@ -653,7 +655,7 @@ func retainedCapacitySideFrameV1(t *testing.T) (*btWorld, []byte, [32]byte) {
 	w, _, genesis := riGenesis(t)
 	child, x := retainedCapacityNativeChildV1(t, w, genesis, 1)
 	link, _ := mdbx.HeightKey(3, 1)
-	w.pair(t, btMutation(6, link, mdbx.ChainValue(x, genesis, [40]byte{39: 1})))
+	w.pair(t, btMutation(6, link, mdbx.ChainValue(x, genesis, [40]byte{39: 2})))
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
 		a.Authority.Phase = mdbx.StoragePhasePruneGCV1
 		a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: 1, NextHeight: 1, LastHeight: 1}}}
@@ -950,7 +952,7 @@ func retainedCapacityOptionalFrameV1(t *testing.T, bodyLen int) (*btWorld, []byt
 	raw := retainedCapacityOptionalRawV1(t)
 	y := sha3.Sum256(raw[:148])
 	link, _ := mdbx.HeightKey(4, 1)
-	rows := []mdbx.Mutation{btMutation(3, y[:], raw[:148]), btMutation(6, link, mdbx.ChainValue(y, genesis, [40]byte{39: 1}))}
+	rows := []mdbx.Mutation{btMutation(3, y[:], raw[:148]), btMutation(6, link, mdbx.ChainValue(y, genesis, [40]byte{39: 2}))}
 	if bodyLen != 0 {
 		rows = append(rows, btMutation(4, y[:], raw[:bodyLen]))
 	}

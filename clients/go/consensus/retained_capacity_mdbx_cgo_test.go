@@ -431,15 +431,15 @@ func retainedCapacityChildV1(t *testing.T, w *btWorld) ([32]byte, [32]byte) {
 	return x, genesis
 }
 
-// retainedCapacityIndexV1 is x's planned CURRENT canonical index and owner
-// insert, the only Pair source of x's planned canonical identity.
+// retainedCapacityIndexV1 is x's planned CURRENT canonical index (W_h=h+1: genesis 1 plus work 1 per all-ff target,
+// MP 2817) and owner insert, the only Pair source of x's planned canonical identity.
 func retainedCapacityIndexV1(g, h uint64, x, parent [32]byte) []mdbx.Mutation {
 	index, _ := mdbx.HeightKey(g, h)
 	owner, _ := mdbx.CanonicalOwnerKey(g, x)
 	height := make([]byte, 8)
 	height[7] = byte(h)
 	return []mdbx.Mutation{
-		{DBI: mdbx.TreeSchemaV1DBIs()[2], Key: index, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(x, parent, [40]byte{})},
+		{DBI: mdbx.TreeSchemaV1DBIs()[2], Key: index, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(x, parent, [40]byte{39: byte(h + 1)})},
 		{DBI: mdbx.TreeSchemaV1DBIs()[7], Key: owner, AfterKind: mdbx.AfterLiteral, Literal: height},
 	}
 }
@@ -553,10 +553,8 @@ func TestRetainedCapacityMDBXFinite(t *testing.T) {
 	}
 	staged := mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[6], Key: []byte{1}, AfterKind: mdbx.AfterLiteral, Literal: []byte{1}}
 	for name, mutate := range map[string]func(*mdbx.TreeOperationV1){
-		"no_index_insert": func(op *mdbx.TreeOperationV1) { op.Pair.Mutations = op.Pair.Mutations[1:] },
-		"index_names_other": func(op *mdbx.TreeOperationV1) {
-			op.Pair.Mutations[0].Literal = mdbx.ChainValue([32]byte{9}, [32]byte{}, [40]byte{})
-		},
+		"no_index_insert":   func(op *mdbx.TreeOperationV1) { op.Pair.Mutations = op.Pair.Mutations[1:] },
+		"index_names_other": func(op *mdbx.TreeOperationV1) { op.Pair.Mutations[0].Literal[0] ^= 1 },
 		"unknown_namespace": func(op *mdbx.TreeOperationV1) { op.Pair.Mutations = append(op.Pair.Mutations, staged) },
 		"slot_with_pair_header": func(op *mdbx.TreeOperationV1) {
 			x := op.Primitives[0].Block
@@ -796,13 +794,13 @@ func TestRetainedCapacityMDBXPromise(t *testing.T) {
 	}
 }
 
-// W/L transfer (MP 3018-3037): side F=0=H_old holds x@1 (MP 2984-2986) and its child y@2 (298 bytes each);
-// publishing x at 1 has W={x}, L={y}: side cleared, SIDE(3,2,2,2) owing L, SideLink (3,1) deleted. x's
-// header is delta 0 (148 in, 148 out); y's header 148 leaves E, its body transfers to SIDE (0). Deleting L's
-// SideLink or y's owed body is refused. On the lawful-retention OLD (healthy y@1, x's sibling, MP 3047-3058) a
-// W-less SideLink (3,1) deletion (side cleared, with or without SIDE) and y's owned body deletion are refused; the side is kept.
+// W/L transfer (MP 3018-3037): side F=0=H_old holds x@1 (MP 2984-2986) and its child y@2 (298 bytes each). The op publishes
+// x at 1 on the route of MP 3723-3726 (a longer descendant chain applied one D=0,C=1 commit or one bounded phase at a time; y
+// as the winner is C=2 ORDINARY_APPLY, MP 3736-3740): W={x}, L={y}, side cleared, SIDE(3,2,2,2) owing L, SideLink (3,1) and y's
+// unowned header deleted (MP 2550-2557): x's header delta 0, y's 148 leaves E, its body and link stay owed. Deleting L's link or y's body is refused.
+// On the lawful-retention OLD (healthy y@1, x's sibling, MP 3047-3058) a W-less SideLink (3,1) deletion (side cleared, with or without SIDE) and y's owned body deletion are refused; the side is kept.
 func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
-	wl, yh := retainedCapacityWLSideV1(t)
+	wl, leave := retainedCapacityWLSideV1(t)
 	w, _, genesis := riGenesis(t)
 	kept := retainedCapacitySelectedV1(t, w, initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = genesis, blockStepsMedian+2 }), 1)
 	for name, c := range map[string]struct {
@@ -810,11 +808,11 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 		op *mdbx.TreeOperationV1
 		m  []mdbx.Mutation
 	}{
-		"accepted":                {wl, retainedCapacityWLOpV1(t, wl, 2, 2), nil},
+		"accepted":                {wl, retainedCapacityWLOpV1(t, wl, 2, 2, leave), nil},
 		"link deletion without W": {w, retainedCapacityWLOpV1(t, w, 1, 1), nil},
 		"non-W row as W":          {w, retainedCapacityWLOpV1(t, w, 1, 0), nil},
-		"L link deletion":         {wl, retainedCapacityWLOpV1(t, wl, 2, 2), []mdbx.Mutation{retainedCapacityLinkDeleteV1(3, 2)}},
-		"owed body deletion":      {wl, retainedCapacityWLOpV1(t, wl, 2, 2), []mdbx.Mutation{{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: yh[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}}},
+		"L link deletion":         {wl, retainedCapacityWLOpV1(t, wl, 2, 2, leave), []mdbx.Mutation{retainedCapacityLinkDeleteV1(3, 2)}},
+		"owed body deletion":      {wl, retainedCapacityWLOpV1(t, wl, 2, 2, leave), []mdbx.Mutation{{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: leave.Key, BeforePresent: true, AfterKind: mdbx.AfterAbsent}}},
 		"owned deletion":          {w, retainedCapacityBoundOpV1(t, w), []mdbx.Mutation{{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: kept[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}}},
 	} {
 		c.op.Pair.Mutations = append(c.op.Pair.Mutations, c.m...)
@@ -830,8 +828,8 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	retainedCapacityKeptSideV1(t, w)
 }
 
-// retainedCapacityWLSideV1 installs the selected side F=0, rows x@1 and its child y@2; returns y.
-func retainedCapacityWLSideV1(t *testing.T) (*btWorld, [32]byte) {
+// retainedCapacityWLSideV1 installs the side F=0, rows x@1 and its child y@2; returns y's leaving header deletion (MP 2550-2557).
+func retainedCapacityWLSideV1(t *testing.T) (*btWorld, mdbx.Mutation) {
 	t.Helper()
 	w, _, genesis := riGenesis(t)
 	child := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent = genesis })
@@ -840,14 +838,14 @@ func retainedCapacityWLSideV1(t *testing.T) (*btWorld, [32]byte) {
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
 		a.Authority.SelectedSide.F, a.Authority.SelectedSide.RowCount, a.Authority.SelectedSide.LogicalBytes = 0, 2, 2*uint64(len(child))
 	})
-	return w, y
+	return w, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[3], Key: y[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}
 }
 
-// retainedCapacityWLOpV1 publishes x at 1: side cleared, SIDE(3,f,l,f) if f<=l, SideLink (3,1) deleted.
-func retainedCapacityWLOpV1(t *testing.T, w *btWorld, f, l uint64) *mdbx.TreeOperationV1 {
+// retainedCapacityWLOpV1 publishes x at 1: side cleared, SIDE(3,f,l,f) if f<=l, SideLink (3,1) deleted, then m.
+func retainedCapacityWLOpV1(t *testing.T, w *btWorld, f, l uint64, m ...mdbx.Mutation) *mdbx.TreeOperationV1 {
 	op := retainedCapacityBoundOpV1(t, w)
 	retainedCapacityClearSideV1(t, w, op, f, l)
-	op.Pair.Mutations = append(op.Pair.Mutations, retainedCapacityLinkDeleteV1(3, 1))
+	op.Pair.Mutations = append(append(op.Pair.Mutations, retainedCapacityLinkDeleteV1(3, 1)), m...)
 	return op
 }
 
@@ -891,7 +889,7 @@ func retainedCapacityObsoleteV1(t *testing.T, w *btWorld, member bool) {
 	if member {
 		index, _ := mdbx.HeightKey(5, 1)
 		owner, _ := mdbx.CanonicalOwnerKey(5, x)
-		rows = append(rows, btMutation(2, index, mdbx.ChainValue(x, genesis, [40]byte{39: 1})), btMutation(7, owner, []byte{7: 1}))
+		rows = append(rows, btMutation(2, index, mdbx.ChainValue(x, genesis, [40]byte{39: 2})), btMutation(7, owner, []byte{7: 1}))
 	}
 	w.pair(t, rows...)
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
@@ -970,15 +968,15 @@ func retainedCapacityAgreeV1(t *testing.T, cold, warm *DirectRetainedProofV1) {
 	}
 }
 
-// retainedCapacitySelectedV1 stores raw's header and a SideLink naming it at
-// (3,h) and installs a one-row selected side of generation 3 at tip h.
+// retainedCapacitySelectedV1 stores raw's header and a SideLink naming it at (3,h) with W_h=h+1 (genesis 1 plus work 1
+// per all-ff target, MP 1462-1464, 2817) and installs a one-row selected side of generation 3 at tip h.
 func retainedCapacitySelectedV1(t *testing.T, w *btWorld, raw []byte, h uint64) [32]byte {
 	t.Helper()
 	hash := sha3.Sum256(raw[:148])
 	key, _ := mdbx.HeightKey(3, h)
-	w.pair(t, btMutation(3, hash[:], raw[:148]), btMutation(4, hash[:], raw), btMutation(6, key, mdbx.ChainValue(hash, [32]byte(raw[4:36]), [40]byte{39: 1})))
+	w.pair(t, btMutation(3, hash[:], raw[:148]), btMutation(4, hash[:], raw), btMutation(6, key, mdbx.ChainValue(hash, [32]byte(raw[4:36]), [40]byte{39: byte(h + 1)})))
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
-		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: h - 1, TipHeight: h, TipHash: hash, RowCount: 1, LogicalBytes: uint64(len(raw)), CumulativeChainwork: [40]byte{39: 1}}
+		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: h - 1, TipHeight: h, TipHash: hash, RowCount: 1, LogicalBytes: uint64(len(raw)), CumulativeChainwork: [40]byte{39: byte(h + 1)}}
 	})
 	return hash
 }
@@ -1038,7 +1036,7 @@ func TestRetainedCapacityMDBXWPromotion(t *testing.T) {
 	// (MP 2559-2561); an overwrite, a before-absent or unknown-kind effect or
 	// another key is refused (MP 1473-1474).
 	overwrite, absent, unknown := link, link, link
-	overwrite.AfterKind, overwrite.Literal = mdbx.AfterLiteral, mdbx.ChainValue(x, genesis, [40]byte{39: 1})
+	overwrite.AfterKind, overwrite.Literal = mdbx.AfterLiteral, mdbx.ChainValue(x, genesis, [40]byte{39: 2})
 	absent.BeforePresent, unknown.AfterKind = false, 0
 	stray := [][]mdbx.Mutation{bare, append(retainedCapacityBoundOpV1(t, w).Pair.Mutations, link)}
 	for _, m := range []mdbx.Mutation{retainedCapacityLinkDeleteV1(3, 2), retainedCapacityLinkDeleteV1(2, 1), overwrite, absent, unknown} {
@@ -1060,8 +1058,8 @@ func retainedCapacityLinkDeleteV1(g, h uint64) mdbx.Mutation {
 // T10 (D15/D3/D13): one W/L-transfer op gives identical finite captures and
 // identical accepted proofs on the warm and the cold path.
 func TestRetainedCapacityMDBXTransferWarmCold(t *testing.T) {
-	w, _ := retainedCapacityWLSideV1(t)
-	cold, warm := retainedCapacityTwinsV1(t, w, func() *mdbx.TreeOperationV1 { return retainedCapacityWLOpV1(t, w, 2, 2) })
+	w, leave := retainedCapacityWLSideV1(t)
+	cold, warm := retainedCapacityTwinsV1(t, w, func() *mdbx.TreeOperationV1 { return retainedCapacityWLOpV1(t, w, 2, 2, leave) })
 	if cold.add != 148 || cold.remove != 148+148 {
 		t.Fatalf("transfer capture add=%d remove=%d", cold.add, cold.remove)
 	}
@@ -1251,7 +1249,7 @@ func TestRetainedCapacityMDBXSideOrder(t *testing.T) {
 			return mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: first, NextHeight: first, LastHeight: last}
 		}
 		a.Authority.Phase = mdbx.StoragePhasePruneGCV1
-		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 1, TipHeight: 1441, RowCount: 1439, LogicalBytes: 1439, CumulativeChainwork: [40]byte{39: 1}}
+		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 1, TipHeight: 1441, RowCount: 1439, LogicalBytes: 1439, CumulativeChainwork: [40]byte{38: 5, 39: 0xa2}}
 		a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{side(2, 2)}}
 		_, rolling := a.Encode()
 		a.Authority.SelectedSide = nil
