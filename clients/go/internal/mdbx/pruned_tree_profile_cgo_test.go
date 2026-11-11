@@ -126,6 +126,9 @@ func TestPrunedTreeProfileControl(t *testing.T) {
 	prunedRecovery.Authority.PendingTargetProfile = &pending
 	busyArchive := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhasePruneGCV1, StorageLifecycleStableV1, 0)
 	busyArchive.Authority.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: CleanupSpanGenerationV1, GenerationID: 3, FirstHeight: 0, LastHeight: 0, NextHeight: 0}}}
+	recoveryGC := busyArchive
+	recoveryGC.Authority.Lifecycle = StorageLifecycleRecoveryRequiredV1
+	recoveryGC.Authority.PendingTargetProfile = &pending
 	busyPruned := busyArchive
 	busyPruned.Authority.ActiveProfile = StorageProfilePrunedV1
 	high := &AuthorityPointV1{Height: 0x100000000}
@@ -138,6 +141,7 @@ func TestPrunedTreeProfileControl(t *testing.T) {
 	}{
 		{"A2 archive recovery", recovery, false, nil, "RECOVERY_REQUIRED"},
 		{"A2 pruned recovery", prunedRecovery, false, nil, "RECOVERY_REQUIRED"},
+		{"A2 archive recovery prune gc", recoveryGC, true, nil, "RECOVERY_REQUIRED"},
 		{"A3 pruned none", prunedTreeEnvelope(StorageProfilePrunedV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0), false, nil, "PROFILE_NOOP"},
 		{"A3 pruned gc", busyPruned, false, nil, "PROFILE_NOOP"},
 		{"A4 busy confirmed", busyArchive, true, nil, "LOCAL_BUSY"},
