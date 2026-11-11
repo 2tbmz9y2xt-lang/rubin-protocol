@@ -168,6 +168,8 @@ func retainedCapacityCommitV1(t *testing.T, w *btWorld, a *RetainedAccountingV1,
 func retainedCapacityNativeCommitV1(t *testing.T) {
 	w, _, genesis := riGenesis(t)
 	child, x := retainedCapacityNativeChildV1(t, w, genesis)
+	// Seed the later D3/D13 op's unowned body now, so building it is no commit.
+	retainedCapacityChildV1(t, w)
 	rolesBefore, endsBefore := retainedCapacityRolesV1(t, w)
 	a := NewRetainedAccountingV1(DefaultLimitsV1())
 	// The companion op: count/kind refusal, no token, no native write.
@@ -194,9 +196,23 @@ func retainedCapacityNativeCommitV1(t *testing.T) {
 	if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false); err != nil || !dst.applied || a.active != nil {
 		t.Fatalf("apply success: %v", err)
 	}
-	logicalMDBXAssert(t, !a.valid || a.exactRet == 1596, "cached successor %d", a.exactRet)
+	logicalMDBXAssert(t, a.valid && a.exactRet == 1596, "cached successor %d/%v", a.exactRet, a.valid)
 	cold, err := riRead(t, w, nil)
 	logicalMDBXAssert(t, err == nil && cold.exactRet == 1596, "fresh post enumeration %d: %v", cold.exactRet, err)
+	// D3: the successor binding is reused with no cold visit (a marked cache
+	// value is observed); D13: an intervening native commit of another kind
+	// advances the epoch and the next Plan reconstructs once.
+	a.exactRet = 1596 + 7
+	warm := &DirectRetainedProofV1{}
+	_ = retainedCapacityPlanV1(t, w, a, warm, retainedCapacityBoundOpV1(t, w), 8192)
+	logicalMDBXAssert(t, warm.pre == 1596+7 && a.valid, "warm successor pre %d", warm.pre)
+	logicalMDBXAssert(t, a.ApplyDirectMDBX(warm, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errors.New("callback"), true) == nil, "warm apply")
+	a.exactRet = 1596 + 7
+	riAuthority(t, w, func(*mdbx.TreeAuthorityV1) {}) // an intervening Pair-only native commit
+	next := &DirectRetainedProofV1{}
+	_ = retainedCapacityPlanV1(t, w, a, next, retainedCapacityBoundOpV1(t, w), 8192)
+	fresh, err := riRead(t, w, nil)
+	logicalMDBXAssert(t, err == nil && next.pre == fresh.exactRet && next.pre != 1596+7, "reconstruction pre %d fresh %d", next.pre, fresh.exactRet)
 	rolesAfter, endsAfter := retainedCapacityRolesV1(t, w)
 	// After reopen the test qualifies the committed pair itself (the startup
 	// owner is outside this issue); the LAG role must read back unchanged.
