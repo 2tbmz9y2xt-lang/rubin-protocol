@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -2639,4 +2640,303 @@ func TestTreeHeaderSlotEntryV1(t *testing.T) {
 			t.Fatal("accepted ENTRY control left the refused state")
 		}
 	})
+}
+
+// RUB-1733 context window rows through the public entry under native fixture faults.
+
+func ctxTreeIndexKey(gen, h uint64) []byte {
+	return binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, gen), h)
+}
+
+func ctxTreeHeaderKey(t *testing.T, gen, h uint64) []byte {
+	hash := sha3.Sum256(ctxTreeHeader(t, gen, h))
+	return hash[:]
+}
+
+// ctxTreePairScene is a format-3 Store with a complete generation-7 window at heights 100..102.
+func ctxTreePairScene(t *testing.T) (*Store, *OperationReservationOwner, *CanonicalContextWindowV1) {
+	t.Helper()
+	s, path, o := tsNew(t)
+	ctxTreePaths[s] = path
+	ctxTreeSeed(t, s, 7, 100, 3, nil, nil)
+	return s, o, &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 3}
+}
+
+var ctxTreePaths = map[*Store]string{}
+
+func ctxTreeFault(t *testing.T, s *Store, mode uint32, rank uint8, key []byte, run func()) fixtureLargeEvidence {
+	t.Helper()
+	evidence, err := fixtureLargeFault(s, mode, rank, key, run)
+	mustEnvironment(t, err)
+	return evidence
+}
+
+func TestCtxTreePairFixtureV1(t *testing.T) {
+	t.Run("A8a-crossed-clean", func(t *testing.T) {
+		s, o, w := ctxTreePairScene(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, s, 12, 0, []byte{9}, func() { r = tsRun(t, s, o, TreeOperation, ctxTreeOp(60, w)) })
+		r.tuple(t, 2, 3, -1)
+		if evidence.commits != 1 || evidence.drift != 0 {
+			t.Fatalf("A8a evidence%+v err%v", evidence, r.err)
+		}
+		tsConsumed(t, s, o, 2, r.err)
+		tsRead(t, tsReopen(t, s, ctxTreePaths[s]), tsTarget(60).DBI, tsTarget(60).Key, tsTarget(60).Literal)
+	})
+	t.Run("R8a-crossed-drift", func(t *testing.T) {
+		var calls [2]uint32
+		for i, h := range []uint64{100, 102} {
+			s, o, w := ctxTreePairScene(t)
+			var r tsResult
+			evidence := ctxTreeFault(t, s, 3, 3, ctxTreeHeaderKey(t, 7, h), func() {
+				r = tsRun(t, s, o, TreeOperation, ctxTreeOp(61, w))
+				calls[i] = fixtureLargeNativeCalls()
+			})
+			r.tuple(t, 3, 3, -1)
+			if evidence.commits != 1 || evidence.drift != 1 {
+				t.Fatalf("R8a evidence%+v", evidence)
+			}
+			tsConsumed(t, s, o, 3, r.err)
+		}
+		if calls[0] != calls[1] || calls[0] == 0 {
+			t.Fatalf("R8a native calls offset0 %d, last %d", calls[0], calls[1])
+		}
+	})
+	for _, c := range []struct {
+		rank uint8
+		key  func(*testing.T) []byte
+	}{{2, func(*testing.T) []byte { return ctxTreeIndexKey(7, 101) }}, {3, func(t *testing.T) []byte { return ctxTreeHeaderKey(t, 7, 101) }}} {
+		t.Run(fmt.Sprintf("R6-write-snapshot-rank%d", c.rank), func(t *testing.T) {
+			s, o, w := ctxTreePairScene(t)
+			var r tsResult
+			evidence := ctxTreeFault(t, s, 14, c.rank, c.key(t), func() { r = tsRun(t, s, o, TreeOperation, ctxTreeOp(62, w)) })
+			r.tuple(t, 1, 1, -1)
+			treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+			if evidence.drift != 1 || evidence.commits != 0 {
+				t.Fatalf("R6 evidence%+v", evidence)
+			}
+			ctxTreeConsulted(t, s, o, r)
+		})
+		t.Run(fmt.Sprintf("R7-final-rank%d", c.rank), func(t *testing.T) {
+			s, o, w := ctxTreePairScene(t)
+			var r tsResult
+			evidence := ctxTreeFault(t, s, 13, c.rank, c.key(t), func() { r = tsRun(t, s, o, TreeOperation, ctxTreeOp(63, w)) })
+			r.tuple(t, 1, 2, -1)
+			treeNativeError(t, r.err, "update", "StateMismatch", -30779, "final update image mismatch", nil)
+			if evidence.drift != 1 || evidence.commits != 0 {
+				t.Fatalf("R7 evidence%+v", evidence)
+			}
+			tsConsumed(t, s, o, 1, r.err)
+			tsRead(t, tsReopen(t, s, ctxTreePaths[s]), tsTarget(63).DBI, tsTarget(63).Key, nil)
+		})
+		t.Run(fmt.Sprintf("H2-native-read-rank%d", c.rank), func(t *testing.T) {
+			s, o, w := ctxTreePairScene(t)
+			var r tsResult
+			evidence := ctxTreeFault(t, s, 28, c.rank, c.key(t), func() { r = tsRun(t, s, o, TreeOperation, ctxTreeOp(64, w)) })
+			r.tuple(t, 1, 1, -1)
+			var engine *EngineError
+			if evidence.gets == 0 || !errors.As(r.err, &engine) || engine.Class != EngineIO {
+				t.Fatalf("H2 %v evidence%+v", r.err, evidence)
+			}
+			if _, wrapped := r.err.(*contextTreeInfrastructureV1); wrapped {
+				t.Fatal("H2 leaked the infrastructure wrapper")
+			}
+			tsConsumed(t, s, o, 1, r.err)
+		})
+	}
+	t.Run("H2s-invalid-shape", func(t *testing.T) {
+		s, o, w := ctxTreePairScene(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, s, 17, 2, ctxTreeIndexKey(7, 100), func() { r = tsRun(t, s, o, TreeOperation, ctxTreeOp(65, w)) })
+		r.tuple(t, 1, 1, -1)
+		if evidence.gets == 0 || r.err == nil || !strings.Contains(r.err.Error(), "mdbx_get returned invalid result shape") {
+			t.Fatalf("H2s %v evidence%+v", r.err, evidence)
+		}
+		tsConsumed(t, s, o, 1, r.err)
+	})
+	t.Run("no-native-read", func(t *testing.T) {
+		s, o, w := ctxTreePairScene(t)
+		mutation, consulted := ctxTreeOverlaps(t, 66, w)
+		for _, op := range []TreeOperationV1{
+			ctxTreeOp(66, &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 10081}),
+			ctxTreeOp(66, &CanonicalContextWindowV1{FirstHeight: 100, Count: 1}),
+			ctxTreeOp(66, &CanonicalContextWindowV1{Generation: 7, FirstHeight: 0x1_0000_0000, Count: 1}),
+			ctxTreeOp(66, &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100}),
+			ctxTreeOp(66, &CanonicalContextWindowV1{Generation: 7, FirstHeight: 0xffffffff, Count: 2}),
+			mutation, consulted,
+		} {
+			ctxTreeNoRead(t, s, o, op)
+		}
+	})
+	t.Run("R5c-no-native-read", func(t *testing.T) {
+		s, _, w := ctxTreePairScene(t)
+		mutation, consulted := ctxTreeOverlaps(t, 67, w)
+		for _, op := range []TreeOperationV1{ctxTreeOp(67, &CanonicalContextWindowV1{Generation: 8, FirstHeight: 100, Count: 1}), mutation, consulted} {
+			ctxTreeNoRead(t, s, reservationFilled(t, 343), op)
+		}
+	})
+	t.Run("R5-no-write-transaction", func(t *testing.T) {
+		s, o, _ := ctxTreePairScene(t)
+		ctxTreeSeed(t, s, 9, 100, 3, map[uint64]bool{101: true}, nil)
+		ctxTreeSeed(t, s, 10, 100, 3, nil, map[uint64]bool{101: true})
+		for _, gen := range []uint64{9, 10} {
+			var r tsResult
+			evidence := ctxTreeFault(t, s, 14, 2, ctxTreeIndexKey(7, 101), func() {
+				r = tsRun(t, s, o, TreeOperation, ctxTreeOp(68, &CanonicalContextWindowV1{Generation: gen, FirstHeight: 100, Count: 3}))
+			})
+			ctxTreeIncomplete(t, r)
+			if evidence.drift != 0 || evidence.commits != 0 {
+				t.Fatalf("R5 generation %d began a write transaction: evidence%+v", gen, evidence)
+			}
+			ctxTreeOpen(t, s)
+		}
+	})
+}
+
+// ctxTreeNoRead runs an admission-refused op with mode 28 armed on its own offset-0 index key, wants no get of
+// that key and no commit, and wants the Store OPEN.
+func ctxTreeNoRead(t *testing.T, s *Store, o *OperationReservationOwner, op TreeOperationV1) {
+	t.Helper()
+	w := op.Pair.ContextConsulted
+	var r tsResult
+	evidence := ctxTreeFault(t, s, 28, 2, ctxTreeIndexKey(w.Generation, w.FirstHeight), func() { r = tsRun(t, s, o, LaneOperation, op) })
+	r.tuple(t, 1, 1, -1)
+	if evidence.gets != 0 || evidence.commits != 0 {
+		t.Fatalf("admission row read context: %v evidence%+v", r.err, evidence)
+	}
+	ctxTreeOpen(t, s)
+}
+
+// ctxTreeConsulted pins the lifecycle that a drifted Consulted row takes at the write snapshot.
+func ctxTreeConsulted(t *testing.T, s *Store, o *OperationReservationOwner, r tsResult) {
+	t.Helper()
+	tsConsumed(t, s, o, 1, r.err)
+}
+
+func ctxTreeScene(t *testing.T) *tsfScene {
+	t.Helper()
+	s := tsfNew(t)
+	ctxTreeSeed(t, s.s, 7, 100, 3, nil, nil)
+	s.op.Pair.ContextConsulted = &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 3}
+	return s
+}
+
+func TestCtxTreePrimitiveFixtureV1(t *testing.T) {
+	t.Run("A8b-crossed-clean", func(t *testing.T) {
+		s := ctxTreeScene(t)
+		r := s.crossed(t)
+		r.tuple(t, 2, 3, -1)
+		tsConsumed(t, s.s, s.o, 2, r.err)
+	})
+	t.Run("R8b-crossed-drift", func(t *testing.T) {
+		var calls [2]uint32
+		for i, h := range []uint64{100, 102} {
+			s := ctxTreeScene(t)
+			var r tsResult
+			evidence := ctxTreeFault(t, s.s, 3, 3, ctxTreeHeaderKey(t, 7, h), func() {
+				r = s.run(t)
+				calls[i] = fixtureLargeNativeCalls()
+			})
+			r.tuple(t, 3, 3, -1)
+			if evidence.commits != 1 || evidence.drift != 1 {
+				t.Fatalf("R8b evidence%+v", evidence)
+			}
+			tsConsumed(t, s.s, s.o, 3, r.err)
+		}
+		if calls[0] != calls[1] || calls[0] == 0 {
+			t.Fatalf("R8b native calls offset0 %d, last %d", calls[0], calls[1])
+		}
+	})
+	for _, crossed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("H1-mutated-after-first-source-crossed%v", crossed), func(t *testing.T) {
+			s := ctxTreeScene(t)
+			window := s.op.Pair.ContextConsulted
+			s.p[1].before = func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error {
+				window.Generation = 99
+				return nil
+			}
+			var r tsResult
+			if crossed {
+				r = s.crossed(t)
+				r.tuple(t, 2, 3, -1)
+				tsConsumed(t, s.s, s.o, 2, r.err)
+			} else {
+				r = s.run(t)
+				r.tuple(t, 2, 3, -1)
+				mustEnvironment(t, r.err)
+			}
+			if window.Generation != 99 || s.p[1].calls == [3]int{} {
+				t.Fatal("H1 mutation did not run")
+			}
+		})
+	}
+}
+
+func TestCtxTreeClosedBeforeHoldV1(t *testing.T) {
+	for _, count := range []uint32{1, 10081} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			s, o, _ := ctxTreePairScene(t)
+			var closed *OperationAccount
+			mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error { closed = a; return nil }))
+			window := &CanonicalContextWindowV1{Generation: 8, FirstHeight: 100, Count: count}
+			var r tsResult
+			calls := 0
+			evidence := ctxTreeFault(t, s, 28, 2, ctxTreeIndexKey(8, 100), func() {
+				s.operations.Lock()
+				defer s.operations.Unlock()
+				var unwind treeUnwindV1
+				r.truth, r.stage, r.index, unwind, r.err = s.treeEntryLockedV1(closed, func(*Reader) (TreeOperationV1, error) {
+					calls++
+					return ctxTreeOp(80, window), nil
+				})
+				if unwind.kind != 0 {
+					t.Fatal("closed-before-hold unwind")
+				}
+			})
+			if count > 10080 {
+				tsRefusal(t, r, true)
+			} else {
+				r.tuple(t, 1, 1, -1)
+				if any(r.err) != any(errOperationReservationInput) {
+					t.Fatalf("closed before hold = %v", r.err)
+				}
+			}
+			if calls != 1 || evidence.gets != 0 || reservationLive(o) != 0 {
+				t.Fatalf("closed before hold calls%d evidence%+v", calls, evidence)
+			}
+			ctxTreeOpen(t, s)
+		})
+	}
+}
+
+func TestCtxTreeSlotOverlapV1(t *testing.T) {
+	for _, identical := range []bool{true, false} {
+		t.Run(fmt.Sprintf("identical%v", identical), func(t *testing.T) {
+			s, _, o := tsNew(t)
+			calls, proofs := 0, 0
+			op := tsSlotShape(t, &calls, &proofs, nil, 0)
+			x := op.HeaderSlot.Hash
+			forward := canonicalForwardLiteral(7, 100, x, [40]byte{39: 0x41})
+			owner := canonicalOwnerPairOf(forward)
+			forward.DBI, owner.DBI = TreeSchemaV1DBIs()[2], TreeSchemaV1DBIs()[7]
+			seed := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{forward, owner}}}
+			if identical {
+				header := Mutation{DBI: TreeSchemaV1DBIs()[3], Key: x[:], AfterKind: 2, Literal: bytes.Clone(op.HeaderSlot.Header[:])}
+				seed.Pair.Mutations = []Mutation{forward, header, owner}
+			} else {
+				stored := bytes.Repeat([]byte{0x5a}, 148)
+				treeNativeSeed(t, s, 3, x[:], stored)
+			}
+			r := tsRun(t, s, o, TreeOperation, seed)
+			r.tuple(t, 2, 3, -1)
+			mustEnvironment(t, r.err)
+			op.Pair.ContextConsulted = &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 1}
+			evidence := ctxTreeFault(t, s, 28, 3, x[:], func() { r = tsRun(t, s, o, TreeOperation, op) })
+			tsRefusal(t, r, false)
+			if proofs != 0 || evidence.gets != 0 {
+				t.Fatalf("R4b proofs%d evidence%+v", proofs, evidence)
+			}
+			ctxTreeOpen(t, s)
+		})
+	}
 }

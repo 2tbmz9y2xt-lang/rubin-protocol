@@ -63,6 +63,7 @@ type largeImageScope struct {
 	tip            *canonicalTipCell
 	context        CanonicalContextWindowV1
 	contextPresent bool
+	contextTree    bool // header-width selector: false = legacy 116, true = format-3 tree 148
 	selectors      []LargeImageSelectorV1
 	maxKey         uint64
 	domains        []obsoleteDomain

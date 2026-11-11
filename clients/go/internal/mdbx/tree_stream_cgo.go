@@ -25,6 +25,15 @@ type TreePairV1 struct {
 	Consulted []ConsultedRow
 	// EntryInventory accepts the completed token for this same entry, account and Pair.
 	EntryInventory *EntryInventoryV1
+	// ContextConsulted is an optional canonical context window with the legacy Batch.ContextConsulted semantics
+	// and format-3 widths: each 104-byte index row and the 148-byte header selected by its leading 32 bytes must
+	// be present and byte-identical at ORIGINAL OLD qualification, write snapshot, final image and possible-crossed
+	// readback. nil adds no domain. A non-nil window cannot be combined with EntryInventory ("invalid Update
+	// Batch"). A non-nil window takes exactly one fixed 344-byte charge, held to operation completion; its rows are
+	// reread from ORIGINAL OLD one pair at a time and not retained, and context data the caller reads or holds stays
+	// on the caller's own charges. The engine copies the descriptor at step 5 and never reads the caller's value
+	// after; the caller must keep *ContextConsulted unchanged from the callback's return until that copy.
+	ContextConsulted *CanonicalContextWindowV1
 }
 
 // TreeSourceV1 is an immutable, replayable complete block source. At each position
@@ -94,8 +103,8 @@ type TreePrimitiveV1 struct {
 // after the complete covered preflight, freeze and reservation and before the
 // first native write, never at readback; Proof is not called when an earlier
 // step refuses. A non-nil result E ends the attempt as (OLD, Prewrite, -1, E)
-// with no write, consumes the Store with terminal E and releases the account
-// charges once. A Proof panic or Goexit takes the writer-position unwind with
+// with no write, consumes or retains Store resources under the existing owner
+// and releases the account charges once. A Proof panic or Goexit takes the writer-position unwind with
 // index -1; a clean unwind leaves the Store OPEN, then the panic or Goexit
 // resumes. A nil result continues, with HeaderSlot non-nil, to the header-slot
 // resolution below, which can still refuse, and then to flush, final checks and
@@ -110,7 +119,9 @@ type TreePrimitiveV1 struct {
 // Batch exceeds bound" when the slot, counted as one more auxiliary 32-byte-key
 // 148-byte-literal mutation and one more Consulted row, exceeds a Pair cap.
 // Every earlier admission row wins; every slot admission refusal wins over the
-// refusal saved for an operation account closed before the hold. The step-5 charge
+// refusal saved for an operation account closed before the hold. A context window
+// whose ORIGINAL OLD index selects a header key equal to Hash is refused with
+// "invalid Update Batch" at context qualification, whatever the slot would resolve to. The step-5 charge
 // then also covers one owned mutation and one owned Consulted row with the
 // slot's key and literal; the engine copies the slot at step 5 and never reads the caller's value after.
 // The caller must keep *HeaderSlot unchanged from the callback's return until
@@ -125,8 +136,9 @@ type TreePrimitiveV1 struct {
 // "OLD/write snapshot mismatch" when the two images differ and "tree header
 // slot differs" for a differing row. Each resolution refusal (these two and
 // any read error, returned unchanged) takes the Proof error route: OLD,
-// Prewrite, index -1, the Store consumed; the admission refusals above leave
-// the Store open. Final equality and the readback then cover the insert as a
+// Prewrite, index -1, Store resources consumed or retained under the existing
+// owner; the admission refusals above leave the Store open. Final equality and
+// the readback then cover the insert as a
 // Pair target and the reuse as a Consulted row. The engine verifies nothing of
 // Header beyond the admission check.
 type TreeOperationV1 struct {
@@ -176,7 +188,19 @@ func (s *TreeDeltaSinkV1) WindowV1() []byte {
 // Mutations, Consulted, then cross-row relations. Structural failures are "invalid
 // Update Batch"; Pair caps are "Update Batch exceeds bound"; the first refused
 // row wins. Admission and account refusals abort OLD and leave the Store reusable
-// on successful cleanup. One primitive requires TreeOperation; pair-only plans
+// on successful cleanup, except that a native read error or an invalid native
+// result shape ("mdbx_get returned invalid result shape") at context qualification
+// keeps its infrastructure disposition and uses the existing consuming failure
+// lifecycle.
+// With Pair.ContextConsulted non-nil, after the HeaderSlot row and before the step-5
+// charge: the charge-free descriptor rows (a window with EntryInventory, then the
+// legacy scalar "invalid Update Batch", the 10,080-pair "Update Batch exceeds
+// bound" and the last-height wrap rows) win over the refusal saved for a closed
+// account; then that saved refusal; then one 344-byte context charge; then every
+// index key against Pair targets and Consulted rows ("invalid Update Batch") before
+// any native read; then ORIGINAL OLD qualification per ascending offset (index
+// present with 104 bytes, header key not a Pair row nor HeaderSlot.Hash, header
+// present with 148 bytes; "canonical context OLD image is incomplete"). One primitive requires TreeOperation; pair-only plans
 // also admit LaneOperation and need at least one target. Rank 8 and references
 // are forbidden in Pairs, as are primitive-owned undo families and generation
 // root bindings. Meta keys 0, 1, 3 and 0x12 are immutable targets; 2 is literal-only,
@@ -325,7 +349,7 @@ func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(
 	err = e.prewriteV1(account, op, saved)
 	if err != nil {
 		e.retireEntryV1()
-		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, e.store.abortReadLocked(e.old, err, false)
+		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, e.prewriteAbortV1(err)
 	}
 	plan := treeOwnPlanV1(op)
 	if e.inventory != nil {
@@ -352,11 +376,41 @@ func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperati
 	if slotErr != nil {
 		return slotErr
 	}
-	if saved != nil {
-		return saved
+	err = e.contextQualifyV1(&op, saved)
+	if err != nil {
+		return err
 	}
 	// A zero-byte grow also preserves the post-callback open check.
 	return e.hold.grow(treeStepFiveBytesV1(op))
+}
+
+// prewriteAbortV1 aborts OLD after a prewrite refusal; only a wrapped context qualification error is infrastructure.
+func (e *treePublicEntryV1) prewriteAbortV1(err error) error {
+	primary, infrastructure := contextTreeAbortV1(err)
+	return e.store.abortReadLocked(e.old, primary, infrastructure)
+}
+
+// contextQualifyV1 runs the charge-free descriptor rows, then the refusal saved for an account closed before the
+// hold, then charges the fixed 344-byte context reservation, scans index overlaps and qualifies at ORIGINAL OLD.
+// With a nil window only the saved refusal remains, at its merged position.
+func (e *treePublicEntryV1) contextQualifyV1(op *TreeOperationV1, saved error) error {
+	err := contextTreeAdmitV1(&op.Pair)
+	if err != nil {
+		return err
+	}
+	window := op.Pair.ContextConsulted
+	if saved != nil || window == nil {
+		return saved
+	}
+	err = e.hold.grow(344)
+	if err != nil {
+		return err
+	}
+	err = contextTreeOverlapV1(&op.Pair, *window)
+	if err != nil {
+		return err
+	}
+	return contextTreeQualifyV1(e, &op.Pair, op.HeaderSlot, *window)
 }
 
 type treeAccountLedgerV1 struct{ hold *operationHold }
@@ -384,7 +438,7 @@ func treeAdmitSlotV1(op TreeOperationV1, account *OperationAccount, databaseID [
 	if err != nil {
 		return false, err
 	}
-	over, err := treePairScanV1(op.Pair, op.HeaderSlot)
+	over, err := treePairScanV1(&op.Pair, op.HeaderSlot)
 	if err != nil {
 		return false, err
 	}
@@ -494,7 +548,7 @@ func treeEndpointAllowedV1(p TreePrimitiveV1) bool {
 	return p.Endpoint.Kind == TreeEndpointAppliedV1 && p.Endpoint.Height == p.Height-1
 }
 
-func treePairScanV1(pair TreePairV1, slot *TreeHeaderSlotV1) (bool, error) {
+func treePairScanV1(pair *TreePairV1, slot *TreeHeaderSlotV1) (bool, error) {
 	var budget updateBudget
 	var previous Mutation
 	for j, m := range pair.Mutations {
@@ -753,6 +807,9 @@ func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
 	}
 	for j, row := range op.Pair.Consulted {
 		plan.consulted[j] = ownedConsulted{dbi: row.DBI, key: updateClone(row.Key)}
+	}
+	if op.Pair.ContextConsulted != nil {
+		plan.context = *op.Pair.ContextConsulted
 	}
 	if op.Proof != nil {
 		plan.proof, plan.report = op.Proof, &TreeDeltaReportV1{Undo: make([]TreeUndoChargeV1, len(op.Primitives))}
