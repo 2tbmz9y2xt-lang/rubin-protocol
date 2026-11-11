@@ -79,6 +79,14 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 		logicalMDBXAssert(t, err == nil && dst.prepared && dst.add == 148 && dst.remove == 296+2*(36+20), "plan: %v add=%d remove=%d", err, dst.add, dst.remove)
 		logicalMDBXAssert(t, dst.Proof(retainedCapacityGrowV1(dst, mdbx.TreeUndoChargeV1{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56})) == nil && dst.accepted, "proof")
 	})
+	// D15 W/L transfer whose Pair keeps y's unowned leaving header, no obsolete projection of y: that header leaves E
+	// as when the Pair deletes it (MP 2550-2557, 3169).
+	t.Run("D15_wl_kept_leaving_header", func(t *testing.T) {
+		w, _ := retainedCapacityWLSideV1(t)
+		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityWLOpV1(t, w, 2, 2), 8192)
+		logicalMDBXAssert(t, err == nil && dst.prepared && dst.add == 148 && dst.remove == 296, "plan: %v add=%d remove=%d", err, dst.add, dst.remove)
+	})
 	t.Run("D3_D14_D18_native_callback_refusal_witness_warm_no_cold_row", retainedCapacityCallbackRefusalV1)
 	t.Run("D29_native_context_window", retainedCapacityContextWindowV1)
 	t.Run("D14_native_fault_tuples", retainedCapacityFaultTuplesV1)
