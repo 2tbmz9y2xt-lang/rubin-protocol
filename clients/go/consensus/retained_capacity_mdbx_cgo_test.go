@@ -583,9 +583,7 @@ func TestRetainedCapacityMDBXFinite(t *testing.T) {
 			x := op.Primitives[0].Block
 			op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[3], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 148)})
 		},
-		"qualified_slot": func(op *mdbx.TreeOperationV1) {
-			op.HeaderSlot = &mdbx.TreeHeaderSlotV1{Hash: op.Primitives[0].Block}
-		},
+		"qualified_slot": func(op *mdbx.TreeOperationV1) { op.HeaderSlot = &mdbx.TreeHeaderSlotV1{Hash: op.Primitives[0].Block} },
 		"bodykind1_nil_slot_insert": func(op *mdbx.TreeOperationV1) {
 			c, x := op.Primitives[0].Coverage, op.Primitives[0].Block
 			c.BodyKind, c.CurrentBody = 1, make([]byte, 298)
