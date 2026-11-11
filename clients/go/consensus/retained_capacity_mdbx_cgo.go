@@ -102,6 +102,9 @@ func (p *DirectRetainedProofV1) planV1(old *mdbx.Reader, account *mdbx.Operation
 	if err := p.owner.preV1(p, &read); err != nil {
 		return err
 	}
+	if err := retainedRoleRelationV1(&read, p.op); err != nil {
+		return err
+	}
 	if err := p.undoChargeV1(&read); err != nil {
 		return err
 	}
@@ -170,6 +173,17 @@ func retainedRelationV1(read *retainedReadV1, op *mdbx.TreeOperationV1) error {
 		return errRetainedShapeAPIV1
 	}
 	if c.Block != p.Block || c.Height != p.Height || p.Undo != mdbx.UndoWriteOrReuseV1 && p.Undo != mdbx.UndoTransientV1 {
+		return errRetainedShapeAPIV1
+	}
+	return nil
+}
+
+// retainedRoleRelationV1 binds the sole primitive to the fresh CURRENT role:
+// its coverage database is the role origin and its height is the role's next
+// height j (DIRECT 3759, h=H_old+1). It runs once the role data exists.
+func retainedRoleRelationV1(read *retainedReadV1, op *mdbx.TreeOperationV1) error {
+	p := &op.Primitives[0]
+	if p.Coverage.DatabaseID != read.origin.database || p.Height != read.roles[0].j {
 		return errRetainedShapeAPIV1
 	}
 	return nil

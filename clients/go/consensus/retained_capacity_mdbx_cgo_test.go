@@ -324,6 +324,31 @@ func retainedCapacityPlanV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, d
 	return result
 }
 
+// retainedCapacityBoundOpV1 binds the direct op to the fixture's actual
+// CURRENT role through the producer: origin DatabaseID and next height j.
+func retainedCapacityBoundOpV1(t *testing.T, w *btWorld) *mdbx.TreeOperationV1 {
+	t.Helper()
+	op := retainedCapacityDirectOpV1()
+	err := w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
+		return account.WithReservation(retainedPlanFrameV1, func() error {
+			return w.s.View(func(reader *mdbx.Reader) error {
+				var read retainedReadV1
+				if err := prepareRetainedReadV1(&read, reader, account, nil); err != nil {
+					return err
+				}
+				if err := readRetainedRolesV1(&read); err != nil {
+					return err
+				}
+				op.Primitives[0].Coverage.DatabaseID, op.Primitives[0].Height = read.origin.database, read.roles[0].j
+				op.Primitives[0].Coverage.Height = read.roles[0].j
+				return nil
+			})
+		})
+	})
+	logicalMDBXAssert(t, err == nil, "bind op: %v", err)
+	return op
+}
+
 func TestRetainedCapacityMDBXPlanPre(t *testing.T) {
 	w, _, _ := riGenesis(t)
 	cold, err := riRead(t, w, nil)
@@ -331,7 +356,7 @@ func TestRetainedCapacityMDBXPlanPre(t *testing.T) {
 	a := NewRetainedAccountingV1(DefaultLimitsV1())
 	run := func() *DirectRetainedProofV1 {
 		dst := &DirectRetainedProofV1{}
-		if err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityDirectOpV1(), 8192); !errors.Is(err, errRetainedPendingV1) {
+		if err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityBoundOpV1(t, w), 8192); !errors.Is(err, errRetainedPendingV1) {
 			t.Fatalf("plan: %v", err)
 		}
 		if a.active != dst || dst.prepared || dst.entered {
@@ -381,5 +406,25 @@ func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); !errors.Is(err, errRetainedShapeAPIV1) || a.valid || dst.roles != ([2]retainedRoleV1{}) || a.active != dst {
 		t.Fatalf("relation: %v", err)
+	}
+	// D8: the role relations run after the cold quantity entry, which stores
+	// its completed pre tuple first; the clean witness then preserves it.
+	for name, mutate := range map[string]func(*mdbx.TreeOperationV1){
+		"database": func(op *mdbx.TreeOperationV1) { op.Primitives[0].Coverage.DatabaseID[0] ^= 1 },
+		"height": func(op *mdbx.TreeOperationV1) {
+			op.Primitives[0].Height++
+			op.Primitives[0].Coverage.Height++
+		},
+	} {
+		a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		op = retainedCapacityBoundOpV1(t, w)
+		mutate(op)
+		err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+		if !errors.Is(err, errRetainedShapeAPIV1) || !a.valid || dst.pre == 0 || dst.roles[0].generation == 0 || a.active != dst || dst.prepared {
+			t.Fatalf("%s relation: %v valid=%v pre=%d", name, err, a.valid, dst.pre)
+		}
+		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, true); err != nil || !a.valid {
+			t.Fatalf("%s clean witness lost completed pre: %v", name, err)
+		}
 	}
 }
