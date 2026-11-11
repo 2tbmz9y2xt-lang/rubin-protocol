@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -55,6 +56,7 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	}
 	t.Run("D4_D23_native_commit_and_companion", retainedCapacityNativeCommitV1)
 	t.Run("T18_w_row_beside_pending_side", retainedCapacityWBesidePendingV1)
+	t.Run("D4_native_frame_R_boundaries", retainedCapacityNativeBoundsV1)
 	t.Run("T19_rolling_merge_full_plan_proof", retainedCapacityRollingMergeV1)
 }
 
@@ -172,6 +174,7 @@ func retainedCapacityNativeCommitV1(t *testing.T) {
 	retainedCapacityChildV1(t, w)
 	rolesBefore, endsBefore := retainedCapacityRolesV1(t, w)
 	a := NewRetainedAccountingV1(DefaultLimitsV1())
+	retainedCapacityLagEmptyV1(t, w)
 	retainedCapacityCompanionV1(t, w, a, child, x)
 	// The one-CURRENT op: cold pre 779, Proof accepts post 1596, NEW/nil commit.
 	dst := &DirectRetainedProofV1{}
@@ -179,10 +182,6 @@ func retainedCapacityNativeCommitV1(t *testing.T) {
 	res.want(t, 2, 3, -1)
 	if res.err != nil || dst.pre != 779 || !dst.accepted || dst.post != 1596 {
 		t.Fatalf("direct commit: %v pre=%d post=%d accepted=%v", res.err, dst.pre, dst.post, dst.accepted)
-	}
-	// D4 boundary from the native post: default R 805306368 needs LRet 805307964.
-	if 805306368+dst.post != 805307964 {
-		t.Fatalf("R boundary %d", dst.post)
 	}
 	if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false); err != nil || !dst.applied || a.active != nil {
 		t.Fatalf("apply success: %v", err)
@@ -202,12 +201,20 @@ func retainedCapacityCompanionV1(t *testing.T, w *btWorld, a *RetainedAccounting
 	refused := &DirectRetainedProofV1{}
 	res := retainedCapacityCommitV1(t, w, a, refused, child, x, true)
 	res.want(t, 1, 1, -1)
-	if !errors.Is(res.err, errRetainedShapeAPIV1) && !errors.Is(res.err, errRetainedPlanAPIV1) || a.active != nil || refused.owner != nil || refused.entered {
+	if res.err != errRetainedPlanAPIV1 || a.active != nil || refused.owner != nil || refused.entered || refused.pre != 0 || refused.roles != ([2]retainedRoleV1{}) {
 		t.Fatalf("companion: %v active=%v", res.err, a.active)
 	}
 	if err := a.ApplyDirectMDBX(refused, res.truth, res.stage, res.index, res.err, true); !errors.Is(err, errRetainedApplyAPIV1) || a.valid {
 		t.Fatalf("companion apply: %v", err)
 	}
+}
+
+// retainedCapacityLagEmptyV1: the LAG generation 2 root binding, counter
+// bytes and both canonical index keysets equal the seeded empty role.
+func retainedCapacityLagEmptyV1(t *testing.T, w *btWorld) {
+	t.Helper()
+	err := w.s.View(func(r *mdbx.Reader) error { return riEmptyRole(r, 2) })
+	logicalMDBXAssert(t, err == nil, "LAG role bytes: %v", err)
 }
 
 func retainedCapacityReuseV1(t *testing.T, w *btWorld, a *RetainedAccountingV1) {
@@ -232,6 +239,7 @@ func retainedCapacityReuseV1(t *testing.T, w *btWorld, a *RetainedAccountingV1) 
 // unchanged after the commit and after reopen; CURRENT went 89/1 -> 178/2.
 func retainedCapacityLagKeptV1(t *testing.T, w *btWorld, rolesBefore [2]retainedRoleV1, endsBefore [2]mdbx.TreeEndpointV1) {
 	t.Helper()
+	retainedCapacityLagEmptyV1(t, w)
 	rolesAfter, endsAfter := retainedCapacityRolesV1(t, w)
 	// After reopen the test qualifies the committed pair itself (the startup
 	// owner is outside this issue); the LAG role must read back unchanged.
@@ -240,6 +248,7 @@ func retainedCapacityLagKeptV1(t *testing.T, w *btWorld, rolesBefore [2]retained
 		return mdbx.StartupCanonicalActiveAndReplayCompleteV1, nil
 	})
 	logicalMDBXAssert(t, verr == nil, "reopen qualification: %v", verr)
+	retainedCapacityLagEmptyV1(t, w)
 	if rolesReopen, endsReopen := retainedCapacityRolesV1(t, w); rolesReopen != rolesAfter || endsReopen != endsAfter {
 		t.Fatalf("reopen roles %+v/%+v differ from %+v/%+v", rolesReopen, endsReopen, rolesAfter, endsAfter)
 	}
@@ -341,4 +350,47 @@ func retainedCapacityMergeAuthorityV1(t *testing.T, w *btWorld, op *mdbx.TreeOpe
 	meta := btMutation(0, []byte{2}, encoded)
 	meta.BeforePresent = true
 	op.Pair.Mutations = append([]mdbx.Mutation{meta}, op.Pair.Mutations...)
+}
+
+// D4 on the recipe frame: x's 298-byte body is SIDE-owned before
+// (SIDE(3,1,1,1) with its SideLink), so pre is 1077 (CURRENT 301, LAG 32,
+// header 148, bodies 596) and post 1596. Each refusal is the actual Proof
+// error inside UpdateTreeV1: OLD/Prewrite/-1 with that error and no write,
+// so the next attempt sees the same frame; the exact fit then commits.
+func retainedCapacityNativeBoundsV1(t *testing.T) {
+	for i, limits := range []LimitsV1{
+		NewLimitsV1(805306368, 805307963), NewLimitsV1(1073741824, 1073743419),
+		NewLimitsV1(805306368, 1000), NewLimitsV1(math.MaxUint64, math.MaxUint64),
+	} {
+		// A Proof error takes the native consuming route, so each case owns a frame.
+		w, child, x := retainedCapacitySideFrameV1(t)
+		a, dst := NewRetainedAccountingV1(limits), &DirectRetainedProofV1{}
+		res := retainedCapacityCommitV1(t, w, a, dst, child, x, false)
+		res.want(t, 1, 1, -1)
+		var failure *RetainedProofFailureV1
+		if !errors.As(res.err, &failure) || failure.Resource != "storage_capacity" || dst.pre != 1077 || !dst.entered || dst.accepted {
+			t.Fatalf("refusal %d: %v pre=%d entered=%v", i, res.err, dst.pre, dst.entered)
+		}
+		logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false) == nil && !a.valid, "refusal %d apply", i)
+	}
+	for _, limits := range []LimitsV1{NewLimitsV1(805306368, 805307964), NewLimitsV1(1073741824, 1073743420)} {
+		w, child, x := retainedCapacitySideFrameV1(t)
+		a, dst := NewRetainedAccountingV1(limits), &DirectRetainedProofV1{}
+		res := retainedCapacityCommitV1(t, w, a, dst, child, x, false)
+		res.want(t, 2, 3, -1)
+		logicalMDBXAssert(t, res.err == nil && dst.pre == 1077 && dst.post == 1596, "fit R%d: %v", limits.R(), res.err)
+	}
+}
+
+func retainedCapacitySideFrameV1(t *testing.T) (*btWorld, []byte, [32]byte) {
+	t.Helper()
+	w, _, genesis := riGenesis(t)
+	child, x := retainedCapacityNativeChildV1(t, w, genesis)
+	link, _ := mdbx.HeightKey(3, 1)
+	w.pair(t, btMutation(6, link, mdbx.ChainValue(x, genesis, [40]byte{39: 1})))
+	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+		a.Authority.Phase = mdbx.StoragePhasePruneGCV1
+		a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: 1, NextHeight: 1, LastHeight: 1}}}
+	})
+	return w, child, x
 }
