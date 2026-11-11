@@ -294,11 +294,30 @@ func retainedCapacityCompanionV1(t *testing.T, w *btWorld, a *RetainedAccounting
 }
 
 // retainedCapacityLagEmptyV1: the LAG generation 2 root binding, counter
-// bytes and both canonical index keysets equal the seeded empty role.
+// bytes and both canonical index keysets equal the seeded empty role, and its
+// state-map (utxo-v1) and tree-node-v1 keysets are empty.
 func retainedCapacityLagEmptyV1(t *testing.T, w *btWorld) {
 	t.Helper()
-	err := w.s.View(func(r *mdbx.Reader) error { return riEmptyRole(r, 2) })
+	err := w.s.View(retainedCapacityLagReadV1)
 	logicalMDBXAssert(t, err == nil, "LAG role bytes: %v", err)
+}
+
+func retainedCapacityLagReadV1(r *mdbx.Reader) error {
+	if err := riEmptyRole(r, 2); err != nil {
+		return err
+	}
+	for _, rank := range []uint8{1, 8} {
+		if n, err := retainedCapacityRowsV1(r, rank, 2); err != nil || n != 0 {
+			return fmt.Errorf("LAG rank%d rows %d: %w", rank, n, err)
+		}
+	}
+	return nil
+}
+
+// retainedCapacityRowsV1 counts the generation-g prefix rows of one rank.
+func retainedCapacityRowsV1(r *mdbx.Reader, rank uint8, g uint64) (int, error) {
+	page, err := r.PrefixPage(mdbx.TreeSchemaV1DBIs()[rank], binary.BigEndian.AppendUint64(nil, g), nil, 64, 1<<20)
+	return len(page.Rows), err
 }
 
 func retainedCapacityReuseV1(t *testing.T, w *btWorld, a *RetainedAccountingV1) {
@@ -328,10 +347,10 @@ func retainedCapacityLagKeptV1(t *testing.T, w *btWorld, rolesBefore [2]retained
 	// After reopen the test qualifies the committed pair itself (the startup
 	// owner is outside this issue); the LAG role must read back unchanged.
 	w.reopen(t)
-	verr, _ := w.s.StartupVerifyCanonicalV1(func(*mdbx.Reader) (mdbx.StartupCanonicalCompletionV1, error) {
-		return mdbx.StartupCanonicalActiveAndReplayCompleteV1, nil
+	verr, cached := w.s.StartupVerifyCanonicalV1(func(r *mdbx.Reader) (mdbx.StartupCanonicalCompletionV1, error) {
+		return mdbx.StartupCanonicalActiveAndReplayCompleteV1, retainedCapacityLagReadV1(r)
 	})
-	logicalMDBXAssert(t, verr == nil, "reopen qualification: %v", verr)
+	logicalMDBXAssert(t, verr == nil && !cached, "reopen qualification: %v/%v", verr, cached)
 	retainedCapacityLagEmptyV1(t, w)
 	if rolesReopen, endsReopen := retainedCapacityRolesV1(t, w); rolesReopen != rolesAfter || endsReopen != endsAfter {
 		t.Fatalf("reopen roles %+v/%+v differ from %+v/%+v", rolesReopen, endsReopen, rolesAfter, endsAfter)
@@ -339,6 +358,15 @@ func retainedCapacityLagKeptV1(t *testing.T, w *btWorld, rolesBefore [2]retained
 	if rolesAfter[1] != rolesBefore[1] || endsAfter[1] != endsBefore[1] {
 		t.Fatalf("LAG changed: %+v/%+v -> %+v/%+v", rolesBefore[1], endsBefore[1], rolesAfter[1], endsAfter[1])
 	}
+	err := w.s.View(func(r *mdbx.Reader) error {
+		state, err := retainedCapacityRowsV1(r, 1, 1)
+		nodes, nerr := retainedCapacityRowsV1(r, 8, 1)
+		if err != nil || nerr != nil || state != 2 || nodes == 0 {
+			return fmt.Errorf("CURRENT state %d nodes %d: %w %w", state, nodes, err, nerr)
+		}
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "CURRENT rows (selectivity control): %v", err)
 	if rolesBefore[0].s != 89 || rolesBefore[0].n != 1 || rolesAfter[0].s != 178 || rolesAfter[0].n != 2 || rolesAfter[0].generation != rolesBefore[0].generation {
 		t.Fatalf("CURRENT %+v -> %+v", rolesBefore[0], rolesAfter[0])
 	}
