@@ -50,7 +50,20 @@ func prunedTreeSameRefusal(got, want error) bool {
 	}
 	g, gotDirect := directTestEngineError(got)
 	w, wantDirect := directTestEngineError(want)
-	return gotDirect && wantDirect && reflect.DeepEqual(*g, *w)
+	return gotDirect && wantDirect && prunedTreeSameEngineFields(g, w)
+}
+
+func prunedTreeSameEngineFields(g, w *EngineError) bool {
+	type fields struct {
+		class      EngineClass
+		operation  string
+		code       int
+		diagnostic string
+		reopen     bool
+	}
+	gf := fields{g.Class, g.Operation, g.Code, g.Diagnostic, g.ReopenRequired}
+	wf := fields{w.Class, w.Operation, w.Code, w.Diagnostic, w.ReopenRequired}
+	return gf == wf && sameError(g.Cause, w.Cause) && reflect.DeepEqual(g.TreeObservation, w.TreeObservation)
 }
 
 func prunedTreeLagKey() []byte { return binary.BigEndian.AppendUint64([]byte{0x11}, 2) }
