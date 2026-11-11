@@ -20,7 +20,8 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 		if dst.undo.block != op.Primitives[0].Block || dst.undo.oldCharge != 2*(36+20) {
 			t.Fatalf("family projection %+v", dst.undo)
 		}
-	})	// D10/D28 under a FALSE fact: a raw index row (5,2) without reverse
+	})
+	// D10/D28 under a FALSE fact: a raw index row (5,2) without reverse
 	// leaves generation 5 incomplete. A positive own forward with a healthy
 	// matching-parent header still transfers x; a negative membership is
 	// branch_data with no post and the active unprepared token kept.
