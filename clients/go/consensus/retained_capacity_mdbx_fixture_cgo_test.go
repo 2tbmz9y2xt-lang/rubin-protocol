@@ -182,7 +182,7 @@ func retainedCapacityWitnessTupleV1(t *testing.T) {
 		refuse := errors.New("callback refusal")
 		res := retainedCapacityShapedV1(t, w, a, dst, child, x, false, false, func(*mdbx.Reader, *mdbx.TreeOperationV1) error { return refuse })
 		logicalMDBXAssert(t, a.valid && a.exactRet == 1077 && !dst.entered, "completed pre")
-		if err := a.ApplyDirectMDBX(dst, c.truth, c.stage, c.index, res.err, true); errors.Is(err, errRetainedApplyAPIV1) != (c.truth == mdbx.CommitTruthNew) || a.valid != c.keep || a.active != nil {
+		if err := a.ApplyDirectMDBX(dst, c.truth, c.stage, c.index, res.err, true); errors.Is(err, errRetainedApplyAPIV1) != (c.truth == mdbx.CommitTruthNew) || a.valid != c.keep || a.active != nil || !c.keep && (a.exactRet != 0 || a.binding != (mdbx.MutationBindingV1{})) {
 			t.Fatalf("%+v: %v valid=%v", c, err, a.valid)
 		}
 	}
@@ -266,8 +266,8 @@ func retainedCapacityHeaderSlotV1(t *testing.T) {
 		if !errors.As(res.err, &engine) || engine.Class != mdbx.EngineStateMismatch || engine.Code != -30779 || engine.Diagnostic != "tree header slot differs" {
 			t.Fatalf("slot refusal %T %v", res.err, res.err)
 		}
-		if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false); err != nil || a.valid || a.active != nil || !dst.applied {
-			t.Fatalf("slot refusal apply: %v valid=%v", err, a.valid)
+		if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false); err != nil || a.valid || a.active != nil || !dst.applied || a.exactRet != 0 || a.binding != (mdbx.MutationBindingV1{}) {
+			t.Fatalf("slot refusal apply: %v valid=%v ret=%d", err, a.valid, a.exactRet)
 		}
 		// The slot refusal takes the consuming route; the row is read after reopen.
 		_, closed := mdbx.FixtureRawRowEqual(w.s, 3, x[:], other)
@@ -456,17 +456,19 @@ func retainedCapacityNativeCommitV1(t *testing.T) {
 
 // retainedCapacityCompanionV1: the [CURRENT, LagForward] op is the invalid
 // initial count/kind control: no token, no native write (OLD/Prewrite/-1),
-// and Apply of that tuple is the not-active failure that invalidates.
+// and Apply of that tuple is the not-active failure that invalidates: the cold 779 cached as
+// the marked 786 survives the refused Plan and is cleared, so the next Plan's 779 is cold.
 func retainedCapacityCompanionV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, child []byte, x [32]byte) {
 	t.Helper()
+	logicalMDBXAssert(t, retainedCapacityWarmCacheV1(t, w, a) == 779, "companion cache")
 	refused := &DirectRetainedProofV1{}
 	res := retainedCapacityCommitV1(t, w, a, refused, child, x, true)
 	res.want(t, 1, 1, -1)
-	if !retainedCapacitySameErrV1(res.err, errRetainedPlanAPIV1) || a.active != nil || refused.owner != nil || refused.entered || refused.pre != 0 || refused.roles != ([2]retainedRoleV1{}) {
-		t.Fatalf("companion: %v active=%v", res.err, a.active)
+	if !retainedCapacitySameErrV1(res.err, errRetainedPlanAPIV1) || a.active != nil || refused.owner != nil || refused.entered || refused.pre != 0 || refused.roles != ([2]retainedRoleV1{}) || !a.valid || a.exactRet != 779+7 {
+		t.Fatalf("companion: %v active=%v ret=%d", res.err, a.active, a.exactRet)
 	}
-	if err := a.ApplyDirectMDBX(refused, res.truth, res.stage, res.index, res.err, true); !errors.Is(err, errRetainedApplyAPIV1) || a.valid {
-		t.Fatalf("companion apply: %v", err)
+	if err := a.ApplyDirectMDBX(refused, res.truth, res.stage, res.index, res.err, true); !errors.Is(err, errRetainedApplyAPIV1) || a.valid || a.exactRet != 0 || a.binding != (mdbx.MutationBindingV1{}) {
+		t.Fatalf("companion apply: %v ret=%d", err, a.exactRet)
 	}
 }
 
@@ -644,7 +646,7 @@ func retainedCapacityNativeBoundsV1(t *testing.T) {
 		if !errors.As(res.err, &failure) || failure.Resource != "storage_capacity" || dst.pre != 1077 || !dst.entered || dst.accepted {
 			t.Fatalf("refusal %d: %v pre=%d entered=%v", i, res.err, dst.pre, dst.entered)
 		}
-		logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false) == nil && !a.valid, "refusal %d apply", i)
+		logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false) == nil && !a.valid && a.exactRet == 0 && a.binding == (mdbx.MutationBindingV1{}), "refusal %d apply", i)
 	}
 	for _, limits := range []LimitsV1{NewLimitsV1(805306368, 805307964), NewLimitsV1(1073741824, 1073743420)} {
 		w, child, x := retainedCapacitySideFrameV1(t)
@@ -690,7 +692,7 @@ func retainedCapacityCallbackRefusalV1(t *testing.T) {
 			t.Fatalf("clean=%v apply: %v valid=%v", clean, err, a.valid)
 		}
 		if !clean {
-			logicalMDBXAssert(t, a.exactRet == 0, "invalidated cache keeps %d", a.exactRet)
+			logicalMDBXAssert(t, a.exactRet == 0 && a.binding == (mdbx.MutationBindingV1{}), "invalidated cache keeps %d", a.exactRet)
 			continue
 		}
 		logicalMDBXAssert(t, a.exactRet == 1077, "kept pre %d", a.exactRet)
@@ -711,8 +713,9 @@ func retainedCapacityCallbackRefusalV1(t *testing.T) {
 // key a Pair row or the slot hash, is no Plan control and no E term: the op proves once with the nil-window pre 1077 and
 // post 1596, commits NEW/nil/CommitMayHaveCrossed/-1, caches 1596, and the cold Ret after reopen is 1596. E2: a window
 // naming the absent index row (1,2), no Pair target, gets the native EngineStateMismatch "canonical context OLD image is
-// incomplete" (canonical_context_cgo.go:87) at OLD/Prewrite/-1 with Proof not entered; Apply without the clean witness
-// returns nil and invalidates, and the next nil-window Plan reconstructs the cold 1077 once on the open Store.
+// incomplete" (canonical_context_cgo.go:87) at OLD/Prewrite/-1 with Proof not entered; the completed pre 1077 cached by
+// that Plan is marked 1077+7, Apply without the clean witness returns nil and clears the cache (Ret 0, zero binding), and
+// the next nil-window Plan reconstructs the cold 1077 once on the open Store, not the marked kept value.
 func retainedCapacityContextWindowV1(t *testing.T) {
 	for _, window := range []*mdbx.CanonicalContextWindowV1{nil, {Generation: 1, FirstHeight: 0, Count: 1}, {Generation: 1, FirstHeight: 2, Count: 1}} {
 		w, child, x := retainedCapacitySideFrameV1(t)
@@ -732,11 +735,12 @@ func retainedCapacityContextWindowV1(t *testing.T) {
 		}
 		res.want(t, 1, 1, -1)
 		var engine *mdbx.EngineError
-		if !errors.As(res.err, &engine) || engine.Class != mdbx.EngineStateMismatch || engine.Code != -30779 || engine.Diagnostic != "canonical context OLD image is incomplete" || !dst.prepared || dst.entered {
-			t.Fatalf("absent window %T %v entered=%v", res.err, res.err, dst.entered)
+		if !errors.As(res.err, &engine) || engine.Class != mdbx.EngineStateMismatch || engine.Code != -30779 || engine.Diagnostic != "canonical context OLD image is incomplete" || !dst.prepared || dst.entered || !a.valid || a.exactRet != 1077 {
+			t.Fatalf("absent window %T %v entered=%v ret=%d", res.err, res.err, dst.entered, a.exactRet)
 		}
-		if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false); err != nil || a.valid || a.active != nil || !dst.applied {
-			t.Fatalf("absent window apply: %v valid=%v", err, a.valid)
+		a.exactRet = 1077 + 7
+		if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false); err != nil || a.valid || a.active != nil || !dst.applied || a.exactRet != 0 || a.binding != (mdbx.MutationBindingV1{}) {
+			t.Fatalf("absent window apply: %v valid=%v ret=%d", err, a.valid, a.exactRet)
 		}
 		next := &DirectRetainedProofV1{}
 		res = retainedCapacityCommitV1(t, w, a, next, child, x, false)
@@ -871,7 +875,7 @@ func retainedCapacityUnwindsV1(t *testing.T) {
 			}
 			btReservationsReleased(t, w.owner)
 			a.InvalidateV1()
-			logicalMDBXAssert(t, a.active == nil && !a.valid && a.exactRet == 0, "invalidate after unwind")
+			logicalMDBXAssert(t, a.active == nil && !a.valid && a.exactRet == 0 && a.binding == (mdbx.MutationBindingV1{}), "invalidate after unwind")
 			pre, err := riRead(t, w, nil)
 			logicalMDBXAssert(t, err == nil && pre.exactRet == 1077, "no write after unwind: %d %v", pre.exactRet, err)
 			next := &DirectRetainedProofV1{}
