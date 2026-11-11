@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"unsafe"
 )
@@ -2877,5 +2878,482 @@ func TestTreeHeaderSlotJoinAllocsV1(t *testing.T) {
 	}
 	if n := testing.AllocsPerRun(10, func() { rowsOut = treeSlotConsultedV1(plan.consulted, row) }); n != 0 || len(rowsOut) != rows+1 {
 		t.Fatalf("Consulted join allocations %v", n)
+	}
+}
+
+// RUB-1733 context window rows. Expected widths (104 index, 148 header) and the 10080 cap come from
+// RUBIN_L1_CANONICAL.md §4/§10.1 and the legacy window contract, never from the production helpers.
+
+func ctxTreeHeader(t *testing.T, gen, h uint64) []byte {
+	t.Helper()
+	header := initial148NativeLiteral(t)
+	binary.BigEndian.PutUint64(header[132:], gen)
+	binary.BigEndian.PutUint64(header[140:], h)
+	return header
+}
+
+// ctxTreeRows returns the sorted rank-2 index (with its rank-7 owner) and rank-3 header insert rows of heights
+// first..first+count-1.
+func ctxTreeRows(t *testing.T, gen, first uint64, count int, omitIndex, omitHeader map[uint64]bool) []Mutation {
+	t.Helper()
+	var index, headers, owners []Mutation
+	for i := range uint64(count) {
+		h := first + i
+		header := ctxTreeHeader(t, gen, h)
+		hash := sha3.Sum256(header)
+		if !omitIndex[h] {
+			forward := canonicalForwardLiteral(gen, h, hash, [40]byte{39: 0x41})
+			owner := canonicalOwnerPairOf(forward)
+			forward.DBI, owner.DBI = TreeSchemaV1DBIs()[2], TreeSchemaV1DBIs()[7]
+			index, owners = append(index, forward), append(owners, owner)
+		}
+		if !omitHeader[h] {
+			headers = append(headers, Mutation{DBI: TreeSchemaV1DBIs()[3], Key: hash[:], AfterKind: 2, Literal: header})
+		}
+	}
+	slices.SortFunc(headers, func(a, b Mutation) int { return bytes.Compare(a.Key, b.Key) })
+	slices.SortFunc(owners, func(a, b Mutation) int { return bytes.Compare(a.Key, b.Key) })
+	return append(append(index, headers...), owners...)
+}
+
+func ctxTreeSeed(t *testing.T, s *Store, gen, first uint64, count int, omitIndex, omitHeader map[uint64]bool) {
+	t.Helper()
+	o := reservationOwner(t, 805_306_368)
+	for done := 0; done < count; done += 1000 {
+		n := min(1000, count-done)
+		rows := ctxTreeRows(t, gen, first+uint64(done), n, omitIndex, omitHeader)
+		r := tsRun(t, s, o, TreeOperation, TreeOperationV1{Pair: TreePairV1{Mutations: rows}})
+		r.tuple(t, 2, 3, -1)
+		mustEnvironment(t, r.err)
+	}
+}
+
+func ctxTreeOp(n uint64, window *CanonicalContextWindowV1) TreeOperationV1 {
+	op := tsPair(n)
+	op.Pair.ContextConsulted = window
+	return op
+}
+
+// ctxTreePC is the step-5 charge of a pair-only plan (one owned-row array element and its key/literal bytes
+// per Mutation and Consulted row), computed independently of the production helper.
+func ctxTreePC(op TreeOperationV1) uint64 {
+	n := uint64(len(op.Pair.Mutations))*uint64(unsafe.Sizeof(ownedMutation{})) + uint64(len(op.Pair.Consulted))*uint64(unsafe.Sizeof(ownedConsulted{}))
+	for _, m := range op.Pair.Mutations {
+		n += uint64(len(m.Key) + len(m.Literal))
+	}
+	for _, c := range op.Pair.Consulted {
+		n += uint64(len(c.Key))
+	}
+	return n
+}
+
+func ctxTreeFree(t *testing.T, s *Store, free uint64, op TreeOperationV1) tsResult {
+	t.Helper()
+	return tsRun(t, s, reservationFilled(t, free), LaneOperation, op)
+}
+
+var ctxTreeNext uint64 = 5_000_000
+
+func ctxTreeOpen(t *testing.T, s *Store) {
+	t.Helper()
+	if s.state != storeOPEN || s.terminal != nil || s.terminalTruth != 0 {
+		t.Fatalf("lifecycle %s/%v/%d, want OPEN", s.state, s.terminal, s.terminalTruth)
+	}
+	ctxTreeNext++
+	r := tsRun(t, s, reservationOwner(t, 805_306_368), TreeOperation, tsPair(ctxTreeNext))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+}
+
+func ctxTreeIncomplete(t *testing.T, r tsResult) {
+	t.Helper()
+	r.tuple(t, 1, 1, -1)
+	treeNativeError(t, r.err, "update", "StateMismatch", -30779, "canonical context OLD image is incomplete", nil)
+}
+
+func TestCtxTreeAdmittedV1(t *testing.T) {
+	s, path, o := tsNew(t)
+	ctxTreeSeed(t, s, 7, 100, 10080, nil, nil)
+	for i, count := range []uint32{10080, 1, 11} {
+		for _, kind := range []OperationKind{TreeOperation, LaneOperation} {
+			n := uint64(1000 + 10*i + int(kind))
+			r := tsRun(t, s, o, kind, ctxTreeOp(n, &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: count}))
+			r.tuple(t, 2, 3, -1)
+			mustEnvironment(t, r.err)
+		}
+	}
+	// A3: generation 8 lacks its index row at 101, so a window over it is refused; the nil-window plan reads no
+	// context, so that absent row does not affect its result.
+	ctxTreeSeed(t, s, 8, 100, 3, map[uint64]bool{101: true}, nil)
+	ctxTreeIncomplete(t, tsRun(t, s, o, TreeOperation, ctxTreeOp(1999, &CanonicalContextWindowV1{Generation: 8, FirstHeight: 100, Count: 3})))
+	r := tsRun(t, s, o, TreeOperation, ctxTreeOp(2000, nil))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	// A4: 16384 Consulted rows plus a full window plus one target.
+	op := ctxTreeOp(2001, &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 10080})
+	for i := range uint64(16384) {
+		op.Pair.Consulted = append(op.Pair.Consulted, ConsultedRow{DBI: TreeSchemaV1DBIs()[6], Key: tsTarget(3_000_000 + i).Key})
+	}
+	r = tsRun(t, s, o, TreeOperation, op)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	s = tsReopen(t, s, path)
+	for _, n := range []uint64{1000 + uint64(TreeOperation), 1000 + uint64(LaneOperation), 2000} {
+		target := tsTarget(n)
+		tsRead(t, s, target.DBI, target.Key, target.Literal)
+	}
+	tsRead(t, s, tsTarget(1999).DBI, tsTarget(1999).Key, nil)
+	for _, row := range ctxTreeRows(t, 7, 100, 10080, nil, nil) {
+		tsRead(t, s, row.DBI, row.Key, row.Literal)
+	}
+}
+
+func TestCtxTreeAccountBoundaryV1(t *testing.T) {
+	s, _, _ := tsNew(t)
+	ctxTreeSeed(t, s, 7, 100, 10080, nil, nil)
+	window := &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 10080}
+	pc := ctxTreePC(tsPair(1))
+	r := ctxTreeFree(t, s, pc+343, ctxTreeOp(10, window))
+	r.tuple(t, 1, 1, -1)
+	if any(r.err) != any(errOperationReservationCapacity) {
+		t.Fatalf("PC+343 = %v, want capacity", r.err)
+	}
+	ctxTreeOpen(t, s)
+	r = ctxTreeFree(t, s, pc+344, ctxTreeOp(11, window))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	r = ctxTreeFree(t, s, pc, ctxTreeOp(12, nil))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	r = ctxTreeFree(t, s, pc-1, ctxTreeOp(13, nil))
+	if any(r.err) != any(errOperationReservationCapacity) {
+		t.Fatalf("nil window PC-1 = %v, want capacity", r.err)
+	}
+	// R5b: the absent-index refusal precedes the step-5 charge.
+	r = ctxTreeFree(t, s, pc+343, ctxTreeOp(14, &CanonicalContextWindowV1{Generation: 8, FirstHeight: 100, Count: 1}))
+	ctxTreeIncomplete(t, r)
+	ctxTreeOpen(t, s)
+}
+
+// ctxTreeCapacity runs op at free capacity free and wants the direct capacity refusal with the owner live
+// unchanged and the Store OPEN.
+func ctxTreeCapacity(t *testing.T, s *Store, free uint64, op TreeOperationV1) {
+	t.Helper()
+	o := reservationFilled(t, free)
+	live := reservationLive(o)
+	r := tsRun(t, s, o, LaneOperation, op)
+	r.tuple(t, 1, 1, -1)
+	if any(r.err) != any(errOperationReservationCapacity) {
+		t.Fatalf("capacity %d = %v, want capacity", free, r.err)
+	}
+	if reservationLive(o) != live {
+		t.Fatalf("owner live %d, want %d", reservationLive(o), live)
+	}
+	ctxTreeOpen(t, s)
+}
+
+// ctxTreeOverlaps returns the R3 Mutation-overlap and Consulted-overlap plans for the generation-7 window.
+func ctxTreeOverlaps(t *testing.T, n uint64, window *CanonicalContextWindowV1) (TreeOperationV1, TreeOperationV1) {
+	t.Helper()
+	index := ctxTreeRows(t, 7, 100, 1, nil, map[uint64]bool{100: true})[0]
+	mutation := ctxTreeOp(n, window)
+	mutation.Pair.Mutations = append([]Mutation{index}, mutation.Pair.Mutations...)
+	consulted := ctxTreeOp(n+1, window)
+	consulted.Pair.Consulted = []ConsultedRow{{DBI: index.DBI, Key: index.Key}}
+	return mutation, consulted
+}
+
+func TestCtxTreeChargeOrderV1(t *testing.T) {
+	s, _, _ := tsNew(t)
+	ctxTreeSeed(t, s, 7, 100, 3, nil, nil)
+	window := &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 3}
+	// R5c: the 344-byte charge precedes overlap and qualification; scalar rows precede it.
+	ctxTreeCapacity(t, s, 343, ctxTreeOp(15, &CanonicalContextWindowV1{Generation: 8, FirstHeight: 100, Count: 1}))
+	mutation, consulted := ctxTreeOverlaps(t, 16, window)
+	ctxTreeCapacity(t, s, 343, mutation)
+	// R3: the Consulted-overlap variant also follows the charge.
+	ctxTreeCapacity(t, s, 343, consulted)
+	r := ctxTreeFree(t, s, 0, ctxTreeOp(18, &CanonicalContextWindowV1{Generation: 0, FirstHeight: 100, Count: 1}))
+	tsRefusal(t, r, false)
+	ctxTreeOpen(t, s)
+}
+
+func TestCtxTreeScalarRowsV1(t *testing.T) {
+	s, _, _ := tsNew(t)
+	for _, c := range []struct {
+		name     string
+		window   CanonicalContextWindowV1
+		capacity bool
+	}{
+		{"R1-bound", CanonicalContextWindowV1{Generation: 1, FirstHeight: 0, Count: 10081}, true},
+		{"R2-generation", CanonicalContextWindowV1{Generation: 0, FirstHeight: 0, Count: 1}, false},
+		{"R2-first", CanonicalContextWindowV1{Generation: 1, FirstHeight: 0x1_0000_0000, Count: 1}, false},
+		{"R2-empty", CanonicalContextWindowV1{Generation: 1, FirstHeight: 0, Count: 0}, false},
+		{"R2-wrap", CanonicalContextWindowV1{Generation: 1, FirstHeight: 0xffffffff, Count: 2}, false},
+		{"R2-invalid-before-bound", CanonicalContextWindowV1{Generation: 0, FirstHeight: 0, Count: 10081}, false},
+		{"R2-bound-before-wrap", CanonicalContextWindowV1{Generation: 1, FirstHeight: 0xfffffff0, Count: 10081}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for _, free := range []uint64{0, 1 << 20} {
+				w := c.window
+				tsRefusal(t, ctxTreeFree(t, s, free, ctxTreeOp(20, &w)), c.capacity)
+				ctxTreeOpen(t, s)
+			}
+		})
+	}
+}
+
+func TestCtxTreeOverlapAndQualificationV1(t *testing.T) {
+	s, _, _ := tsNew(t)
+	ctxTreeSeed(t, s, 7, 100, 3, nil, nil)
+	ctxTreeSeed(t, s, 9, 100, 3, map[uint64]bool{101: true}, nil)
+	ctxTreeSeed(t, s, 10, 100, 3, nil, map[uint64]bool{101: true})
+	window := CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 3}
+	index := ctxTreeRows(t, 7, 101, 1, nil, map[uint64]bool{101: true})[0]
+	header := ctxTreeRows(t, 7, 101, 1, map[uint64]bool{101: true}, nil)[0]
+	big := uint64(1 << 20)
+	for _, c := range []struct {
+		name string
+		edit func(*TreeOperationV1)
+	}{
+		{"R3-mutation", func(op *TreeOperationV1) {
+			op.Pair.Mutations = append([]Mutation{index}, op.Pair.Mutations...)
+		}},
+		{"R3-consulted", func(op *TreeOperationV1) {
+			op.Pair.Consulted = []ConsultedRow{{DBI: index.DBI, Key: index.Key}}
+		}},
+		{"R4-mutation", func(op *TreeOperationV1) {
+			op.Pair.Mutations = append([]Mutation{header}, op.Pair.Mutations...)
+		}},
+		{"R4-consulted", func(op *TreeOperationV1) {
+			op.Pair.Consulted = []ConsultedRow{{DBI: header.DBI, Key: header.Key}}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			own, _, _ := tsNew(t)
+			ctxTreeSeed(t, own, 7, 100, 3, nil, nil)
+			w := window
+			op := ctxTreeOp(30, &w)
+			c.edit(&op)
+			o := reservationFilled(t, big)
+			live := reservationLive(o)
+			tsRefusal(t, tsRun(t, own, o, LaneOperation, op), false)
+			if reservationLive(o) != live {
+				t.Fatalf("owner live %d, want %d", reservationLive(o), live)
+			}
+			ctxTreeOpen(t, own)
+		})
+	}
+	for _, gen := range []uint64{9, 10} {
+		ctxTreeIncomplete(t, ctxTreeFree(t, s, big, ctxTreeOp(31, &CanonicalContextWindowV1{Generation: gen, FirstHeight: 100, Count: 3})))
+		ctxTreeOpen(t, s)
+	}
+	// R5 order, lowest failing offset wins: an absent index at offset 1 wins over a header overlap at offset 2,
+	// and a header overlap at offset 0 wins over the absent index at offset 1.
+	op := ctxTreeOp(32, &CanonicalContextWindowV1{Generation: 9, FirstHeight: 100, Count: 3})
+	op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[3], Key: ctxTreeRows(t, 9, 102, 1, map[uint64]bool{102: true}, nil)[0].Key}}
+	ctxTreeIncomplete(t, ctxTreeFree(t, s, big, op))
+	ctxTreeOpen(t, s)
+	op = ctxTreeOp(34, &CanonicalContextWindowV1{Generation: 9, FirstHeight: 100, Count: 3})
+	op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[3], Key: ctxTreeRows(t, 9, 100, 1, map[uint64]bool{100: true}, nil)[0].Key}}
+	tsRefusal(t, ctxTreeFree(t, s, big, op), false)
+	ctxTreeOpen(t, s)
+	// R5 order at one offset: the index check precedes the header-key overlap. The index at offset 1 is
+	// absent, and a rank-3 Consulted row with 32 zero bytes is the key an overlap check run before the presence
+	// check would compare.
+	op = ctxTreeOp(35, &CanonicalContextWindowV1{Generation: 9, FirstHeight: 100, Count: 3})
+	op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[3], Key: make([]byte, 32)}}
+	ctxTreeIncomplete(t, ctxTreeFree(t, s, big, op))
+	ctxTreeOpen(t, s)
+	// At one offset the header-key overlap precedes the header presence check.
+	op = ctxTreeOp(33, &CanonicalContextWindowV1{Generation: 10, FirstHeight: 100, Count: 3})
+	op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[3], Key: ctxTreeRows(t, 10, 101, 1, map[uint64]bool{101: true}, nil)[0].Key}}
+	tsRefusal(t, ctxTreeFree(t, s, big, op), false)
+	ctxTreeOpen(t, s)
+}
+
+func TestCtxTreeAdmissionOrderV1(t *testing.T) {
+	s, _, _ := tsNew(t)
+	over := &CanonicalContextWindowV1{Generation: 1, FirstHeight: 0, Count: 10081}
+	big := uint64(1 << 20)
+	// R9: window-only plan.
+	tsRefusal(t, ctxTreeFree(t, s, big, TreeOperationV1{Pair: TreePairV1{ContextConsulted: &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 1}}}), false)
+	ctxTreeOpen(t, s)
+	// R10: relation row wins over bound; Consulted cap wins over Count 0.
+	op := ctxTreeOp(40, over)
+	op.Pair.Consulted = []ConsultedRow{{DBI: tsTarget(40).DBI, Key: tsTarget(40).Key}}
+	tsRefusal(t, ctxTreeFree(t, s, big, op), false)
+	ctxTreeOpen(t, s)
+	op = ctxTreeOp(41, &CanonicalContextWindowV1{Generation: 1})
+	for i := range uint64(16385) {
+		op.Pair.Consulted = append(op.Pair.Consulted, ConsultedRow{DBI: TreeSchemaV1DBIs()[6], Key: tsTarget(3_000_000 + i).Key})
+	}
+	tsRefusal(t, tsRun(t, s, reservationOwner(t, 805_306_368), TreeOperation, op), true)
+	ctxTreeOpen(t, s)
+	// R12: merged admission rows win over the bound row.
+	op = ctxTreeOp(42, over)
+	op.Proof = func(*TreeDeltaReportV1) error { t.Fatal("Proof called"); return nil }
+	tsRefusal(t, ctxTreeFree(t, s, big, op), false)
+	ctxTreeOpen(t, s)
+	op = ctxTreeOp(43, over)
+	op.HeaderSlot = &TreeHeaderSlotV1{}
+	tsRefusal(t, ctxTreeFree(t, s, big, op), false)
+	ctxTreeOpen(t, s)
+	op = ctxTreeOp(44, over)
+	op.Pair.EntryInventory = &EntryInventoryV1{}
+	r := ctxTreeFree(t, s, big, op)
+	r.tuple(t, 1, 1, -1)
+	if r.err == nil || !strings.Contains(r.err.Error(), "invalid ENTRY inventory") {
+		t.Fatalf("R12 unprepared ENTRY = %v", r.err)
+	}
+	ctxTreeOpen(t, s)
+}
+
+func TestCtxTreeLegacyFormatV1(t *testing.T) {
+	s := newUpdateStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	calls := 0
+	mustEnvironment(t, reservationOwner(t, 805_306_368).WithOperation(TreeOperation, func(a *OperationAccount) error {
+		r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
+			calls++
+			return ctxTreeOp(1, &CanonicalContextWindowV1{Generation: 1, FirstHeight: 0, Count: 10081}), nil
+		})
+		r.tuple(t, 1, 1, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "typed tree operation requires tree store", nil)
+		if calls != 0 {
+			t.Fatalf("R10 format-2 calls%d", calls)
+		}
+		return nil
+	}))
+}
+
+func TestCtxTreeClosedAccountV1(t *testing.T) {
+	for _, count := range []uint32{1, 10081} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			s, _, o := tsNew(t)
+			window := &CanonicalContextWindowV1{Generation: 8, FirstHeight: 100, Count: count}
+			ready, release := make(chan *OperationAccount), make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = o.WithOperation(TreeOperation, func(acc *OperationAccount) error { ready <- acc; <-release; return nil })
+			}()
+			a := <-ready
+			r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { close(release); <-done; return ctxTreeOp(51, window), nil })
+			ctxTreeClosedWant(t, s, o, r, count)
+		})
+	}
+}
+
+func ctxTreeClosedWant(t *testing.T, s *Store, o *OperationReservationOwner, r tsResult, count uint32) {
+	t.Helper()
+	if count > 10080 {
+		tsRefusal(t, r, true)
+	} else {
+		r.tuple(t, 1, 1, -1)
+		if any(r.err) != any(errOperationReservationInput) {
+			t.Fatalf("closed account = %v, want reservation input", r.err)
+		}
+	}
+	if reservationLive(o) != 0 {
+		t.Fatalf("owner live %d", reservationLive(o))
+	}
+	ctxTreeOpen(t, s)
+}
+
+// ctxTreeEntry runs pair with a completed ENTRY token, prepared on pair plus an optional window, then applies edit.
+func ctxTreeEntry(t *testing.T, f *eisFixture, pair TreePairV1, prepared *CanonicalContextWindowV1, edit func(*TreeOperationV1, EntryInventoryV1)) (tsResult, []EntryInventoryRowV1) {
+	t.Helper()
+	var r tsResult
+	var rows []EntryInventoryRowV1
+	mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+		r = tsInvoke(f.s, a, func(reader *Reader) (TreeOperationV1, error) {
+			withWindow := pair
+			withWindow.ContextConsulted = prepared
+			token := eiPrepare(t, reader, a, withWindow)
+			failure, err := reader.VisitEntryInventoryV1(token, func(row EntryInventoryRowV1) error { rows = append(rows, row); return nil })
+			if failure != nil || err != nil || !token.scope.completed {
+				t.Fatalf("ENTRY visit %+v/%v", failure, err)
+			}
+			op := TreeOperationV1{Pair: pair}
+			edit(&op, token)
+			return op, nil
+		})
+		return nil
+	}))
+	if reservationLive(f.o) != 0 {
+		t.Fatalf("ENTRY hold live %d", reservationLive(f.o))
+	}
+	return r, rows
+}
+
+// ctxTreeRowsText renders the exported fields of ENTRY inventory rows.
+func ctxTreeRowsText(rows []EntryInventoryRowV1) string {
+	var text strings.Builder
+	for _, row := range rows {
+		row.access, row.serial = nil, 0
+		fmt.Fprintf(&text, "%+v\n", row)
+	}
+	return text.String()
+}
+
+// ctxTreePairImage reads every Mutation and Consulted row of pair (nil when absent).
+func ctxTreePairImage(t *testing.T, s *Store, pair TreePairV1) [][]byte {
+	t.Helper()
+	var image [][]byte
+	mustEnvironment(t, s.View(func(reader *Reader) error {
+		for _, m := range pair.Mutations {
+			value, _, err := reader.Get(m.DBI, m.Key)
+			image = append(image, slices.Clone(value))
+			mustEnvironment(t, err)
+		}
+		for _, c := range pair.Consulted {
+			value, _, err := reader.Get(c.DBI, c.Key)
+			image = append(image, slices.Clone(value))
+			mustEnvironment(t, err)
+		}
+		return nil
+	}))
+	return image
+}
+
+func TestCtxTreeEntryCombinationV1(t *testing.T) {
+	f := eisNew(t, 3, 1, nil)
+	pair := eisCapture(t, f, 1, 1, false, false)
+	ctxTreeSeed(t, f.s, 7, 100, 3, nil, nil)
+	before := ctxTreePairImage(t, f.s, pair)
+	for _, w := range []CanonicalContextWindowV1{{Generation: 7, FirstHeight: 100, Count: 3}, {Generation: 8, FirstHeight: 100, Count: 3}, {Generation: 7, FirstHeight: 100, Count: 10081}} {
+		r, _ := ctxTreeEntry(t, f, pair, nil, func(op *TreeOperationV1, token EntryInventoryV1) {
+			op.Pair.EntryInventory, op.Pair.ContextConsulted = &token, &w
+		})
+		tsRefusal(t, r, false)
+		tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, eiEncoded(t, f.old))
+		if after := ctxTreePairImage(t, f.s, pair); !reflect.DeepEqual(after, before) {
+			t.Fatalf("R11 pair rows changed")
+		}
+		ctxTreeOpen(t, f.s)
+	}
+	op := TreeOperationV1{Pair: pair}
+	op.Pair.EntryInventory = &EntryInventoryV1{}
+	op.Pair.ContextConsulted = &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 3}
+	r := tsRun(t, f.s, f.o, TreeOperation, op)
+	r.tuple(t, 1, 1, -1)
+	eiInput(t, r.err)
+	ctxTreeOpen(t, f.s)
+	// Preparation returns the same inventory with and without a window (also a Count-0 one); that token
+	// submitted without the window is admitted.
+	var want []EntryInventoryRowV1
+	for i, w := range []*CanonicalContextWindowV1{nil, {Generation: 7, FirstHeight: 100, Count: 3}, {}} {
+		g := eisNew(t, 3, 1, nil)
+		gpair := eisCapture(t, g, 1, 1, false, false)
+		r, rows := ctxTreeEntry(t, g, gpair, w, func(op *TreeOperationV1, token EntryInventoryV1) { op.Pair.EntryInventory = &token })
+		r.tuple(t, 2, 3, -1)
+		mustEnvironment(t, r.err)
+		if i == 0 {
+			want = rows
+		}
+		if len(rows) == 0 || ctxTreeRowsText(rows) != ctxTreeRowsText(want) {
+			t.Fatalf("R11 preparation with window %+v = %+v, want %+v", w, rows, want)
+		}
 	}
 }
