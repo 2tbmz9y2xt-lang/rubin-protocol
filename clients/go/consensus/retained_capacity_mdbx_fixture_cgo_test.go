@@ -180,7 +180,7 @@ func retainedCapacityWitnessTupleV1(t *testing.T) {
 func retainedCapacityAggregateV1(t *testing.T) {
 	for _, over := range []bool{false, true} {
 		w, _, _, y, encoded := retainedCapacityOptionalFrameV1(t, 298)
-		at := bytes.Index(encoded, append(binary.BigEndian.AppendUint64([]byte{0, 1}, 5), y[:]...))
+		at := bytes.Index(encoded, append(binary.BigEndian.AppendUint64([]byte{0, 1}, 1), y[:]...))
 		logicalMDBXAssert(t, at > 0, "detached count field")
 		planned := bytes.Clone(encoded)
 		if over {
@@ -319,13 +319,13 @@ func retainedCapacityWBesidePendingV1(t *testing.T) {
 // retainedCapacityNativeChildV1 is the recipe child of genesis: the genesis
 // tx with one P2PK key-hash byte changed, so it creates a second 89-byte
 // entry; its 298-byte body is stored unowned under x (BodyKind 2 source).
-func retainedCapacityNativeChildV1(t *testing.T, w *btWorld, genesis [32]byte) ([]byte, [32]byte) {
+func retainedCapacityNativeChildV1(t *testing.T, w *btWorld, parent [32]byte, flip byte) ([]byte, [32]byte) {
 	t.Helper()
 	tx := initial148BlockGenesisTx(t)
 	at := bytes.Index(tx, []byte{0x84, 0x48, 0xb9, 0x1b, 0x88, 0xd1, 0xa6, 0xfb})
 	logicalMDBXAssert(t, at > 0, "genesis P2PK key hash")
-	tx[at] ^= 1
-	child := initial148BlockFrame(t, [][]byte{tx}, func(h *initial148BlockHead) { h.parent = genesis })
+	tx[at] ^= flip
+	child := initial148BlockFrame(t, [][]byte{tx}, func(h *initial148BlockHead) { h.parent, h.timestamp = parent, h.timestamp+uint64(flip)-1 })
 	x := sha3.Sum256(child[:148])
 	logicalMDBXAssert(t, len(child) == 298 && ValidateInitial148BlockBodyCommitments(child) == nil, "child body")
 	w.pair(t, btMutation(4, x[:], child))
@@ -363,17 +363,22 @@ func retainedCapacityTupleV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, 
 	return retainedCapacityShapedV1(t, w, a, dst, child, x, lag, false, finish)
 }
 
-// retainedCapacityShapedV1 builds the bound op; slot replaces the Pair's
-// header insert of x with the qualified HeaderSlot{x, child[:148]}.
+// retainedCapacityShapedV1 builds the bound op at height 1 for a child of
+// genesis, else 2 (no store read); slot replaces the Pair's header insert of x
+// with the qualified HeaderSlot{x, child[:148]}.
 func retainedCapacityShapedV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, child []byte, x [32]byte, lag, slot bool, finish func(*mdbx.Reader, *mdbx.TreeOperationV1) error) btResult {
 	t.Helper()
 	var result btResult
+	h := uint64(1)
+	if [32]byte(child[4:36]) != sha3.Sum256(initial148BlockGenesis(t)[:148]) {
+		h = 2
+	}
 	err := w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
 		return account.WithReservation(2<<20, func() error {
 			result.truth, result.stage, result.index, result.err = w.s.UpdateTreeV1(account, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
-				req := btRequest(child, 1)
+				req := btRequest(child, h)
 				req.BodyKind, req.Raw, req.Kind = 2, nil, mdbx.TreeKindDirectApplyV1
-				req.Endpoint.CumulativeChainwork = [40]byte{39: 2}
+				req.Endpoint.CumulativeChainwork = [40]byte{39: byte(h + 1)}
 				source := new(blockTreeSourceV1)
 				effect, err := prepareBlockTreeEffectV1(source, r, account, req)
 				if err != nil {
@@ -414,7 +419,7 @@ func retainedCapacityShapedV1(t *testing.T, w *btWorld, a *RetainedAccountingV1,
 // is refused by Plan before any work and the next Plan reconstructs once.
 func retainedCapacityNativeCommitV1(t *testing.T) {
 	w, _, genesis := riGenesis(t)
-	child, x := retainedCapacityNativeChildV1(t, w, genesis)
+	child, x := retainedCapacityNativeChildV1(t, w, genesis, 1)
 	// Seed the later D3/D13 op's unowned body now, so building it is no commit.
 	retainedCapacityChildV1(t, w)
 	rolesBefore, endsBefore := retainedCapacityRolesV1(t, w)
@@ -646,7 +651,7 @@ func retainedCapacityNativeBoundsV1(t *testing.T) {
 func retainedCapacitySideFrameV1(t *testing.T) (*btWorld, []byte, [32]byte) {
 	t.Helper()
 	w, _, genesis := riGenesis(t)
-	child, x := retainedCapacityNativeChildV1(t, w, genesis)
+	child, x := retainedCapacityNativeChildV1(t, w, genesis, 1)
 	link, _ := mdbx.HeightKey(3, 1)
 	w.pair(t, btMutation(6, link, mdbx.ChainValue(x, genesis, [40]byte{39: 1})))
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
@@ -930,17 +935,21 @@ func retainedCapacityOptionalRawV1(t *testing.T) []byte {
 	return initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = genesis, blockStepsMedian+5 })
 }
 
-// retainedCapacityOptionalFrameV1 is the recipe child x (unowned body) beside
-// an optional SIDE(4,5,5,5) and detached entry (generation 3) on one hash y
-// whose header is stored and whose body is absent (bodyLen 0), malformed
-// (149) or healthy (298).
+// retainedCapacityOptionalFrameV1 commits the recipe child x1 at 1 and returns
+// its child x at 2 (unowned body, a third 89-byte entry) beside an optional
+// SIDE(4,1,1,1) and a detached entry (1,y) on y, x1's sibling under genesis
+// (the reorg genesis->y to genesis->x1: F=0, H_new=1>F, MP 3039-3044, 3736),
+// whose header is stored and whose body is absent (bodyLen 0), malformed (149)
+// or healthy (298).
 func retainedCapacityOptionalFrameV1(t *testing.T, bodyLen int) (*btWorld, []byte, [32]byte, [32]byte, []byte) {
 	t.Helper()
 	w, _, genesis := riGenesis(t)
-	child, x := retainedCapacityNativeChildV1(t, w, genesis)
+	child1, x1 := retainedCapacityNativeChildV1(t, w, genesis, 1)
+	retainedCapacityCommitV1(t, w, NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}, child1, x1, false).want(t, 2, 3, -1)
+	child, x := retainedCapacityNativeChildV1(t, w, x1, 2)
 	raw := retainedCapacityOptionalRawV1(t)
 	y := sha3.Sum256(raw[:148])
-	link, _ := mdbx.HeightKey(4, 5)
+	link, _ := mdbx.HeightKey(4, 1)
 	rows := []mdbx.Mutation{btMutation(3, y[:], raw[:148]), btMutation(6, link, mdbx.ChainValue(y, genesis, [40]byte{39: 1}))}
 	if bodyLen != 0 {
 		rows = append(rows, btMutation(4, y[:], raw[:bodyLen]))
@@ -948,15 +957,16 @@ func retainedCapacityOptionalFrameV1(t *testing.T, bodyLen int) (*btWorld, []byt
 	w.pair(t, rows...)
 	encoded := riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
 		a.Authority.Phase = mdbx.StoragePhasePruneGCV1
-		a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 3}, {Kind: mdbx.CleanupSpanSideV1, GenerationID: 4, FirstHeight: 5, NextHeight: 5, LastHeight: 5}}}
-		a.Authority.DetachedSuffix = &mdbx.DetachedSuffixV1{Entries: []mdbx.DetachedSuffixEntryV1{{Height: 5, Hash: y, BlockBytesLen: 298}}, Cursor: mdbx.AuthorityPointV1{Height: 5, BlockHash: y}, EntryCount: 1, LogicalBytes: 298}
+		a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 3}, {Kind: mdbx.CleanupSpanSideV1, GenerationID: 4, FirstHeight: 1, NextHeight: 1, LastHeight: 1}}}
+		a.Authority.DetachedSuffix = &mdbx.DetachedSuffixV1{Entries: []mdbx.DetachedSuffixEntryV1{{Height: 1, Hash: y, BlockBytesLen: 298}}, Cursor: mdbx.AuthorityPointV1{Height: 1, BlockHash: y}, EntryCount: 1, LogicalBytes: 298}
 	})
 	return w, child, x, y, encoded
 }
 
 // D21: the absent optional body counts 0 under SIDE and detached, the detached header 148
-// (riOptional detached+SIDE header-only): cold pre 779+148=927, Proof post 927+817=1744 (D4 frame
-// delta), NEW/nil commit, successor cached, and the authority bytes are unchanged. D22: the same
+// (riOptional detached+SIDE header-only): cold pre = recipe post-x1 1596 + 148 = 1744; x adds a
+// third 89-byte entry, CURRENT 672 -> 267+Tree(3) 440+J 336 = 1043 (+371), header 148, body 298:
+// post 1744+817=2561. NEW/nil commit, successor cached, and the authority bytes are unchanged. D22: the same
 // frame with a present malformed body refuses storage_capacity first.
 func retainedCapacityOptionalV1(t *testing.T) {
 	for _, malformed := range []bool{false, true} {
@@ -970,12 +980,12 @@ func retainedCapacityOptionalV1(t *testing.T) {
 			continue
 		}
 		res.want(t, 2, 3, -1)
-		if res.err != nil || dst.pre != 927 || !dst.accepted || dst.post != 1744 {
+		if res.err != nil || dst.pre != 1744 || !dst.accepted || dst.post != 2561 {
 			t.Fatalf("optional absent commit: %v pre=%d post=%d", res.err, dst.pre, dst.post)
 		}
-		logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false) == nil && a.valid && a.exactRet == 1744, "successor %d", a.exactRet)
+		logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false) == nil && a.valid && a.exactRet == 2561, "successor %d", a.exactRet)
 		cold, err := riRead(t, w, nil)
-		logicalMDBXAssert(t, err == nil && cold.exactRet == 1744, "fresh post %d: %v", cold.exactRet, err)
+		logicalMDBXAssert(t, err == nil && cold.exactRet == 2561, "fresh post %d: %v", cold.exactRet, err)
 		w.read(t, 0, []byte{2}, encoded)
 	}
 }
