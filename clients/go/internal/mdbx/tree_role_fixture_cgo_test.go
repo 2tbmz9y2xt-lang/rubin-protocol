@@ -366,22 +366,25 @@ func treeRoleCountersReuseV1(t *testing.T) {
 }
 
 // treeRoleEarlyFaultsV1 is H2: a wrong endpoint ends the finite call before
-// the EIO-armed top row is read.
+// the EIO-armed top row is read, and, separately, before the EIO-armed counter
+// row (the first read after the identity checks) is read.
 func treeRoleEarlyFaultsV1(t *testing.T) {
 	var zero [36]byte
-	s, _, o := tsNew(t)
-	treeRoleSeededV1(t, s, o, 1, treeRoleAppliedV1, testKA, testKC)
-	evidence, err := FixtureSelectedDamage(s, o, SelectedDamageGetEIO, 8, testTreeNodeKey(1, 0, zero), func() {
-		mustEnvironment(t, treeRoleViewV1(t, s, o, LaneOperation, func(r *Reader, a *OperationAccount) {
-			got, err := treeRoleTryV1(t, r, a, treeRoleReqV1(treeRoleActiveV1(1, 2), TreeRoleCurrentV1), testTreeApplied(6, 9, 37))
-			if err != nil {
-				t.Fatalf("wrong endpoint did not end the finite call before the EIO-armed top row: %v", err)
-			}
-			treeRoleWantPositiveV1(t, got, TreeRoleCurrentV1, 1, TreeRoleAtBindingV1, TreeRoleWrongIdentityV1)
-		}))
-	})
-	if err == nil || evidence.Faults != 0 {
-		t.Fatalf("wrong endpoint reached the top row: %v %+v", err, evidence)
+	for _, site := range [][2]any{{uint8(8), testTreeNodeKey(1, 0, zero)}, {uint8(0), tsCounterKey(1)}} {
+		s, _, o := tsNew(t)
+		treeRoleSeededV1(t, s, o, 1, treeRoleAppliedV1, testKA, testKC)
+		evidence, err := FixtureSelectedDamage(s, o, SelectedDamageGetEIO, site[0].(uint8), site[1].([]byte), func() {
+			mustEnvironment(t, treeRoleViewV1(t, s, o, LaneOperation, func(r *Reader, a *OperationAccount) {
+				got, err := treeRoleTryV1(t, r, a, treeRoleReqV1(treeRoleActiveV1(1, 2), TreeRoleCurrentV1), testTreeApplied(6, 9, 37))
+				if err != nil {
+					t.Fatalf("wrong endpoint did not end the finite call before the EIO-armed rank %d row: %v", site[0], err)
+				}
+				treeRoleWantPositiveV1(t, got, TreeRoleCurrentV1, 1, TreeRoleAtBindingV1, TreeRoleWrongIdentityV1)
+			}))
+		})
+		if err == nil || evidence.Faults != 0 {
+			t.Fatalf("wrong endpoint reached the rank %d row: %v %+v", site[0], err, evidence)
+		}
 	}
 }
 
