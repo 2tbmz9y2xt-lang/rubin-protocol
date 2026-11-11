@@ -283,12 +283,11 @@ func retainedCapacityHeaderSlotV1(t *testing.T) {
 	}
 }
 
-// T18 (rejected_cases): a W row beside the rolling-prepared pending SIDE. The stored selected side
-// of generation 3 has one row at 5 (F 4, f 5) whose SideLink names x; the OLD authority in this
-// read carries the pending SIDE(3,4,4,4) structurally (MP 1422-1426; the shape is structural-only,
-// MP 2984-2986, 3047-3056, 1408-1411). restV1 reads the actual SideLink through optionalAtV1, finds
-// x as W, and the L merge is refused; the same read with a non-W block admits the merge
-// SIDE(3,4,5,4) (selectivity control).
+// T18 (rejected_cases): a W row beside the rolling-prepared pending SIDE. The stored selected side of generation 3 has one
+// row at 5 (F 4, f 5) whose SideLink names x; the OLD authority in this read carries the pending SIDE(3,4,4,4) (MP 1422-1426).
+// The shape is structural-only (MP 2984-2986, 3047-3056, 1408-1411), and so is x's stored work 6: x is genesis's child
+// (MP 2817 work 2); the read checks only 0<W<=2^288. restV1 reads the actual SideLink through optionalAtV1, finds x as W,
+// and the L merge is refused; the same read with a non-W block admits the merge SIDE(3,4,5,4) (selectivity control).
 func retainedCapacityWBesidePendingV1(t *testing.T) {
 	w, _, genesis := riGenesis(t)
 	raw := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent = genesis })

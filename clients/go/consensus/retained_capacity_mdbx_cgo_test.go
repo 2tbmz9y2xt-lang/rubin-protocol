@@ -365,11 +365,11 @@ func retainedCapacityApplyMatrixV1(t *testing.T) {
 	}
 }
 
-// retainedCapacityPlanV1 runs one Plan inside an actual operation account and
-// View Reader; budget is the extra grant the caller holds around Plan.
-func retainedCapacityPlanV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, op *mdbx.TreeOperationV1, budget uint64) error {
+// retainedCapacityPlanV1 sorts op's Pair into the (rank, key) order native admission requires (tree_stream_cgo.go:18-19)
+// and runs one Plan inside an actual operation account and View Reader; budget is the extra grant the caller holds around Plan.
+func retainedCapacityPlanV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, op *mdbx.TreeOperationV1, budget uint64) (result error) {
 	t.Helper()
-	var result error
+	btSort(op.Pair.Mutations)
 	err := w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
 		return account.WithReservation(budget, func() error {
 			return w.s.View(func(reader *mdbx.Reader) error {
@@ -431,8 +431,8 @@ func retainedCapacityChildV1(t *testing.T, w *btWorld) ([32]byte, [32]byte) {
 	return x, genesis
 }
 
-// retainedCapacityIndexV1 is x's planned CURRENT canonical index (W_h=h+1: genesis 1 plus work 1 per all-ff target,
-// MP 2817) and owner insert, the only Pair source of x's planned canonical identity.
+// retainedCapacityIndexV1 is x's planned CURRENT canonical index and owner insert, the only Pair source of x's planned canonical
+// identity; W_h=h+1 is the MP 2817 work (genesis 1, 1 per all-ff target) only when x is h above genesis; Plan never reads it.
 func retainedCapacityIndexV1(g, h uint64, x, parent [32]byte) []mdbx.Mutation {
 	index, _ := mdbx.HeightKey(g, h)
 	owner, _ := mdbx.CanonicalOwnerKey(g, x)
@@ -968,8 +968,8 @@ func retainedCapacityAgreeV1(t *testing.T, cold, warm *DirectRetainedProofV1) {
 	}
 }
 
-// retainedCapacitySelectedV1 stores raw's header and a SideLink naming it at (3,h) with W_h=h+1 (genesis 1 plus work 1
-// per all-ff target, MP 1462-1464, 2817) and installs a one-row selected side of generation 3 at tip h.
+// retainedCapacitySelectedV1 stores raw's header, body and a SideLink naming it at (3,h) and installs a one-row selected side
+// 3 at tip h, both with W_h=h+1: the MP 1462-1464, 2817 work (genesis 1, 1 per all-ff target) only when raw is h above genesis.
 func retainedCapacitySelectedV1(t *testing.T, w *btWorld, raw []byte, h uint64) [32]byte {
 	t.Helper()
 	hash := sha3.Sum256(raw[:148])
