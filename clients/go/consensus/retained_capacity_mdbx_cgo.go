@@ -900,8 +900,8 @@ func (f *retainedFiniteV1) promiseV1() (bool, error) {
 
 // optionalPlanV1 admits unchanged optional descriptors, or the W/L transfer
 // of a live selected side (MP 3018-3058): side cleared, detached suffix
-// unchanged and one appended SIDE span of the side generation owing exactly
-// L, whose SideLinks keep their association (MP 1473-1478, 2672-2674).
+// unchanged and L appended as, or merged into, the side generation's SIDE
+// span, whose SideLinks keep their association (MP 1473-1478, 2672-2674).
 func (f *retainedFiniteV1) optionalPlanV1() (bool, error) {
 	o, p := f.read.authority.Authority, f.planned.Authority
 	if !retainedDetachedEqualV1(o.DetachedSuffix, p.DetachedSuffix) {
@@ -914,7 +914,20 @@ func (f *retainedFiniteV1) optionalPlanV1() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if n := retainedCountV1(o, mdbx.CleanupSpanSideV1); n != 0 {
+		return true, f.sideMergeV1(l, n)
+	}
 	return true, f.sideSpansV1(true, l)
+}
+
+// sideMergeV1 admits the transfer from the rolling-prepared OLD shape (MP
+// 1422-1426) only as L merged into the pending same-generation SIDE with its
+// first and next heights kept (MP 2539-2541); a W row breaks the adjacency.
+func (f *retainedFiniteV1) sideMergeV1(l mdbx.CleanupSpanV1, n int) error {
+	if !retainedExtendedV1(f.read.authority.Authority, f.planned.Authority, l, n, retainedCountV1(f.planned.Authority, mdbx.CleanupSpanSideV1)) {
+		return errRetainedFiniteAPIV1
+	}
+	return nil
 }
 
 // restV1 returns the SIDE span owing L: the selected rows except a W row x
@@ -994,7 +1007,7 @@ func (f *retainedFiniteV1) spansV1(kind mdbx.CleanupSpanKindV1) bool {
 	return retainedExtendedV1(o, p, u, no, np)
 }
 
-// retainedExtendedV1 admits the last OLD UNDO span extended from U0-1 to U1-1.
+// retainedExtendedV1 admits the last OLD span of u's kind extended to adjacent u.
 func retainedExtendedV1(o, p mdbx.StorageAuthorityV1, u mdbx.CleanupSpanV1, no, np int) bool {
 	if no == 0 || np != no || !retainedPrefixV1(o, p, u.Kind, no-1) {
 		return false

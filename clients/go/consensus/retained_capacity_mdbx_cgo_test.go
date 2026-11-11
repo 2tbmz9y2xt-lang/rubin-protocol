@@ -656,6 +656,56 @@ func TestRetainedCapacityMDBXOptionalPlan(t *testing.T) {
 	}
 }
 
+// D2/D15/D17 rolling merge: from the rolling-prepared OLD shape (MP
+// 1422-1426: one-slot side [f,tip], pending SIDE(g,f-1,f-1,f-1)) the W/L
+// transfer with W empty merges L into that span, SIDE(g,f-1,tip,f-1), and
+// every other SIDE descriptor is refused (MP 2539-2541). "witness" is the
+// RUB-1594 A1 tuple: H_old=F=0, rows 2..1440, SIDE(7,1,1,1), candidate at 1.
+// The op height lies below f, so W is empty with no read. A second planned
+// SIDE span is shown refused here although DecodeTreeAuthorityV1 refuses it
+// before the consumer. "w_row" is the span restV1 builds for a W row at
+// index 0 (L=[f+1,tip]); beside the pending SIDE every plan refuses.
+// Consumer-branch cases: this OLD shape is produced natively only by RUB-1508.
+func TestRetainedCapacityMDBXRollingMerge(t *testing.T) {
+	span := func(g mdbx.GenerationIDV1, first, last, next uint64) mdbx.CleanupSpanV1 {
+		return mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: g, FirstHeight: first, LastHeight: last, NextHeight: next}
+	}
+	for _, geo := range []struct {
+		g          mdbx.GenerationIDV1
+		F, tip, op uint64
+	}{{7, 0, 1440, 1}, {9, 5, 1500, 61}} {
+		side := &mdbx.SelectedSideV1{GenerationID: geo.g, F: geo.F, TipHeight: geo.tip, RowCount: 1439}
+		f, g, tip := geo.tip-1438, geo.g, geo.tip
+		for name, c := range map[string]struct {
+			planned []mdbx.CleanupSpanV1
+			ok      bool
+		}{
+			"witness":       {[]mdbx.CleanupSpanV1{span(g, f-1, tip, f-1)}, true},
+			"first_moved":   {[]mdbx.CleanupSpanV1{span(g, f, tip, f)}, false},
+			"next_moved":    {[]mdbx.CleanupSpanV1{span(g, f-1, tip, f)}, false},
+			"last_wider":    {[]mdbx.CleanupSpanV1{span(g, f-1, tip+1, f-1)}, false},
+			"last_narrower": {[]mdbx.CleanupSpanV1{span(g, f-1, tip-1, f-1)}, false},
+			"second_span":   {[]mdbx.CleanupSpanV1{span(g, f-1, f-1, f-1), span(g, f, tip, f)}, false},
+			"not_merged":    {[]mdbx.CleanupSpanV1{span(g, f-1, f-1, f-1)}, false},
+			"other_gen":     {[]mdbx.CleanupSpanV1{span(g+1, f-1, tip, f-1)}, false},
+		} {
+			var read retainedReadV1
+			read.authority.Authority.SelectedSide = side
+			read.authority.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{span(g, f-1, f-1, f-1)}}
+			fin := retainedFiniteV1{read: &read, op: &mdbx.TreeOperationV1{Primitives: []mdbx.TreePrimitiveV1{{Height: geo.op}}}}
+			fin.planned.Authority.Cleanup = &mdbx.CleanupV1{Spans: c.planned}
+			transfer, err := fin.optionalPlanV1()
+			if (err == nil) != c.ok || err != nil && !errors.Is(err, errRetainedFiniteAPIV1) || c.ok && !transfer {
+				t.Fatalf("g%d %s: transfer=%v err=%v", g, name, transfer, err)
+			}
+			w := span(g, f+1, tip, f+1)
+			if err := fin.sideMergeV1(w, 1); !errors.Is(err, errRetainedFiniteAPIV1) {
+				t.Fatalf("g%d %s w_row: %v", g, name, err)
+			}
+		}
+	}
+}
+
 // The promise transfer admits only the exact UNDO span of a U increase.
 func TestRetainedCapacityMDBXPromise(t *testing.T) {
 	var read retainedReadV1
