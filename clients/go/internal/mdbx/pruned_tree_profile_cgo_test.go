@@ -205,6 +205,12 @@ func TestPrunedTreeProfileTipInput(t *testing.T) {
 	out := s.SelectPrunedTreeProfileV1(true, &AuthorityPointV1{Height: 0x100000000}, prunedTreeLow(t))
 	treeNativeError(t, out.Err, operationUpdate, EngineInvalidInput, codeEINVAL, "invalid pruned tree profile tip", nil)
 	prunedTreeRefusal(t, out, "R4 tip")
+	// Height 0xffffffff is not above the bound: it passes D5 and reaches D6's refusal.
+	edge := s.SelectPrunedTreeProfileV1(true, &AuthorityPointV1{Height: 0xffffffff}, prunedTreeLow(t))
+	if !IsOperationReservationCapacity(edge.Err) {
+		t.Fatalf("R4 boundary 0xffffffff: %+v", edge)
+	}
+	prunedTreeRefusal(t, edge, "R4 boundary")
 	bootstrapOpenUnchanged(t, s, "R4 tip")
 	if !bytes.Equal(prunedTreeBytes(t, s), before) {
 		t.Fatal("R4 envelope changed")
@@ -233,6 +239,20 @@ func TestPrunedTreeProfileCapacity(t *testing.T) {
 		}
 		prunedTreeLatched(t, s, path, out, before, "missing pruned tree profile root binding", o)
 	}
+	// D6 amount: 999 remaining owner bytes refuse the 1000-byte charge and 1000 admit it.
+	// The absent tip row returns before the engine's own hold for the Pair copies.
+	for _, remaining := range []uint64{999, 1000} {
+		s, _, _ := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0))
+		out := s.SelectPrunedTreeProfileV1(true, &AuthorityPointV1{BlockHash: modelHash(1)}, reservationFilled(t, remaining))
+		if remaining == 999 {
+			if !IsOperationReservationCapacity(out.Err) {
+				t.Fatalf("R5 charge amount at 999: %+v", out)
+			}
+			prunedTreeRefusal(t, out, "R5 charge amount at 999")
+			continue
+		}
+		prunedTreeDecision(t, out, "STALE_LOCAL_PLAN", "R5 charge amount at 1000")
+	}
 }
 
 func TestPrunedTreeProfileMissingBinding(t *testing.T) {
@@ -244,9 +264,14 @@ func TestPrunedTreeProfileMissingBinding(t *testing.T) {
 
 // TestPrunedTreeProfileSizeBound is R11 (the tip row is paired with its rank-7
 // owner row, as the canonical pairing rule requires): the BLOCKS span (34 encoded bytes) moves
-// an Encode-accepted envelope past MaxMetadataBytes-27; one byte less commits.
+// an Encode-accepted envelope past MaxMetadataBytes-27; one byte less commits. With p=4881
+// the replacement is also invalid (R9), and D12 refuses validity before size.
 func TestPrunedTreeProfileSizeBound(t *testing.T) {
-	for _, over := range []bool{false, true} {
+	for _, row := range []struct {
+		over bool
+		p    uint64
+	}{{false, 4320}, {true, 4320}, {true, 4881}} {
+		over := row.over
 		// authoritySize before the call: 40 + 44 + len(error); after: +1+9+24.
 		n := MaxMetadataBytes - 27 - 84 - 34
 		if over {
@@ -258,7 +283,7 @@ func TestPrunedTreeProfileSizeBound(t *testing.T) {
 		tip := &AuthorityPointV1{Height: 20000, BlockHash: modelHash(20000)}
 		key, err := HeightKey(1, 20000)
 		mustEnvironment(t, err)
-		p := uint64(4320)
+		p := row.p
 		dbis := TreeSchemaV1DBIs()
 		op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{
 			{DBI: dbis[0], Key: prunedTreeLagKey(), AfterKind: AfterLiteral, Literal: prunedTreeBindingBytes(t, &p)},
@@ -274,6 +299,12 @@ func TestPrunedTreeProfileSizeBound(t *testing.T) {
 			if out.Err != nil || out.Truth != CommitTruthNew || out.Authority == nil || len(prunedTreeBytes(t, s)) != MaxMetadataBytes {
 				t.Fatalf("R11 control at the bound: %+v", out)
 			}
+			continue
+		}
+		if p == 4881 {
+			treeNativeError(t, out.Err, operationUpdate, EngineLocalInvariant, codeProblem, "invalid pruned tree profile replacement", nil)
+			prunedTreeRefusal(t, out, "R11 validity before size")
+			bootstrapOpenUnchanged(t, s, "R11 validity before size")
 			continue
 		}
 		bootstrapRefusal(t, "R11 size bound", out.Truth, out.Err, EngineCapacity, operationUpdate, codeTooLarge, "Update Batch exceeds bound", nil, false)
