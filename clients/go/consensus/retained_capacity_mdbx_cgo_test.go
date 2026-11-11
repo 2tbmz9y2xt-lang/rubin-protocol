@@ -796,7 +796,8 @@ func TestRetainedCapacityMDBXPromise(t *testing.T) {
 	}
 }
 
-// W/L transfer (MP 3018-3058): the planned authority clears the selected
+// W/L transfer (MP 3018-3058): y is the one selected-side row at 1 (F=0=H_old,
+// a direct child of F, MP 2984-2986) beside x. The planned authority clears the
 // side and appends the SIDE span owing L={y}. y's selected header 148 leaves
 // E, its body transfers to SIDE (0), and x adds 148+298. Deleting y's body
 // while SIDE still owes it is an unsupported effect.
@@ -804,13 +805,13 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	w, _, genesis := riGenesis(t)
 	y := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = genesis, blockStepsMedian+2 })
 	yh := sha3.Sum256(y[:148])
-	key, _ := mdbx.HeightKey(3, 5)
+	key, _ := mdbx.HeightKey(3, 1)
 	w.pair(t, btMutation(3, yh[:], y[:148]), btMutation(4, yh[:], y), btMutation(6, key, mdbx.ChainValue(yh, genesis, [40]byte{39: 1})))
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
-		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 4, TipHeight: 5, TipHash: yh, RowCount: 1, LogicalBytes: uint64(len(y)), CumulativeChainwork: [40]byte{39: 1}}
+		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 0, TipHeight: 1, TipHash: yh, RowCount: 1, LogicalBytes: uint64(len(y)), CumulativeChainwork: [40]byte{39: 1}}
 	})
 	op := retainedCapacityBoundOpV1(t, w)
-	retainedCapacityClearSideV1(t, w, op, 5, 5)
+	retainedCapacityClearSideV1(t, w, op, 1, 1)
 	del := func(rank int) mdbx.Mutation {
 		return mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[rank], Key: yh[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}
 	}
@@ -818,7 +819,7 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.prepared || dst.add != 148+298 || dst.remove != 148 {
 		t.Fatalf("leaving side: %v add=%d remove=%d", err, dst.add, dst.remove)
 	}
-	// Refused: a SideLink deletion at x's height without a W row, y's body
+	// Refused: a deletion of L's SideLink at x's height (no W row), y's body
 	// deletion while SIDE owes it, and (y kept owned) y's body deletion.
 	for name, clear := range map[string]bool{"link deletion without W": true, "owed body deletion": true, "owned deletion": false} {
 		op = retainedCapacityBoundOpV1(t, w)
@@ -828,7 +829,7 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 		}
 		op.Pair.Mutations = append(op.Pair.Mutations, m)
 		if clear {
-			retainedCapacityClearSideV1(t, w, op, 5, 5)
+			retainedCapacityClearSideV1(t, w, op, 1, 1)
 		}
 		a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 		if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); !errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst {
@@ -1049,10 +1050,10 @@ func retainedCapacityLinkDeleteV1(g, h uint64) mdbx.Mutation {
 func TestRetainedCapacityMDBXTransferWarmCold(t *testing.T) {
 	w, _, genesis := riGenesis(t)
 	y := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = genesis, blockStepsMedian+2 })
-	retainedCapacitySelectedV1(t, w, y, 5)
+	retainedCapacitySelectedV1(t, w, y, 1)
 	cold, warm := retainedCapacityTwinsV1(t, w, func() *mdbx.TreeOperationV1 {
 		op := retainedCapacityBoundOpV1(t, w)
-		retainedCapacityClearSideV1(t, w, op, 5, 5)
+		retainedCapacityClearSideV1(t, w, op, 1, 1)
 		return op
 	})
 	if cold.add != 148+298 || cold.remove != 148 {

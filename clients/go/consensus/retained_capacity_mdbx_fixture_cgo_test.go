@@ -608,20 +608,10 @@ func retainedCapacityRollingV1(t *testing.T) (*btWorld, [32]byte) {
 // cleared, SIDE(3,first,1440,next).
 func retainedCapacityMergeAuthorityV1(t *testing.T, w *btWorld, op *mdbx.TreeOperationV1, first, next uint64) {
 	t.Helper()
-	var auth mdbx.TreeAuthorityV1
-	err := w.s.View(func(reader *mdbx.Reader) error {
-		var err error
-		auth, _, err = reader.ReadTreeAuthorityV1()
-		return err
+	retainedCapacityMetaV1(t, w, op, func(a *mdbx.StorageAuthorityV1) {
+		a.SelectedSide = nil
+		a.Cleanup.Spans = []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: first, NextHeight: next, LastHeight: 1440}}
 	})
-	logicalMDBXAssert(t, err == nil, "authority: %v", err)
-	auth.Authority.SelectedSide = nil
-	auth.Authority.Cleanup.Spans = []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: first, NextHeight: next, LastHeight: 1440}}
-	encoded, err := auth.Encode()
-	logicalMDBXAssert(t, err == nil, "planned encode: %v", err)
-	meta := btMutation(0, []byte{2}, encoded)
-	meta.BeforePresent = true
-	op.Pair.Mutations = append([]mdbx.Mutation{meta}, op.Pair.Mutations...)
 }
 
 // D4 on the recipe frame: x's 298-byte body is SIDE-owned before (SIDE(3,1,1,1) with its SideLink),
