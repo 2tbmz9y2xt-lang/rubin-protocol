@@ -247,7 +247,7 @@ func TestPrunedTreeProfileStale(t *testing.T) {
 
 func TestPrunedTreeProfileLatched(t *testing.T) {
 	// "R8 U zero p at B'" also fails D12 (R9): D9 refuses the promises first.
-	for _, name := range []string{"R7 work before hash", "R8 U zero", "R8 U plus one", "R8 U zero p at B'", "X1 corrupt binding", "X1 database mismatch", "X2 index width"} {
+	for _, name := range []string{"R7 work before hash", "R7 work before suffix", "R8 U zero", "R8 U plus one", "R8 U zero p at B'", "X1 corrupt binding", "X1 database mismatch", "X2 index width"} {
 		t.Run(name, func(t *testing.T) {
 			u, p := uint64(18561), uint64(4320)
 			switch name {
@@ -265,6 +265,12 @@ func TestPrunedTreeProfileLatched(t *testing.T) {
 			case "R7 work before hash":
 				treeNativeSeed(t, sc.s, 2, sc.key, ChainValue(tip.BlockHash, [32]byte{}, [40]byte{}))
 				tip.BlockHash = modelHash(1)
+				diagnostic = "invalid pruned tree profile tip work"
+			case "R7 work before suffix":
+				treeNativeSeed(t, sc.s, 2, sc.key, ChainValue(tip.BlockHash, [32]byte{}, [40]byte{}))
+				above, err := HeightKey(1, 20001)
+				mustEnvironment(t, err)
+				treeNativeSeed(t, sc.s, 2, above, ChainValue(modelHash(20001), [32]byte{}, modelWork(false)))
 				diagnostic = "invalid pruned tree profile tip work"
 			case "X1 corrupt binding":
 				treeNativeSeed(t, sc.s, 0, prunedTreeLagKey(), []byte{0x7f})
