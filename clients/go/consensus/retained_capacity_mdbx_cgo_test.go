@@ -800,7 +800,7 @@ func TestRetainedCapacityMDBXPromise(t *testing.T) {
 // publishing x at 1 has W={x}, L={y}: side cleared, SIDE(3,2,2,2) owing L, SideLink (3,1) deleted. x's
 // header is delta 0 (148 in, 148 out); y's header 148 leaves E, its body transfers to SIDE (0). Deleting L's
 // SideLink or y's owed body is refused. On the lawful-retention OLD (healthy y@1, x's sibling, MP 3047-3058) a
-// W-less SideLink (3,1) deletion with the side cleared and y's owned body deletion are refused; the side is kept.
+// W-less SideLink (3,1) deletion (side cleared, with or without SIDE) and y's owned body deletion are refused; the side is kept.
 func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	wl, yh := retainedCapacityWLSideV1(t)
 	w, _, genesis := riGenesis(t)
@@ -810,10 +810,11 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 		op *mdbx.TreeOperationV1
 		m  []mdbx.Mutation
 	}{
-		"accepted":                {wl, retainedCapacityWLOpV1(t, wl, 2), nil},
-		"link deletion without W": {w, retainedCapacityWLOpV1(t, w, 1), nil},
-		"L link deletion":         {wl, retainedCapacityWLOpV1(t, wl, 2), []mdbx.Mutation{retainedCapacityLinkDeleteV1(3, 2)}},
-		"owed body deletion":      {wl, retainedCapacityWLOpV1(t, wl, 2), []mdbx.Mutation{{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: yh[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}}},
+		"accepted":                {wl, retainedCapacityWLOpV1(t, wl, 2, 2), nil},
+		"link deletion without W": {w, retainedCapacityWLOpV1(t, w, 1, 1), nil},
+		"non-W row as W":          {w, retainedCapacityWLOpV1(t, w, 1, 0), nil},
+		"L link deletion":         {wl, retainedCapacityWLOpV1(t, wl, 2, 2), []mdbx.Mutation{retainedCapacityLinkDeleteV1(3, 2)}},
+		"owed body deletion":      {wl, retainedCapacityWLOpV1(t, wl, 2, 2), []mdbx.Mutation{{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: yh[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}}},
 		"owned deletion":          {w, retainedCapacityBoundOpV1(t, w), []mdbx.Mutation{{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: kept[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent}}},
 	} {
 		c.op.Pair.Mutations = append(c.op.Pair.Mutations, c.m...)
@@ -842,11 +843,10 @@ func retainedCapacityWLSideV1(t *testing.T) (*btWorld, [32]byte) {
 	return w, y
 }
 
-// retainedCapacityWLOpV1 publishes x at 1: side cleared, SIDE(3,f,f,f), SideLink (3,1) deleted.
-func retainedCapacityWLOpV1(t *testing.T, w *btWorld, f uint64) *mdbx.TreeOperationV1 {
-	t.Helper()
+// retainedCapacityWLOpV1 publishes x at 1: side cleared, SIDE(3,f,l,f) if f<=l, SideLink (3,1) deleted.
+func retainedCapacityWLOpV1(t *testing.T, w *btWorld, f, l uint64) *mdbx.TreeOperationV1 {
 	op := retainedCapacityBoundOpV1(t, w)
-	retainedCapacityClearSideV1(t, w, op, f, f)
+	retainedCapacityClearSideV1(t, w, op, f, l)
 	op.Pair.Mutations = append(op.Pair.Mutations, retainedCapacityLinkDeleteV1(3, 1))
 	return op
 }
@@ -1061,7 +1061,7 @@ func retainedCapacityLinkDeleteV1(g, h uint64) mdbx.Mutation {
 // identical accepted proofs on the warm and the cold path.
 func TestRetainedCapacityMDBXTransferWarmCold(t *testing.T) {
 	w, _ := retainedCapacityWLSideV1(t)
-	cold, warm := retainedCapacityTwinsV1(t, w, func() *mdbx.TreeOperationV1 { return retainedCapacityWLOpV1(t, w, 2) })
+	cold, warm := retainedCapacityTwinsV1(t, w, func() *mdbx.TreeOperationV1 { return retainedCapacityWLOpV1(t, w, 2, 2) })
 	if cold.add != 148 || cold.remove != 148+148 {
 		t.Fatalf("transfer capture add=%d remove=%d", cold.add, cold.remove)
 	}
