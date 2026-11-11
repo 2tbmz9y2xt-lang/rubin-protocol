@@ -80,6 +80,7 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 		logicalMDBXAssert(t, dst.Proof(retainedCapacityGrowV1(dst, mdbx.TreeUndoChargeV1{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56})) == nil && dst.accepted, "proof")
 	})
 	t.Run("D3_D14_D18_native_callback_refusal_witness_warm_no_cold_row", retainedCapacityCallbackRefusalV1)
+	t.Run("D29_native_context_window", retainedCapacityContextWindowV1)
 	t.Run("D14_native_fault_tuples", retainedCapacityFaultTuplesV1)
 	t.Run("D14_native_unwinds", retainedCapacityUnwindsV1)
 	t.Run("D5_D20_D27_H1_canonical_absence_first", retainedCapacityAbsentFirstV1)
@@ -364,8 +365,8 @@ func retainedCapacityCommitV1(t *testing.T, w *btWorld, a *RetainedAccountingV1,
 
 // retainedCapacityShapedV1 builds the bound op at height 1 for a child of
 // genesis, else 2 (no store read); slot replaces the Pair's header insert of x
-// with the qualified HeaderSlot{x, child[:148]}.
-func retainedCapacityShapedV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, child []byte, x [32]byte, lag, slot bool, finish func(*mdbx.Reader, *mdbx.TreeOperationV1) error) btResult {
+// with the qualified HeaderSlot{x, child[:148]}; window sets Pair.ContextConsulted before Plan.
+func retainedCapacityShapedV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, child []byte, x [32]byte, lag, slot bool, finish func(*mdbx.Reader, *mdbx.TreeOperationV1) error, window ...*mdbx.CanonicalContextWindowV1) btResult {
 	t.Helper()
 	var result btResult
 	h := uint64(1)
@@ -396,6 +397,9 @@ func retainedCapacityShapedV1(t *testing.T, w *btWorld, a *RetainedAccountingV1,
 					op.Pair.Mutations = append(op.Pair.Mutations, btMutation(3, bytes.Clone(x[:]), bytes.Clone(child[:148])))
 				}
 				btSort(op.Pair.Mutations)
+				for _, cw := range window {
+					op.Pair.ContextConsulted = cw
+				}
 				if err := a.PlanDirectMDBX(dst, r, account, &op); err != nil {
 					return mdbx.TreeOperationV1{}, err
 				}
@@ -691,6 +695,45 @@ func retainedCapacityCallbackRefusalV1(t *testing.T) {
 		if harness == nil || evidence.Faults != 0 || res.err != nil || next.pre != 1077+7 || next.post != 1596+7 {
 			t.Fatalf("reuse after clean refusal: %+v/%v %v pre=%d post=%d", evidence, harness, res.err, next.pre, next.post)
 		}
+	}
+}
+
+// D29 through actual UpdateTreeV1 on the recipe SIDE frame, the window set before Plan. E1: a window over the present
+// ORIGINAL OLD canonical index row (1,0) (rank 2, 104 bytes) whose genesis header (rank 3, 148 bytes) is present, neither
+// key a Pair row or the slot hash, is no Plan control and no E term: the op proves once with the nil-window pre 1077 and
+// post 1596, commits NEW/nil/CommitMayHaveCrossed/-1, caches 1596, and the cold Ret after reopen is 1596. E2: a window
+// naming the absent index row (1,2), no Pair target, gets the native EngineStateMismatch "canonical context OLD image is
+// incomplete" (canonical_context_cgo.go:87) at OLD/Prewrite/-1 with Proof not entered; Apply without the clean witness
+// returns nil and invalidates, and the next nil-window Plan reconstructs the cold 1077 once on the open Store.
+func retainedCapacityContextWindowV1(t *testing.T) {
+	for _, window := range []*mdbx.CanonicalContextWindowV1{nil, {Generation: 1, FirstHeight: 0, Count: 1}, {Generation: 1, FirstHeight: 2, Count: 1}} {
+		w, child, x := retainedCapacitySideFrameV1(t)
+		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		res := retainedCapacityShapedV1(t, w, a, dst, child, x, false, false, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error { op.Proof = dst.Proof; return nil }, window)
+		if window == nil || window.FirstHeight == 0 {
+			res.want(t, 2, 3, -1)
+			logicalMDBXAssert(t, res.err == nil && dst.pre == 1077 && dst.accepted && dst.post == 1596, "window %+v: %v pre=%d post=%d", window, res.err, dst.pre, dst.post)
+			logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false) == nil && a.valid && a.exactRet == 1596, "window %+v successor %d", window, a.exactRet)
+			w.reopen(t)
+			verr, _ := w.s.StartupVerifyCanonicalV1(func(r *mdbx.Reader) (mdbx.StartupCanonicalCompletionV1, error) {
+				return mdbx.StartupCanonicalActiveAndReplayCompleteV1, retainedCapacityLagReadV1(r)
+			})
+			cold, err := riRead(t, w, nil)
+			logicalMDBXAssert(t, verr == nil && err == nil && cold.exactRet == 1596, "window %+v reopen: %v/%v cold=%d", window, verr, err, cold.exactRet)
+			continue
+		}
+		res.want(t, 1, 1, -1)
+		var engine *mdbx.EngineError
+		if !errors.As(res.err, &engine) || engine.Class != mdbx.EngineStateMismatch || engine.Code != -30779 || engine.Diagnostic != "canonical context OLD image is incomplete" || !dst.prepared || dst.entered {
+			t.Fatalf("absent window %T %v entered=%v", res.err, res.err, dst.entered)
+		}
+		if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, false); err != nil || a.valid || a.active != nil || !dst.applied {
+			t.Fatalf("absent window apply: %v valid=%v", err, a.valid)
+		}
+		next := &DirectRetainedProofV1{}
+		res = retainedCapacityCommitV1(t, w, a, next, child, x, false)
+		res.want(t, 2, 3, -1)
+		logicalMDBXAssert(t, res.err == nil && next.pre == 1077 && next.post == 1596, "after window refusal: %v pre=%d", res.err, next.pre)
 	}
 }
 
