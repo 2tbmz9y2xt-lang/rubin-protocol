@@ -24,7 +24,10 @@ type PrunedTreeProfileOutcomeV1 struct {
 // Static order: a nil Store returns InvalidInput/update/EINVAL "nil Store"; then
 // reservations.WithOperation(LaneOperation) returns its nil or zero owner refusal
 // unchanged; then one UpdateTreeV1 call returns its own refusals (busy, closed or
-// terminal, format 2 StateMismatch) unchanged. All of these are OLD/Prewrite.
+// terminal, format 2 StateMismatch) unchanged with their own truth and stage.
+// The nil Store and owner refusals are OLD/Prewrite. An UpdateTreeV1 refusal is
+// at Prewrite and OLD, except that a state refusal of a closed or terminal Store
+// carries that Store's retained truth. Each has empty Decision and nil Authority.
 //
 // Inside the callback an exact-empty store returns Decision "not eligible". On
 // the decoded envelope, in order: Lifecycle not STABLE is "RECOVERY_REQUIRED",

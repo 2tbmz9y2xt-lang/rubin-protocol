@@ -255,11 +255,15 @@ func TestPrunedTreeProfileCapacity(t *testing.T) {
 	}
 }
 
+// TestPrunedTreeProfileMissingBinding is R10; U=1 also differs from the nil
+// tip's promise 0 (R8), and D8 refuses the missing binding before D9.
 func TestPrunedTreeProfileMissingBinding(t *testing.T) {
-	s, path, o := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0))
-	before := prunedTreeBytes(t, s)
-	out := s.SelectPrunedTreeProfileV1(true, nil, o)
-	prunedTreeLatched(t, s, path, out, before, "missing pruned tree profile root binding", o)
+	for _, u := range []uint64{0, 1} {
+		s, path, o := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, u))
+		before := prunedTreeBytes(t, s)
+		out := s.SelectPrunedTreeProfileV1(true, nil, o)
+		prunedTreeLatched(t, s, path, out, before, "missing pruned tree profile root binding", o)
+	}
 }
 
 // TestPrunedTreeProfileSizeBound is R11 (the tip row is paired with its rank-7

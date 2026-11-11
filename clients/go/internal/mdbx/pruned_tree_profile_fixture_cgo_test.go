@@ -4,6 +4,8 @@ package mdbx
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -212,16 +214,19 @@ func TestPrunedTreeProfileStale(t *testing.T) {
 }
 
 func TestPrunedTreeProfileLatched(t *testing.T) {
-	for _, name := range []string{"R7 work before hash", "R8 U zero", "R8 U plus one", "X1 corrupt binding", "X1 database mismatch", "X2 index width"} {
+	// "R8 U zero p at B'" also fails D12 (R9): D9 refuses the promises first.
+	for _, name := range []string{"R7 work before hash", "R8 U zero", "R8 U plus one", "R8 U zero p at B'", "X1 corrupt binding", "X1 database mismatch", "X2 index width"} {
 		t.Run(name, func(t *testing.T) {
-			u := uint64(18561)
+			u, p := uint64(18561), uint64(4320)
 			switch name {
 			case "R8 U zero":
 				u = 0
 			case "R8 U plus one":
 				u = 18562
+			case "R8 U zero p at B'":
+				u, p = 0, 4881
 			}
-			sc := newPrunedTreeScene(t, u, prunedTreeAt(20000), prunedTreeU64(4320), nil)
+			sc := newPrunedTreeScene(t, u, prunedTreeAt(20000), &p, nil)
 			tip := *sc.tip
 			diagnostic := "pruned tree profile promises disagree with tip"
 			switch name {
@@ -273,7 +278,36 @@ func TestPrunedTreeProfileAliasing(t *testing.T) {
 	out := sc.s.SelectPrunedTreeProfileV1(true, &tip, sc.o)
 	tip.Height, tip.BlockHash = 1, modelHash(1)
 	sc.committed(t, out, sc.expected(4881, prunedTreeU64(4320)), "X3")
-	if out.Authority == &sc.a {
-		t.Fatal("X3 authority aliases scene envelope")
+}
+
+// TestPrunedTreeProfileConsultedExclusion is A9's exclusion half: the active
+// generation's root binding is seeded and drifted before the write transaction.
+// A plan consulting it refuses with OLD/write snapshot mismatch; this plan commits
+// (the fixture's commit hook then reports ENOSPC with the commit readback NEW).
+func TestPrunedTreeProfileConsultedExclusion(t *testing.T) {
+	sc := newPrunedTreeScene(t, 0, nil, nil, nil)
+	active := binary.BigEndian.AppendUint64([]byte{0x11}, 1)
+	treeNativeSeed(t, sc.s, 0, active, prunedTreeBindingBytes(t, nil))
+	var out PrunedTreeProfileOutcomeV1
+	count, err := FixtureWriteSnapshotDrift(sc.s, 0, active, func() { out = sc.s.SelectPrunedTreeProfileV1(true, nil, sc.o) })
+	mustEnvironment(t, err)
+	want := sc.expected(0, nil)
+	if count != 1 || out.Truth != CommitTruthNew || out.Stage != UpdateStageCommitMayHaveCrossed || out.Authority == nil || !reflect.DeepEqual(*out.Authority, want) {
+		t.Fatalf("A9 exclusion drift%d: %+v", count, out)
 	}
+	var engine *EngineError
+	if !errors.As(out.Err, &engine) || engine.Class != EngineCapacity || engine.Code != codeENOSPC {
+		t.Fatalf("A9 exclusion commit error %v", out.Err)
+	}
+	_ = sc.s.Close()
+	reopened, err := OpenTreeV1(sc.path, environmentConfig(), [32]byte{7})
+	mustEnvironment(t, err)
+	defer func() { _ = reopened.Close() }()
+	mustEnvironment(t, reopened.View(func(r *Reader) error {
+		got, present, readErr := r.ReadTreeAuthorityV1()
+		if !present || !reflect.DeepEqual(got, want) {
+			t.Fatalf("A9 exclusion durable %+v", got)
+		}
+		return readErr
+	}))
 }
