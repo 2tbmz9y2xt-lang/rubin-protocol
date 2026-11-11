@@ -448,3 +448,24 @@ func TestPrunedTreeProfileProjection(t *testing.T) {
 		})
 	}
 }
+
+// TestPrunedTreeProfileZeroPromiseMismatch is D9 where laggedPromise(H,15120) is 0:
+// the decoder accepts these U values with B=0, so D9 alone refuses them (TIPB).
+func TestPrunedTreeProfileZeroPromiseMismatch(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		u    uint64
+		tip  *AuthorityPointV1
+	}{
+		{"D9 nil tip U one", 1, nil},
+		{"D9 h5000 U zero", 0, prunedTreeAt(5000)},
+		{"D9 h5000 U plus one", 3562, prunedTreeAt(5000)},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			sc := newPrunedTreeScene(t, row.u, row.tip, nil, nil)
+			before := prunedTreeBytes(t, sc.s)
+			out := sc.s.SelectPrunedTreeProfileV1(true, row.tip, sc.o)
+			prunedTreeLatched(t, sc.s, sc.path, out, before, "pruned tree profile promises disagree with tip", sc.o)
+		})
+	}
+}
