@@ -172,19 +172,10 @@ func retainedCapacityNativeCommitV1(t *testing.T) {
 	retainedCapacityChildV1(t, w)
 	rolesBefore, endsBefore := retainedCapacityRolesV1(t, w)
 	a := NewRetainedAccountingV1(DefaultLimitsV1())
-	// The companion op: count/kind refusal, no token, no native write.
-	refused := &DirectRetainedProofV1{}
-	res := retainedCapacityCommitV1(t, w, a, refused, child, x, true)
-	res.want(t, 1, 1, -1)
-	if !errors.Is(res.err, errRetainedShapeAPIV1) && !errors.Is(res.err, errRetainedPlanAPIV1) || a.active != nil || refused.owner != nil || refused.entered {
-		t.Fatalf("companion: %v active=%v", res.err, a.active)
-	}
-	if err := a.ApplyDirectMDBX(refused, res.truth, res.stage, res.index, res.err, true); !errors.Is(err, errRetainedApplyAPIV1) || a.valid {
-		t.Fatalf("companion apply: %v", err)
-	}
+	retainedCapacityCompanionV1(t, w, a, child, x)
 	// The one-CURRENT op: cold pre 779, Proof accepts post 1596, NEW/nil commit.
 	dst := &DirectRetainedProofV1{}
-	res = retainedCapacityCommitV1(t, w, a, dst, child, x, false)
+	res := retainedCapacityCommitV1(t, w, a, dst, child, x, false)
 	res.want(t, 2, 3, -1)
 	if res.err != nil || dst.pre != 779 || !dst.accepted || dst.post != 1596 {
 		t.Fatalf("direct commit: %v pre=%d post=%d accepted=%v", res.err, dst.pre, dst.post, dst.accepted)
@@ -199,6 +190,28 @@ func retainedCapacityNativeCommitV1(t *testing.T) {
 	logicalMDBXAssert(t, a.valid && a.exactRet == 1596, "cached successor %d/%v", a.exactRet, a.valid)
 	cold, err := riRead(t, w, nil)
 	logicalMDBXAssert(t, err == nil && cold.exactRet == 1596, "fresh post enumeration %d: %v", cold.exactRet, err)
+	retainedCapacityReuseV1(t, w, a)
+	retainedCapacityLagKeptV1(t, w, rolesBefore, endsBefore)
+}
+
+// retainedCapacityCompanionV1: the [CURRENT, LagForward] op is the invalid
+// initial count/kind control: no token, no native write (OLD/Prewrite/-1),
+// and Apply of that tuple is the not-active failure that invalidates.
+func retainedCapacityCompanionV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, child []byte, x [32]byte) {
+	t.Helper()
+	refused := &DirectRetainedProofV1{}
+	res := retainedCapacityCommitV1(t, w, a, refused, child, x, true)
+	res.want(t, 1, 1, -1)
+	if !errors.Is(res.err, errRetainedShapeAPIV1) && !errors.Is(res.err, errRetainedPlanAPIV1) || a.active != nil || refused.owner != nil || refused.entered {
+		t.Fatalf("companion: %v active=%v", res.err, a.active)
+	}
+	if err := a.ApplyDirectMDBX(refused, res.truth, res.stage, res.index, res.err, true); !errors.Is(err, errRetainedApplyAPIV1) || a.valid {
+		t.Fatalf("companion apply: %v", err)
+	}
+}
+
+func retainedCapacityReuseV1(t *testing.T, w *btWorld, a *RetainedAccountingV1) {
+	t.Helper()
 	// D3: the successor binding is reused with no cold visit (a marked cache
 	// value is observed); D13: an intervening native commit of another kind
 	// advances the epoch and the next Plan reconstructs once.
@@ -213,6 +226,12 @@ func retainedCapacityNativeCommitV1(t *testing.T) {
 	_ = retainedCapacityPlanV1(t, w, a, next, retainedCapacityBoundOpV1(t, w), 8192)
 	fresh, err := riRead(t, w, nil)
 	logicalMDBXAssert(t, err == nil && next.pre == fresh.exactRet && next.pre != 1596+7, "reconstruction pre %d fresh %d", next.pre, fresh.exactRet)
+}
+
+// retainedCapacityLagKeptV1: the persisted LAG role and endpoint read back
+// unchanged after the commit and after reopen; CURRENT went 89/1 -> 178/2.
+func retainedCapacityLagKeptV1(t *testing.T, w *btWorld, rolesBefore [2]retainedRoleV1, endsBefore [2]mdbx.TreeEndpointV1) {
+	t.Helper()
 	rolesAfter, endsAfter := retainedCapacityRolesV1(t, w)
 	// After reopen the test qualifies the committed pair itself (the startup
 	// owner is outside this issue); the LAG role must read back unchanged.
@@ -247,47 +266,12 @@ func retainedCapacityRollingMergeV1(t *testing.T) {
 		ok          bool
 	}{"merge": {1, 1, true}, "first_moved": {2, 2, false}, "next_moved": {1, 2, false}} {
 		t.Run(name, func(t *testing.T) {
-			w, _, genesis := riGenesis(t)
-			x, _ := retainedCapacityChildV1(t, w)
-			link, _ := mdbx.HeightKey(3, 1)
-			rows := []mdbx.Mutation{btMutation(6, link, mdbx.ChainValue(x, genesis, [40]byte{39: 1}))}
-			parent, tip := x, [32]byte{}
-			for h := uint64(2); h <= 1440; h++ {
-				y := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(b *initial148BlockHead) { b.parent, b.timestamp = parent, blockStepsMedian+h })
-				tip = sha3.Sum256(y[:148])
-				key, _ := mdbx.HeightKey(3, h)
-				id := bytes.Clone(tip[:])
-				rows = append(rows, btMutation(3, id, y[:148]), btMutation(4, id, y), btMutation(6, key, mdbx.ChainValue(tip, parent, [40]byte{39: 1})))
-				parent = tip
-			}
-			for len(rows) > 0 {
-				n := min(len(rows), 1024)
-				w.pair(t, rows[:n]...)
-				rows = rows[n:]
-			}
-			riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
-				a.Authority.Phase = mdbx.StoragePhasePruneGCV1
-				a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 0, TipHeight: 1440, TipHash: tip, RowCount: 1439, LogicalBytes: 1439 * 298, CumulativeChainwork: [40]byte{39: 1}}
-				a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: 1, NextHeight: 1, LastHeight: 1}}}
-			})
+			w, x := retainedCapacityRollingV1(t)
 			op := retainedCapacityBoundOpV1(t, w)
 			logicalMDBXAssert(t, op.Primitives[0].Block == x && op.Primitives[0].Height == 1, "candidate op")
-			var auth mdbx.TreeAuthorityV1
-			err := w.s.View(func(reader *mdbx.Reader) error {
-				var err error
-				auth, _, err = reader.ReadTreeAuthorityV1()
-				return err
-			})
-			logicalMDBXAssert(t, err == nil, "authority: %v", err)
-			auth.Authority.SelectedSide = nil
-			auth.Authority.Cleanup.Spans = []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: c.first, NextHeight: c.next, LastHeight: 1440}}
-			encoded, err := auth.Encode()
-			logicalMDBXAssert(t, err == nil, "planned encode: %v", err)
-			meta := btMutation(0, []byte{2}, encoded)
-			meta.BeforePresent = true
-			op.Pair.Mutations = append([]mdbx.Mutation{meta}, op.Pair.Mutations...)
+			retainedCapacityMergeAuthorityV1(t, w, op, c.first, c.next)
 			a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-			err = retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+			err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
 			if !c.ok {
 				if !errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst {
 					t.Fatalf("refusal: %v prepared=%v", err, dst.prepared)
@@ -307,4 +291,54 @@ func retainedCapacityRollingMergeV1(t *testing.T) {
 			}
 		})
 	}
+}
+
+// retainedCapacityRollingV1 stores the candidate x's body and SideLink (3,1)
+// and the 1439 chained selected rows 2..1440, then the OLD authority.
+func retainedCapacityRollingV1(t *testing.T) (*btWorld, [32]byte) {
+	t.Helper()
+	w, _, genesis := riGenesis(t)
+	x, _ := retainedCapacityChildV1(t, w)
+	link, _ := mdbx.HeightKey(3, 1)
+	rows := []mdbx.Mutation{btMutation(6, link, mdbx.ChainValue(x, genesis, [40]byte{39: 1}))}
+	parent, tip := x, [32]byte{}
+	for h := uint64(2); h <= 1440; h++ {
+		y := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(b *initial148BlockHead) { b.parent, b.timestamp = parent, blockStepsMedian+h })
+		tip = sha3.Sum256(y[:148])
+		key, _ := mdbx.HeightKey(3, h)
+		id := bytes.Clone(tip[:])
+		rows = append(rows, btMutation(3, id, y[:148]), btMutation(4, id, y), btMutation(6, key, mdbx.ChainValue(tip, parent, [40]byte{39: 1})))
+		parent = tip
+	}
+	for len(rows) > 0 {
+		n := min(len(rows), 1024)
+		w.pair(t, rows[:n]...)
+		rows = rows[n:]
+	}
+	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+		a.Authority.Phase = mdbx.StoragePhasePruneGCV1
+		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 0, TipHeight: 1440, TipHash: tip, RowCount: 1439, LogicalBytes: 1439 * 298, CumulativeChainwork: [40]byte{39: 1}}
+		a.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: 1, NextHeight: 1, LastHeight: 1}}}
+	})
+	return w, x
+}
+
+// retainedCapacityMergeAuthorityV1 prepends the planned authority: side
+// cleared, SIDE(3,first,1440,next).
+func retainedCapacityMergeAuthorityV1(t *testing.T, w *btWorld, op *mdbx.TreeOperationV1, first, next uint64) {
+	t.Helper()
+	var auth mdbx.TreeAuthorityV1
+	err := w.s.View(func(reader *mdbx.Reader) error {
+		var err error
+		auth, _, err = reader.ReadTreeAuthorityV1()
+		return err
+	})
+	logicalMDBXAssert(t, err == nil, "authority: %v", err)
+	auth.Authority.SelectedSide = nil
+	auth.Authority.Cleanup.Spans = []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 3, FirstHeight: first, NextHeight: next, LastHeight: 1440}}
+	encoded, err := auth.Encode()
+	logicalMDBXAssert(t, err == nil, "planned encode: %v", err)
+	meta := btMutation(0, []byte{2}, encoded)
+	meta.BeforePresent = true
+	op.Pair.Mutations = append([]mdbx.Mutation{meta}, op.Pair.Mutations...)
 }
