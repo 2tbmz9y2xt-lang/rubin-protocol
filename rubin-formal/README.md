@@ -99,8 +99,9 @@ to identify a node or any client behavior. Registration adds one theorem
 reference and one unique theorem name; the row stays
 `proved/compiler_trusted/machine_checked_universal` for its other theorems. The
 critical operations of the refinement bridge and the pin
-`spec_section_hashes_sha3_256` are unchanged; both manifest copies carry the hash
-of the edited registry-truth checker.
+`spec_section_hashes_sha3_256` are unchanged; both copies of the active-path
+manifest (`source_rebind.active_path_manifest` in `proof_coverage.json` and in
+`refinement_bridge.json`) carry the hash of the edited registry-truth checker.
 
 Native-rotation replay uses a manual legacy bounded stub, unwritten by current
 generators. Its `*-02` JSON rows have `create_height=100`, `height=199`,
