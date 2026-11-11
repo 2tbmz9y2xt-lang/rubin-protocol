@@ -217,16 +217,23 @@ func (r *Reader) treeRoleAdmitV1(account *OperationAccount) error {
 	return nil
 }
 
-// treeRolePointV1 is the producer's one read path: an unrecorded point read
-// whose native failure is recorded once, mirroring treeRootOldV1.getV1.
-func (r *Reader) treeRolePointV1(rank uint8, key []byte) (treeImageV1, error) {
+// treeRolePointV1 is the one read path, treeReadPointV1's two steps with a native failure recorded once as in treeRootOldV1.getV1.
+// A value above bound is never borrowed: it reads as empty, which each caller's decoder refuses as it refuses that value.
+func (r *Reader) treeRolePointV1(rank uint8, key []byte, bound uint64) (treeImageV1, error) {
 	r.getMu.Lock()
 	defer r.getMu.Unlock()
 	if err := r.treeContext(); err != nil {
 		return treeImageV1{}, err
 	}
-	image, err := treeReadPointV1(r.txn, r.dbis[rank], key)
-	return image, r.treeRecord(err)
+	image, err := updateNativeImage(r.txn, r.dbis[rank], key)
+	if err != nil {
+		return treeImageV1{}, r.treeRecord(err)
+	}
+	if n := uint64(image.length); n > bound && n <= uint64(^uint(0)>>1) {
+		return treeImageV1{present: true}, nil
+	}
+	view, err := treeBorrowV1(image)
+	return view, r.treeRecord(err)
 }
 
 func treeRoleMetaKeyV1(kind byte, generation uint64) [9]byte {
@@ -349,7 +356,7 @@ func treeRolePartialV1(request *TreeRoleBindingRequestV1) bool {
 
 func (r *Reader) treeRoleBindV1(request *TreeRoleBindingRequestV1, generation uint64, out *TreeRoleObservationV1) error {
 	key := treeRoleMetaKeyV1(0x11, generation)
-	image, err := r.treeRolePointV1(0, key[:])
+	image, err := r.treeRolePointV1(0, key[:], 328)
 	if err != nil {
 		return err
 	}
@@ -613,7 +620,7 @@ func (v *treeRoleVisitV1) malformedV1(err error, position TreeRolePositionV1) bo
 
 func (v *treeRoleVisitV1) readCountersV1() error {
 	key := treeRoleMetaKeyV1(0x10, v.bound.generation)
-	image, err := v.reader.treeRolePointV1(0, key[:])
+	image, err := v.reader.treeRolePointV1(0, key[:], 16)
 	if err != nil {
 		return err
 	}
@@ -720,7 +727,7 @@ func (v *treeRoleVisitV1) nodeV1(id *TreeNodeIDV1, node *TreeNodeV1, want *[32]b
 	if v.malformedV1(err, position) {
 		return nil
 	}
-	image, err := v.reader.treeRolePointV1(8, key)
+	image, err := v.reader.treeRolePointV1(8, key, 140)
 	if err != nil {
 		return err
 	}
@@ -751,7 +758,7 @@ func (v *treeRoleVisitV1) pointV1(leaf *TreeNodeIDV1, want *[32]byte, side int, 
 	if v.malformedV1(err, position) {
 		return nil
 	}
-	image, err := v.reader.treeRolePointV1(1, key)
+	image, err := v.reader.treeRolePointV1(1, key, 65560)
 	if err != nil {
 		return err
 	}
@@ -892,7 +899,7 @@ func (r *Reader) treePairEvidenceV1(stage *treePairStageV1, reference *TreeImpor
 	var key [33]byte
 	key[0] = 0x12
 	copy(key[1:], reference.EvidenceID[:])
-	image, err := r.treeRolePointV1(0, key[:])
+	image, err := r.treeRolePointV1(0, key[:], 1048576)
 	if err != nil {
 		return err
 	}

@@ -122,6 +122,7 @@ func TestTreeRoleFaultV1(t *testing.T) {
 	t.Run("grandchild-absent", treeRoleGrandchildAbsentV1)
 	t.Run("capacity-reads", treeRoleCapacityReadsV1)
 	t.Run("admission-reads", treeRoleAdmissionReadsV1)
+	t.Run("over-bound", treeRoleOverBoundV1)
 }
 
 // treeRoleFixtureShapesV1 is A1: every non-empty legal shape is Qualified in
@@ -1102,4 +1103,79 @@ func treeRoleAdmissionReadsV1(t *testing.T) {
 		treeRoleBadRequestsV1(t, r, a, treeRoleActiveV1(1, 2))
 	})
 	treeRoleWantGetsV1(t, e, 5, 0, 0)
+}
+
+// treeRoleOverBoundV1 is the reservation ledger's borrowed-span bound per read
+// site (contract ledger: binding image 328, counter 16, node 140, point 65560,
+// evidence 1048576): a stored value one byte longer keeps the site's public
+// result and read census, and the read path never borrows it above the bound.
+func treeRoleOverBoundV1(t *testing.T) {
+	s, _, o := tsNew(t)
+	topLeaf := func(g uint64) [2]any { return treeRoleNodeSiteV1(g, 288, testKA) }
+	rows := []struct {
+		name     string
+		site     func(g uint64) [2]any
+		bound    int
+		position TreeRolePositionV1
+		gets     [3]uint64
+	}{
+		{"binding-329", func(g uint64) [2]any { return [2]any{uint8(0), tsRootKey(g)} }, 328, TreeRoleAtBindingV1, [3]uint64{1, 0, 0}},
+		{"counter-17", func(g uint64) [2]any { return [2]any{uint8(0), tsCounterKey(g)} }, 16, TreeRoleAtCounterV1, [3]uint64{2, 0, 0}},
+		{"node-141", topLeaf, 140, TreeRoleAtTopV1, [3]uint64{2, 1, 0}},
+		{"point-65561", func(g uint64) [2]any { return treeRolePointSiteV1(g, testKA) }, 65560, TreeRoleAtZeroPointV1, [3]uint64{2, 1, 1}},
+	}
+	for i, row := range rows {
+		g := uint64(300 + i)
+		tr := treeRoleSeededV1(t, s, o, g, treeRoleAppliedV1, testKA)
+		treeRolePutV1(t, s, row.site(g), make([]byte, row.bound+1))
+		t.Run(row.name, func(t *testing.T) {
+			e := treeRoleProbeV1(t, s, o, func(r *Reader, a *OperationAccount) {
+				bound, got := treeRoleObserveV1(t, r, a, treeRoleReqV1(treeRoleActiveV1(g, 2), TreeRoleCurrentV1), tr.binding.Endpoint, nil)
+				if bound.Status != TreeRoleBoundV1 {
+					got = bound
+				}
+				treeRoleWantPositiveV1(t, got, TreeRoleCurrentV1, g, row.position, TreeRoleMalformedV1)
+			})
+			treeRoleWantGetsV1(t, e, row.gets[0], row.gets[1], row.gets[2])
+			treeRoleWantSpanV1(t, s, o, row.site(g), row.bound)
+		})
+	}
+	t.Run("evidence-1048577", func(t *testing.T) { treeRoleOverEvidenceV1(t, s, o) })
+}
+
+// treeRoleOverEvidenceV1 is the evidence site: a C,F pair whose EvidenceID is
+// the SHA3-256 of a 1048577-byte value stays Defective, Affected Current,
+// Unresolved after its one evidence read.
+func treeRoleOverEvidenceV1(t *testing.T, s *Store, o *OperationReservationOwner) {
+	ref, _ := treeRoleImportV1(TreeOriginalCurrentV1, 8)
+	long := make([]byte, 1048577)
+	long[0] = 1
+	ref.EvidenceID = sha3.Sum256(long)
+	treeRoleEvidenceSeedV1(t, s, ref.EvidenceID, long)
+	treeRoleAssuredV1(t, s, o, 310, &ref)
+	treeRoleAssuredV1(t, s, o, 311, nil)
+	auth := treeRoleActiveV1(310, 311)
+	e := treeRoleProbeV1(t, s, o, func(r *Reader, a *OperationAccount) {
+		c, err := r.ObserveTreeRoleBindingV1(a, treeRoleReqV1(auth, TreeRoleCurrentV1))
+		mustEnvironment(t, err)
+		l, err := r.ObserveTreeRoleBindingV1(a, treeRoleReqV1(auth, TreeRoleLagV1))
+		mustEnvironment(t, err)
+		q, err := r.QualifyTreePairAssuranceV1(a, c, l)
+		mustEnvironment(t, err)
+		treeRoleWantPairV1(t, r, q, TreePairDefectiveV1, TreePairAffectedCurrentV1, TreePairEvidenceUnresolvedV1, c, l)
+	})
+	treeRoleWantGetsV1(t, e, 3, 0, 0)
+	treeRoleWantSpanV1(t, s, o, [2]any{uint8(0), append([]byte{0x12}, ref.EvidenceID[:]...)}, 1048576)
+}
+
+// treeRoleWantSpanV1 reads site through the producer's read path with the
+// site's ledger bound and requires a present value borrowed within it.
+func treeRoleWantSpanV1(t *testing.T, s *Store, o *OperationReservationOwner, site [2]any, bound int) {
+	t.Helper()
+	mustEnvironment(t, treeRoleViewV1(t, s, o, LaneOperation, func(r *Reader, _ *OperationAccount) {
+		image, err := r.treeRolePointV1(site[0].(uint8), site[1].([]byte), uint64(bound))
+		if err != nil || !image.present || len(image.value) > bound {
+			t.Fatalf("read of %x: present %v, borrowed %d bytes, ledger bound %d, err %v", site[1], image.present, len(image.value), bound, err)
+		}
+	}))
 }
