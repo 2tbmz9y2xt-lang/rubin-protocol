@@ -71,6 +71,27 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	t.Run("D24_completed_key_first_result", retainedCapacityCompletedKeyV1)
 	t.Run("D28_D14_native_qualified_header_slot", retainedCapacityHeaderSlotV1)
 	t.Run("D3_warm_reads_no_cold_row", retainedCapacityWarmNoColdV1)
+	t.Run("D3_D13_reopen_reconstructs", retainedCapacityReopenV1)
+}
+
+// D3/D13 "reopen": a kept pre (marked 1077+7) does not survive a reopen of
+// the same store; the next Plan reconstructs the fresh 1077 once and proves
+// 1596.
+func retainedCapacityReopenV1(t *testing.T) {
+	w, child, x := retainedCapacitySideFrameV1(t)
+	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	res := retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(*mdbx.Reader, *mdbx.TreeOperationV1) error { return errors.New("refuse") })
+	logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, true) == nil && a.valid, "kept pre")
+	a.exactRet = 1077 + 7
+	w.reopen(t)
+	verr, _ := w.s.StartupVerifyCanonicalV1(func(r *mdbx.Reader) (mdbx.StartupCanonicalCompletionV1, error) {
+		return mdbx.StartupCanonicalActiveAndReplayCompleteV1, retainedCapacityLagReadV1(r)
+	})
+	logicalMDBXAssert(t, verr == nil, "reopen qualification: %v", verr)
+	next := &DirectRetainedProofV1{}
+	res = retainedCapacityCommitV1(t, w, a, next, child, x, false)
+	res.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, res.err == nil && next.pre == 1077 && next.post == 1596, "after reopen: %v pre=%d", res.err, next.pre)
 }
 
 // D3 "ZERO cold scanner calls": after a clean callback refusal keeps the
