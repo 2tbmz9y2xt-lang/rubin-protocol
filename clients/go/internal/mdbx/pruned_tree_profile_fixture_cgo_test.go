@@ -154,6 +154,36 @@ func TestPrunedTreeProfileConsulted(t *testing.T) {
 	}
 }
 
+// TestPrunedTreeProfileConsultedList pins D13's Consulted list exactly: the plan
+// built on the A9 and A6 scenes equals rows written from literals, so an extra,
+// missing or reordered row fails here.
+func TestPrunedTreeProfileConsultedList(t *testing.T) {
+	dbis := TreeSchemaV1DBIs()
+	for _, row := range []struct {
+		name string
+		tip  *AuthorityPointV1
+		u    uint64
+		p    *uint64
+	}{
+		{"A9", nil, 0, nil},
+		{"A6", prunedTreeAt(20000), 18561, prunedTreeU64(4320)},
+	} {
+		sc := newPrunedTreeScene(t, row.u, row.tip, row.p, nil)
+		want := []ConsultedRow{{DBI: dbis[0], Key: []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 2}}}
+		if row.tip != nil {
+			want = append(want, ConsultedRow{DBI: dbis[2], Key: sc.key})
+		}
+		mustEnvironment(t, sc.s.View(func(r *Reader) error {
+			a, decision := sc.a, ""
+			op, err := prunedTreeOperation(r, &a, row.tip, &decision, errors.New("stale"))
+			if err != nil || !reflect.DeepEqual(op.Pair.Consulted, want) {
+				t.Fatalf("D13 %s consulted %+v (%v)", row.name, op.Pair.Consulted, err)
+			}
+			return nil
+		}))
+	}
+}
+
 // prunedTreeEngineDrift runs the same drift on a twin scene against a direct
 // UpdateTreeV1 call whose pair plan is built from spec literals (X4 oracle).
 func prunedTreeEngineDrift(t *testing.T, tip *AuthorityPointV1, u uint64, p *uint64, rank uint8, key func(*prunedTreeScene) []byte) (CommitTruth, UpdateStage, error) {
