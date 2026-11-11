@@ -348,12 +348,26 @@ func retainedCapacityBoundOpV1(t *testing.T, w *btWorld) *mdbx.TreeOperationV1 {
 				}
 				op.Primitives[0].Coverage.DatabaseID, op.Primitives[0].Height = read.origin.database, read.roles[0].j
 				op.Primitives[0].Coverage.Height = read.roles[0].j
+				op.Pair.Mutations = retainedCapacityIndexV1(read.roles[0].generation, read.roles[0].j, op.Primitives[0].Block)
 				return nil
 			})
 		})
 	})
 	logicalMDBXAssert(t, err == nil, "bind op: %v", err)
 	return op
+}
+
+// retainedCapacityIndexV1 is x's planned CURRENT canonical index and owner
+// insert, the only Pair source of x's planned canonical identity.
+func retainedCapacityIndexV1(g, h uint64, x [32]byte) []mdbx.Mutation {
+	index, _ := mdbx.HeightKey(g, h)
+	owner, _ := mdbx.CanonicalOwnerKey(g, x)
+	height := make([]byte, 8)
+	height[7] = byte(h)
+	return []mdbx.Mutation{
+		{DBI: mdbx.TreeSchemaV1DBIs()[2], Key: index, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(x, [32]byte{1}, [40]byte{})},
+		{DBI: mdbx.TreeSchemaV1DBIs()[7], Key: owner, AfterKind: mdbx.AfterLiteral, Literal: height},
+	}
 }
 
 func TestRetainedCapacityMDBXPlanPre(t *testing.T) {
@@ -363,13 +377,15 @@ func TestRetainedCapacityMDBXPlanPre(t *testing.T) {
 	a := NewRetainedAccountingV1(DefaultLimitsV1())
 	run := func() *DirectRetainedProofV1 {
 		dst := &DirectRetainedProofV1{}
-		if err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityBoundOpV1(t, w), 8192); !errors.Is(err, errRetainedPendingV1) {
+		if err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityBoundOpV1(t, w), 8192); err != nil {
 			t.Fatalf("plan: %v", err)
 		}
-		if a.active != dst || dst.prepared || dst.entered {
-			t.Fatalf("refused plan lost its active unprepared token")
+		// x is absent and unowned before: canonical header +148, stored
+		// absent body 0, family unowned before and owned after.
+		if a.active != dst || !dst.prepared || dst.entered || dst.add != 148 || dst.remove != 0 || dst.undo.oldOwned || !dst.undo.postOwned {
+			t.Fatalf("prepared finite capture: %+v", dst)
 		}
-		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errRetainedPendingV1, true); err != nil {
+		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errors.New("callback"), true); err != nil {
 			t.Fatalf("clean refusal apply: %v", err)
 		}
 		return dst
@@ -433,5 +449,76 @@ func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, true); err != nil || !a.valid {
 			t.Fatalf("%s clean witness lost completed pre: %v", name, err)
 		}
+	}
+}
+
+func TestRetainedCapacityMDBXFinite(t *testing.T) {
+	w, _, _ := riGenesis(t)
+	plan := func(mutate func(*mdbx.TreeOperationV1)) (*RetainedAccountingV1, *DirectRetainedProofV1, error) {
+		a, dst, op := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}, retainedCapacityBoundOpV1(t, w)
+		mutate(op)
+		return a, dst, retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+	}
+	staged := mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[6], Key: []byte{1}, AfterKind: mdbx.AfterLiteral, Literal: []byte{1}}
+	for name, mutate := range map[string]func(*mdbx.TreeOperationV1){
+		"no_index_insert": func(op *mdbx.TreeOperationV1) { op.Pair.Mutations = op.Pair.Mutations[1:] },
+		"index_names_other": func(op *mdbx.TreeOperationV1) {
+			op.Pair.Mutations[0].Literal = mdbx.ChainValue([32]byte{9}, [32]byte{}, [40]byte{})
+		},
+		"unknown_namespace": func(op *mdbx.TreeOperationV1) { op.Pair.Mutations = append(op.Pair.Mutations, staged) },
+		"slot_with_pair_header": func(op *mdbx.TreeOperationV1) {
+			x := op.Primitives[0].Block
+			op.HeaderSlot = &mdbx.TreeHeaderSlotV1{Hash: x}
+			op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[3], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 148)})
+		},
+		"stored_body_literal": func(op *mdbx.TreeOperationV1) {
+			x := op.Primitives[0].Block
+			op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 298)})
+		},
+	} {
+		a, dst, err := plan(mutate)
+		if !errors.Is(err, errRetainedFiniteAPIV1) || a.active != dst || dst.prepared || dst.pre == 0 {
+			t.Fatalf("%s: %v prepared=%v", name, err, dst.prepared)
+		}
+	}
+	// T5: a fresh nil-slot header insert of an absent x adds the canonical
+	// 148 once, not 296; a qualified slot also adds 148 once.
+	for name, mutate := range map[string]func(*mdbx.TreeOperationV1){
+		"nil_slot_insert": func(op *mdbx.TreeOperationV1) {
+			x := op.Primitives[0].Block
+			op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[3], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 148)})
+		},
+		"qualified_slot": func(op *mdbx.TreeOperationV1) {
+			op.HeaderSlot = &mdbx.TreeHeaderSlotV1{Hash: op.Primitives[0].Block}
+		},
+	} {
+		_, dst, err := plan(mutate)
+		if err != nil || !dst.prepared || dst.add != 148 || dst.remove != 0 {
+			t.Fatalf("%s: %v add=%d remove=%d", name, err, dst.add, dst.remove)
+		}
+	}
+	// A BodyKind 1 current body literal is owned after at its exact length.
+	_, dst, err := plan(func(op *mdbx.TreeOperationV1) {
+		c := op.Primitives[0].Coverage
+		c.BodyKind, c.CurrentBody = 1, make([]byte, 298)
+		x := op.Primitives[0].Block
+		op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: c.CurrentBody})
+	})
+	if err != nil || !dst.prepared || dst.add != 148+298 {
+		t.Fatalf("current body: %v add=%d", err, dst.add)
+	}
+	// The prepared finite capture reduces an actual-shaped report exactly:
+	// CURRENT +S56,N+1 (Tree +170 or +68 from N0), J+1, header 148, family.
+	_, dst, err = plan(func(*mdbx.TreeOperationV1) {})
+	logicalMDBXAssert(t, err == nil && dst.prepared, "plan: %v", err)
+	r := dst.roles[0]
+	report := &mdbx.TreeDeltaReportV1{
+		Current: mdbx.TreeRoleDeltaV1{Present: true, Generation: r.generation, BytesBefore: r.s, CountBefore: r.n, BytesAfter: r.s + 56, CountAfter: r.n + 1, IndexAdded: 1},
+		Undo:    []mdbx.TreeUndoChargeV1{{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56}},
+	}
+	oldTree, _ := RetainedTreeChargeV1(r.n)
+	newTree, _ := RetainedTreeChargeV1(r.n + 1)
+	if err := dst.Proof(report); err != nil || dst.post != dst.pre+56+newTree-oldTree+RetainedIndexChargeV1+148+56 {
+		t.Fatalf("proof: %v post=%d pre=%d", err, dst.post, dst.pre)
 	}
 }

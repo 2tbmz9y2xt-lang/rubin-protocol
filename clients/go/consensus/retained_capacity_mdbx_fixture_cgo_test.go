@@ -11,7 +11,7 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 		// Two native 20-byte entries charge 36+20 each; the 33-byte manifest key is not an entry.
 		rifFamily(t, w, op.Primitives[0].Block, op.Primitives[0].Height, 2, "")
 		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-		if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != errRetainedPendingV1 {
+		if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.prepared {
 			t.Fatalf("plan: %v", err)
 		}
 		if dst.undo.block != op.Primitives[0].Block || dst.undo.oldCharge != 2*(36+20) {

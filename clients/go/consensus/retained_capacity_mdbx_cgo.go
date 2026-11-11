@@ -3,7 +3,9 @@
 package consensus
 
 import (
+	"bytes"
 	"math"
+	"reflect"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
@@ -44,7 +46,7 @@ type DirectRetainedProofV1 struct {
 var (
 	errRetainedPlanAPIV1     error = localLogicalStateFailure("invalid retained direct plan")
 	errRetainedShapeAPIV1    error = localLogicalStateFailure("invalid retained direct shape")
-	errRetainedPendingV1     error = localLogicalStateFailure("retained direct finite delta is unavailable")
+	errRetainedFiniteAPIV1   error = localLogicalStateFailure("unsupported retained direct finite effect")
 	errRetainedProofAPIV1    error = localLogicalStateFailure("invalid retained direct proof")
 	errRetainedReportAPIV1   error = localLogicalStateFailure("invalid retained direct report")
 	errRetainedApplyAPIV1    error = localLogicalStateFailure("invalid retained direct application")
@@ -84,16 +86,27 @@ func (a *RetainedAccountingV1) PlanDirectMDBX(dst *DirectRetainedProofV1, old *m
 // retainedPlanFrameV1 is the OLD frame 2313928 plus the planned frame 2166472.
 const retainedPlanFrameV1 uint64 = 4480400
 
-// planV1 runs initializer, planned decode and relation, then the pre tuple,
-// and clears the read context before the frame exits.
+// retainedFiniteV1 is the finite local context: the read pointer, the single
+// planned authority value, the post endpoints and the borrowed op and proof.
+type retainedFiniteV1 struct {
+	read    *retainedReadV1
+	planned mdbx.TreeAuthorityV1
+	post    [2]mdbx.TreeEndpointV1
+	op      *mdbx.TreeOperationV1
+	proof   *DirectRetainedProofV1
+}
+
+// planV1 runs initializer, planned decode and relation, the pre tuple, the
+// role relations and the finite delta, and clears every context before the
+// frame exits. prepared is set only after the complete finite capture.
 func (p *DirectRetainedProofV1) planV1(old *mdbx.Reader, account *mdbx.OperationAccount) error {
 	var read retainedReadV1
-	defer func() { read = retainedReadV1{} }()
+	f := retainedFiniteV1{read: &read, op: p.op, proof: p}
+	defer func() { read, f = retainedReadV1{}, retainedFiniteV1{} }()
 	if err := prepareRetainedReadV1(&read, old, account, retainedLateV1(p.op)); err != nil {
 		return err
 	}
-	planned := &read.authority
-	if err := retainedPlannedV1(&read, p.op, &planned); err != nil {
+	if err := f.plannedV1(); err != nil {
 		return err
 	}
 	if err := retainedRelationV1(&read, p.op); err != nil {
@@ -105,10 +118,11 @@ func (p *DirectRetainedProofV1) planV1(old *mdbx.Reader, account *mdbx.Operation
 	if err := retainedRoleRelationV1(&read, p.op); err != nil {
 		return err
 	}
-	if err := p.undoChargeV1(&read); err != nil {
+	if err := f.deltaV1(); err != nil {
 		return err
 	}
-	return errRetainedPendingV1
+	p.prepared = true
+	return nil
 }
 
 // undoChargeV1 captures the sole primitive's actual OLD physical family
@@ -132,10 +146,11 @@ func retainedLateV1(op *mdbx.TreeOperationV1) *[32]byte {
 	return &hash
 }
 
-// retainedPlannedV1 decodes the proposed authority once or keeps OLD by
-// pointer; the planned authority keeps the direct grammar and generations.
-func retainedPlannedV1(read *retainedReadV1, op *mdbx.TreeOperationV1, planned **mdbx.TreeAuthorityV1) error {
-	m, ok := retainedAuthorityMutationV1(op)
+// plannedV1 decodes the proposed authority once into this context's single
+// planned value, or copies nothing when the Pair keeps OLD. The planned value
+// must keep the direct grammar and generations.
+func (f *retainedFiniteV1) plannedV1() error {
+	m, ok := retainedAuthorityMutationV1(f.op)
 	if !ok {
 		return nil
 	}
@@ -146,11 +161,11 @@ func retainedPlannedV1(read *retainedReadV1, op *mdbx.TreeOperationV1, planned *
 	if err != nil || !retainedAuthorityV1(decoded) {
 		return errRetainedShapeAPIV1
 	}
-	o, n := read.authority, decoded
-	if n.Authority.ActiveGenerationID != o.Authority.ActiveGenerationID || n.LagGenerationID != o.LagGenerationID {
+	o := &f.read.authority
+	if decoded.Authority.ActiveGenerationID != o.Authority.ActiveGenerationID || decoded.LagGenerationID != o.LagGenerationID {
 		return errRetainedShapeAPIV1
 	}
-	*planned = &decoded
+	f.planned = decoded
 	return nil
 }
 
@@ -470,5 +485,192 @@ func (a *RetainedAccountingV1) successV1(p *DirectRetainedProofV1, truth mdbx.Co
 		return nil
 	}
 	a.binding, a.exactRet, a.valid, a.complete = next, p.post, true, p.complete
+	return nil
+}
+
+// deltaV1 captures the complete finite delta of the sole primitive x. Its
+// supported domain is a Pair whose only ownership effects are x's canonical
+// index/owner insert, an optional x header insert (nil slot), a BodyKind 1 x
+// body literal and an authority literal equal to OLD; every other finite
+// effect is refused as a local API failure before Proof.
+func (f *retainedFiniteV1) deltaV1() error {
+	parent, err := f.pairV1()
+	if err != nil {
+		return err
+	}
+	f.post = [2]mdbx.TreeEndpointV1{f.op.Primitives[0].Endpoint, f.read.endpoints[1]}
+	x := retainedArtifactV1{hash: f.op.Primitives[0].Block, parent: parent, height: f.op.Primitives[0].Height, generation: f.read.roles[0].generation}
+	if err := f.obsoleteV1(x); err != nil {
+		return err
+	}
+	old, err := f.read.ownersV1(x.hash, 1440)
+	if err != nil {
+		return err
+	}
+	if old.required != 0 || old.bits&4 != 0 {
+		return errRetainedFiniteAPIV1
+	}
+	if err := f.headerV1(x, old.bits&1 != 0); err != nil {
+		return err
+	}
+	if err := f.bodyV1(x, old.bits&2 != 0); err != nil {
+		return err
+	}
+	return f.undoV1()
+}
+
+// authorityV1 returns the planned authority: OLD when the Pair keeps it.
+func (f *retainedFiniteV1) authorityV1() *mdbx.TreeAuthorityV1 {
+	if _, ok := retainedAuthorityMutationV1(f.op); ok {
+		return &f.planned
+	}
+	return &f.read.authority
+}
+
+// pairV1 classifies every Pair mutation and returns x's planned canonical
+// parent from its CURRENT index insert.
+func (f *retainedFiniteV1) pairV1() ([32]byte, error) {
+	var parent [32]byte
+	found := false
+	for i := range f.op.Pair.Mutations {
+		m := &f.op.Pair.Mutations[i]
+		ok, index := f.mutationV1(m)
+		if !ok {
+			return parent, errRetainedFiniteAPIV1
+		}
+		if index {
+			parent, found = [32]byte(m.Literal[32:64]), true
+		}
+	}
+	if !found || !reflect.DeepEqual(*f.authorityV1(), f.read.authority) {
+		return parent, errRetainedFiniteAPIV1
+	}
+	return parent, nil
+}
+
+// mutationV1 admits one mutation of the supported finite domain and reports
+// whether it is x's CURRENT canonical index insert. CURRENT state, undo,
+// tree-node and counter/root rows are reduced from the native report.
+func (f *retainedFiniteV1) mutationV1(m *mdbx.Mutation) (bool, bool) {
+	x := &f.op.Primitives[0]
+	insert := !m.BeforePresent && m.AfterKind == mdbx.AfterLiteral
+	switch m.DBI.Rank {
+	case 0, 1, 5, 8:
+		return true, false
+	case 2:
+		key, _ := mdbx.HeightKey(f.read.roles[0].generation, x.Height)
+		ok := insert && bytes.Equal(m.Key, key) && len(m.Literal) == 104 && [32]byte(m.Literal[:32]) == x.Block
+		return ok, ok
+	case 7:
+		key, _ := mdbx.CanonicalOwnerKey(f.read.roles[0].generation, x.Block)
+		return insert && bytes.Equal(m.Key, key), false
+	case 3:
+		return insert && f.op.HeaderSlot == nil && bytes.Equal(m.Key, x.Block[:]), false
+	case 4:
+		return insert && x.Coverage.BodyKind == 1 && bytes.Equal(m.Key, x.Block[:]), false
+	}
+	return false, false
+}
+
+// obsoleteV1 refuses an x already owned by an obsolete generation through the
+// producer's earlier-membership rule; a FALSE fact without positive evidence
+// is the producer's branch_data refusal.
+func (f *retainedFiniteV1) obsoleteV1(x retainedArtifactV1) error {
+	w := retainedWalkV1{read: f.read, pre: retainedPreImageV1{complete: f.proof.complete}}
+	found, err := w.earlierV1(retainedGenerationsV1(f.read.authority.Authority), x)
+	if err != nil {
+		return err
+	}
+	if found {
+		return errRetainedFiniteAPIV1
+	}
+	return nil
+}
+
+func retainedGenerationsV1(a mdbx.StorageAuthorityV1) int {
+	n := 0
+	for _, s := range retainedSpansV1(a) {
+		if s.Kind == mdbx.CleanupSpanGenerationV1 {
+			n++
+		}
+	}
+	return min(n, 2)
+}
+
+// headerV1 adds the canonical header term once and removes x's OLD optional
+// header charge; the qualified slot omits x before and reads nothing.
+func (f *retainedFiniteV1) headerV1(x retainedArtifactV1, owned bool) error {
+	p := f.proof
+	p.add = RetainedHeaderChargeV1
+	if !owned {
+		return nil
+	}
+	header, present, err := f.read.headerV1(x.hash)
+	if err != nil {
+		return retainedSourceV1(err, false)
+	}
+	if present && !retainedHeaderV1(header, retainedArtifactV1{hash: x.hash}) {
+		return errRetainedFiniteAPIV1
+	}
+	if present {
+		p.remove = RetainedHeaderChargeV1
+	}
+	return nil
+}
+
+// bodyV1 settles x's body between its OLD optional owner and its planned
+// canonical keep; a stored body is read only when ownership changes.
+func (f *retainedFiniteV1) bodyV1(x retainedArtifactV1, oldOwned bool) error {
+	a := &f.authorityV1().Authority
+	postOwned := x.height >= f.read.bodyFirstV1() || retainedOwedV1(*a, x.height, mdbx.CleanupSpanBlocksV1)
+	c := f.op.Primitives[0].Coverage
+	if c.BodyKind == 1 {
+		if postOwned {
+			return f.addV1(uint64(len(c.CurrentBody)))
+		}
+		return nil
+	}
+	if oldOwned == postOwned {
+		return nil
+	}
+	w := retainedWalkV1{read: f.read}
+	x.bits = 2
+	if err := w.bodyV1(x); err != nil {
+		return err
+	}
+	if postOwned {
+		return f.addV1(w.pre.exactRet)
+	}
+	return f.removeV1(w.pre.exactRet)
+}
+
+// undoV1 captures the sole family projection: OLD unowned in the supported
+// domain, planned owned iff x is at or above planned U or owed by UNDO.
+func (f *retainedFiniteV1) undoV1() error {
+	p := f.proof
+	if err := p.undoChargeV1(f.read); err != nil {
+		return err
+	}
+	a := &f.authorityV1().Authority
+	h := f.op.Primitives[0].Height
+	p.undo.postOwned = h >= a.U || retainedOwedV1(*a, h, mdbx.CleanupSpanUndoV1)
+	return nil
+}
+
+func (f *retainedFiniteV1) addV1(n uint64) error {
+	v, ok := retainedAddV1(f.proof.add, n)
+	if !ok {
+		return errRetainedProofCapacity
+	}
+	f.proof.add = v
+	return nil
+}
+
+func (f *retainedFiniteV1) removeV1(n uint64) error {
+	v, ok := retainedAddV1(f.proof.remove, n)
+	if !ok {
+		return errRetainedProofCapacity
+	}
+	f.proof.remove = v
 	return nil
 }
