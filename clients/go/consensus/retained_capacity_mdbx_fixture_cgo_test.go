@@ -111,10 +111,9 @@ func retainedCapacityWarmArchiveV1(t *testing.T) {
 	logicalMDBXAssert(t, harness != nil && evidence.Faults == 0 && dst.pre == 9143051+7, "warm ARCHIVE: %+v/%v pre=%d", evidence, harness, dst.pre)
 }
 
-// D12 exact/cost-1 with a successful warm Plan: the caller holds lane
-// 402653184 minus the temporary frame 4480400 and the shared body frame
-// 136463310 (resource_boundary); Plan succeeds, both are free again when Plan
-// returns (the same grant fits beside the held cost) and the returned proof
+// D12 exact/cost-1 with a successful warm Plan: the caller holds lane 402653184 minus the temporary
+// frame 4480400 and the shared body frame 136463310 (resource_boundary); Plan succeeds, both are
+// free again when Plan returns (the same grant fits beside the held cost) and the returned proof
 // stays callable. One byte more held is denied.
 func retainedCapacityExactAdmitV1(t *testing.T) {
 	const exactHeld = 402653184 - 4480400 - 136463310
@@ -220,10 +219,9 @@ func retainedCapacityReopenV1(t *testing.T) {
 	logicalMDBXAssert(t, res.err == nil && next.pre == 1077 && next.post == 1596, "after reopen: %v pre=%d", res.err, next.pre)
 }
 
-// D3 "ZERO cold scanner calls": after a clean callback refusal keeps the
-// completed pre 1077, the next Plan on the same binding commits while a Get
-// EIO is armed on the required genesis body, a row only the cold visit reads
-// (selectivity control: the same arm is the cold first result in
+// D3 "ZERO cold scanner calls": after a clean callback refusal keeps the completed pre 1077, the
+// next Plan on the same binding commits while a Get EIO is armed on the required genesis body, a
+// row only the cold visit reads (selectivity control: the same arm is the cold first result in
 // D5_D20_D27_H1_canonical_absence_first). The arm is never reached.
 func retainedCapacityWarmNoColdV1(t *testing.T) {
 	w, child, x := retainedCapacitySideFrameV1(t)
@@ -239,14 +237,12 @@ func retainedCapacityWarmNoColdV1(t *testing.T) {
 	logicalMDBXAssert(t, harness != nil && evidence.Faults == 0 && res.err == nil && next.pre == 1077 && next.post == 1596, "warm read a cold row: %+v/%v %v", evidence, harness, res.err)
 }
 
-// D28 through actual UpdateTreeV1 on the recipe SIDE frame: the qualified
-// HeaderSlot of the bound child x (Pair without a header-x row) contributes 0
-// to the pre 1077 and +148 once to the post 1596 (native_fixture_recipe);
-// the slot inserts x and a fresh enumeration agrees. D14 "Proof nil then
-// HeaderSlot error": a different stored row x makes the native slot refuse
-// after an accepted Proof with StateMismatch -30779 "tree header slot
-// differs" (RUB-1750, tree_stream_cgo.go:117-127) at OLD/Prewrite/-1 with no
-// write; Apply returns nil and invalidates.
+// D28 through actual UpdateTreeV1 on the recipe SIDE frame: the qualified HeaderSlot of the bound
+// child x (Pair without a header-x row) contributes 0 to the pre 1077 and +148 once to the post
+// 1596 (native_fixture_recipe); the slot inserts x and a fresh enumeration agrees. D14 "Proof nil
+// then HeaderSlot error": a different stored row x makes the native slot refuse after an accepted
+// Proof with StateMismatch -30779 "tree header slot differs" (RUB-1750, tree_stream_cgo.go:117-127)
+// at OLD/Prewrite/-1 with no write; Apply returns nil and invalidates.
 func retainedCapacityHeaderSlotV1(t *testing.T) {
 	for _, differ := range []bool{false, true} {
 		w, child, x := retainedCapacitySideFrameV1(t)
@@ -287,13 +283,12 @@ func retainedCapacityHeaderSlotV1(t *testing.T) {
 	}
 }
 
-// T18 (rejected_cases): a W row beside the rolling-prepared pending SIDE.
-// The stored selected side of generation 3 has one row at 5 (F 4, f 5) whose
-// SideLink names x; the OLD authority in this read carries the pending
-// SIDE(3,4,4,4) structurally (MP 1422-1426; the shape is structural-only, MP
-// 2984-2986, 3047-3056, 1408-1411). restV1 reads the actual SideLink through
-// optionalAtV1, finds x as W, and the L merge is refused; the same read with
-// a non-W block admits the merge SIDE(3,4,5,4) (selectivity control).
+// T18 (rejected_cases): a W row beside the rolling-prepared pending SIDE. The stored selected side
+// of generation 3 has one row at 5 (F 4, f 5) whose SideLink names x; the OLD authority in this
+// read carries the pending SIDE(3,4,4,4) structurally (MP 1422-1426; the shape is structural-only,
+// MP 2984-2986, 3047-3056, 1408-1411). restV1 reads the actual SideLink through optionalAtV1, finds
+// x as W, and the L merge is refused; the same read with a non-W block admits the merge
+// SIDE(3,4,5,4) (selectivity control).
 func retainedCapacityWBesidePendingV1(t *testing.T) {
 	w, _, genesis := riGenesis(t)
 	raw := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent = genesis })
@@ -413,11 +408,10 @@ func retainedCapacityShapedV1(t *testing.T, w *btWorld, a *RetainedAccountingV1,
 	return result
 }
 
-// D4/D23 through actual UpdateTreeV1 (native_fixture_recipe): pre 779 is the
-// recipe's setup value without SIDE (CURRENT 89+100+112, LAG 32, header 148,
-// genesis body 298); post 1596 (CURRENT 178+270+224, LAG 32, headers 296,
-// bodies 596). The LAG role is untouched; a LagForward companion is refused by
-// Plan before any work and the next Plan reconstructs once.
+// D4/D23 through actual UpdateTreeV1 (native_fixture_recipe): pre 779 is the recipe's setup value
+// without SIDE (CURRENT 89+100+112, LAG 32, header 148, genesis body 298); post 1596 (CURRENT
+// 178+270+224, LAG 32, headers 296, bodies 596). The LAG role is untouched; a LagForward companion
+// is refused by Plan before any work and the next Plan reconstructs once.
 func retainedCapacityNativeCommitV1(t *testing.T) {
 	w, _, genesis := riGenesis(t)
 	child, x := retainedCapacityNativeChildV1(t, w, genesis)
@@ -540,14 +534,12 @@ func retainedCapacityLagKeptV1(t *testing.T, w *btWorld, rolesBefore [2]retained
 	}
 }
 
-// T19 (D2/D15/D17): the rolling-prepared OLD shape of the RUB-1594 A1
-// witness: H_old=F=0, live one-slot selected side [2,1440] (1439 rows, f 2
-// >= F+2, MP 1408-1411) and pending SIDE(3,1,1,1) owing the candidate x at
-// f-1 (MP 1422-1426). The direct op at 1 has W empty and merges L=[2,1440]
-// into SIDE(3,1,1440,1) with first and next kept (MP 2539-2541, DIRECT
-// 3800-3805), and the full Plan/Proof path accepts it. x's header is the
-// canonical +148; each of the 1439 L headers leaves the selected owner
-// (SIDE body only), so remove is 148*1439; bodies stay owned. SIDE(3,2,1440,2)
+// T19 (D2/D15/D17): the rolling-prepared OLD shape of the RUB-1594 A1 witness: H_old=F=0, live
+// one-slot selected side [2,1440] (1439 rows, f 2 >= F+2, MP 1408-1411) and pending SIDE(3,1,1,1)
+// owing the candidate x at f-1 (MP 1422-1426). The direct op at 1 has W empty and merges L=[2,1440]
+// into SIDE(3,1,1440,1) with first and next kept (MP 2539-2541, DIRECT 3800-3805), and the full
+// Plan/Proof path accepts it. x's header is the canonical +148; each of the 1439 L headers leaves
+// the selected owner (SIDE body only), so remove is 148*1439; bodies stay owned. SIDE(3,2,1440,2)
 // and SIDE(3,1,1440,2) are refused.
 func retainedCapacityRollingMergeV1(t *testing.T) {
 	for name, c := range map[string]struct {
@@ -632,11 +624,10 @@ func retainedCapacityMergeAuthorityV1(t *testing.T, w *btWorld, op *mdbx.TreeOpe
 	op.Pair.Mutations = append([]mdbx.Mutation{meta}, op.Pair.Mutations...)
 }
 
-// D4 on the recipe frame: x's 298-byte body is SIDE-owned before
-// (SIDE(3,1,1,1) with its SideLink), so pre is 1077 (CURRENT 301, LAG 32,
-// header 148, bodies 596) and post 1596. Each refusal is the actual Proof
-// error inside UpdateTreeV1: OLD/Prewrite/-1 with that error and no write,
-// so the next attempt sees the same frame; the exact fit then commits.
+// D4 on the recipe frame: x's 298-byte body is SIDE-owned before (SIDE(3,1,1,1) with its SideLink),
+// so pre is 1077 (CURRENT 301, LAG 32, header 148, bodies 596) and post 1596. Each refusal is the
+// actual Proof error inside UpdateTreeV1: OLD/Prewrite/-1 with that error and no write, so the next
+// attempt sees the same frame; the exact fit then commits.
 func retainedCapacityNativeBoundsV1(t *testing.T) {
 	for i, limits := range []LimitsV1{
 		NewLimitsV1(805306368, 805307963), NewLimitsV1(1073741824, 1073743419),
@@ -675,12 +666,11 @@ func retainedCapacitySideFrameV1(t *testing.T) (*btWorld, []byte, [32]byte) {
 	return w, child, x
 }
 
-// D14/D18 rows "callback E, no Reader failure, clean abort; completed pre"
-// and "false/absent clean witness": Plan completes inside the actual
-// UpdateTreeV1 callback, then the callback refuses with E. The raw tuple is
-// OLD/Prewrite/-1/E with no write. Under the trusted clean witness Apply
-// consumes the token and keeps the completed cold pre 1077 (the next Plan
-// reads a marked cached value: no cold visit); without it the cache is gone.
+// D14/D18 rows "callback E, no Reader failure, clean abort; completed pre" and "false/absent clean
+// witness": Plan completes inside the actual UpdateTreeV1 callback, then the callback refuses with
+// E. The raw tuple is OLD/Prewrite/-1/E with no write. Under the trusted clean witness Apply
+// consumes the token and keeps the completed cold pre 1077 (the next Plan reads a marked cached
+// value: no cold visit); without it the cache is gone.
 func retainedCapacityCallbackRefusalV1(t *testing.T) {
 	refuse := errors.New("callback refusal")
 	for _, clean := range []bool{true, false} {
@@ -743,14 +733,13 @@ func retainedCapacityProofPanicV1(t *testing.T) {
 	logicalMDBXAssert(t, res.err == nil && next.pre == 1077 && next.post == 1596, "store OPEN after unwind: %v", res.err)
 }
 
-// D14 rows "callback nil/E/wrappedE with ReaderF", "Proof nil then write error
-// or commit crossed error", "equality OLD/NEW with error, UNKNOWN" and "any
-// cleanup failure" under one armed native scenario each. The commit hook
-// returns ENOSPC, so commit_old is the readback equality OLD, not the definite
-// attempted OLD (that tuple is pinned in the unit apply matrix).
-// Every tuple is the raw native one; Apply consumes the token, returns nil,
-// keeps no successor and retires the cache. A Reader or cleanup failure never
-// carries the clean witness (false is passed), so a completed pre is lost.
+// D14 rows "callback nil/E/wrappedE with ReaderF", "Proof nil then write error or commit crossed
+// error", "equality OLD/NEW with error, UNKNOWN" and "any cleanup failure" under one armed native
+// scenario each. The commit hook returns ENOSPC, so commit_old is the readback equality OLD, not
+// the definite attempted OLD (that tuple is pinned in the unit apply matrix). Every tuple is the
+// raw native one; Apply consumes the token, returns nil, keeps no successor and retires the cache.
+// A Reader or cleanup failure never carries the clean witness (false is passed), so a completed pre
+// is lost.
 func retainedCapacityFaultTuplesV1(t *testing.T) {
 	refuse, absent := errors.New("callback refusal"), make([]byte, 32)
 	read := func(ret int) func(*mdbx.Reader, *mdbx.TreeOperationV1) error {
@@ -896,13 +885,12 @@ func retainedCapacityForwardedV1(t *testing.T, a *RetainedAccountingV1, dst *Dir
 	}
 }
 
-// D5/D20/D27/H1 (the producer's rifSources body-absent-before-SIDE at this
-// consumer): the required genesis body is absent and the healthy SIDE-owned
-// body y (not the subject, whose source read precedes Plan) is armed with a
-// Get EIO. The first result is the typed StoreIntegrity absence with a
-// non-native cause and the SIDE row is never read (arm unreached); no row is
-// repaired or drained. With the genesis body present (selectivity control)
-// the same arm fires and the SIDE transient is the first result.
+// D5/D20/D27/H1 (the producer's rifSources body-absent-before-SIDE at this consumer): the required
+// genesis body is absent and the healthy SIDE-owned body y (not the subject, whose source read
+// precedes Plan) is armed with a Get EIO. The first result is the typed StoreIntegrity absence with
+// a non-native cause and the SIDE row is never read (arm unreached); no row is repaired or drained.
+// With the genesis body present (selectivity control) the same arm fires and the SIDE transient is
+// the first result.
 func retainedCapacityAbsentFirstV1(t *testing.T) {
 	genesis := sha3.Sum256(initial148BlockGenesis(t)[:148])
 	for _, absent := range []bool{true, false} {
@@ -976,10 +964,9 @@ func retainedCapacityOptionalFrameV1(t *testing.T, bodyLen int) (*btWorld, []byt
 	return w, child, x, y, encoded
 }
 
-// D21: the absent optional body counts 0 under SIDE and detached, the
-// detached header 148 (riOptional detached+SIDE header-only): cold pre
-// 779+148=927, Proof post 927+817=1744 (D4 frame delta), NEW/nil commit,
-// successor cached, and the authority bytes are unchanged. D22: the same
+// D21: the absent optional body counts 0 under SIDE and detached, the detached header 148
+// (riOptional detached+SIDE header-only): cold pre 779+148=927, Proof post 927+817=1744 (D4 frame
+// delta), NEW/nil commit, successor cached, and the authority bytes are unchanged. D22: the same
 // frame with a present malformed body refuses storage_capacity first.
 func retainedCapacityOptionalV1(t *testing.T) {
 	for _, malformed := range []bool{false, true} {
@@ -1003,11 +990,10 @@ func retainedCapacityOptionalV1(t *testing.T) {
 	}
 }
 
-// D26: a clean callback refusal keeps the completed pre 1077 and the helper
-// drains nothing (the stored image is still 1077 with its SIDE). A separate
-// external commit then drains the SIDE descriptor; the next Plan sees a
-// non-reusable binding and reconstructs the fresh pre 779 (x unowned), not the
-// cached 1077, and proves post 1596.
+// D26: a clean callback refusal keeps the completed pre 1077 and the helper drains nothing (the
+// stored image is still 1077 with its SIDE). A separate external commit then drains the SIDE
+// descriptor; the next Plan sees a non-reusable binding and reconstructs the fresh pre 779 (x
+// unowned), not the cached 1077, and proves post 1596.
 func retainedCapacityDrainV1(t *testing.T) {
 	w, child, x := retainedCapacitySideFrameV1(t)
 	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
@@ -1027,11 +1013,10 @@ func retainedCapacityDrainV1(t *testing.T) {
 	logicalMDBXAssert(t, res.err == nil && next.pre == 779 && next.post == 1596, "reconstruction after drain: %v pre=%d post=%d", res.err, next.pre, next.post)
 }
 
-// D24: the producer's completed malformed node key (rifKinds malformed-key:
-// the bare obsolete generation-3 prefix in tree-node-v1, on the D21 frame
-// that alone commits) is its first result inside the
-// actual UpdateTreeV1 callback: storage_capacity forwarded with no Proof, no
-// post and no cache advance, and no native write.
+// D24: the producer's completed malformed node key (rifKinds malformed-key: the bare obsolete
+// generation-3 prefix in tree-node-v1, on the D21 frame that alone commits) is its first result
+// inside the actual UpdateTreeV1 callback: storage_capacity forwarded with no Proof, no post and no
+// cache advance, and no native write.
 func retainedCapacityCompletedKeyV1(t *testing.T) {
 	w, child, x, _, _ := retainedCapacityOptionalFrameV1(t, 0)
 	rifSeed(t, w, 8, binary.BigEndian.AppendUint64(nil, 3), []byte{1})

@@ -588,8 +588,6 @@ func (f *retainedFiniteV1) wLinkV1(m *mdbx.Mutation) bool {
 	return m.BeforePresent && m.AfterKind == mdbx.AfterAbsent && bytes.Equal(m.Key, key)
 }
 
-func retainedLinkV1(m mdbx.Mutation) bool { return m.DBI.Rank == 6 }
-
 func retainedInsertV1(m *mdbx.Mutation) bool {
 	return !m.BeforePresent && m.AfterKind == mdbx.AfterLiteral
 }
@@ -981,7 +979,7 @@ func (f *retainedFiniteV1) restV1() (mdbx.CleanupSpanV1, error) {
 		l.FirstHeight += w
 	}
 	l.NextHeight = l.FirstHeight
-	if (l.FirstHeight != selectedSideFirst(s)) != slices.ContainsFunc(f.op.Pair.Mutations, retainedLinkV1) {
+	if (l.FirstHeight != selectedSideFirst(s)) != slices.ContainsFunc(f.op.Pair.Mutations, func(m mdbx.Mutation) bool { return m.DBI.Rank == 6 }) {
 		return l, errRetainedFiniteAPIV1
 	}
 	return l, nil
