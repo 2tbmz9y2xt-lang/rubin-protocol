@@ -1205,7 +1205,7 @@ func TestRetainedCapacityMDBXProofNoAlloc(t *testing.T) {
 		}
 		next := 0
 		allocs := testing.AllocsPerRun(runs, func() {
-			if err := proofs[next].Proof(reports[next]); err != tc.want {
+			if err := proofs[next].Proof(reports[next]); !retainedCapacitySameErrV1(err, tc.want) {
 				t.Fatalf("%s call %d: %v", tc.name, next, err)
 			}
 			next++
@@ -1214,4 +1214,10 @@ func TestRetainedCapacityMDBXProofNoAlloc(t *testing.T) {
 			t.Fatalf("%s: allocs=%v calls=%d accepted=%v", tc.name, allocs, next, proofs[runs].accepted)
 		}
 	}
+}
+
+// retainedCapacitySameErrV1 is identity of the preinitialized error value
+// (D12): errors.Is would also admit a wrapper, which Proof must not build.
+func retainedCapacitySameErrV1(got, want error) bool {
+	return any(got) == any(want)
 }
