@@ -490,6 +490,21 @@ func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 	if !mdbx.IsOperationReservationCapacity(err) || a.valid || dst.pre != 0 || dst.roles != ([2]retainedRoleV1{}) {
 		t.Fatalf("denied frame: %v pre=%d", err, dst.pre)
 	}
+	// D12 exact/cost-1: a relation refusal runs inside the frame after the
+	// initializer, so with lane 402653184 minus the 4480400 frame held it is the
+	// result (frame admitted); one byte less denies the frame first.
+	for _, c := range []struct {
+		held  uint64
+		admit bool
+	}{{402653184 - 4480400, true}, {402653184 - 4480400 + 1, false}} {
+		op = retainedCapacityBoundOpV1(t, w)
+		op.Primitives[0].Generation, op.Primitives[0].Coverage.Generation = 9, 9
+		a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+		err = retainedCapacityPlanV1(t, w, a, dst, op, c.held)
+		if errors.Is(err, errRetainedShapeAPIV1) != c.admit || mdbx.IsOperationReservationCapacity(err) == c.admit || a.valid || a.active != dst {
+			t.Fatalf("held %d: %v", c.held, err)
+		}
+	}
 	// Relation refusals run after the initializer and before roles or cold work.
 	op = retainedCapacityDirectOpV1()
 	op.Primitives[0].Generation, op.Primitives[0].Coverage.Generation = 9, 9
