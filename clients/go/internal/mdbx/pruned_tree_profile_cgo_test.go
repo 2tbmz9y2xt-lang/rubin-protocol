@@ -187,6 +187,18 @@ func TestPrunedTreeProfileStaticRefusals(t *testing.T) {
 	prunedUnchanged(t, v2, nil, v2Before, "R3 format 2")
 	prunedDecision(t, v2.SelectPrunedProfileV1(false, nil, o), "PROFILE_CONFIRMATION_REQUIRED", "R3 format-2 owner")
 
+	busy, _, _ := prunedTreeSeed(t, archive)
+	busyBefore := prunedTreeBytes(t, busy)
+	busy.operations.Lock()
+	out = busy.SelectPrunedTreeProfileV1(true, nil, o)
+	busy.operations.Unlock()
+	treeNativeError(t, out.Err, operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
+	prunedTreeRefusal(t, out, "R3 busy")
+	if !bytes.Equal(prunedTreeBytes(t, busy), busyBefore) {
+		t.Fatal("R3 busy envelope changed")
+	}
+	prunedTreeDecision(t, busy.SelectPrunedTreeProfileV1(false, nil, o), "PROFILE_CONFIRMATION_REQUIRED", "R3 busy reusable")
+
 	closed, _, _ := prunedTreeSeed(t, archive)
 	mustEnvironment(t, closed.Close())
 	out = closed.SelectPrunedTreeProfileV1(true, nil, o)

@@ -155,8 +155,9 @@ func TestPrunedTreeProfileConsulted(t *testing.T) {
 }
 
 // TestPrunedTreeProfileConsultedList pins D13's Consulted list exactly: the plan
-// built on the A9 and A6 scenes equals rows written from literals, so an extra,
-// missing or reordered row fails here.
+// built on the A9 and A6 scenes equals the LAG binding key written as a literal
+// followed, on A6, by the tip row key the scene seeded (HeightKey of the tip), so
+// an extra, missing or reordered row fails here.
 func TestPrunedTreeProfileConsultedList(t *testing.T) {
 	dbis := TreeSchemaV1DBIs()
 	for _, row := range []struct {
@@ -247,7 +248,7 @@ func TestPrunedTreeProfileStale(t *testing.T) {
 
 func TestPrunedTreeProfileLatched(t *testing.T) {
 	// "R8 U zero p at B'" also fails D12 (R9): D9 refuses the promises first.
-	for _, name := range []string{"R7 work before hash", "R7 work before suffix", "R8 U zero", "R8 U plus one", "R8 U zero p at B'", "X1 corrupt binding", "X1 database mismatch", "X2 index width"} {
+	for _, name := range []string{"R7 work before hash", "R7 work before suffix", "R8 U zero", "R8 U plus one", "R8 U zero p at B'", "X1 corrupt binding", "X1 database mismatch", "X2 index width", "D7 suffix read failure", "D7 nil tip read failure", "D3 envelope read failure"} {
 		t.Run(name, func(t *testing.T) {
 			u, p := uint64(18561), uint64(4320)
 			switch name {
@@ -260,7 +261,8 @@ func TestPrunedTreeProfileLatched(t *testing.T) {
 			}
 			sc := newPrunedTreeScene(t, u, prunedTreeAt(20000), &p, nil)
 			tip := *sc.tip
-			diagnostic := "pruned tree profile promises disagree with tip"
+			call := &tip
+			diagnostic, raw := "pruned tree profile promises disagree with tip", "invalid tree native representation"
 			switch name {
 			case "R7 work before hash":
 				treeNativeSeed(t, sc.s, 2, sc.key, ChainValue(tip.BlockHash, [32]byte{}, [40]byte{}))
@@ -283,17 +285,52 @@ func TestPrunedTreeProfileLatched(t *testing.T) {
 			case "X2 index width":
 				treeNativeSeed(t, sc.s, 2, sc.key, append(bytes.Clone(sc.value), 0))
 				diagnostic = ""
+			case "D7 suffix read failure":
+				above, err := HeightKey(1, 20001)
+				mustEnvironment(t, err)
+				treeNativeSeed(t, sc.s, 2, above, append(ChainValue(modelHash(20001), [32]byte{}, modelWork(false)), 0))
+				diagnostic, raw = "", "stored value width outside SchemaV2 bound"
+			case "D7 nil tip read failure":
+				treeNativeSeed(t, sc.s, 2, sc.key, append(bytes.Clone(sc.value), 0))
+				call = nil
+				diagnostic, raw = "", "stored value width outside SchemaV2 bound"
+			case "D3 envelope read failure":
+				treeNativeSeed(t, sc.s, 0, []byte{2}, []byte{0x7f})
+				diagnostic = ""
 			}
 			before := prunedTreeBytes(t, sc.s)
-			out := sc.s.SelectPrunedTreeProfileV1(true, &tip, sc.o)
+			out := sc.s.SelectPrunedTreeProfileV1(true, call, sc.o)
 			if diagnostic == "" {
 				engine, direct := directTestEngineError(out.Err)
-				if !direct || engine.Class != EngineIntegrity || engine.Diagnostic != "invalid tree native representation" {
+				if !direct || engine.Class != EngineIntegrity || engine.Diagnostic != raw {
 					t.Fatalf("%s: %+v", name, out)
 				}
 			}
+			if name == "D3 envelope read failure" {
+				prunedTreeCorruptEnvelope(t, sc, out)
+				return
+			}
 			prunedTreeLatched(t, sc.s, sc.path, out, before, diagnostic, sc.o)
 		})
+	}
+}
+
+// prunedTreeCorruptEnvelope is the latched route for an envelope ReadTreeAuthorityV1
+// cannot decode: OpenTreeV1 still refuses the same corrupt bytes, so nothing committed.
+func prunedTreeCorruptEnvelope(t *testing.T, sc *prunedTreeScene, out PrunedTreeProfileOutcomeV1) {
+	t.Helper()
+	prunedTreeRefusal(t, out, "D3 envelope read failure")
+	if sc.s.state != storeCLOSED {
+		t.Fatalf("D3 envelope store state %s", sc.s.state)
+	}
+	again := sc.s.SelectPrunedTreeProfileV1(true, nil, sc.o)
+	if !sameError(again.Err, out.Err) || again.Truth != CommitTruthOld || again.Stage != UpdateStagePrewrite {
+		t.Fatalf("D3 envelope reuse: %+v", again)
+	}
+	reopened, err := OpenTreeV1(sc.path, environmentConfig(), [32]byte{7})
+	engine, direct := directTestEngineError(err)
+	if reopened != nil || !direct || engine.Class != EngineIntegrity || engine.Diagnostic != "invalid tree native representation" {
+		t.Fatalf("D3 envelope reopen: %v", err)
 	}
 }
 
@@ -347,6 +384,17 @@ func prunedTreeExcluded(t *testing.T, key []byte, seed, reopen bool) {
 	if !errors.As(out.Err, &engine) || engine.Class != EngineCapacity || engine.Code != codeENOSPC {
 		t.Fatalf("A9 exclusion commit error %v", out.Err)
 	}
+	// D2: the consumed Store retains truth NEW (mdbx_cgo.go:2363, refusedUpdate at
+	// :2432-2438), so the following refusal is NEW/Prewrite, as a direct UpdateTreeV1 call returns.
+	again := sc.s.SelectPrunedTreeProfileV1(true, nil, sc.o)
+	var direct tsResult
+	mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+		direct = tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { return TreeOperationV1{}, nil })
+		return nil
+	}))
+	if again.Truth != CommitTruthNew || again.Stage != UpdateStagePrewrite || again.Err == nil || again.Decision != "" || again.Authority != nil || direct.truth != again.Truth || direct.stage != again.Stage {
+		t.Fatalf("D2 retained truth refusal: %+v, direct %+v", again, direct)
+	}
 	_ = sc.s.Close()
 	if !reopen {
 		return
@@ -361,4 +409,42 @@ func prunedTreeExcluded(t *testing.T, key []byte, seed, reopen bool) {
 		}
 		return readErr
 	}))
+}
+
+// TestPrunedTreeProfileProjection is X4's helper-level proxy evidence for D14
+// (contract X4): no existing hook returns these tuples for a pair-only plan. Only
+// the exact sentinel at OLD/Prewrite becomes Decision, only NEW/CommitMayHaveCrossed
+// sets Authority, and every other tuple keeps its error by identity.
+func TestPrunedTreeProfileProjection(t *testing.T) {
+	sentinel, other := errors.New("decision"), errors.New("other")
+	joined := errors.Join(sentinel, other)
+	planned := &TreeAuthorityV1{LagGenerationID: 9}
+	for _, row := range []struct {
+		name      string
+		truth     CommitTruth
+		stage     UpdateStage
+		err       error
+		decision  string
+		authority *TreeAuthorityV1
+	}{
+		{"sentinel", CommitTruthOld, UpdateStagePrewrite, sentinel, "STALE_LOCAL_PLAN", nil},
+		{"joined sentinel", CommitTruthOld, UpdateStagePrewrite, joined, "", nil},
+		{"sentinel unknown truth", CommitTruthUnknown, UpdateStagePrewrite, sentinel, "", nil},
+		{"sentinel write started", CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, sentinel, "", nil},
+		{"new crossed", CommitTruthNew, UpdateStageCommitMayHaveCrossed, other, "", planned},
+		{"new write started", CommitTruthNew, UpdateStageWriteStartedDefinitelyPrecommit, other, "", nil},
+		{"unknown crossed", CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, other, "", nil},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			in := PrunedTreeProfileOutcomeV1{Truth: row.truth, Stage: row.stage, Err: row.err}
+			got := prunedTreeOutcome(in, planned, "STALE_LOCAL_PLAN", sentinel)
+			wantErr := row.err
+			if row.decision != "" {
+				wantErr = nil
+			}
+			if got.Decision != row.decision || got.Authority != row.authority || got.Truth != row.truth || got.Stage != row.stage || !sameError(got.Err, wantErr) {
+				t.Fatalf("D14 %s: %+v", row.name, got)
+			}
+		})
+	}
 }
