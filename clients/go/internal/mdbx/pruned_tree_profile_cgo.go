@@ -43,8 +43,10 @@ type PrunedTreeProfileOutcomeV1 struct {
 // checked first, and invalid work is the latched "invalid pruned tree profile tip
 // work" below; then a BlockHash mismatch or any row above the tip is
 // "STALE_LOCAL_PLAN". A nil tip requires an empty index, otherwise
-// "STALE_LOCAL_PLAN". Index read errors are returned unchanged. Three routes return Integrity/get/MDBX_INVALID with the
-// named diagnostic and no cause, latched on the Reader so the Store is consumed:
+// "STALE_LOCAL_PLAN". Index read errors are returned unchanged.
+//
+// Three routes return Integrity/get/MDBX_INVALID with the named diagnostic and
+// no cause, latched on the Reader so the Store is consumed:
 // "invalid pruned tree profile tip work", "missing pruned tree profile root
 // binding" (no binding at LagGenerationID), and "pruned tree profile promises
 // disagree with tip" (U differs from the tip's promise).

@@ -96,6 +96,7 @@ func prunedTreeLatched(t *testing.T, s *Store, path string, out PrunedTreeProfil
 	}
 }
 
+// A1 holds for every confirmation and tip input: exact empty precedes D4 and D5.
 func TestPrunedTreeProfileExactEmpty(t *testing.T) {
 	for _, low := range []bool{false, true} {
 		s, _, _ := treeNativeStore(t)
@@ -104,7 +105,11 @@ func TestPrunedTreeProfileExactEmpty(t *testing.T) {
 			owner = prunedTreeLow(t)
 		}
 		before := reservationLive(owner)
-		prunedTreeDecision(t, s.SelectPrunedTreeProfileV1(true, nil, owner), "not eligible", "A1 exact empty")
+		for _, confirmed := range []bool{true, false} {
+			for _, tip := range []*AuthorityPointV1{nil, {Height: 0x100000000}} {
+				prunedTreeDecision(t, s.SelectPrunedTreeProfileV1(confirmed, tip, owner), "not eligible", "A1 exact empty")
+			}
+		}
 		if reservationLive(owner) != before {
 			t.Fatal("A1 owner live changed")
 		}
@@ -151,11 +156,14 @@ func TestPrunedTreeProfileControl(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			s, _, _ := prunedTreeSeed(t, row.a)
 			before := prunedTreeBytes(t, s)
-			for _, owner := range []*OperationReservationOwner{reservationOwner(t, MinReservationLimit), prunedTreeLow(t)} {
-				live := reservationLive(owner)
-				prunedTreeDecision(t, s.SelectPrunedTreeProfileV1(row.confirmed, row.tip, owner), row.want, row.name)
-				if reservationLive(owner) != live || !bytes.Equal(prunedTreeBytes(t, s), before) {
-					t.Fatal(row.name + ": owner or envelope changed")
+			// Each decision precedes the D5 tip input check, so it holds with a tip above 0xffffffff too.
+			for _, tip := range []*AuthorityPointV1{row.tip, high} {
+				for _, owner := range []*OperationReservationOwner{reservationOwner(t, MinReservationLimit), prunedTreeLow(t)} {
+					live := reservationLive(owner)
+					prunedTreeDecision(t, s.SelectPrunedTreeProfileV1(row.confirmed, tip, owner), row.want, row.name)
+					if reservationLive(owner) != live || !bytes.Equal(prunedTreeBytes(t, s), before) {
+						t.Fatal(row.name + ": owner or envelope changed")
+					}
 				}
 			}
 		})
