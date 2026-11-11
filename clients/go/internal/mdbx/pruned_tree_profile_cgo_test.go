@@ -41,12 +41,18 @@ func prunedTreeBindingBytes(t *testing.T, p *uint64) []byte {
 	return encoded
 }
 
-// prunedTreeSameEngine reports whether got and want are both direct *EngineError
-// values that are deeply equal: the error a separate direct UpdateTreeV1 call returned.
-func prunedTreeSameEngine(got, want error) bool {
+// prunedTreeSameRefusal reports whether got is an *EngineError equal field by
+// field to want, the freshly built *EngineError a direct UpdateTreeV1 call on a
+// closed Store returned; Cause is compared by identity.
+func prunedTreeSameRefusal(got, want error) bool {
 	g, gok := directTestEngineError(got)
 	w, wok := directTestEngineError(want)
-	return gok && wok && reflect.DeepEqual(*g, *w)
+	if !gok || !wok || !sameError(g.Cause, w.Cause) || !reflect.DeepEqual(g.TreeObservation, w.TreeObservation) {
+		return false
+	}
+	gc, wc := *g, *w
+	gc.Cause, gc.TreeObservation, wc.Cause, wc.TreeObservation = nil, nil, nil, nil
+	return gc == wc
 }
 
 func prunedTreeLagKey() []byte { return binary.BigEndian.AppendUint64([]byte{0x11}, 2) }
@@ -244,7 +250,7 @@ func TestPrunedTreeProfileStaticRefusals(t *testing.T) {
 	}))
 	for _, in := range inputs {
 		out = closed.SelectPrunedTreeProfileV1(in.confirmed, in.tip, o)
-		if !prunedTreeSameEngine(out.Err, direct.err) {
+		if !prunedTreeSameRefusal(out.Err, direct.err) {
 			t.Fatalf("R3 closed: %+v vs %+v", out, direct)
 		}
 		if out.Truth != direct.truth || out.Stage != direct.stage || out.Decision != "" || out.Authority != nil {

@@ -211,6 +211,12 @@ func prunedTreeEngineDrift(t *testing.T, tip *AuthorityPointV1, u uint64, p *uin
 	return r.truth, r.stage, r.err
 }
 
+func prunedTreeSameEngine(got, want error) bool {
+	g, gok := directTestEngineError(got)
+	w, wok := directTestEngineError(want)
+	return gok && wok && reflect.DeepEqual(g, w)
+}
+
 func TestPrunedTreeProfileStale(t *testing.T) {
 	for _, name := range []string{"absent row", "hash differs", "row above tip", "nil tip nonempty"} {
 		t.Run(name, func(t *testing.T) {
