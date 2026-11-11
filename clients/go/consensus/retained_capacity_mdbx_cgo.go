@@ -279,7 +279,7 @@ func retainedOpBindingV1(op *mdbx.TreeOperationV1) error {
 	if p.Source == nil || p.Coverage == nil {
 		return errRetainedShapeAPIV1
 	}
-	if p.Direction != mdbx.TreeForwardV1 || p.Kind != mdbx.TreeKindDirectApplyV1 {
+	if p.Direction != mdbx.TreeForwardV1 || p.Kind != mdbx.TreeKindDirectApplyV1 || p.Undo < 1 || p.Undo > 6 {
 		return errRetainedShapeAPIV1
 	}
 	if !retainedCoverageShapeV1(p.Coverage) {
@@ -443,7 +443,7 @@ func (a *RetainedAccountingV1) ApplyDirectMDBX(p *DirectRetainedProofV1, truth m
 	if a == nil {
 		return errRetainedApplyAPIV1
 	}
-	if !a.ownsV1(p) || !retainedTupleDomainV1(truth, stage, index) {
+	if !a.ownsV1(p) || !retainedTupleDomainV1(truth, stage, index, nativeErr != nil) {
 		a.InvalidateV1()
 		return errRetainedApplyAPIV1
 	}
@@ -461,10 +461,21 @@ func (a *RetainedAccountingV1) ownsV1(p *DirectRetainedProofV1) bool {
 	return p != nil && p.self == p && p.owner == a && a.active == p && !p.applied
 }
 
-func retainedTupleDomainV1(truth mdbx.CommitTruth, stage mdbx.UpdateStage, index int) bool {
+func retainedTupleDomainV1(truth mdbx.CommitTruth, stage mdbx.UpdateStage, index int, failed bool) bool {
 	truthOK := truth >= mdbx.CommitTruthOld && truth <= mdbx.CommitTruthUnknown
 	stageOK := stage >= mdbx.UpdateStagePrewrite && stage <= mdbx.UpdateStageCommitMayHaveCrossed
-	return truthOK && stageOK && index >= -1 && index <= 0
+	return truthOK && stageOK && index >= -1 && index <= 0 && (!failed || retainedFailureTupleV1(truth, stage, index))
+}
+
+// retainedFailureTupleV1 is the native failure union (internal/mdbx
+// mdbx_cgo.go updateNativeOutcome.valid, tree_compose_cgo.go index): before
+// the commit may have crossed the truth is OLD; a primitive index is a
+// precommit writer abort.
+func retainedFailureTupleV1(truth mdbx.CommitTruth, stage mdbx.UpdateStage, index int) bool {
+	if stage == mdbx.UpdateStageCommitMayHaveCrossed {
+		return index == -1
+	}
+	return truth == mdbx.CommitTruthOld
 }
 
 func retainedCleanRefusalV1(p *DirectRetainedProofV1, truth mdbx.CommitTruth, stage mdbx.UpdateStage, index int, clean bool) bool {
@@ -628,11 +639,13 @@ func (f *retainedFiniteV1) deletedV1(hash [32]byte, upto int) uint8 {
 // hash: a healthy header names its parent, then the producer's earlier
 // membership rule takes a positive own forward with that parent despite a
 // FALSE fact and excludes it only under a TRUE fact (FALSE is branch_data).
-// Obsolete namespaces are untouched, so OLD and planned share the projection.
-func (f *retainedFiniteV1) obsoleteV1(hash [32]byte) (uint8, error) {
+// Obsolete namespaces are untouched, so OLD and planned share the projection;
+// a header read error takes OLD's canonical header duty, as projectedV1 does.
+func (f *retainedFiniteV1) obsoleteV1(old retainedArtifactV1) (uint8, error) {
+	hash := old.hash
 	header, present, err := f.read.headerV1(hash)
 	if err != nil {
-		return 0, retainedSourceV1(err, false)
+		return 0, retainedSourceV1(err, old.required&1 != 0)
 	}
 	k := retainedArtifactV1{hash: hash, generation: f.read.roles[0].generation}
 	if !present || len(header) != 148 || !retainedHeaderV1(header, retainedArtifactV1{hash: hash}) {
@@ -658,7 +671,7 @@ func (f *retainedFiniteV1) unionsV1(old, planned retainedArtifactV1) (retainedAr
 	if err != nil {
 		return old, planned, err
 	}
-	ob, err := f.obsoleteV1(old.hash)
+	ob, err := f.obsoleteV1(old)
 	old.bits, planned.bits = old.bits|ob, planned.bits|ob
 	return old, planned, err
 }
@@ -879,15 +892,15 @@ func (read *retainedReadV1) indexOfV1(hash [32]byte, limit uint64) (bool, error)
 }
 
 // promiseV1 admits only the descriptor changes of a direct op: unchanged
-// profile, B, next generation, BLOCKS and GENERATION spans, a U increase
+// profile, next generation, excluded branch, BLOCKS and GENERATION spans,
+// nonregressing B (MP 1288-1290; L_body, not B, decides BLOCKS), a U increase
 // U0->U1 that creates or extends exactly UNDO(CURRENT,U0,U1-1,U0), and the
 // optional plan; it reports a W/L transfer.
 func (f *retainedFiniteV1) promiseV1() (bool, error) {
 	if !f.changedV1() {
 		return false, nil
 	}
-	o, p := &f.read.authority.Authority, &f.planned.Authority
-	if o.ActiveProfile != p.ActiveProfile || o.B != p.B || o.NextGenerationID != p.NextGenerationID || p.U < o.U {
+	if !retainedPromiseFixedV1(&f.read.authority.Authority, &f.planned.Authority) {
 		return false, errRetainedFiniteAPIV1
 	}
 	for _, kind := range [3]mdbx.CleanupSpanKindV1{mdbx.CleanupSpanBlocksV1, mdbx.CleanupSpanGenerationV1, mdbx.CleanupSpanUndoV1} {
@@ -896,6 +909,20 @@ func (f *retainedFiniteV1) promiseV1() (bool, error) {
 		}
 	}
 	return f.optionalPlanV1()
+}
+
+func retainedPromiseFixedV1(o, p *mdbx.StorageAuthorityV1) bool {
+	same := o.ActiveProfile == p.ActiveProfile && o.NextGenerationID == p.NextGenerationID && p.B >= o.B && p.U >= o.U
+	return same && retainedExcludedSameV1(o.ExcludedInvalidBranch, p.ExcludedInvalidBranch)
+}
+
+// retainedExcludedSameV1: a direct op never sets, clears or overwrites the
+// excluded_invalid_branch slot (MP 1855-1861).
+func retainedExcludedSameV1(x, y *mdbx.InvalidBranchV1) bool {
+	if x == nil || y == nil {
+		return x == y
+	}
+	return x.FirstInvalidHeight == y.FirstInvalidHeight && x.FirstInvalidBlockHash == y.FirstInvalidBlockHash && bytes.Equal(x.ExactConsensusError, y.ExactConsensusError)
 }
 
 // optionalPlanV1 admits unchanged optional descriptors, or the W/L transfer

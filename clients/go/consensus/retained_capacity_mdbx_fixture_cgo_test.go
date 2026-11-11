@@ -106,7 +106,7 @@ func retainedCapacityWarmArchiveV1(t *testing.T) {
 	genesis := sha3.Sum256(initial148BlockGenesis(t)[:148])
 	dst := &DirectRetainedProofV1{}
 	evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 4, genesis[:], func() {
-		_ = retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+		logicalMDBXAssert(t, retainedCapacityPlanV1(t, w, a, dst, op, 8192) == nil, "warm ARCHIVE plan")
 	})
 	logicalMDBXAssert(t, harness != nil && evidence.Faults == 0 && dst.pre == 9143051+7, "warm ARCHIVE: %+v/%v pre=%d", evidence, harness, dst.pre)
 }
@@ -493,13 +493,14 @@ func retainedCapacityReuseV1(t *testing.T, w *btWorld, a *RetainedAccountingV1) 
 	// advances the epoch and the next Plan reconstructs once.
 	a.exactRet = 1596 + 7
 	warm := &DirectRetainedProofV1{}
-	_ = retainedCapacityPlanV1(t, w, a, warm, retainedCapacityBoundOpV1(t, w), 8192)
-	logicalMDBXAssert(t, warm.pre == 1596+7 && a.valid, "warm successor pre %d", warm.pre)
+	err := retainedCapacityPlanV1(t, w, a, warm, retainedCapacityBoundOpV1(t, w), 8192)
+	logicalMDBXAssert(t, err == nil && warm.prepared && warm.pre == 1596+7 && a.valid, "warm successor pre %d", warm.pre)
 	logicalMDBXAssert(t, a.ApplyDirectMDBX(warm, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errors.New("callback"), true) == nil, "warm apply")
 	a.exactRet = 1596 + 7
 	riAuthority(t, w, func(*mdbx.TreeAuthorityV1) {}) // an intervening Pair-only native commit
 	next := &DirectRetainedProofV1{}
-	_ = retainedCapacityPlanV1(t, w, a, next, retainedCapacityBoundOpV1(t, w), 8192)
+	err = retainedCapacityPlanV1(t, w, a, next, retainedCapacityBoundOpV1(t, w), 8192)
+	logicalMDBXAssert(t, err == nil && next.prepared, "reconstruction plan: %v", err)
 	fresh, err := riRead(t, w, nil)
 	logicalMDBXAssert(t, err == nil && next.pre == fresh.exactRet && next.pre != 1596+7, "reconstruction pre %d fresh %d", next.pre, fresh.exactRet)
 }
@@ -715,18 +716,19 @@ func retainedCapacityProofPanicV1(t *testing.T) {
 	w, child, x := retainedCapacitySideFrameV1(t)
 	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 	type sentinel struct{}
+	var proofErr error
 	got := func() (v any) {
 		defer func() { v = recover() }()
 		retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error {
 			op.Proof = func(r *mdbx.TreeDeltaReportV1) error {
-				_ = dst.Proof(r)
+				proofErr = dst.Proof(r)
 				panic(sentinel{})
 			}
 			return nil
 		})
 		return nil
 	}()
-	if got != (sentinel{}) || !dst.entered || !dst.accepted || dst.post != 1596 || a.active != dst {
+	if got != (sentinel{}) || proofErr != nil || !dst.entered || !dst.accepted || dst.post != 1596 || a.active != dst {
 		t.Fatalf("panic %v entered=%v accepted=%v post=%d", got, dst.entered, dst.accepted, dst.post)
 	}
 	btReservationsReleased(t, w.owner)
@@ -849,19 +851,20 @@ func retainedCapacityUnwindsV1(t *testing.T) {
 			w, child, x := retainedCapacitySideFrameV1(t)
 			a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 			returned, done := false, make(chan any)
+			var proofErr error
 			go func() {
 				defer func() { done <- recover() }()
 				retainedCapacityTupleV1(t, w, a, dst, child, x, false, func(_ *mdbx.Reader, op *mdbx.TreeOperationV1) error {
 					if !c.proof {
 						c.end()
 					}
-					op.Proof = func(r *mdbx.TreeDeltaReportV1) error { _ = dst.Proof(r); c.end(); return nil }
+					op.Proof = func(r *mdbx.TreeDeltaReportV1) error { proofErr = dst.Proof(r); c.end(); return nil }
 					return nil
 				})
 				returned = true
 			}()
 			got := <-done
-			if returned || (got == nil) != (c.name != "callback_panic") || !dst.prepared || dst.entered != c.proof || dst.accepted != c.proof || a.active != dst {
+			if returned || proofErr != nil || (got == nil) != (c.name != "callback_panic") || !dst.prepared || dst.entered != c.proof || dst.accepted != c.proof || a.active != dst {
 				t.Fatalf("unwind %v returned=%v entered=%v accepted=%v", got, returned, dst.entered, dst.accepted)
 			}
 			btReservationsReleased(t, w.owner)
