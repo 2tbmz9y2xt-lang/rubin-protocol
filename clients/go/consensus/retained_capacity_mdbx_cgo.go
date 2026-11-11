@@ -76,7 +76,127 @@ func (a *RetainedAccountingV1) PlanDirectMDBX(dst *DirectRetainedProofV1, old *m
 	if err := retainedOpBindingV1(op); err != nil {
 		return err
 	}
+	return account.WithReservation(retainedPlanFrameV1, func() error {
+		return dst.planV1(old, account)
+	})
+}
+
+// retainedPlanFrameV1 is the OLD frame 2313928 plus the planned frame 2166472.
+const retainedPlanFrameV1 uint64 = 4480400
+
+// planV1 runs initializer, planned decode and relation, then the pre tuple,
+// and clears the read context before the frame exits.
+func (p *DirectRetainedProofV1) planV1(old *mdbx.Reader, account *mdbx.OperationAccount) error {
+	var read retainedReadV1
+	defer func() { read = retainedReadV1{} }()
+	if err := prepareRetainedReadV1(&read, old, account, retainedLateV1(p.op)); err != nil {
+		return err
+	}
+	planned := &read.authority
+	if err := retainedPlannedV1(&read, p.op, &planned); err != nil {
+		return err
+	}
+	if err := retainedRelationV1(&read, p.op); err != nil {
+		return err
+	}
+	if err := p.owner.preV1(p, &read); err != nil {
+		return err
+	}
 	return errRetainedPendingV1
+}
+
+// retainedLateV1 returns a private copy of a qualified slot hash or nil.
+func retainedLateV1(op *mdbx.TreeOperationV1) *[32]byte {
+	if op.HeaderSlot == nil {
+		return nil
+	}
+	hash := op.HeaderSlot.Hash
+	return &hash
+}
+
+// retainedPlannedV1 decodes the proposed authority once or keeps OLD by
+// pointer; the planned authority keeps the direct grammar and generations.
+func retainedPlannedV1(read *retainedReadV1, op *mdbx.TreeOperationV1, planned **mdbx.TreeAuthorityV1) error {
+	m, ok := retainedAuthorityMutationV1(op)
+	if !ok {
+		return nil
+	}
+	if m.AfterKind != mdbx.AfterLiteral || !m.BeforePresent {
+		return errRetainedShapeAPIV1
+	}
+	decoded, err := mdbx.DecodeTreeAuthorityV1(m.Literal)
+	if err != nil || !retainedAuthorityV1(decoded) {
+		return errRetainedShapeAPIV1
+	}
+	o, n := read.authority, decoded
+	if n.Authority.ActiveGenerationID != o.Authority.ActiveGenerationID || n.LagGenerationID != o.LagGenerationID {
+		return errRetainedShapeAPIV1
+	}
+	*planned = &decoded
+	return nil
+}
+
+func retainedAuthorityMutationV1(op *mdbx.TreeOperationV1) (*mdbx.Mutation, bool) {
+	meta := mdbx.TreeSchemaV1DBIs()[0]
+	for i := range op.Pair.Mutations {
+		m := &op.Pair.Mutations[i]
+		if m.DBI == meta && len(m.Key) == 1 && m.Key[0] == 2 {
+			return m, true
+		}
+	}
+	return nil, false
+}
+
+// retainedRelationV1 binds the sole primitive to the OLD CURRENT generation.
+func retainedRelationV1(read *retainedReadV1, op *mdbx.TreeOperationV1) error {
+	p := &op.Primitives[0]
+	c := p.Coverage
+	if p.Generation != read.authority.Authority.ActiveGenerationID || c.Generation != p.Generation {
+		return errRetainedShapeAPIV1
+	}
+	if c.Block != p.Block || c.Height != p.Height || p.Undo != mdbx.UndoWriteOrReuseV1 && p.Undo != mdbx.UndoTransientV1 {
+		return errRetainedShapeAPIV1
+	}
+	return nil
+}
+
+// preV1 reuses a matching completed pre tuple with fresh roles and no cold
+// visit; otherwise it drops the cache and reconstructs once.
+func (a *RetainedAccountingV1) preV1(p *DirectRetainedProofV1, read *retainedReadV1) error {
+	p.binding = read.binding
+	if a.valid && a.binding.EqualForReuse(read.binding) && retainedFactsMatchV1(read, a.complete) {
+		if err := readRetainedRolesV1(read); err != nil {
+			return err
+		}
+		p.pre, p.complete, p.roles = a.exactRet, a.complete, read.roles
+		return nil
+	}
+	a.binding, a.exactRet, a.valid, a.complete = mdbx.MutationBindingV1{}, 0, false, [2]retainedCompleteV1{}
+	pre, err := readDirectRetainedMDBXV1(read)
+	if err != nil {
+		return err
+	}
+	p.pre, p.complete, p.roles = pre.exactRet, pre.complete, read.roles
+	if pre.binding.EqualForReuse(pre.binding) {
+		a.binding, a.exactRet, a.valid, a.complete = pre.binding, pre.exactRet, true, pre.complete
+	}
+	return nil
+}
+
+// retainedFactsMatchV1 compares cached fact generations with fresh OLD spans.
+func retainedFactsMatchV1(read *retainedReadV1, cached [2]retainedCompleteV1) bool {
+	var fresh [2]uint64
+	at := 0
+	for _, span := range retainedSpansV1(read.authority.Authority) {
+		if span.Kind != mdbx.CleanupSpanGenerationV1 {
+			continue
+		}
+		if at == len(fresh) {
+			return false
+		}
+		fresh[at], at = span.GenerationID, at+1
+	}
+	return fresh == [2]uint64{cached[0].generation, cached[1].generation}
 }
 
 // initialV1 checks the initial controls in contract order.

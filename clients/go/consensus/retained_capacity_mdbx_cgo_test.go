@@ -157,9 +157,9 @@ func retainedCapacityUndoEffectsV1(t *testing.T) {
 func retainedCapacityDirectOpV1() *mdbx.TreeOperationV1 {
 	block := [32]byte{7}
 	return &mdbx.TreeOperationV1{Primitives: []mdbx.TreePrimitiveV1{{
-		Direction: mdbx.TreeForwardV1, Kind: mdbx.TreeKindDirectApplyV1, Generation: 1, Block: block,
+		Direction: mdbx.TreeForwardV1, Kind: mdbx.TreeKindDirectApplyV1, Generation: 1, Block: block, Undo: mdbx.UndoWriteOrReuseV1,
 		Source:   retainedCapacitySourceV1{},
-		Coverage: &mdbx.TreeSourceCoverageV1{Block: block, HeaderBytes: 148, BodyKind: 2},
+		Coverage: &mdbx.TreeSourceCoverageV1{Generation: 1, Block: block, HeaderBytes: 148, BodyKind: 2},
 	}}}
 }
 
@@ -303,5 +303,80 @@ func retainedCapacityApplyMatrixV1(t *testing.T) {
 	_ = a.PlanDirectMDBX(dst, &mdbx.Reader{}, &mdbx.OperationAccount{}, op)
 	if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, boom, true); err != nil || a.active != nil || !dst.applied {
 		t.Fatalf("unprepared apply: %v", err)
+	}
+}
+
+// retainedCapacityPlanV1 runs one Plan inside an actual operation account and
+// View Reader; budget is the extra grant the caller holds around Plan.
+func retainedCapacityPlanV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, op *mdbx.TreeOperationV1, budget uint64) error {
+	t.Helper()
+	var result error
+	err := w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
+		return account.WithReservation(budget, func() error {
+			return w.s.View(func(reader *mdbx.Reader) error {
+				result = a.PlanDirectMDBX(dst, reader, account, op)
+				return nil
+			})
+		})
+	})
+	logicalMDBXAssert(t, err == nil, "plan account owner: %v", err)
+	btReservationsReleased(t, w.owner)
+	return result
+}
+
+func TestRetainedCapacityMDBXPlanPre(t *testing.T) {
+	w, _, _ := riGenesis(t)
+	cold, err := riRead(t, w, nil)
+	logicalMDBXAssert(t, err == nil && cold.exactRet != 0, "cold reference: %v", err)
+	a := NewRetainedAccountingV1(DefaultLimitsV1())
+	run := func() *DirectRetainedProofV1 {
+		dst := &DirectRetainedProofV1{}
+		if err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityDirectOpV1(), 8192); err != errRetainedPendingV1 {
+			t.Fatalf("plan: %v", err)
+		}
+		if a.active != dst || dst.prepared || dst.entered {
+			t.Fatalf("refused plan lost its active unprepared token")
+		}
+		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errRetainedPendingV1, true); err != nil {
+			t.Fatalf("clean refusal apply: %v", err)
+		}
+		return dst
+	}
+	first := run()
+	if first.pre != cold.exactRet || !a.valid || a.exactRet != cold.exactRet || first.roles[0].generation == 0 {
+		t.Fatalf("cold pre %d cache %d/%v want %d", first.pre, a.exactRet, a.valid, cold.exactRet)
+	}
+	// D3: a matching binding reuses the cached quantity with fresh roles and no cold visit.
+	a.exactRet = cold.exactRet + 7
+	if warm := run(); warm.pre != cold.exactRet+7 || warm.roles != first.roles {
+		t.Fatalf("warm pre %d roles %v", warm.pre, warm.roles)
+	}
+	// A cache under another binding is never reused.
+	a.binding = mdbx.MutationBindingV1{}
+	if again := run(); again.pre != cold.exactRet || a.exactRet != cold.exactRet {
+		t.Fatalf("nonmatching binding reused cache: %d", again.pre)
+	}
+}
+
+func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
+	w, _, _ := riGenesis(t)
+	denied := uint64(402653184 - retainedPlanFrameV1 + 1)
+	// D8/T1: the op-only refusal precedes the temporary frame; the frame itself is cost-1 denied.
+	a, dst, op := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}, retainedCapacityDirectOpV1()
+	op.Primitives[0].Source = nil
+	if err := retainedCapacityPlanV1(t, w, a, dst, op, denied); err != errRetainedShapeAPIV1 || a.valid || a.active != dst {
+		t.Fatalf("op-only under denied frame: %v", err)
+	}
+	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityDirectOpV1(), denied)
+	if !mdbx.IsOperationReservationCapacity(err) || a.valid || dst.pre != 0 || dst.roles != ([2]retainedRoleV1{}) {
+		t.Fatalf("denied frame: %v pre=%d", err, dst.pre)
+	}
+	// Relation refusals run after the initializer and before roles or cold work.
+	op = retainedCapacityDirectOpV1()
+	op.Primitives[0].Generation, op.Primitives[0].Coverage.Generation = 9, 9
+	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != errRetainedShapeAPIV1 || a.valid || dst.roles != ([2]retainedRoleV1{}) || a.active != dst {
+		t.Fatalf("relation: %v", err)
 	}
 }
