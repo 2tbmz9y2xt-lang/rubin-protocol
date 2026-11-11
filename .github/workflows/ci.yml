@@ -101,7 +101,7 @@ jobs:
       - name: Install Semgrep
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install semgrep==1.184.0
+          python3 -m pip install semgrep==1.185.0
 
       - name: Install gosec + govulncheck
         run: |
@@ -114,11 +114,11 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-${{ runner.os }}-v0.22.2
+          key: cargo-audit-${{ runner.os }}-v0.23.0
 
       - name: Install cargo-audit
         if: steps.cache-cargo-audit-sec.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit@0.22.2 --locked
+        run: cargo install cargo-audit@0.23.0 --locked
 
       - name: Prepare OpenSSL bundle
         uses: ./.github/actions/openssl-bundle
