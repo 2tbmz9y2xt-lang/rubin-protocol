@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/binary"
+	"reflect"
 	"testing"
 )
 
@@ -38,6 +39,18 @@ func prunedTreeBindingBytes(t *testing.T, p *uint64) []byte {
 	encoded, err := root.Encode()
 	mustEnvironment(t, err)
 	return encoded
+}
+
+// prunedTreeSameRefusal reports whether got is the error a direct UpdateTreeV1
+// call returned: the same retained error value, or an *EngineError equal field
+// by field to a freshly built *EngineError want.
+func prunedTreeSameRefusal(got, want error) bool {
+	if want != nil && sameError(got, want) {
+		return true
+	}
+	g, gotDirect := directTestEngineError(got)
+	w, wantDirect := directTestEngineError(want)
+	return gotDirect && wantDirect && reflect.DeepEqual(*g, *w)
 }
 
 func prunedTreeLagKey() []byte { return binary.BigEndian.AppendUint64([]byte{0x11}, 2) }
@@ -232,7 +245,7 @@ func TestPrunedTreeProfileStaticRefusals(t *testing.T) {
 	}))
 	for _, in := range inputs {
 		out = closed.SelectPrunedTreeProfileV1(in.confirmed, in.tip, o)
-		if !sameError(out.Err, direct.err) && (out.Err == nil || direct.err == nil || out.Err.Error() != direct.err.Error()) {
+		if !prunedTreeSameRefusal(out.Err, direct.err) {
 			t.Fatalf("R3 closed: %+v vs %+v", out, direct)
 		}
 		if out.Truth != direct.truth || out.Stage != direct.stage || out.Decision != "" || out.Authority != nil {

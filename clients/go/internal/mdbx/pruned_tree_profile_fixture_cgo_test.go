@@ -275,7 +275,9 @@ func TestPrunedTreeProfileLatched(t *testing.T) {
 				treeNativeSeed(t, sc.s, 2, above, ChainValue(modelHash(20001), [32]byte{}, modelWork(false)))
 				diagnostic = "invalid pruned tree profile tip work"
 			case "X1 corrupt binding":
-				treeNativeSeed(t, sc.s, 0, prunedTreeLagKey(), []byte{0x7f})
+				encoded := prunedTreeBindingBytes(t, prunedTreeU64(4320))
+				encoded[0] = 2
+				treeNativeSeed(t, sc.s, 0, prunedTreeLagKey(), encoded)
 				diagnostic = ""
 			case "X1 database mismatch":
 				encoded := prunedTreeBindingBytes(t, prunedTreeU64(4320))
@@ -394,6 +396,9 @@ func prunedTreeExcluded(t *testing.T, key []byte, seed, reopen bool) {
 	}))
 	if again.Truth != CommitTruthNew || again.Stage != UpdateStagePrewrite || again.Err == nil || again.Decision != "" || again.Authority != nil || direct.truth != again.Truth || direct.stage != again.Stage {
 		t.Fatalf("D2 retained truth refusal: %+v, direct %+v", again, direct)
+	}
+	if !prunedTreeSameRefusal(again.Err, direct.err) {
+		t.Fatalf("D2 retained truth refusal error: %v vs %v", again.Err, direct.err)
 	}
 	_ = sc.s.Close()
 	if !reopen {
