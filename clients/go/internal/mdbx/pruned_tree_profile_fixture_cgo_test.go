@@ -1,0 +1,259 @@
+//go:build rubin_mdbx_fixture && cgo && (darwin || linux) && (amd64 || arm64)
+
+package mdbx
+
+import (
+	"bytes"
+	"crypto/sha3"
+	"encoding/binary"
+	"reflect"
+	"testing"
+)
+
+type prunedTreeScene struct {
+	s     *Store
+	path  string
+	o     *OperationReservationOwner
+	a     TreeAuthorityV1
+	tip   *AuthorityPointV1
+	key   []byte
+	value []byte
+}
+
+// prunedTreeBindingBytes encodes the LAG root binding; a nil p is PRE_GENESIS.
+func prunedTreeBindingBytes(t *testing.T, p *uint64) []byte {
+	t.Helper()
+	root := RootBindingV1{DatabaseID: [32]byte{7}, CommitmentVersion: 1, RootDigest: sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")), Assurance: TreeAssuranceV1{Kind: TreeAssuranceFullHistoryV1}}
+	if p != nil {
+		root.Endpoint = TreeEndpointV1{Kind: TreeEndpointAppliedV1, Height: *p, BlockHash: modelHash(*p), CumulativeChainwork: modelWork(false)}
+	}
+	encoded, err := root.Encode()
+	mustEnvironment(t, err)
+	return encoded
+}
+
+func prunedTreeLagKey() []byte { return binary.BigEndian.AppendUint64([]byte{0x11}, 2) }
+
+// newPrunedTreeScene seeds ARCHIVE NONE/STABLE with U, an optional tip row and an optional binding.
+func newPrunedTreeScene(t *testing.T, u uint64, tip *AuthorityPointV1, p *uint64, edit func(*TreeAuthorityV1)) *prunedTreeScene {
+	t.Helper()
+	a := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, u)
+	if edit != nil {
+		edit(&a)
+	}
+	s, path, o := prunedTreeSeed(t, a)
+	scene := &prunedTreeScene{s: s, path: path, o: o, a: a, tip: tip}
+	if tip != nil {
+		key, err := HeightKey(1, tip.Height)
+		mustEnvironment(t, err)
+		scene.key, scene.value = key, ChainValue(tip.BlockHash, [32]byte{}, modelWork(false))
+		treeNativeSeed(t, s, 2, key, scene.value)
+	}
+	treeNativeSeed(t, s, 0, prunedTreeLagKey(), prunedTreeBindingBytes(t, p))
+	return scene
+}
+
+func prunedTreeU64(v uint64) *uint64 { return &v }
+
+func prunedTreeAt(height uint64) *AuthorityPointV1 {
+	return &AuthorityPointV1{Height: height, BlockHash: modelHash(height)}
+}
+
+// expected builds the committed envelope from spec literals, never from laggedPromise.
+func (sc *prunedTreeScene) expected(b uint64, last *uint64) TreeAuthorityV1 {
+	want := sc.a
+	want.Authority.ActiveProfile, want.Authority.B = StorageProfilePrunedV1, b
+	if last != nil {
+		want.Authority.Phase = StoragePhasePruneGCV1
+		want.Authority.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: CleanupSpanBlocksV1, GenerationID: 1, FirstHeight: 0, LastHeight: *last, NextHeight: 0}}}
+	}
+	return want
+}
+
+func (sc *prunedTreeScene) committed(t *testing.T, out PrunedTreeProfileOutcomeV1, want TreeAuthorityV1, marker string) {
+	t.Helper()
+	if out.Err != nil || out.Truth != CommitTruthNew || out.Stage != UpdateStageCommitMayHaveCrossed || out.Decision != "" || out.Authority == nil {
+		t.Fatalf("%s: %+v", marker, out)
+	}
+	if !reflect.DeepEqual(*out.Authority, want) {
+		t.Fatalf("%s: outcome authority %+v, want %+v", marker, *out.Authority, want)
+	}
+	mustEnvironment(t, sc.s.Close())
+	reopened, err := OpenTreeV1(sc.path, environmentConfig(), [32]byte{7})
+	mustEnvironment(t, err)
+	defer func() { _ = reopened.Close() }()
+	mustEnvironment(t, reopened.View(func(r *Reader) error {
+		got, present, readErr := r.ReadTreeAuthorityV1()
+		if !present || !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: durable %+v present=%v, want %+v", marker, got, present, want)
+		}
+		return readErr
+	}))
+}
+
+func TestPrunedTreeProfileCommit(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		h, u uint64
+		p    *uint64
+		b    uint64
+		last *uint64
+	}{
+		{"A6 p4320", 20000, 18561, prunedTreeU64(4320), 4881, prunedTreeU64(4320)},
+		{"A6 p2880", 20000, 18561, prunedTreeU64(2880), 4881, prunedTreeU64(2880)},
+		{"A7 pre-genesis lag", 15500, 14061, nil, 381, nil},
+		{"A8 h1000", 1000, 0, nil, 0, nil},
+		{"A8 h5000", 5000, 3561, nil, 0, nil},
+		{"A11 p4500 outside pair", 20000, 18561, prunedTreeU64(4500), 4881, prunedTreeU64(4500)},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			sc := newPrunedTreeScene(t, row.u, prunedTreeAt(row.h), row.p, nil)
+			sc.committed(t, sc.s.SelectPrunedTreeProfileV1(true, sc.tip, sc.o), sc.expected(row.b, row.last), row.name)
+		})
+	}
+	t.Run("A9 pre-genesis current", func(t *testing.T) {
+		sc := newPrunedTreeScene(t, 0, nil, nil, nil)
+		sc.committed(t, sc.s.SelectPrunedTreeProfileV1(true, nil, sc.o), sc.expected(0, nil), "A9")
+	})
+	t.Run("A10 unchanged optional field", func(t *testing.T) {
+		branch := func(a *TreeAuthorityV1) {
+			a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 20001, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte{1}}
+		}
+		sc := newPrunedTreeScene(t, 18561, prunedTreeAt(20000), prunedTreeU64(4320), branch)
+		want := sc.expected(4881, prunedTreeU64(4320))
+		if want.Authority.ExcludedInvalidBranch == nil || want.Authority.ExcludedInvalidBranch.FirstInvalidHeight != 20001 {
+			t.Fatal("A10 field not set")
+		}
+		sc.committed(t, sc.s.SelectPrunedTreeProfileV1(true, sc.tip, sc.o), want, "A10 ExcludedInvalidBranch")
+	})
+}
+
+// TestPrunedTreeProfileConsulted drifts a consulted row before the write
+// transaction: a committed plan that consults it refuses, so the row is in the plan.
+// The non-NEW tuple is also X4: it is returned unchanged with no Authority.
+func TestPrunedTreeProfileConsulted(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		tip  *AuthorityPointV1
+		rank uint8
+		key  func(*prunedTreeScene) []byte
+	}{
+		{"A9 lag binding", nil, 0, func(*prunedTreeScene) []byte { return prunedTreeLagKey() }},
+		{"A6 lag binding", prunedTreeAt(20000), 0, func(*prunedTreeScene) []byte { return prunedTreeLagKey() }},
+		{"A6 tip row", prunedTreeAt(20000), 2, func(sc *prunedTreeScene) []byte { return sc.key }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			u, p := uint64(0), (*uint64)(nil)
+			if row.tip != nil {
+				u, p = 18561, prunedTreeU64(4320)
+			}
+			sc := newPrunedTreeScene(t, u, row.tip, p, nil)
+			before := prunedTreeBytes(t, sc.s)
+			var out PrunedTreeProfileOutcomeV1
+			count, err := FixtureWriteSnapshotDrift(sc.s, row.rank, row.key(sc), func() { out = sc.s.SelectPrunedTreeProfileV1(true, sc.tip, sc.o) })
+			mustEnvironment(t, err)
+			if count != 1 || out.Err == nil || out.Truth == CommitTruthNew || out.Authority != nil || out.Decision != "" {
+				t.Fatalf("%s: drift%d %+v", row.name, count, out)
+			}
+			if sc.s.state == storeOPEN && !bytes.Equal(prunedTreeBytes(t, sc.s), before) {
+				t.Fatal(row.name + ": envelope changed")
+			}
+		})
+	}
+}
+
+func TestPrunedTreeProfileStale(t *testing.T) {
+	for _, name := range []string{"absent row", "hash differs", "row above tip", "nil tip nonempty"} {
+		t.Run(name, func(t *testing.T) {
+			sc := newPrunedTreeScene(t, 18561, prunedTreeAt(20000), prunedTreeU64(4320), nil)
+			tip := *sc.tip
+			call := &tip
+			switch name {
+			case "absent row":
+				call.Height = 20001
+				call.BlockHash = modelHash(20001)
+			case "hash differs":
+				call.BlockHash = modelHash(1)
+			case "row above tip":
+				key, err := HeightKey(1, 20001)
+				mustEnvironment(t, err)
+				treeNativeSeed(t, sc.s, 2, key, ChainValue(modelHash(20001), [32]byte{}, modelWork(false)))
+			case "nil tip nonempty":
+				call = nil
+			}
+			before := prunedTreeBytes(t, sc.s)
+			prunedTreeDecision(t, sc.s.SelectPrunedTreeProfileV1(true, call, sc.o), "STALE_LOCAL_PLAN", "R6 "+name)
+			bootstrapOpenUnchanged(t, sc.s, "R6 "+name)
+			if !bytes.Equal(prunedTreeBytes(t, sc.s), before) {
+				t.Fatal("R6 envelope changed")
+			}
+		})
+	}
+}
+
+func TestPrunedTreeProfileLatched(t *testing.T) {
+	for _, name := range []string{"R7 work before hash", "R8 U zero", "R8 U plus one", "X1 corrupt binding", "X1 database mismatch", "X2 index width"} {
+		t.Run(name, func(t *testing.T) {
+			u := uint64(18561)
+			switch name {
+			case "R8 U zero":
+				u = 0
+			case "R8 U plus one":
+				u = 18562
+			}
+			sc := newPrunedTreeScene(t, u, prunedTreeAt(20000), prunedTreeU64(4320), nil)
+			tip := *sc.tip
+			diagnostic := "pruned tree profile promises disagree with tip"
+			switch name {
+			case "R7 work before hash":
+				treeNativeSeed(t, sc.s, 2, sc.key, ChainValue(tip.BlockHash, [32]byte{}, [40]byte{}))
+				tip.BlockHash = modelHash(1)
+				diagnostic = "invalid pruned tree profile tip work"
+			case "X1 corrupt binding":
+				treeNativeSeed(t, sc.s, 0, prunedTreeLagKey(), []byte{0x7f})
+				diagnostic = ""
+			case "X1 database mismatch":
+				encoded := prunedTreeBindingBytes(t, prunedTreeU64(4320))
+				encoded[1] ^= 1
+				treeNativeSeed(t, sc.s, 0, prunedTreeLagKey(), encoded)
+				diagnostic = ""
+			case "X2 index width":
+				treeNativeSeed(t, sc.s, 2, sc.key, append(bytes.Clone(sc.value), 0))
+				diagnostic = ""
+			}
+			before := prunedTreeBytes(t, sc.s)
+			out := sc.s.SelectPrunedTreeProfileV1(true, &tip, sc.o)
+			if diagnostic == "" {
+				engine, direct := directTestEngineError(out.Err)
+				if !direct || engine.Class != EngineIntegrity || engine.Diagnostic != "invalid tree native representation" {
+					t.Fatalf("%s: %+v", name, out)
+				}
+			}
+			prunedTreeLatched(t, sc.s, sc.path, out, before, diagnostic, sc.o)
+		})
+	}
+}
+
+func TestPrunedTreeProfileReplacementInvariant(t *testing.T) {
+	sc := newPrunedTreeScene(t, 18561, prunedTreeAt(20000), prunedTreeU64(4881), nil)
+	before := prunedTreeBytes(t, sc.s)
+	out := sc.s.SelectPrunedTreeProfileV1(true, sc.tip, sc.o)
+	treeNativeError(t, out.Err, operationUpdate, EngineLocalInvariant, codeProblem, "invalid pruned tree profile replacement", nil)
+	prunedTreeRefusal(t, out, "R9")
+	bootstrapOpenUnchanged(t, sc.s, "R9")
+	if !bytes.Equal(prunedTreeBytes(t, sc.s), before) {
+		t.Fatal("R9 envelope changed")
+	}
+}
+
+// X3: the outcome Authority is owned by the call and the caller's tip is copied.
+func TestPrunedTreeProfileAliasing(t *testing.T) {
+	sc := newPrunedTreeScene(t, 18561, prunedTreeAt(20000), prunedTreeU64(4320), nil)
+	tip := *sc.tip
+	out := sc.s.SelectPrunedTreeProfileV1(true, &tip, sc.o)
+	tip.Height, tip.BlockHash = 1, modelHash(1)
+	sc.committed(t, out, sc.expected(4881, prunedTreeU64(4320)), "X3")
+	if out.Authority == &sc.a {
+		t.Fatal("X3 authority aliases scene envelope")
+	}
+}
