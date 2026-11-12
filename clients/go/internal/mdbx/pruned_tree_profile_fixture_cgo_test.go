@@ -168,11 +168,13 @@ func TestPrunedTreeProfileConsulted(t *testing.T) {
 	}
 }
 
-// TestPrunedTreeProfileConsultedList pins D13's Consulted list exactly: the plan
-// built on the A9 and A6 scenes equals the LAG binding key written as a literal
-// followed, on A6, by the tip row key the scene seeded (HeightKey of the tip), so
-// an extra, missing or reordered row fails here; Mutations must be exactly the
-// one envelope row at key 0x02.
+// TestPrunedTreeProfileConsultedList pins D13's whole operation as UpdateTreeV1
+// receives it: the callback prunedTreePlan returns is the value
+// SelectPrunedTreeProfileV1 passes to the engine unwrapped, and on the A9 and A6
+// scenes its operation must equal, field for field, one Pair with exactly one
+// mutation (meta key 0x02, the expected envelope encoded from literals) and the
+// LAG binding key followed, on A6, by the seeded tip row key. An extra, missing
+// or reordered Mutations or Consulted row fails here.
 func TestPrunedTreeProfileConsultedList(t *testing.T) {
 	dbis := TreeSchemaV1DBIs()
 	for _, row := range []struct {
@@ -185,20 +187,24 @@ func TestPrunedTreeProfileConsultedList(t *testing.T) {
 		{"A6", prunedTreeAt(20000), 18561, prunedTreeU64(4320)},
 	} {
 		sc := newPrunedTreeScene(t, row.u, row.tip, row.p, nil)
-		want := []ConsultedRow{{DBI: dbis[0], Key: []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 2}}}
+		envelope := sc.expected(0, nil)
+		consulted := []ConsultedRow{{DBI: dbis[0], Key: []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 2}}}
 		if row.tip != nil {
-			want = append(want, ConsultedRow{DBI: dbis[2], Key: sc.key})
+			envelope = sc.expected(4881, prunedTreeU64(4320))
+			consulted = append(consulted, ConsultedRow{DBI: dbis[2], Key: sc.key})
 		}
-		mustEnvironment(t, sc.s.View(func(r *Reader) error {
-			a, decision := sc.a, ""
-			op, err := prunedTreeOperation(r, &a, row.tip, &decision, errors.New("stale"))
-			if err != nil || !reflect.DeepEqual(op.Pair.Consulted, want) {
-				t.Fatalf("D13 %s consulted %+v (%v)", row.name, op.Pair.Consulted, err)
-			}
-			if m := op.Pair.Mutations; len(m) != 1 || m[0].DBI != dbis[0] || !bytes.Equal(m[0].Key, []byte{0x02}) || !m[0].BeforePresent || m[0].AfterKind != AfterLiteral || len(m[0].Literal) == 0 {
-				t.Fatalf("D13 %s mutations %+v", row.name, m)
-			}
-			return nil
+		encoded, err := envelope.Encode()
+		mustEnvironment(t, err)
+		want := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: dbis[0], Key: []byte{0x02}, BeforePresent: true, AfterKind: AfterLiteral, Literal: encoded}}, Consulted: consulted}}
+		mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(account *OperationAccount) error {
+			return sc.s.View(func(r *Reader) error {
+				decision, planned := "", (*TreeAuthorityV1)(nil)
+				op, err := prunedTreePlan(account, true, row.tip, &decision, &planned, errors.New("stale"))(r)
+				if err != nil || decision != "" || !reflect.DeepEqual(op, want) {
+					t.Fatalf("D13 %s operation %+v (%v %q), want %+v", row.name, op, err, decision, want)
+				}
+				return nil
+			})
 		}))
 	}
 }

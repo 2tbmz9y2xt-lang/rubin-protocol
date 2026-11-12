@@ -39,9 +39,12 @@ type PrunedTreeProfileOutcomeV1 struct {
 // then returns InvalidInput/update/EINVAL "invalid pruned tree profile tip".
 // Only then is 1000 bytes charged to the operation account (the 344-byte index
 // evidence plus 656 bytes for the LAG root binding); a capacity refusal of this
-// charge is returned unchanged before any index or binding read. The engine's
-// own hold for the Pair copies is separate: UpdateTreeV1 charges it after the
-// callback, and its refusal is a tuple of the projection below.
+// charge is returned unchanged before any index or binding read. The charge is
+// held through the tip witness and suffix page, the binding read, the promise and
+// replacement checks and Encode, and is released when that one reservation
+// callback returns, before UpdateTreeV1 takes its own hold. That engine hold for
+// the Pair copies is separate: UpdateTreeV1 charges it after the callback, and
+// its refusal is a tuple of the projection below.
 //
 // The tip witness reads the rank-2 canonical index of ActiveGenerationID. For a
 // non-nil tip, an absent tip row is "STALE_LOCAL_PLAN"; a present row's work is
@@ -106,13 +109,19 @@ func (s *Store) SelectPrunedTreeProfileV1(confirmed bool, expectedTip *Authority
 	var planned *TreeAuthorityV1
 	out.Err = reservations.WithOperation(LaneOperation, func(account *OperationAccount) error {
 		var err error
-		out.Truth, out.Stage, _, err = s.UpdateTreeV1(account, func(reader *Reader) (op TreeOperationV1, planErr error) {
-			op, planned, planErr = prunedTreeCompose(reader, account, confirmed, tip, &decision, sentinel)
-			return op, planErr
-		})
+		out.Truth, out.Stage, _, err = s.UpdateTreeV1(account, prunedTreePlan(account, confirmed, tip, &decision, &planned, sentinel))
 		return err
 	})
 	return prunedTreeOutcome(out, planned, decision, sentinel)
+}
+
+// prunedTreePlan returns the callback SelectPrunedTreeProfileV1 passes to
+// UpdateTreeV1 unwrapped, so the operation it returns is the one the engine receives.
+func prunedTreePlan(account *OperationAccount, confirmed bool, tip *AuthorityPointV1, decision *string, planned **TreeAuthorityV1, sentinel error) func(*Reader) (TreeOperationV1, error) {
+	return func(reader *Reader) (op TreeOperationV1, err error) {
+		op, *planned, err = prunedTreeCompose(reader, account, confirmed, tip, decision, sentinel)
+		return op, err
+	}
 }
 
 func prunedTreeCompose(reader *Reader, account *OperationAccount, confirmed bool, tip *AuthorityPointV1, decision *string, sentinel error) (TreeOperationV1, *TreeAuthorityV1, error) {
