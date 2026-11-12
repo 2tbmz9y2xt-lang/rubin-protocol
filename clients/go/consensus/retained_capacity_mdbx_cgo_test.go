@@ -836,6 +836,10 @@ func retainedCapacitySpansV1(a *mdbx.StorageAuthorityV1, spans []mdbx.CleanupSpa
 // On the lawful-retention OLD (healthy y@1, x's sibling, MP 3047-3058) a W-less SideLink (3,1) deletion (side cleared, with or without SIDE) and y's owned body deletion are refused; the side is kept.
 func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	wl, leave := retainedCapacityWLSideV1(t)
+	// G7 (D15, MP 1717, 2550-2557): in wo obsolete generation 5 also projects y; deleting y's header ends that projection in the
+	// planned image, so y's header leaves E with its projection-owned (here absent) undo family while SIDE keeps its body.
+	wo, leaveO := retainedCapacityWLSideV1(t)
+	retainedCapacityObsoleteYV1(t, wo, [32]byte(leaveO.Key))
 	w, _, genesis := riGenesis(t)
 	kept := retainedCapacitySelectedV1(t, w, initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = genesis, blockStepsMedian+2 }), 1)
 	for name, c := range map[string]struct {
@@ -845,6 +849,7 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	}{
 		"accepted":                {wl, retainedCapacityWLOpV1(t, wl, 2, 2, leave), nil},
 		"accepted, header kept":   {wl, retainedCapacityWLOpV1(t, wl, 2, 2), nil},
+		"accepted, G7 obsolete y": {wo, retainedCapacityWLOpV1(t, wo, 2, 2, leaveO), nil},
 		"link deletion without W": {w, retainedCapacityWLOpV1(t, w, 1, 1), nil},
 		"non-W row as W":          {w, retainedCapacityWLOpV1(t, w, 1, 0), nil},
 		"L link deletion":         {wl, retainedCapacityWLOpV1(t, wl, 2, 2, leave), []mdbx.Mutation{retainedCapacityLinkDeleteV1(3, 2)}},
@@ -855,22 +860,10 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 		err := retainedCapacityPlanV1(t, c.w, a, dst, c.op, 8192)
 		accepted := strings.HasPrefix(name, "accepted")
-		if accepted && (err != nil || !dst.prepared || dst.add != 148 || dst.remove != 148+148) {
-			t.Fatalf("%s: %v add=%d remove=%d", name, err, dst.add, dst.remove)
-		}
-		if !accepted && (!errors.Is(err, errRetainedFiniteAPIV1) || dst.prepared || a.active != dst) {
-			t.Fatalf("%s: %v", name, err)
-		}
+		logicalMDBXAssert(t, !accepted || err == nil && dst.prepared && dst.add == 148 && dst.remove == 148+148 && (c.w != wo || dst.complete[0] == (retainedCompleteV1{5, true})), "%s: %v add=%d remove=%d complete=%+v", name, err, dst.add, dst.remove, dst.complete)
+		logicalMDBXAssert(t, accepted || errors.Is(err, errRetainedFiniteAPIV1) && !dst.prepared && a.active == dst, "%s: %v", name, err)
 	}
 	retainedCapacityKeptSideV1(t, w)
-	// G7 (D15, MP 1717, 2550-2557): obsolete generation 5 also projects y; deleting y's header ends that projection in the
-	// planned image, so y's header leaves E with its projection-owned (here absent) undo family while SIDE keeps its body.
-	wo, leaveO := retainedCapacityWLSideV1(t)
-	retainedCapacityObsoleteYV1(t, wo, [32]byte(leaveO.Key))
-	a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-	if err := retainedCapacityPlanV1(t, wo, a, dst, retainedCapacityWLOpV1(t, wo, 2, 2, leaveO), 8192); err != nil || !dst.prepared || dst.add != 148 || dst.remove != 296 || dst.complete[0] != (retainedCompleteV1{5, true}) {
-		t.Fatalf("obsolete leaving header: %v add=%d remove=%d complete=%+v", err, dst.add, dst.remove, dst.complete)
-	}
 }
 
 // retainedCapacityObsoleteYV1 makes obsolete generation 5 project y, x's child at 2, under a TRUE fact: its own forward
