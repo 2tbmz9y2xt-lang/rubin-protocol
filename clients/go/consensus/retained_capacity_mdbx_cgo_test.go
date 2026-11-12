@@ -256,11 +256,13 @@ func retainedCapacityInitialControlsV1(t *testing.T) {
 		t.Fatalf("nil Reader apply: %v valid=%v", err, a.valid)
 	}
 	a = retainedCapacityCachedV1()
-	active := &DirectRetainedProofV1{}
-	a.active = active
-	if err := a.PlanDirectMDBX(&DirectRetainedProofV1{}, reader, account, op); !errors.Is(err, errRetainedPlanAPIV1) || a.active != active {
-		t.Fatalf("active owner: %v", err)
-	}
+	active, fresh := retainedCapacityStructuralV1(a), &DirectRetainedProofV1{}
+	before := *active
+	logicalMDBXAssert(t, errors.Is(a.PlanDirectMDBX(fresh, reader, account, op), errRetainedPlanAPIV1) && a.active == active, "active owner")
+	// F15: Apply on that refused fresh proof clears the cache and keeps the active attempt, whose own Proof and Apply then run as untouched.
+	logicalMDBXAssert(t, errors.Is(a.ApplyDirectMDBX(fresh, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errors.New("refused"), true), errRetainedApplyAPIV1) && retainedCapacityClearedV1(a) && a.active == active && *active == before && *fresh == (DirectRetainedProofV1{}), "active owner apply")
+	logicalMDBXAssert(t, active.Proof(retainedCapacityReportV1()) == nil && active.accepted && active.post == 1613, "active attempt proof after misuse")
+	logicalMDBXAssert(t, a.ApplyDirectMDBX(active, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false) == nil && active.applied && a.active == nil, "active attempt apply after misuse")
 }
 
 func retainedCapacityOpOnlyV1(t *testing.T) {

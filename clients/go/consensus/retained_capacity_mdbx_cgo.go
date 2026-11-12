@@ -60,10 +60,9 @@ func NewRetainedAccountingV1(limits LimitsV1) *RetainedAccountingV1 {
 
 // InvalidateV1 retires the cache, its facts and any active attempt with no Reader, account or native work; the caller calls it on unwind and after any other successful mutation without an owned complete delta.
 func (a *RetainedAccountingV1) InvalidateV1() {
-	if a == nil {
-		return
+	if a != nil {
+		a.binding, a.exactRet, a.valid, a.complete, a.active = mdbx.MutationBindingV1{}, 0, false, [2]retainedCompleteV1{}, nil
 	}
-	a.binding, a.exactRet, a.valid, a.complete, a.active = mdbx.MutationBindingV1{}, 0, false, [2]retainedCompleteV1{}, nil
 }
 
 // PlanDirectMDBX refuses invalid initial controls with no new attempt, no Reader or account work and the cache and any active attempt unchanged, then owns exactly one attempt that stays active with prepared=false on every later refusal. Its errors are this file's preinitialized local API or storage_capacity errors, or exactly what the producer (its functions and its classifier) or the account returned: Plan adds no wrapper, join or merged result bit, so causes, Unwrap and errors.As stay the producer's.
@@ -292,13 +291,9 @@ func retainedCoverageShapeV1(op *mdbx.TreeOperationV1) bool {
 // retainedBodyLiteralV1 reports a Pair body literal at x.
 func retainedBodyLiteralV1(op *mdbx.TreeOperationV1) bool {
 	x := op.Primitives[0].Block
-	for i := range op.Pair.Mutations {
-		m := &op.Pair.Mutations[i]
-		if m.DBI.Rank == 4 && m.AfterKind == mdbx.AfterLiteral && bytes.Equal(m.Key, x[:]) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(op.Pair.Mutations, func(m mdbx.Mutation) bool {
+		return m.DBI.Rank == 4 && m.AfterKind == mdbx.AfterLiteral && bytes.Equal(m.Key, x[:])
+	})
 }
 
 // retainedHeaderSlotV1 qualifies an optional slot; a nil slot is admitted.
@@ -346,15 +341,12 @@ func (p *DirectRetainedProofV1) reportShapeV1(r *mdbx.TreeDeltaReportV1) bool {
 		validLogicalStateResidualEnvelope(c.BytesAfter, c.CountAfter) && retainedUndoShapeV1(r.Undo[0])
 }
 
-// retainedUndoShapeV1 bounds the sole record by the per-block envelope.
+// retainedUndoShapeV1 bounds the sole record by the per-block envelope; zero entries force zero bytes.
 func retainedUndoShapeV1(u mdbx.TreeUndoChargeV1) bool {
 	switch u.Effect {
 	case mdbx.TreeUndoFamilyNoneV1:
 		return u.Entries == 0 && u.Bytes == 0
 	case mdbx.TreeUndoFamilyWrittenV1, mdbx.TreeUndoFamilyKeptV1, mdbx.TreeUndoFamilyDeletedV1:
-		if u.Entries == 0 {
-			return u.Bytes == 0
-		}
 		return u.Entries <= 414634 && u.Bytes >= 56*u.Entries && u.Bytes <= 65596*u.Entries
 	}
 	return false
@@ -425,12 +417,12 @@ func retainedAddV1(v uint64, values ...uint64) (uint64, bool) {
 // ApplyDirectMDBX consumes the owned active attempt once, including one PlanDirectMDBX refused, with the raw native truth, stage, index and error the caller holds. Only the exact
 // accepted NEW/nil/CommitMayHaveCrossed/-1 tuple advances the cache; every other valid tuple invalidates, except that a trusted clean callback refusal keeps a cached completed pre tuple whose binding equals the one this attempt captured at its pre step; every refusal raised before that step captured no binding and invalidates even an equal-for-reuse cache.
 // cleanCallbackRefusal is the caller's witness, set only for an OLD/Prewrite/-1 error of its own callback refusal before Proof, after a usable callback-end binding, with a clean abort and no Reader or cleanup failure.
-// Misuse (a nil, copied, foreign, used or inactive proof, a tuple outside the native domain or an impossible nil-error tuple) is a local API failure and invalidates. Otherwise it returns nil: the tuple was
+// Misuse is a local API failure: a nil owner changes nothing; a nil, copied, foreign, used or inactive proof retires only the cache and its facts, leaving the active attempt and every proof unchanged; the active
+// attempt's own proof with a tuple outside the native domain also retires that attempt, unapplied, and with an impossible nil-error tuple it consumes the attempt and invalidates. Otherwise it returns nil: the tuple was
 // applied, not that the operation succeeded; it never returns, wraps or replaces nativeErr, and the caller maps the tuple it holds. It makes no Reader, account or native call.
 func (a *RetainedAccountingV1) ApplyDirectMDBX(p *DirectRetainedProofV1, truth mdbx.CommitTruth, stage mdbx.UpdateStage, index int, nativeErr error, cleanCallbackRefusal bool) error {
 	if a == nil || !a.ownsV1(p) || !retainedTupleDomainV1(truth, stage, index, nativeErr != nil) {
-		a.InvalidateV1()
-		return errRetainedApplyAPIV1
+		return a.misuseV1(p)
 	}
 	a.active, p.applied = nil, true
 	if nativeErr == nil {
@@ -440,6 +432,16 @@ func (a *RetainedAccountingV1) ApplyDirectMDBX(p *DirectRetainedProofV1, truth m
 		a.InvalidateV1()
 	}
 	return nil
+}
+
+// misuseV1 refuses a misused ApplyDirectMDBX call: a non-nil owner that does not own p retires only its cache and facts; otherwise it is InvalidateV1.
+func (a *RetainedAccountingV1) misuseV1(p *DirectRetainedProofV1) error {
+	if a != nil && !a.ownsV1(p) {
+		a.binding, a.exactRet, a.valid, a.complete = mdbx.MutationBindingV1{}, 0, false, [2]retainedCompleteV1{}
+		return errRetainedApplyAPIV1
+	}
+	a.InvalidateV1()
+	return errRetainedApplyAPIV1
 }
 
 func (a *RetainedAccountingV1) ownsV1(p *DirectRetainedProofV1) bool {
@@ -1044,10 +1046,9 @@ func retainedPrefixV1(o, p mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1,
 
 // retainedSumV1 adds n to the proof's add or remove scalar with checked arithmetic.
 func retainedSumV1(dst *uint64, n uint64) error {
-	v, ok := retainedAddV1(*dst, n)
-	if !ok {
-		return errRetainedProofCapacity
+	if v, ok := retainedAddV1(*dst, n); ok {
+		*dst = v
+		return nil
 	}
-	*dst = v
-	return nil
+	return errRetainedProofCapacity
 }
