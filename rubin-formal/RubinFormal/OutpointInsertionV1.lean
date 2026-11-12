@@ -347,15 +347,16 @@ theorem mem_tids {tid : Core → Nat} {A : List Applied} {a : Applied} (ha : a �
 /-- An earlier effect does not have the outpoint of a later insertion. -/
 def EffRel (x y : Effect) : Prop := ∀ op w, y = .ins op w → x.op ≠ op
 
-/-- What the run keeps about its applied list and effects. -/
+/-- What the run keeps about its applied list and effects while that list satisfies
+`Consistent` (`runFrom_good`). -/
 structure Good (tid : Core → Nat) (A : List Applied) (E : List Effect) : Prop where
   nodup : (tids tid A).Pairwise (· ≠ ·)
   old : ∀ e ∈ E, e.op.1 ∈ tids tid A
   insFalse : ∀ op w, Effect.ins op w ∈ E → w = false
   rel : E.Pairwise EffRel
 
-/-- What the run keeps about the current state; `bound` exceeds every applied coinbase
-locktime. -/
+/-- What the run keeps about the current state while its applied list satisfies `Consistent`;
+`bound` exceeds every applied coinbase locktime. -/
 structure SInv (tid : Core → Nat) (A : List Applied) (s : State) (bound : Nat) : Prop where
   present : ∀ op ∈ s, op.1 ∈ tids tid A
   spent : ∀ a ∈ A, a.core.nonce ≠ 0 → ∀ op ∈ a.core.inputs, op ∉ s ∧ op.1 ∈ tids tid A
@@ -427,7 +428,8 @@ theorem good_step {tid : Core → Nat} {A : List Applied} {E : List Effect} {a :
       · exact cross_fresh (fun x hx => (hP x hx).1) hfresh hK
     · exact cross_fresh hg.old hfresh hPK
 
-/-- The identifier of an applied transaction at an index above 0 is fresh. -/
+/-- From a state with `SInv`, a transaction at an index above 0 that passes `spendOk` has a
+fresh identifier when the applied list extended by it satisfies `Consistent`. -/
 theorem spend_fresh {tid : Core → Nat} {A : List Applied} {s : State} {b : Nat} {a : Applied}
     {rest : List Applied} (hs : SInv tid A s b) (hok : spendOk s a.core = true)
     (hc : Consistent tid (A ++ a :: rest)) : tid a.core ∉ tids tid A := by
@@ -443,7 +445,8 @@ theorem spend_fresh {tid : Core → Nat} {A : List Applied} {s : State} {b : Nat
     have := hs.spent e he (hcore ▸ hn) op (hcore ▸ hin)
     exact this.1 (hall op hin)
 
-/-- The identifier of an applied coinbase is fresh. -/
+/-- From a state with `SInv` at bound `h`, a transaction with nonce 0 and locktime `h` has a
+fresh identifier when the applied list extended by it satisfies `Consistent`. -/
 theorem cb_fresh {tid : Core → Nat} {A : List Applied} {s : State} {h : Nat} {a : Applied}
     {rest : List Applied} (hs : SInv tid A s h) (hn : a.core.nonce = 0)
     (hl : a.core.locktime = h) (hc : Consistent tid (A ++ a :: rest)) :
@@ -1099,9 +1102,11 @@ theorem applyChain_prefix (tid : Core → Nat) (chain : Chain) (j : Nat) :
 
 /-! ## Registered theorem -/
 
-/-- The bounded model's contract: (a) and (b) under the premise (which covers a chain whose
-every block is valid as a special case),
-(c) the premise break, (d) to (f) the event-order classifier, (g) the composition. -/
+/-- The bounded model's contract: (a) and (b) under `Premise`, with no hypothesis on the block
+results; (c) the premise break, (d) to (f) the event-order classifier, (g) the composition.
+A chain whose every `applyChain` result is `valid` satisfies `Premise`, since by (c) a premise
+break gives `noResult` to a block of the chain, so (a) and (b) cover it. A chain whose every
+`runBase` result is `valid` need not satisfy `Premise` (the T9 example). -/
 theorem outpoint_insertion_contract (tid : Core → Nat) (chain : Chain) (r : BlockResult)
     (h : Nat) (ins resolved : List Outpoint) (es : List Event) :
     -- (a)
@@ -1254,6 +1259,12 @@ under the injective `tidA` is `invalid`. -/
 example : applyChain tidA [[cbTx c0], [cbTx c1, spTx sR, spTx c1]] =
     [.valid [(1, 0)], .invalid] := by decide
 
+/-- T6: in the same block `s1` inserts `(6, 1)` and `s2` removes it; `s1` applied again, which
+would insert `(6, 1)` again, is `invalid` under the injective `tidA`: its first application
+removed its input `(1, 0)` (`R1`). -/
+example : applyChain tidA [[cbTx c0], [cbTx c1, spTx s1, spTx s2, spTx s1]] =
+    [.valid [(1, 0)], .invalid] := by decide
+
 /-- T7: output 0 non-spendable, output 1 spendable: the key has output index 1. -/
 example : runBase tidA [[cbTx c7]] = ([.valid [(10, 1)]], [⟨0, 0, c7⟩], [.ins (10, 1) false]) := by
   decide
@@ -1376,11 +1387,13 @@ example : spendKeys tidB c1 = [(2, 0)] := by decide
 
 /-- S17: the S1 sequence alone gives a failed check. -/
 example : insertionFinding 1 (spendKeys tidB c1) []
-    [.parentEntry .derivation (2, 0) .keyed false] = some .failedCheck := by decide
+    [.parentEntry .derivation (2, 0) .keyed false, .consume .derivation] = some .failedCheck := by
+  decide
 
-/-- S17: with the `noResult` of block 1 there is no outcome. -/
+/-- S17: with the `noResult` of block 1 the S1 sequence has no outcome. -/
 example : storeOutcome ((applyChain tidB t8).getD 1 .invalid) 1 (spendKeys tidB c1) []
-    [.parentEntry .derivation (2, 0) .keyed false] = .noOutcome := by decide
+    [.parentEntry .derivation (2, 0) .keyed false, .consume .derivation] = .noOutcome := by
+  decide
 
 /-- S17: with the `valid` result of block 0 the empty sequence gives no finding. -/
 example : storeOutcome ((applyChain tidB t8).getD 0 .invalid) 0 (spendKeys tidB c0) [] [] =
