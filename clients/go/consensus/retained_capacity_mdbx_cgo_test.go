@@ -351,7 +351,7 @@ func retainedCapacityApplyMatrixV1(t *testing.T) {
 	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); err != nil || !retainedCapacityClearedV1(a) || a.active != nil {
 		t.Fatalf("non-reusable success: %v valid=%v", err, a.valid)
 	}
-	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); !errors.Is(err, errRetainedApplyAPIV1) {
+	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); !errors.Is(err, errRetainedApplyAPIV1) || !retainedCapacityClearedV1(a) {
 		t.Fatalf("used token: %v", err)
 	}
 	// T8: the exact success tuple without this attempt's accepted Proof is the
@@ -557,7 +557,7 @@ func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 		}
 		cold := a.exactRet
 		a.exactRet++
-		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, c.clean); err != nil || a.valid != c.clean {
+		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, c.clean); err != nil || a.valid != c.clean || !c.clean && !retainedCapacityClearedV1(a) {
 			t.Fatalf("%s clean witness lost completed pre: %v", c.name, err)
 		}
 		want, dst := cold, &DirectRetainedProofV1{}

@@ -688,7 +688,7 @@ func retainedCapacityCallbackRefusalV1(t *testing.T) {
 		if !retainedCapacitySameErrV1(res.err, refuse) || !dst.prepared || dst.entered || dst.pre != 1077 || a.active != dst || !a.valid {
 			t.Fatalf("clean=%v refusal: %v prepared=%v entered=%v pre=%d", clean, res.err, dst.prepared, dst.entered, dst.pre)
 		}
-		if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, clean); err != nil || a.active != nil || !dst.applied || a.valid != clean {
+		if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, clean); err != nil || a.active != nil || !dst.applied || a.valid != clean || !clean && (a.exactRet != 0 || a.binding != (mdbx.MutationBindingV1{})) {
 			t.Fatalf("clean=%v apply: %v valid=%v", clean, err, a.valid)
 		}
 		if !clean {
@@ -896,7 +896,7 @@ func retainedCapacityForwardedV1(t *testing.T, a *RetainedAccountingV1, dst *Dir
 	if dst.prepared || dst.entered || a.active != dst || a.valid || dst.pre != 0 || dst.add != 0 || dst.remove != 0 {
 		t.Fatalf("forwarded first result: prepared=%v entered=%v valid=%v pre=%d", dst.prepared, dst.entered, a.valid, dst.pre)
 	}
-	if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, true); err != nil || a.valid || a.active != nil || !dst.applied {
+	if err := a.ApplyDirectMDBX(dst, res.truth, res.stage, res.index, res.err, true); err != nil || a.valid || a.exactRet != 0 || a.binding != (mdbx.MutationBindingV1{}) || a.active != nil || !dst.applied {
 		t.Fatalf("apply forwarded: %v valid=%v", err, a.valid)
 	}
 }
