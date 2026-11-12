@@ -198,10 +198,10 @@ func TestPrunedTreeProfileConsultedList(t *testing.T) {
 		want := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: dbis[0], Key: []byte{0x02}, BeforePresent: true, AfterKind: AfterLiteral, Literal: encoded}}, Consulted: consulted}}
 		mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(account *OperationAccount) error {
 			return sc.s.View(func(r *Reader) error {
-				decision, planned := "", (*TreeAuthorityV1)(nil)
-				op, err := prunedTreePlan(account, true, row.tip, &decision, &planned, errors.New("stale"))(r)
-				if err != nil || decision != "" || !reflect.DeepEqual(op, want) {
-					t.Fatalf("D13 %s operation %+v (%v %q), want %+v", row.name, op, err, decision, want)
+				var run prunedTreeRun
+				op, err := prunedTreePlan(account, true, row.tip, &run, errors.New("stale"))(r)
+				if err != nil || run.decision != "" || !reflect.DeepEqual(op, want) {
+					t.Fatalf("D13 %s operation %+v (%v %q), want %+v", row.name, op, err, run.decision, want)
 				}
 				return nil
 			})

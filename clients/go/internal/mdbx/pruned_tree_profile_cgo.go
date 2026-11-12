@@ -105,21 +105,26 @@ func (s *Store) SelectPrunedTreeProfileV1(confirmed bool, expectedTip *Authority
 		tip = &copied
 	}
 	sentinel := errors.New("pruned tree profile decision")
-	var decision string
-	var planned *TreeAuthorityV1
+	var run prunedTreeRun
 	out.Err = reservations.WithOperation(LaneOperation, func(account *OperationAccount) error {
 		var err error
-		out.Truth, out.Stage, _, err = s.UpdateTreeV1(account, prunedTreePlan(account, confirmed, tip, &decision, &planned, sentinel))
+		out.Truth, out.Stage, _, err = s.UpdateTreeV1(account, prunedTreePlan(account, confirmed, tip, &run, sentinel))
 		return err
 	})
-	return prunedTreeOutcome(out, planned, decision, sentinel)
+	return prunedTreeOutcome(out, run.planned, run.decision, sentinel)
+}
+
+// prunedTreeRun holds the decision and planned envelope one call's callback sets.
+type prunedTreeRun struct {
+	decision string
+	planned  *TreeAuthorityV1
 }
 
 // prunedTreePlan returns the callback SelectPrunedTreeProfileV1 passes to
 // UpdateTreeV1 unwrapped, so the operation it returns is the one the engine receives.
-func prunedTreePlan(account *OperationAccount, confirmed bool, tip *AuthorityPointV1, decision *string, planned **TreeAuthorityV1, sentinel error) func(*Reader) (TreeOperationV1, error) {
+func prunedTreePlan(account *OperationAccount, confirmed bool, tip *AuthorityPointV1, run *prunedTreeRun, sentinel error) func(*Reader) (TreeOperationV1, error) {
 	return func(reader *Reader) (op TreeOperationV1, err error) {
-		op, *planned, err = prunedTreeCompose(reader, account, confirmed, tip, decision, sentinel)
+		op, run.planned, err = prunedTreeCompose(reader, account, confirmed, tip, &run.decision, sentinel)
 		return op, err
 	}
 }
