@@ -423,15 +423,12 @@ func retainedAddV1(v uint64, values ...uint64) (uint64, bool) {
 }
 
 // ApplyDirectMDBX consumes the owned active attempt once, including one PlanDirectMDBX refused, with the raw native truth, stage, index and error the caller holds. Only the exact
-// accepted NEW/nil/CommitMayHaveCrossed/-1 tuple advances the cache; every other valid tuple invalidates, except that a trusted clean callback refusal keeps a cached completed pre tuple whose binding equals the one this attempt captured at its pre step; a refusal raised before that step (op-only, initializer, planned-decode or Pair/source relation) has no such binding and invalidates even an equal-for-reuse cache.
+// accepted NEW/nil/CommitMayHaveCrossed/-1 tuple advances the cache; every other valid tuple invalidates, except that a trusted clean callback refusal keeps a cached completed pre tuple whose binding equals the one this attempt captured at its pre step; every refusal raised before that step captured no binding and invalidates even an equal-for-reuse cache.
 // cleanCallbackRefusal is the caller's witness, set only for an OLD/Prewrite/-1 error of its own callback refusal before Proof, after a usable callback-end binding, with a clean abort and no Reader or cleanup failure.
 // Misuse (a nil, copied, foreign, used or inactive proof, a tuple outside the native domain or an impossible nil-error tuple) is a local API failure and invalidates. Otherwise it returns nil: the tuple was
 // applied, not that the operation succeeded; it never returns, wraps or replaces nativeErr, and the caller maps the tuple it holds. It makes no Reader, account or native call.
 func (a *RetainedAccountingV1) ApplyDirectMDBX(p *DirectRetainedProofV1, truth mdbx.CommitTruth, stage mdbx.UpdateStage, index int, nativeErr error, cleanCallbackRefusal bool) error {
-	if a == nil {
-		return errRetainedApplyAPIV1
-	}
-	if !a.ownsV1(p) || !retainedTupleDomainV1(truth, stage, index, nativeErr != nil) {
+	if a == nil || !a.ownsV1(p) || !retainedTupleDomainV1(truth, stage, index, nativeErr != nil) {
 		a.InvalidateV1()
 		return errRetainedApplyAPIV1
 	}
@@ -610,47 +607,45 @@ func (f *retainedFiniteV1) deletedV1(hash [32]byte, upto int) uint8 {
 	return bits
 }
 
-// obsoleteV1 returns every kind bit when an obsolete generation projects
-// hash in OLD: a healthy header names its parent, then the producer's earlier
-// membership rule takes a positive own forward with that parent despite a
-// FALSE fact and excludes it only under a TRUE fact (FALSE is branch_data).
-// A header read error takes OLD's canonical header duty, as projectedV1 does.
-func (f *retainedFiniteV1) obsoleteV1(old retainedArtifactV1) (uint8, error) {
-	header, present, err := f.read.headerV1(old.hash)
-	if err != nil {
-		return 0, retainedSourceV1(err, old.required&1 != 0)
+// obsoleteV1 returns OLD's obsolete projection of hash as the producer's item of its first projecting generation: a healthy header names its parent,
+// the producer's earlier membership rule, one generation at a time, takes a positive own forward with that parent despite a FALSE fact and excludes it only
+// under a TRUE fact (FALSE is branch_data); the item takes that generation and the reverse height. A header read error takes OLD's canonical header duty, as projectedV1 does.
+func (f *retainedFiniteV1) obsoleteV1(old retainedArtifactV1) (retainedArtifactV1, error) {
+	header, _, err := f.read.headerV1(old.hash)
+	if err != nil || !retainedHeaderV1(header, retainedArtifactV1{hash: old.hash}) {
+		return retainedArtifactV1{}, retainedSourceV1(err, old.required&1 != 0)
 	}
-	k := retainedArtifactV1{hash: old.hash, generation: f.read.roles[0].generation}
-	if !present || len(header) != 148 || !retainedHeaderV1(header, retainedArtifactV1{hash: old.hash}) {
-		return 0, nil
+	k := retainedArtifactV1{hash: old.hash, parent: [32]byte(header[4:36]), generation: f.read.roles[0].generation}
+	for _, fact := range f.proof.complete[:min(retainedCountV1(f.read.authority.Authority, mdbx.CleanupSpanGenerationV1), 2)] {
+		w := retainedWalkV1{read: f.read, pre: retainedPreImageV1{complete: [2]retainedCompleteV1{fact}}}
+		found, err := w.earlierV1(1, k)
+		if err != nil {
+			return retainedArtifactV1{}, err
+		}
+		if found {
+			k.height, _, err = f.read.reverseV1(fact.generation, k.hash)
+			k.generation, k.bits = fact.generation, 7
+			return k, err
+		}
 	}
-	k.parent = [32]byte(header[4:36])
-	w := retainedWalkV1{read: f.read, pre: retainedPreImageV1{complete: f.proof.complete}}
-	found, err := w.earlierV1(min(retainedCountV1(f.read.authority.Authority, mdbx.CleanupSpanGenerationV1), 2), k)
-	if err != nil || !found {
-		return 0, err
-	}
-	return 7, nil
+	return retainedArtifactV1{}, nil
 }
 
-// unionsV1 settles the OLD and planned unions from their seeds and adds the
-// obsolete projection, which owns every kind. Obsolete namespaces are
-// untouched and the Pair changes no header but a deleted one and x's, whose
-// planned keep owns every kind, so the planned image keeps OLD's projection
-// unless the Pair deletes the header it needs (MP 1717, 2550-2557).
-func (f *retainedFiniteV1) unionsV1(old, planned retainedArtifactV1, deleted uint8) (retainedArtifactV1, retainedArtifactV1, error) {
-	old, err := f.read.unionV1(old)
-	if err != nil {
+// unionsV1 settles the OLD and planned owners from their seeds and adds the
+// obsolete projection as the last owner. Obsolete namespaces are untouched and
+// the Pair changes no header but a deleted one and x's, whose planned keep owns
+// every kind, so the planned image keeps OLD's projection unless the Pair
+// deletes the header it needs (MP 1717, 2550-2557).
+func (f *retainedFiniteV1) unionsV1(oldK, plannedK retainedArtifactV1, deleted uint8) (old, planned retainedOwnersV1, err error) {
+	if old, err = f.read.unionV1(oldK); err != nil {
 		return old, planned, err
 	}
-	planned, err = f.plannedOwnersV1(planned)
-	if err != nil {
+	if planned, err = f.plannedOwnersV1(plannedK); err != nil {
 		return old, planned, err
 	}
-	ob, err := f.obsoleteV1(old)
-	old.bits |= ob
+	old[2], err = f.obsoleteV1(oldK)
 	if deleted&1 == 0 {
-		planned.bits |= ob
+		planned[2] = old[2]
 	}
 	return old, planned, err
 }
@@ -677,47 +672,54 @@ func (read *retainedReadV1) keepV1(k retainedArtifactV1) retainedArtifactV1 {
 	return k
 }
 
-// unionV1 adds the optional owners of k.hash in read.authority order; it
-// stops once header and body, the only optional kinds, are owned.
-func (read *retainedReadV1) unionV1(k retainedArtifactV1) (retainedArtifactV1, error) {
-	for at := uint64(0); k.bits&3 != 3 && at < 1440; at++ {
-		item, present, err := read.optionalAtV1(at)
-		if err != nil || !present {
-			return k, err
-		}
-		if item.hash == k.hash {
-			k = retainedMergeV1(k, item)
+// retainedOwnersV1 is an identity's canonical point, first optional owner and
+// obsolete projection in owner priority; each kind is charged at its first
+// owner with that owner's fields, as the producer's walk charges it.
+type retainedOwnersV1 [3]retainedArtifactV1
+
+func (o *retainedOwnersV1) atV1(bit uint8) retainedArtifactV1 {
+	for _, k := range o {
+		if k.bits&bit != 0 {
+			return k
 		}
 	}
-	return k, nil
+	return retainedArtifactV1{}
 }
 
-func retainedMergeV1(k, item retainedArtifactV1) retainedArtifactV1 {
-	if k.bits == 0 {
-		return item
+func (o *retainedOwnersV1) bitsV1() uint8 { return o[0].bits | o[1].bits | o[2].bits }
+
+// unionV1 adds the first optional owner of k.hash in read.authority order, which owns every kind a later one does;
+// it stops once header and body, the only optional kinds, are owned.
+func (read *retainedReadV1) unionV1(k retainedArtifactV1) (retainedOwnersV1, error) {
+	u := retainedOwnersV1{k}
+	for at := uint64(0); u.bitsV1()&3 != 3 && at < 1440; at++ {
+		item, present, err := read.optionalAtV1(at)
+		if err != nil || !present {
+			return u, err
+		}
+		if item.hash == k.hash && u[1].bits == 0 {
+			u[1] = item
+		}
 	}
-	k.bits |= item.bits
-	k.selected = k.selected || item.selected
-	return k
+	return u, nil
 }
 
 // plannedOwnersV1 settles the planned union of an identity: its canonical
 // point under the planned keep and its planned optional owners.
-func (f *retainedFiniteV1) plannedOwnersV1(k retainedArtifactV1) (retainedArtifactV1, error) {
+func (f *retainedFiniteV1) plannedOwnersV1(k retainedArtifactV1) (u retainedOwnersV1, err error) {
 	if !f.changedV1() {
 		return f.read.plannedUnionV1(k)
 	}
-	err := f.exchangeV1(func() error {
-		var err error
-		k, err = f.read.plannedUnionV1(k)
+	err = f.exchangeV1(func() error {
+		u, err = f.read.plannedUnionV1(k)
 		return err
 	})
-	return k, err
+	return u, err
 }
 
 // plannedUnionV1 applies read.authority's keep to a canonical point, then
 // adds its optional owners.
-func (read *retainedReadV1) plannedUnionV1(k retainedArtifactV1) (retainedArtifactV1, error) {
+func (read *retainedReadV1) plannedUnionV1(k retainedArtifactV1) (retainedOwnersV1, error) {
 	if k.required&1 != 0 {
 		k = read.keepV1(k)
 	}
@@ -744,21 +746,21 @@ func (f *retainedFiniteV1) settleXV1(x retainedArtifactV1) error {
 	if err := f.proof.undoChargeV1(f.read); err != nil {
 		return err
 	}
-	f.proof.undo.oldOwned, f.proof.undo.postOwned = old.bits&4 != 0, planned.bits&4 != 0
+	f.proof.undo.oldOwned, f.proof.undo.postOwned = old.bitsV1()&4 != 0, planned.bitsV1()&4 != 0
 	return nil
 }
 
 // bodyXV1 settles x's body: a BodyKind 1 literal never rewrites an owned
 // body; a stored body follows the union.
-func (f *retainedFiniteV1) bodyXV1(old, planned retainedArtifactV1) error {
+func (f *retainedFiniteV1) bodyXV1(old, planned retainedOwnersV1) error {
 	c := f.op.Primitives[0].Coverage
 	if c.BodyKind != 1 {
 		return f.chargeV1(old, planned, 2, 0)
 	}
-	if old.bits&2 != 0 {
+	if old.bitsV1()&2 != 0 {
 		return errRetainedFiniteAPIV1
 	}
-	if planned.bits&2 != 0 {
+	if planned.bitsV1()&2 != 0 {
 		return retainedSumV1(&f.proof.add, uint64(len(c.CurrentBody)))
 	}
 	return nil
@@ -787,19 +789,19 @@ func retainedEOwnedV1(k retainedArtifactV1, bit uint8) bool {
 	return k.bits&bit != 0 && (bit != 1 || k.required&1 == 0)
 }
 
-// chargeV1 removes or adds one kind's actual OLD bytes when its E ownership
-// changes; a deleted row may not stay owned.
-func (f *retainedFiniteV1) chargeV1(old, planned retainedArtifactV1, bit, deleted uint8) error {
-	o, p := retainedEOwnedV1(old, bit), retainedEOwnedV1(planned, bit)
-	if deleted&bit != 0 && planned.bits&bit != 0 {
+// chargeV1 removes or adds one kind's actual OLD bytes at its first OLD or
+// planned owner when its E ownership changes; a deleted row may not stay owned.
+func (f *retainedFiniteV1) chargeV1(old, planned retainedOwnersV1, bit, deleted uint8) error {
+	o, p := retainedEOwnedV1(old.atV1(bit), bit), retainedEOwnedV1(planned.atV1(bit), bit)
+	if deleted&bit != 0 && planned.bitsV1()&bit != 0 {
 		return errRetainedFiniteAPIV1
 	}
 	if o == p {
 		return nil
 	}
-	item := planned
+	item := planned.atV1(bit)
 	if o {
-		item = old
+		item = old.atV1(bit)
 	}
 	item.bits, item.required = bit, item.required&bit
 	w := retainedWalkV1{read: f.read}
@@ -991,8 +993,7 @@ func (f *retainedFiniteV1) spansV1(kind mdbx.CleanupSpanKindV1) bool {
 	}
 	u := mdbx.CleanupSpanV1{Kind: kind, GenerationID: f.read.roles[0].generation, FirstHeight: o.U, NextHeight: o.U, LastHeight: p.U - 1}
 	if np == no+1 {
-		last := retainedNthV1(p, kind, no)
-		return last == u && retainedPrefixV1(o, p, kind, no)
+		return retainedNthV1(p, kind, no) == u && retainedPrefixV1(o, p, kind, no)
 	}
 	return retainedExtendedV1(o, p, u, no, np)
 }
@@ -1003,10 +1004,9 @@ func retainedExtendedV1(o, p mdbx.StorageAuthorityV1, u mdbx.CleanupSpanV1, no, 
 		return false
 	}
 	e := retainedNthV1(o, u.Kind, no-1)
-	t := retainedNthV1(p, u.Kind, no-1)
 	ok := e.LastHeight+1 == u.FirstHeight && e.GenerationID == u.GenerationID
 	e.LastHeight = u.LastHeight
-	return ok && e == t
+	return ok && e == retainedNthV1(p, u.Kind, no-1)
 }
 
 func retainedCountV1(a mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1) int {
@@ -1035,9 +1035,7 @@ func retainedNthV1(a mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1, i int
 
 func retainedPrefixV1(o, p mdbx.StorageAuthorityV1, kind mdbx.CleanupSpanKindV1, n int) bool {
 	for i := 0; i < n; i++ {
-		a := retainedNthV1(o, kind, i)
-		b := retainedNthV1(p, kind, i)
-		if a != b {
+		if retainedNthV1(o, kind, i) != retainedNthV1(p, kind, i) {
 			return false
 		}
 	}
