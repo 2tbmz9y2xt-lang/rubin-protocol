@@ -171,7 +171,8 @@ func TestPrunedTreeProfileConsulted(t *testing.T) {
 // TestPrunedTreeProfileConsultedList pins D13's Consulted list exactly: the plan
 // built on the A9 and A6 scenes equals the LAG binding key written as a literal
 // followed, on A6, by the tip row key the scene seeded (HeightKey of the tip), so
-// an extra, missing or reordered row fails here.
+// an extra, missing or reordered row fails here; Mutations must be exactly the
+// one envelope row at key 0x02.
 func TestPrunedTreeProfileConsultedList(t *testing.T) {
 	dbis := TreeSchemaV1DBIs()
 	for _, row := range []struct {
@@ -193,6 +194,9 @@ func TestPrunedTreeProfileConsultedList(t *testing.T) {
 			op, err := prunedTreeOperation(r, &a, row.tip, &decision, errors.New("stale"))
 			if err != nil || !reflect.DeepEqual(op.Pair.Consulted, want) {
 				t.Fatalf("D13 %s consulted %+v (%v)", row.name, op.Pair.Consulted, err)
+			}
+			if m := op.Pair.Mutations; len(m) != 1 || m[0].DBI != dbis[0] || !bytes.Equal(m[0].Key, []byte{0x02}) || !m[0].BeforePresent || m[0].AfterKind != AfterLiteral || len(m[0].Literal) == 0 {
+				t.Fatalf("D13 %s mutations %+v", row.name, m)
 			}
 			return nil
 		}))

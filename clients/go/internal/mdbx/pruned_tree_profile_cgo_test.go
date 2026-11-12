@@ -6,6 +6,9 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/binary"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"reflect"
 	"testing"
 )
@@ -397,4 +400,64 @@ func TestPrunedTreeProfileSizeBound(t *testing.T) {
 		}
 		prunedTreeOpenUnchanged(t, s, before, "R11 size bound")
 	}
+}
+
+// TestPrunedTreeProfileChargeSpan is D6's source-structure evidence: in
+// pruned_tree_profile_cgo.go the plan steps (D7 tip witness and suffix page, D8
+// binding read, D9/D12 checks and Encode) are reached only through
+// prunedTreeOperation, and prunedTreeOperation is called only inside the
+// WithReservation callback of prunedTreeCompose, so the 1000-byte charge is held
+// until every plan step has returned.
+func TestPrunedTreeProfileChargeSpan(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "pruned_tree_profile_cgo.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sites := map[string][]string{}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Body != nil {
+			prunedTreeCallSites(fn.Name.Name, fn.Body, sites)
+		}
+	}
+	want := map[string][]string{
+		"prunedTreeOperation":   {"prunedTreeCompose/WithReservation"},
+		"prunedTreeTip":         {"prunedTreeOperation"},
+		"prunedTreeBodyLimit":   {"prunedTreeOperation"},
+		"prunedTreeReplacement": {"prunedTreeOperation"},
+		"Encode":                {"prunedTreeReplacement"},
+	}
+	for name, at := range want {
+		if !reflect.DeepEqual(sites[name], at) {
+			t.Fatalf("D6 %s called at %v, want %v", name, sites[name], at)
+		}
+	}
+}
+
+// prunedTreeCallSites records, per called name, the enclosing function, marking
+// calls inside a WithReservation callback literal with a /WithReservation suffix.
+func prunedTreeCallSites(owner string, body ast.Node, sites map[string][]string) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name := prunedTreeCallName(call.Fun)
+		if name == "WithReservation" && len(call.Args) == 2 {
+			prunedTreeCallSites(owner+"/WithReservation", call.Args[1], sites)
+			return false
+		}
+		sites[name] = append(sites[name], owner)
+		return true
+	})
+}
+
+func prunedTreeCallName(fun ast.Expr) string {
+	switch f := fun.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	}
+	return ""
 }
