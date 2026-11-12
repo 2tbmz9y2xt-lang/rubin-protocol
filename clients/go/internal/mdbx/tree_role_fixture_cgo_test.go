@@ -1109,6 +1109,7 @@ func treeRoleAdmissionReadsV1(t *testing.T) {
 // site (contract ledger: binding image 328, counter 16, node 140, point 65560,
 // evidence 1048576): a stored value one byte longer keeps the site's public
 // result and read census, and the read path never borrows it above the bound.
+// A legal value of exactly the point or evidence bound is still read in full.
 func treeRoleOverBoundV1(t *testing.T) {
 	s, _, o := tsNew(t)
 	topLeaf := func(g uint64) [2]any { return treeRoleNodeSiteV1(g, 288, testKA) }
@@ -1118,43 +1119,73 @@ func treeRoleOverBoundV1(t *testing.T) {
 		bound    int
 		position TreeRolePositionV1
 		gets     [3]uint64
+		value    []byte
+		finding  TreeRoleFindingV1
 	}{
-		{"binding-329", func(g uint64) [2]any { return [2]any{uint8(0), tsRootKey(g)} }, 328, TreeRoleAtBindingV1, [3]uint64{1, 0, 0}},
-		{"counter-17", func(g uint64) [2]any { return [2]any{uint8(0), tsCounterKey(g)} }, 16, TreeRoleAtCounterV1, [3]uint64{2, 0, 0}},
-		{"node-141", topLeaf, 140, TreeRoleAtTopV1, [3]uint64{2, 1, 0}},
-		{"point-65561", func(g uint64) [2]any { return treeRolePointSiteV1(g, testKA) }, 65560, TreeRoleAtZeroPointV1, [3]uint64{2, 1, 1}},
+		{"binding-329", func(g uint64) [2]any { return [2]any{uint8(0), tsRootKey(g)} }, 328, TreeRoleAtBindingV1, [3]uint64{1, 0, 0}, nil, 0},
+		{"counter-17", func(g uint64) [2]any { return [2]any{uint8(0), tsCounterKey(g)} }, 16, TreeRoleAtCounterV1, [3]uint64{2, 0, 0}, nil, 0},
+		{"node-141", topLeaf, 140, TreeRoleAtTopV1, [3]uint64{2, 1, 0}, nil, 0},
+		{"point-65561", func(g uint64) [2]any { return treeRolePointSiteV1(g, testKA) }, 65560, TreeRoleAtZeroPointV1, [3]uint64{2, 1, 1}, nil, 0},
+		{"point-at-65560", func(g uint64) [2]any { return treeRolePointSiteV1(g, testKA) }, 65560, TreeRoleAtZeroPointV1, [3]uint64{2, 1, 1}, tdFormed(tdFrame(1, 0, make([]byte, 65536)), 1, 0), TreeRoleRelationFailedV1},
 	}
 	for i, row := range rows {
 		g := uint64(300 + i)
 		tr := treeRoleSeededV1(t, s, o, g, treeRoleAppliedV1, testKA)
-		treeRolePutV1(t, s, row.site(g), make([]byte, row.bound+1))
+		value, finding := make([]byte, row.bound+1), TreeRoleMalformedV1
+		if row.value != nil {
+			value, finding = row.value, row.finding
+		}
+		if len(value) != 65560 && row.value != nil {
+			t.Fatalf("at-bound point value has %d bytes", len(value))
+		}
+		treeRolePutV1(t, s, row.site(g), value)
 		t.Run(row.name, func(t *testing.T) {
 			e := treeRoleProbeV1(t, s, o, func(r *Reader, a *OperationAccount) {
 				bound, got := treeRoleObserveV1(t, r, a, treeRoleReqV1(treeRoleActiveV1(g, 2), TreeRoleCurrentV1), tr.binding.Endpoint, nil)
 				if bound.Status != TreeRoleBoundV1 {
 					got = bound
 				}
-				treeRoleWantPositiveV1(t, got, TreeRoleCurrentV1, g, row.position, TreeRoleMalformedV1)
+				treeRoleWantPositiveV1(t, got, TreeRoleCurrentV1, g, row.position, finding)
 			})
 			treeRoleWantGetsV1(t, e, row.gets[0], row.gets[1], row.gets[2])
 			treeRoleWantSpanV1(t, s, o, row.site(g), row.bound)
 		})
 	}
-	t.Run("evidence-1048577", func(t *testing.T) { treeRoleOverEvidenceV1(t, s, o) })
+	long := make([]byte, 1048577)
+	long[0] = 1
+	t.Run("evidence-1048577", func(t *testing.T) {
+		treeRoleOverEvidenceV1(t, s, o, 310, long, TreePairDefectiveV1, TreePairAffectedCurrentV1, TreePairEvidenceUnresolvedV1)
+	})
+	t.Run("evidence-at-1048576", func(t *testing.T) {
+		treeRoleOverEvidenceV1(t, s, o, 312, treeRoleEvidenceAtBoundV1(t), TreePairAssuranceOnlyV1, 0, 0)
+	})
+}
+
+// treeRoleEvidenceAtBoundV1 is a resolving evidence value of exactly 1048576
+// bytes: treeRoleImportV1's 53-byte header with a 1048523-byte payload.
+func treeRoleEvidenceAtBoundV1(t *testing.T) []byte {
+	database := testTreeHash(0x21)
+	value := append([]byte{1}, database[:]...)
+	value = binary.BigEndian.AppendUint64(value, 7)
+	value = binary.BigEndian.AppendUint64(value, 8)
+	value = binary.BigEndian.AppendUint32(value, 1048523)
+	value = append(value, make([]byte, 1048523)...)
+	if len(value) != 1048576 {
+		t.Fatalf("at-bound evidence value has %d bytes", len(value))
+	}
+	return value
 }
 
 // treeRoleOverEvidenceV1 is the evidence site: a C,F pair whose EvidenceID is
-// the SHA3-256 of a 1048577-byte value stays Defective, Affected Current,
-// Unresolved after its one evidence read.
-func treeRoleOverEvidenceV1(t *testing.T, s *Store, o *OperationReservationOwner) {
+// the SHA3-256 of value (generations g and g+1) has the given pair result
+// after its one evidence read.
+func treeRoleOverEvidenceV1(t *testing.T, s *Store, o *OperationReservationOwner, g uint64, value []byte, status TreePairStatusV1, affected TreePairAffectedV1, defect TreePairDefectV1) {
 	ref, _ := treeRoleImportV1(TreeOriginalCurrentV1, 8)
-	long := make([]byte, 1048577)
-	long[0] = 1
-	ref.EvidenceID = sha3.Sum256(long)
-	treeRoleEvidenceSeedV1(t, s, ref.EvidenceID, long)
-	treeRoleAssuredV1(t, s, o, 310, &ref)
-	treeRoleAssuredV1(t, s, o, 311, nil)
-	auth := treeRoleActiveV1(310, 311)
+	ref.EvidenceID = sha3.Sum256(value)
+	treeRoleEvidenceSeedV1(t, s, ref.EvidenceID, value)
+	treeRoleAssuredV1(t, s, o, g, &ref)
+	treeRoleAssuredV1(t, s, o, g+1, nil)
+	auth := treeRoleActiveV1(g, g+1)
 	e := treeRoleProbeV1(t, s, o, func(r *Reader, a *OperationAccount) {
 		c, err := r.ObserveTreeRoleBindingV1(a, treeRoleReqV1(auth, TreeRoleCurrentV1))
 		mustEnvironment(t, err)
@@ -1162,7 +1193,7 @@ func treeRoleOverEvidenceV1(t *testing.T, s *Store, o *OperationReservationOwner
 		mustEnvironment(t, err)
 		q, err := r.QualifyTreePairAssuranceV1(a, c, l)
 		mustEnvironment(t, err)
-		treeRoleWantPairV1(t, r, q, TreePairDefectiveV1, TreePairAffectedCurrentV1, TreePairEvidenceUnresolvedV1, c, l)
+		treeRoleWantPairV1(t, r, q, status, affected, defect, c, l)
 	})
 	treeRoleWantGetsV1(t, e, 3, 0, 0)
 	treeRoleWantSpanV1(t, s, o, [2]any{uint8(0), append([]byte{0x12}, ref.EvidenceID[:]...)}, 1048576)
