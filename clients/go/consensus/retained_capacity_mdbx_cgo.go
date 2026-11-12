@@ -10,10 +10,10 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
-// RetainedAccountingV1 is the dormant retained-accounting owner of ordinary
-// direct operations (RUBIN_COMPACT_BLOCKS.md Section 10). It caches only a
-// fully completed pre tuple bound to an exact reusable mutation binding.
-// It is noncopyable during use and is not safe for concurrent use.
+// RetainedAccountingV1 is the dormant retained-accounting owner of ordinary direct operations (RUBIN_COMPACT_BLOCKS.md Section 10). It caches only a fully completed pre
+// tuple bound to an exact reusable mutation binding. It is noncopyable during use and is not safe for concurrent use; the caller serializes its calls under its existing guard.
+// The caller derives its reservation owner limit from the same LimitsV1 value it passes to NewRetainedAccountingV1 (no method checks that equality) and gives each plan the one
+// direct operation's own account; it funds owner, proof, op and source backing before allocation and holds them until native cleanup and ApplyDirectMDBX or InvalidateV1, releasing them last.
 type RetainedAccountingV1 struct {
 	limits   LimitsV1
 	binding  mdbx.MutationBindingV1
@@ -29,8 +29,8 @@ type retainedUndoProjectionV1 struct {
 	oldOwned, postOwned bool
 }
 
-// DirectRetainedProofV1 is one owned direct attempt: the exact borrowed
-// operation, its captured roles and scalars and the sole undo projection.
+// DirectRetainedProofV1 is one owned direct attempt: the exact borrowed operation, its captured roles and scalars and the sole undo projection. It is noncopyable during use: the caller
+// passes a zero value by pointer to PlanDirectMDBX, sets op.Proof to its Proof (its own final validation may follow), keeps the input lifetimes UpdateTreeV1 and TreeOperationV1 document and submits exactly that op; no method detects a replaced op.
 type DirectRetainedProofV1 struct {
 	owner                                *RetainedAccountingV1
 	self                                 *DirectRetainedProofV1
@@ -53,12 +53,12 @@ var (
 	errRetainedProofCapacity       = retainedFailureV1("storage_capacity", errRetainedArithmetic)
 )
 
-// NewRetainedAccountingV1 copies limits and performs no native work.
+// NewRetainedAccountingV1 copies limits unchanged and performs no native work: it neither rejects nor clamps a small R or LRet<R, which the account precheck and Proof refuse.
 func NewRetainedAccountingV1(limits LimitsV1) *RetainedAccountingV1 {
 	return &RetainedAccountingV1{limits: limits}
 }
 
-// InvalidateV1 retires the cache, its facts and any active attempt.
+// InvalidateV1 retires the cache, its facts and any active attempt with no Reader, account or native work; the caller calls it on unwind and after any other successful mutation without an owned complete delta.
 func (a *RetainedAccountingV1) InvalidateV1() {
 	if a == nil {
 		return
@@ -66,9 +66,9 @@ func (a *RetainedAccountingV1) InvalidateV1() {
 	a.binding, a.exactRet, a.valid, a.complete, a.active = mdbx.MutationBindingV1{}, 0, false, [2]retainedCompleteV1{}, nil
 }
 
-// PlanDirectMDBX refuses invalid initial controls with no new attempt and no Reader work, then owns exactly one attempt that stays active with prepared=false on every later refusal.
-// Caller precondition (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.6): a non-nil op.HeaderSlot declares x=Primitives[0].Block the healthy bound SIDE-sourced candidate, header x unowned in OLD and Header
-// its body's first 148 bytes. Plan checks Hash==x==Coverage.Block and BodyKind 2, not the premise, on which it skips stored header x: 0 in Ret(pre), cached or cold, and 148 once in Ret(post).
+// PlanDirectMDBX refuses invalid initial controls with no new attempt, no Reader or account work and the cache and any active attempt unchanged, then owns exactly one attempt that stays active with prepared=false on every later refusal.
+// It adds at most one temporary 4480400-byte reservation on account, released before return; nil means a prepared proof that keeps only scalars and the op borrow; Pair.ContextConsulted is never read or charged. Caller precondition
+// (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.6): a non-nil op.HeaderSlot declares x=Primitives[0].Block the healthy bound SIDE-sourced candidate, header x unowned in OLD and Header its body's first 148 bytes. Plan checks Hash==x==Coverage.Block and BodyKind 2, not the premise, on which it skips stored header x: 0 in Ret(pre), cached or cold, and 148 once in Ret(post).
 func (a *RetainedAccountingV1) PlanDirectMDBX(dst *DirectRetainedProofV1, old *mdbx.Reader, account *mdbx.OperationAccount, op *mdbx.TreeOperationV1) error {
 	if err := a.initialV1(dst, old, account, op); err != nil {
 		return err
@@ -310,9 +310,9 @@ func retainedHeaderSlotV1(op *mdbx.TreeOperationV1) error {
 	return nil
 }
 
-// Proof reduces the native report against the captured finite delta. It makes
-// no Store, Reader or account call, allocates nothing and returns only
-// preinitialized errors.
+// Proof reduces the native report against the captured finite delta. It makes no Store, Reader or account call, allocates nothing, starts no goroutine, keeps no report reference and returns only preinitialized errors.
+// A nil, copied, inactive, unprepared, already entered or applied proof is a local API error; so is a nil report or one outside the direct shape (CURRENT present with this attempt's generation and before values and a valid after envelope, LAG all zero, exactly one bounded undo record).
+// It returns nil and marks the proof accepted only when the checked post plus R does not exceed LRet (equality fits); an underflow, overflow or excess is a storage_capacity error. Acceptance is not commit or publication success.
 func (p *DirectRetainedProofV1) Proof(report *mdbx.TreeDeltaReportV1) error {
 	if !p.callableV1() {
 		return errRetainedProofAPIV1
@@ -422,11 +422,11 @@ func retainedAddV1(v uint64, values ...uint64) (uint64, bool) {
 	return v, true
 }
 
-// ApplyDirectMDBX consumes the owned active attempt once. Only the exact
-// accepted NEW/nil/CommitMayHaveCrossed/-1 tuple advances the cache; every
-// other valid tuple invalidates unless a trusted clean callback refusal
-// preserves a completed same-binding pre tuple. Misuse is a local API failure
-// and invalidates. It makes no Reader, account or native call.
+// ApplyDirectMDBX consumes the owned active attempt once, including one PlanDirectMDBX refused, with the raw native truth, stage, index and error the caller holds. Only the exact
+// accepted NEW/nil/CommitMayHaveCrossed/-1 tuple advances the cache; every other valid tuple invalidates unless a trusted clean callback refusal preserves a completed same-binding pre tuple.
+// cleanCallbackRefusal is the caller's witness, set only for an OLD/Prewrite/-1 error of its own callback refusal before Proof, after a usable callback-end binding, with a clean abort and no Reader or cleanup failure.
+// Misuse (a nil, copied, foreign, used or inactive proof, a tuple outside the native domain or an impossible nil-error tuple) is a local API failure and invalidates. Otherwise it returns nil: the tuple was
+// applied, not that the operation succeeded; it never returns, wraps or replaces nativeErr, and the caller maps the tuple it holds. It makes no Reader, account or native call.
 func (a *RetainedAccountingV1) ApplyDirectMDBX(p *DirectRetainedProofV1, truth mdbx.CommitTruth, stage mdbx.UpdateStage, index int, nativeErr error, cleanCallbackRefusal bool) error {
 	if a == nil {
 		return errRetainedApplyAPIV1
