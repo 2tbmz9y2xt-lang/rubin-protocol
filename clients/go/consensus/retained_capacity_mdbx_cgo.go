@@ -542,10 +542,10 @@ func (f *retainedFiniteV1) pairV1() (retainedArtifactV1, error) {
 }
 
 // mutationV1 admits one mutation of the direct CURRENT domain and reports
-// whether it is x's CURRENT canonical index insert. A state, undo, tree-node
-// or counter/root row, which native admission refuses for every covered
-// direct op, and every other namespace, generation or SideLink effect is
-// refused as an unknown effect.
+// whether it is x's CURRENT canonical index insert. Every other row is an
+// unknown effect: a state, x-keyed undo, tree-node or CURRENT counter/root
+// row, which native admission refuses for every covered direct op, and every
+// other namespace, generation or SideLink effect.
 func (f *retainedFiniteV1) mutationV1(m *mdbx.Mutation) (bool, bool) {
 	switch m.DBI.Rank {
 	case 0:
