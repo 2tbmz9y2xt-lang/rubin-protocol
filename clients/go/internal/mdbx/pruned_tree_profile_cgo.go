@@ -47,11 +47,13 @@ type PrunedTreeProfileOutcomeV1 struct {
 // "STALE_LOCAL_PLAN". Index read errors are returned unchanged.
 //
 // The LAG root binding is read with ReadTreeRootBindingV1(LagGenerationID); its
-// read error is returned unchanged. A native read failure of the envelope,
-// index or binding read, whatever its engine class, and a raw tree integrity
-// error of one (a value outside its width bound, a decode failure, or a binding
-// whose DatabaseID differs from the store) are recorded on the Reader by that
-// read, so the Store is consumed.
+// read error is returned unchanged. Once its Reader-usability and request
+// checks pass, each read (ReadTreeAuthorityV1 for the envelope, Get for the tip
+// row, PrefixPage for the index suffix, ReadTreeRootBindingV1 for the binding)
+// records every error it returns on the Reader, so the Store is consumed: among
+// them any native failure, an invalid result shape, a stored key or value
+// outside its domain or width bound, an absence-census or decode failure, and a
+// binding whose DatabaseID differs from the store.
 //
 // Three routes return Integrity/get/MDBX_INVALID with the named diagnostic and
 // no cause, latched on the Reader so the Store is consumed:
