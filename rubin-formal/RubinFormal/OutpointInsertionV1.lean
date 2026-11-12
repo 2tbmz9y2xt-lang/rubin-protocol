@@ -172,10 +172,6 @@ def applyChain (tid : Core → Nat) (chain : Chain) : List BlockResult :=
   | none => (runBase tid chain).1
   | some k => (runBase tid chain).1.take k ++ List.replicate (chain.length - k) .noResult
 
-/-- One result per block and every result `valid`. -/
-def AllValid (tid : Core → Nat) (chain : Chain) : Prop :=
-  (applyChain tid chain).length = chain.length ∧ ∀ r ∈ applyChain tid chain, ∃ s, r = .valid s
-
 /-- The outpoints of the insertion effects, in order. -/
 def insOps (E : List Effect) : List Outpoint :=
   E.filterMap (fun e => match e with
@@ -231,7 +227,11 @@ def failsE4 (h : Nat) (ins resolved : List Outpoint) : Event → Bool
   | .parentLeaf .derivation op _ => inserted h ins resolved op
   | _ => false
 
-/-- The first event that is unavailable or fails decides; a consumption decides nothing. -/
+/-- The first event that is unavailable or fails E4 decides; a consumption decides nothing.
+Of the failed checks of the store this represents only the one that E4 adds: no other failed
+check is represented, `crossRowOk` enters no finding, and `none` means only that neither E4
+nor an unavailable read gives a finding. Where an unrepresented check fails, this value need
+not be the outcome that the specification gives. -/
 def insertionFinding (h : Nat) (ins resolved : List Outpoint) : List Event → Option Finding
   | [] => none
   | e :: es =>
@@ -239,7 +239,9 @@ def insertionFinding (h : Nat) (ins resolved : List Outpoint) : List Event → O
     else if failsE4 h ins resolved e then some .failedCheck
     else insertionFinding h ins resolved es
 
-/-- The outcome without E4. -/
+/-- The outcome without E4, as far as the model represents it: only an unavailable read.
+No failed check of the store is represented, so where one fails this value need not be the
+outcome that the specification gives. -/
 def baselineFinding (es : List Event) : Option Finding :=
   if Event.unavailable ∈ es then some .unavailableRead else none
 
@@ -1097,15 +1099,16 @@ theorem applyChain_prefix (tid : Core → Nat) (chain : Chain) (j : Nat) :
 
 /-! ## Registered theorem -/
 
-/-- The bounded model's contract: (a) and (b) under the premise and all-valid hypotheses,
+/-- The bounded model's contract: (a) and (b) under the premise (which covers a chain whose
+every block is valid as a special case),
 (c) the premise break, (d) to (f) the event-order classifier, (g) the composition. -/
 theorem outpoint_insertion_contract (tid : Core → Nat) (chain : Chain) (r : BlockResult)
     (h : Nat) (ins resolved : List Outpoint) (es : List Event) :
     -- (a)
-    (Premise tid chain → AllValid tid chain →
+    (Premise tid chain →
       ((runBase tid chain).2.1.map (fun a => tid a.core)).Nodup) ∧
     -- (b)
-    (Premise tid chain → AllValid tid chain →
+    (Premise tid chain →
       (∀ op w, Effect.ins op w ∈ (runBase tid chain).2.2 → w = false) ∧
       (insOps (runBase tid chain).2.2).Nodup ∧
       (∀ pre post op w, (runBase tid chain).2.2 = pre ++ Effect.ins op w :: post →
@@ -1140,8 +1143,8 @@ theorem outpoint_insertion_contract (tid : Core → Nat) (chain : Chain) (r : Bl
       insertionFinding h ins resolved es = some f)) ∧
     (r ≠ .noResult → (storeOutcome r h ins resolved es = .noFinding ↔
       insertionFinding h ins resolved es = none)) := by
-  refine ⟨fun hp _ => (runBase_good tid chain hp).nodup,
-    fun hp _ => ⟨(runBase_good tid chain hp).insFalse, insOps_nodup _ (runBase_good tid chain hp).rel,
+  refine ⟨fun hp => (runBase_good tid chain hp).nodup,
+    fun hp => ⟨(runBase_good tid chain hp).insFalse, insOps_nodup _ (runBase_good tid chain hp).rel,
       no_ins_after_rem (runBase_good tid chain hp).rel⟩,
     fun hp => by simp only [applyChain, (premise_iff tid chain).1 hp],
     applyChain_break tid chain, applyChain_prefix tid chain,
@@ -1182,150 +1185,241 @@ def tidA (c : Core) : Nat :=
 def tidB (c : Core) : Nat := if c = s0 then 2 else tidA c
 
 def cbTx (c : Core) : Tx := ⟨c, true⟩
+
 def spTx (c : Core) : Tx := ⟨c, false⟩
+
 /-- T1: coinbases at heights 0 and 1; every insertion has `wasPresent` false. -/
 example : applyChain tidA [[cbTx c0], [cbTx c1]] = [.valid [(1, 0)], .valid [(1, 0), (2, 0)]] := by
   decide
+
 /-- T1: the effects. -/
 example : (runBase tidA [[cbTx c0], [cbTx c1]]).2.2 = [.ins (1, 0) false, .ins (2, 0) false] := by
   decide
+
 /-- T2: a spend of an earlier block's coinbase output and a same-block spend of output 1 of
 the transaction at index 1; the spender at index 2 inserts output index 0. -/
 example : applyChain tidA [[cbTx c0], [cbTx c1, spTx s1, spTx s2]] =
     [.valid [(1, 0)], .valid [(2, 0), (6, 0), (7, 0)]] := by decide
+
 /-- T2: the effects, every insertion flag false. -/
 example : (runBase tidA [[cbTx c0], [cbTx c1, spTx s1, spTx s2]]).2.2 =
     [.ins (1, 0) false, .ins (2, 0) false, .rem (1, 0), .ins (6, 0) false, .ins (6, 1) false,
      .rem (6, 1), .ins (7, 0) false] := by decide
+
 /-- T3: the two coinbases of T1 have different cores. -/
 example : c0 ≠ c1 := by decide
+
 /-- T3: a height-1 coinbase whose core equals the height-0 coinbase core is `invalid`. -/
 example : applyChain tidA [[cbTx c0], [cbTx c0]] = [.valid [(1, 0)], .invalid] := by decide
+
 /-- T4: a non-coinbase core applied again in a later block is `invalid`. -/
 example : applyChain tidA [[cbTx c0], [cbTx c1, spTx s0], [cbTx c2, spTx s0]] =
     [.valid [(1, 0)], .valid [(2, 0), (4, 0)], .invalid] := by decide
+
 /-- T4: applied again in the same block, `invalid`. -/
 example : applyChain tidA [[cbTx c0], [cbTx c1, spTx s0, spTx s0]] =
     [.valid [(1, 0)], .invalid] := by decide
+
 /-- T4: a non-coinbase transaction with no input is `invalid`. -/
 example : applyChain tidA [[cbTx c0, spTx n0]] = [.invalid] := by decide
+
 /-- T5: index 1 with nonce 0 and `cbRest` true: `invalid`, no transaction applied, although
 the coinbase would break the premise. -/
 example : applyChain tidB [[cbTx c0, spTx s0], [cbTx c1, cbTx z]] =
     [.valid [(2, 0)], .invalid] := by decide
+
 /-- T5: the same with `cbRest` false: the coinbase breaks the premise, `noResult`. -/
 example : applyChain tidB [[cbTx c0, spTx s0], [cbTx c1, spTx z]] =
     [.valid [(2, 0)], .noResult] := by decide
+
 /-- T5: the same with `cbRest` false and no premise break: `invalid` (nonce 0, input present). -/
 example : applyChain tidA [[cbTx c0], [cbTx c1, spTx z]] = [.valid [(1, 0)], .invalid] := by
   decide
+
 /-- T5: a first transaction with nonce 1 makes the block `invalid`. -/
 example : applyChain tidA [[cbTx c0], [cbTx s0]] = [.valid [(1, 0)], .invalid] := by decide
-/-- T6: `(1, 0)` inserted and removed; the attempt to insert it again is `invalid`. -/
+
+/-- T6: an earlier block inserted and removed `(1, 0)`; the attempt to insert it again is
+`invalid`. -/
 example : applyChain tidA [[cbTx c0, spTx s0], [cbTx c0]] = [.valid [(4, 0)], .invalid] := by
   decide
-/-- T6: `(2, 0)` inserted and removed; the attempt under the premise-breaking `tidB` is
-`noResult`. -/
+
+/-- T6: an earlier block inserted and removed `(2, 0)`; the attempt under the
+premise-breaking `tidB` is `noResult`. -/
 example : applyChain tidB [[cbTx c0, spTx s0, spTx sR], [cbTx c1]] =
     [.valid [(5, 0)], .noResult] := by decide
+
+/-- T6: earlier transactions of the same block inserted and removed `(2, 0)`; the attempt
+under the injective `tidA` is `invalid`. -/
+example : applyChain tidA [[cbTx c0], [cbTx c1, spTx sR, spTx c1]] =
+    [.valid [(1, 0)], .invalid] := by decide
+
 /-- T7: output 0 non-spendable, output 1 spendable: the key has output index 1. -/
 example : runBase tidA [[cbTx c7]] = ([.valid [(10, 1)]], [⟨0, 0, c7⟩], [.ins (10, 1) false]) := by
   decide
+
 /-- T7: a coinbase with only a non-spendable output has no effect and no key. -/
 example : runBase tidA [[cbTx cF]] = ([.valid []], [⟨0, 0, cF⟩], []) := by decide
-/-- The T8 chain: block 1 of three breaks the premise. -/
+
+/-- The T8 chain: block 1 of three breaks the premise under `tidB`. -/
 def t8 : Chain := [[cbTx c0, spTx s0], [cbTx c1], [cbTx c2]]
+
 /-- T8: `valid`, `noResult`, `noResult`. -/
 example : applyChain tidB t8 = [.valid [(2, 0)], .noResult, .noResult] := by decide
+
 /-- T8: a break inside one block gives `noResult` for that block. -/
 example : applyChain tidB [[cbTx c0], [cbTx c1, spTx s0]] = [.valid [(1, 0)], .noResult] := by
   decide
+
 /-- T9: the T8 chain under the baseline gives three `valid` results. -/
 example : (runBase tidB t8).1 = [.valid [(2, 0)], .valid [(2, 0)], .valid [(2, 0), (3, 0)]] := by
   decide
+
 /-- S1: keyed parent entry of the derivation at an inserted outpoint. -/
 example : insertionFinding 1 [(2, 0)] []
     [.parentEntry .derivation (2, 0) .keyed false, .consume .derivation] = some .failedCheck := by
   decide
+
 /-- S2: a multi-outpoint read. -/
 example : insertionFinding 1 [(2, 0)] [] [.parentEntry .derivation (2, 0) .multi false] =
     some .failedCheck := by decide
+
 /-- S3: a leaf, whatever entry it holds (first value). -/
 example : insertionFinding 1 [(2, 0)] [] [.parentLeaf .derivation (2, 0) 7] =
     some .failedCheck := by decide
+
 /-- S3: a leaf, whatever entry it holds (second value). -/
 example : insertionFinding 1 [(2, 0)] [] [.parentLeaf .derivation (2, 0) 8] =
     some .failedCheck := by decide
-/-- S4: an output created earlier in the same block is not in `resolved`. -/
+
+/-- S4: an entry at an output created earlier in the same block, which is not in `resolved`. -/
 example : insertionFinding 1 [(2, 0), (4, 0)] [(1, 0)]
     [.parentEntry .derivation (4, 0) .keyed false] = some .failedCheck := by decide
+
+/-- S4: a leaf at an output created earlier in the same block. -/
+example : insertionFinding 1 [(2, 0), (4, 0)] [(1, 0)] [.parentLeaf .derivation (4, 0) 3] =
+    some .failedCheck := by decide
+
 /-- S5: an outpoint resolved as a present entry of `U_parent`. -/
-example : insertionFinding 1 [(2, 0)] [(2, 0)] [.parentEntry .derivation (2, 0) .keyed false] =
+example : insertionFinding 1 [(2, 0)] [(2, 0)] [.parentEntry .derivation (2, 0) .keyed true] =
     none := by decide
+
 /-- S6: a definitive absence. -/
 example : insertionFinding 1 [(2, 0)] [] [.parentAbsent .derivation (2, 0)] = none := by decide
+
 /-- S7: no event. -/
 example : insertionFinding 1 [(2, 0)] [] [] = none := by decide
+
 /-- S7: events only for other outpoints. -/
-example : insertionFinding 1 [(2, 0)] [] [.parentEntry .derivation (3, 0) .keyed false,
+example : insertionFinding 1 [(2, 0)] [] [.parentEntry .derivation (3, 0) .keyed true,
     .parentLeaf .derivation (2, 1) 0] = none := by decide
+
 /-- S8: the private-candidate view. -/
 example : insertionFinding 1 [(2, 0)] [] [.candidateEntry .derivation (2, 0)] = none := by decide
+
 /-- S9: obtained by the operation that includes input resolution. -/
-example : insertionFinding 1 [(2, 0)] [] [.parentEntry .resolution (2, 0) .keyed false] = none := by
+example : insertionFinding 1 [(2, 0)] [] [.parentEntry .resolution (2, 0) .keyed true] = none := by
   decide
+
 /-- S10: `ins` from a core with spendable output 0 and non-spendable output 1. -/
 example : spendKeys tidA cS10 = [(12, 0)] := by decide
+
 /-- S10: an entry at output 1. -/
-example : insertionFinding 1 (spendKeys tidA cS10) [] [.parentEntry .derivation (12, 1) .keyed false] =
+example : insertionFinding 1 (spendKeys tidA cS10) [] [.parentEntry .derivation (12, 1) .keyed true] =
     none := by decide
-/-- S11: height 0. -/
-example : insertionFinding 0 [(2, 0)] [] [.parentEntry .derivation (2, 0) .keyed false] = none := by
+
+/-- S11: a definitive absence at height 0. -/
+example : insertionFinding 0 [(2, 0)] [] [.parentAbsent .derivation (2, 0)] = none := by decide
+
+/-- S11, the height clause of E4: an entry event at height 0, a state that the specification
+excludes (every parent-branch lookup at height 0 is a definitive absence). -/
+example : insertionFinding 0 [(2, 0)] [] [.parentEntry .derivation (2, 0) .keyed true] = none := by
   decide
+
 /-- S12: obtained after the last consumption. -/
 example : insertionFinding 1 [(2, 0)] [] [.consume .derivation,
     .parentEntry .derivation (2, 0) .keyed false] = some .failedCheck := by decide
+
 /-- S13: the entry satisfies the cross-row consistency check. -/
 example : insertionFinding 1 [(2, 0)] [] [.parentEntry .derivation (2, 0) .keyed true] =
     some .failedCheck := by decide
+
 /-- S14: an unavailable read first. -/
 example : insertionFinding 1 [(2, 0)] [] [.unavailable,
     .parentEntry .derivation (2, 0) .keyed false] = some .unavailableRead := by decide
+
 /-- S14: the failing obtain first. -/
 example : insertionFinding 1 [(2, 0)] [] [.parentEntry .derivation (2, 0) .keyed false,
     .unavailable] = some .failedCheck := by decide
+
 /-- S15: the sequence ends before the failing obtain. -/
 example : insertionFinding 1 [(2, 0)] [] [.parentAbsent .derivation (3, 0), .consume .derivation] =
     none := by decide
-/-- S16: the baseline outcome on a failing sequence. -/
-example : baselineFinding [.parentEntry .derivation (2, 0) .keyed false] = none := by decide
+
+/-- S16: the baseline outcome on a sequence whose entry satisfies every cross-row relation. -/
+example : baselineFinding [.parentEntry .derivation (2, 0) .keyed true] = none := by decide
+
 /-- S16: the outcome with E4 on the same sequence. -/
-example : insertionFinding 1 [(2, 0)] [] [.parentEntry .derivation (2, 0) .keyed false] =
+example : insertionFinding 1 [(2, 0)] [] [.parentEntry .derivation (2, 0) .keyed true] =
     some .failedCheck := by decide
+
 /-- S16: equal results on a sequence with no failing event (baseline). -/
 example : baselineFinding [.parentAbsent .derivation (2, 0), .unavailable] =
     some .unavailableRead := by decide
+
 /-- S16: equal results on a sequence with no failing event (with E4). -/
 example : insertionFinding 1 [(2, 0)] [] [.parentAbsent .derivation (2, 0), .unavailable] =
     some .unavailableRead := by decide
+
 /-- S17: the premise-breaking coinbase of block 1 of the T8 chain inserts `(2, 0)`. -/
 example : spendKeys tidB c1 = [(2, 0)] := by decide
+
 /-- S17: the S1 sequence alone gives a failed check. -/
 example : insertionFinding 1 (spendKeys tidB c1) []
     [.parentEntry .derivation (2, 0) .keyed false] = some .failedCheck := by decide
+
 /-- S17: with the `noResult` of block 1 there is no outcome. -/
 example : storeOutcome ((applyChain tidB t8).getD 1 .invalid) 1 (spendKeys tidB c1) []
     [.parentEntry .derivation (2, 0) .keyed false] = .noOutcome := by decide
+
 /-- S17: with the `valid` result of block 0 the empty sequence gives no finding. -/
 example : storeOutcome ((applyChain tidB t8).getD 0 .invalid) 0 (spendKeys tidB c0) [] [] =
     .noFinding := by decide
+
+/-- S17: under the injective `tidA` every block of the T8 chain is `valid`. -/
+example : applyChain tidA t8 =
+    [.valid [(4, 0)], .valid [(4, 0), (2, 0)], .valid [(4, 0), (2, 0), (3, 0)]] := by decide
+
+/-- S17: under `tidA` the `valid` result of block 1 gives the failed check. -/
+example : storeOutcome ((applyChain tidA t8).getD 1 .invalid) 1 (spendKeys tidA c1) []
+    [.parentEntry .derivation (2, 0) .keyed true] = .finding .failedCheck := by decide
+
 /-- Hostile: an empty block is `invalid`. -/
 example : applyChain tidA [[]] = [.invalid] := by decide
+
 /-- Hostile: a constant identifier breaks the premise at the second application. -/
 example : applyChain (fun _ => 0) [[cbTx c0], [cbTx c1]] = [.valid [(0, 0)], .noResult] := by
   decide
-/-- Hostile: one input listed twice passes `R1`; the removal is idempotent. -/
+
+/-- Hostile: one input listed twice passes `R1` and the removal is idempotent. The
+specification rejects such a transaction by the duplicate-outpoint scan, which the model does
+not represent. -/
 example : applyChain tidA [[cbTx c0, spTx dupIn]] = [.valid [(13, 0)]] := by decide
+
+/-- Hostile: an outpoint listed twice in `ins`. -/
+example : insertionFinding 1 [(2, 0), (2, 0)] [] [.parentEntry .derivation (2, 0) .keyed true] =
+    some .failedCheck := by decide
+
+/-- Hostile: the outpoint once in `ins` and listed twice in `resolved`. -/
+example : insertionFinding 1 [(2, 0)] [(2, 0), (2, 0)]
+    [.parentEntry .derivation (2, 0) .keyed true] = none := by decide
+
+/-- Hostile: the block result `invalid` given to `storeOutcome`, a value outside the states of
+the rule, since an earlier consensus error ends later reads. -/
+example : storeOutcome .invalid 1 [(2, 0)] []
+    [.parentEntry .derivation (2, 0) .keyed false, .consume .derivation] =
+    .finding .failedCheck := by decide
+
 end Examples
 
 end RubinFormal.OutpointInsertionV1

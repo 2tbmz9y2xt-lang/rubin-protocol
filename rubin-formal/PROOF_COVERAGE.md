@@ -156,7 +156,10 @@ states: under the premise that equal identifiers have equal cores, applied
 identifiers are distinct, every insertion finds its outpoint absent and none
 follows a removal of it; a premise break gives no result from its block on;
 and the first unavailable read or failing obtain decides, a block without a
-result having no outcome. It has no bridge to Go or Rust code and does not
+result having no outcome. Of the failed checks of the store it represents only the
+proposed one; no other failed check, including the cross-row consistency check, is
+represented, and where one fails the model's value need not be the specification's
+outcome. It has no bridge to Go or Rust code and does not
 prove hashing, bytes, the transaction encoding, store reads, the derivation of
 Root(U_candidate), how a result comes to identify a leaf, the rules the model
 does not represent or any client behavior. Registration adds one theorem
