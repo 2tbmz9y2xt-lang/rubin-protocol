@@ -41,6 +41,18 @@ func newPrunedTreeScene(t *testing.T, u uint64, tip *AuthorityPointV1, p *uint64
 	return scene
 }
 
+// prunedTreeImageBesideMeta is prunedTreeImage without the meta key 2 entry.
+func prunedTreeImageBesideMeta(t *testing.T, s *Store) []byte {
+	t.Helper()
+	value := prunedTreeBytes(t, s)
+	entry := binary.BigEndian.AppendUint32(append(binary.BigEndian.AppendUint32([]byte{0}, 1), 2), uint32(len(value)))
+	image := prunedTreeImage(t, s)
+	if !bytes.Contains(image, append(entry, value...)) {
+		t.Fatal("meta key 2 entry missing from the image")
+	}
+	return bytes.Replace(image, append(entry, value...), nil, 1)
+}
+
 func prunedTreeU64(v uint64) *uint64 { return &v }
 
 func prunedTreeAt(height uint64) *AuthorityPointV1 {
