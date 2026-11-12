@@ -496,28 +496,18 @@ func TestRetainedCapacityMDBXPlanPre(t *testing.T) {
 	if warm := run(); warm.pre != cold.exactRet+7 || warm.roles != first.roles {
 		t.Fatalf("warm pre %d roles %v", warm.pre, warm.roles)
 	}
-	// A cache under another binding is never reused.
-	a.binding = mdbx.MutationBindingV1{}
-	if again := run(); again.pre != cold.exactRet || a.exactRet != cold.exactRet {
-		t.Fatalf("nonmatching binding reused cache: %d", again.pre)
-	}
 }
 
 func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 	w, _, _ := riGenesis(t)
 	denied := uint64(402653184 - retainedPlanFrameV1 + 1)
-	// D8/T1: the op-only refusals precede the temporary frame, itself cost-1 denied here, so the initializer never runs:
-	// nil Source, Undo 0 (outside native treeUndoAllowedV1) and a stored BodyKind 2 x body literal in the Pair.
-	var a *RetainedAccountingV1
-	var dst *DirectRetainedProofV1
-	var op *mdbx.TreeOperationV1
+	// D8/T1: op-only refusals (nil Source, Undo 0, a stored BodyKind 2 x body literal) precede the cost-1 denied frame.
+	a, dst, op := (*RetainedAccountingV1)(nil), (*DirectRetainedProofV1)(nil), retainedCapacityBoundOpV1(t, w)
+	literal := mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: op.Primitives[0].Block[:], AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 298)}
 	for name, mutate := range map[string]func(*mdbx.TreeOperationV1){
-		"nil_source": func(op *mdbx.TreeOperationV1) { op.Primitives[0].Source = nil },
-		"undo_0":     func(op *mdbx.TreeOperationV1) { op.Primitives[0].Undo = 0 },
-		"stored_body_literal": func(op *mdbx.TreeOperationV1) {
-			x := op.Primitives[0].Block
-			op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 298)})
-		},
+		"nil_source":          func(op *mdbx.TreeOperationV1) { op.Primitives[0].Source = nil },
+		"undo_0":              func(op *mdbx.TreeOperationV1) { op.Primitives[0].Undo = 0 },
+		"stored_body_literal": func(op *mdbx.TreeOperationV1) { op.Pair.Mutations = append(op.Pair.Mutations, literal) },
 	} {
 		a, dst, op = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}, retainedCapacityBoundOpV1(t, w)
 		mutate(op)
@@ -545,31 +535,43 @@ func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 			t.Fatalf("held %d: %v", c.held, err)
 		}
 	}
-	// D8: the role relations run after the cold quantity entry, which stores
-	// its completed pre tuple first; the clean witness then preserves it.
-	for name, mutate := range map[string]func(*mdbx.TreeOperationV1){
-		"database": func(op *mdbx.TreeOperationV1) { op.Primitives[0].Coverage.DatabaseID[0] ^= 1 },
-		"height": func(op *mdbx.TreeOperationV1) {
+	// D8/T6: the role relations run after the cold quantity entry, which stores its completed pre first; the clean witness
+	// keeps it, so the next same-binding Plan makes no cold call (it returns the +1 mark); without the witness it makes one.
+	for _, c := range []struct {
+		name   string
+		clean  bool
+		mutate func(*mdbx.TreeOperationV1)
+	}{
+		{"database unclean", false, func(op *mdbx.TreeOperationV1) { op.Primitives[0].Coverage.DatabaseID[0] ^= 1 }},
+		{"height", true, func(op *mdbx.TreeOperationV1) {
 			op.Primitives[0].Height++
 			op.Primitives[0].Coverage.Height++
-		},
+		}},
+		{"database", true, func(op *mdbx.TreeOperationV1) { op.Primitives[0].Coverage.DatabaseID[0] ^= 1 }},
 	} {
-		a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-		op = retainedCapacityBoundOpV1(t, w)
-		mutate(op)
+		a, dst, op = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}, retainedCapacityBoundOpV1(t, w)
+		c.mutate(op)
 		err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
 		if !errors.Is(err, errRetainedShapeAPIV1) || !a.valid || dst.pre == 0 || dst.roles[0].generation == 0 || a.active != dst || dst.prepared {
-			t.Fatalf("%s relation: %v valid=%v pre=%d", name, err, a.valid, dst.pre)
+			t.Fatalf("%s relation: %v valid=%v pre=%d", c.name, err, a.valid, dst.pre)
 		}
-		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, true); err != nil || !a.valid {
-			t.Fatalf("%s clean witness lost completed pre: %v", name, err)
+		cold := a.exactRet
+		a.exactRet++
+		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, c.clean); err != nil || a.valid != c.clean {
+			t.Fatalf("%s clean witness lost completed pre: %v", c.name, err)
 		}
+		want, dst := cold, &DirectRetainedProofV1{}
+		if c.clean {
+			want = cold + 1
+		}
+		if err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityBoundOpV1(t, w), 8192); err != nil || dst.pre != want {
+			t.Fatalf("%s: %v pre=%d want %d", c.name, err, dst.pre, want)
+		}
+		logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errRetainedShapeAPIV1, true) == nil, "release")
 	}
 	// D8: a clean refusal raised before this attempt's pre tuple has no completed pre of its own, so it clears the
-	// same-binding pre an earlier attempt cached (marked +7); the next Plan's pre is the cold value, not the mark.
-	want := a.exactRet
-	a.exactRet += 7
-	op, dst = retainedCapacityBoundOpV1(t, w), &DirectRetainedProofV1{}
+	// same-binding pre the last row kept (marked +1); the next Plan's pre is the cold value, not the mark.
+	want, op, dst := a.exactRet-1, retainedCapacityBoundOpV1(t, w), &DirectRetainedProofV1{}
 	op.Primitives[0].Generation, op.Primitives[0].Coverage.Generation = 9, 9
 	err = retainedCapacityPlanV1(t, w, a, dst, op, 8192)
 	logicalMDBXAssert(t, errors.Is(err, errRetainedShapeAPIV1) && a.valid && dst.pre == 0, "relation refusal over a cached pre: %v", err)
@@ -590,6 +592,12 @@ func TestRetainedCapacityMDBXFinite(t *testing.T) {
 		return a, dst, retainedCapacityPlanV1(t, w, a, dst, op, 8192)
 	}
 	staged := mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[6], Key: []byte{1}, AfterKind: mdbx.AfterLiteral, Literal: []byte{1}}
+	g, one, x := binary.BigEndian.AppendUint64(nil, 1), []byte{1}, retainedCapacityBoundOpV1(t, w).Primitives[0].Block
+	row := func(m mdbx.Mutation) func(*mdbx.TreeOperationV1) {
+		return func(op *mdbx.TreeOperationV1) { op.Pair.Mutations = append(op.Pair.Mutations, m) }
+	}
+	node, err := mdbx.TreeNodeKey(1, mdbx.TreeNodeIDV1{Kind: mdbx.TreeNodeLeafV1, Depth: 288})
+	logicalMDBXAssert(t, err == nil, "tree node key: %v", err)
 	for name, mutate := range map[string]func(*mdbx.TreeOperationV1){
 		"no_index_insert":   func(op *mdbx.TreeOperationV1) { op.Pair.Mutations = op.Pair.Mutations[1:] },
 		"index_names_other": func(op *mdbx.TreeOperationV1) { op.Pair.Mutations[0].Literal[0] ^= 1 },
@@ -599,25 +607,13 @@ func TestRetainedCapacityMDBXFinite(t *testing.T) {
 			op.HeaderSlot = &mdbx.TreeHeaderSlotV1{Hash: x}
 			op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[3], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 148)})
 		},
-		// A Pair state, x-keyed undo, tree-node, counter or root meta row of the CURRENT generation: native admission
-		// refuses each for every covered direct op (internal/mdbx/tree_stream_cgo.go:582-584, 655-691).
-		"state_row": func(op *mdbx.TreeOperationV1) {
-			op.Pair.Mutations = append(op.Pair.Mutations, btMutation(1, append(binary.BigEndian.AppendUint64(nil, op.Primitives[0].Generation), make([]byte, 36)...), []byte{1}))
-		},
-		"undo_row": func(op *mdbx.TreeOperationV1) {
-			op.Pair.Mutations = append(op.Pair.Mutations, btMutation(5, append(op.Primitives[0].Block[:], 0, 0, 0, 1), []byte{1}))
-		},
-		"tree_node_row": func(op *mdbx.TreeOperationV1) {
-			key, err := mdbx.TreeNodeKey(op.Primitives[0].Generation, mdbx.TreeNodeIDV1{Kind: mdbx.TreeNodeLeafV1, Depth: 288})
-			logicalMDBXAssert(t, err == nil, "tree node key: %v", err)
-			op.Pair.Mutations = append(op.Pair.Mutations, btMutation(8, key, []byte{1}))
-		},
-		"counter_meta": func(op *mdbx.TreeOperationV1) {
-			op.Pair.Mutations = append(op.Pair.Mutations, btMutation(0, binary.BigEndian.AppendUint64([]byte{0x10}, op.Primitives[0].Generation), []byte{1}))
-		},
-		"root_meta": func(op *mdbx.TreeOperationV1) {
-			op.Pair.Mutations = append(op.Pair.Mutations, btMutation(0, binary.BigEndian.AppendUint64([]byte{0x11}, op.Primitives[0].Generation), []byte{1}))
-		},
+		// A Pair state, x-keyed undo, tree-node, counter or root meta row of the CURRENT generation g=1: native
+		// admission refuses each for every covered direct op (internal/mdbx/tree_stream_cgo.go:582-584, 655-691).
+		"state_row":     row(btMutation(1, append(g, make([]byte, 36)...), one)),
+		"undo_row":      row(btMutation(5, append(x[:], 0, 0, 0, 1), one)),
+		"tree_node_row": row(btMutation(8, node, one)),
+		"counter_meta":  row(btMutation(0, append([]byte{0x10}, g...), one)),
+		"root_meta":     row(btMutation(0, append([]byte{0x11}, g...), one)),
 	} {
 		a, dst, err := plan(mutate)
 		if !errors.Is(err, errRetainedFiniteAPIV1) || a.active != dst || dst.prepared || dst.pre == 0 || !a.valid {
@@ -1095,17 +1091,15 @@ func TestRetainedCapacityMDBXWPromotion(t *testing.T) {
 			t.Fatalf("SideLink row %d: %v", i, err)
 		}
 	}
-	// D8 order: a BodyKind 1 write of x while the selected side owns x's body is refused only after x's header
-	// settlement. The cache models a completed pre taken before x's selected header was lost with no native commit
-	// since; x's header charge then returns selected_damage first, and the clean witness keeps that pre.
+	// D8 order: a BodyKind 1 write of x whose body the selected side owns is refused only after x's header settlement. The
+	// cache models a pre completed before x's selected header was lost; x's header charge then returns selected_damage first.
 	w.pair(t, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[3], Key: x[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent})
 	op = retainedCapacityBoundOpV1(t, w)
 	op.Primitives[0].Coverage.BodyKind, op.Primitives[0].Coverage.CurrentBody = 1, child
 	retainedCapacityClearSideV1(t, w, op, 1, 0)
 	op.Pair.Mutations = append(op.Pair.Mutations, link)
 	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-	cold := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
-	logicalMDBXAssert(t, cold != nil && a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, cold, false) == nil, "cold plan: %v", cold)
+	logicalMDBXAssert(t, retainedCapacityPlanV1(t, w, a, dst, op, 8192) != nil && a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errRetainedShapeAPIV1, false) == nil, "cold plan")
 	a.binding, a.exactRet, a.valid, dst = dst.binding, 1077, true, &DirectRetainedProofV1{}
 	err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
 	var failure *RetainedProofFailureV1
@@ -1122,18 +1116,7 @@ func retainedCapacityLinkDeleteV1(g, h uint64) mdbx.Mutation {
 	return mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[6], Key: key, BeforePresent: true, AfterKind: mdbx.AfterAbsent}
 }
 
-// T10 (D15/D3/D13): one W/L-transfer op gives identical finite captures and
-// identical accepted proofs on the warm and the cold path.
-func TestRetainedCapacityMDBXTransferWarmCold(t *testing.T) {
-	w, leave := retainedCapacityWLSideV1(t)
-	cold, warm := retainedCapacityTwinsV1(t, w, func() *mdbx.TreeOperationV1 { return retainedCapacityWLOpV1(t, w, 2, 2, leave) })
-	if cold.add != 148 || cold.remove != 148+148 {
-		t.Fatalf("transfer capture add=%d remove=%d", cold.add, cold.remove)
-	}
-	retainedCapacityAgreeV1(t, cold, warm)
-}
-
-// D28: with x owned by an obsolete projection under a TRUE fact the warm and
+// D28/T10: with x owned by an obsolete projection under a TRUE fact the warm and
 // cold final quantities agree; cached facts whose generations disagree with
 // the fresh OLD spans, or a cache under another binding, are never reused.
 func TestRetainedCapacityMDBXObsoleteWarmCold(t *testing.T) {
@@ -1163,32 +1146,11 @@ func TestRetainedCapacityMDBXObsoleteWarmCold(t *testing.T) {
 			t.Fatalf("%s outlived: %v pre=%d cache=%d facts=%+v", name, err, dst.pre, a.exactRet, a.complete)
 		}
 	}
-}
-
-// T6 (D8): a cold-path role-relation refusal stores the completed pre tuple
-// first; the clean witness keeps it, so the next same-binding Plan makes no
-// cold call (it returns the marked cache); without the witness it makes one.
-func TestRetainedCapacityMDBXRoleRefusalWitness(t *testing.T) {
-	w, _, _ := riGenesis(t)
-	for _, clean := range []bool{true, false} {
-		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-		op := retainedCapacityBoundOpV1(t, w)
-		op.Primitives[0].Coverage.DatabaseID[0] ^= 1
-		err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
-		logicalMDBXAssert(t, errors.Is(err, errRetainedShapeAPIV1) && a.valid && !dst.prepared, "role refusal: %v", err)
-		cold := a.exactRet
-		a.exactRet++
-		logicalMDBXAssert(t, a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, clean) == nil, "apply")
-		next := &DirectRetainedProofV1{}
-		err = retainedCapacityPlanV1(t, w, a, next, retainedCapacityBoundOpV1(t, w), 8192)
-		want := cold
-		if clean {
-			want = cold + 1
-		}
-		if err != nil || next.pre != want {
-			t.Fatalf("clean=%v: %v pre=%d want %d", clean, err, next.pre, want)
-		}
-	}
+	// T10 (D15/D3/D13): one W/L-transfer op gives identical finite captures and accepted proofs warm and cold.
+	wl, leave := retainedCapacityWLSideV1(t)
+	cold, warm = retainedCapacityTwinsV1(t, wl, func() *mdbx.TreeOperationV1 { return retainedCapacityWLOpV1(t, wl, 2, 2, leave) })
+	logicalMDBXAssert(t, cold.add == 148 && cold.remove == 148+148, "transfer capture add=%d remove=%d", cold.add, cold.remove)
+	retainedCapacityAgreeV1(t, cold, warm)
 }
 
 // T7 (D8): the endpoint relation over the producer's actual j: a PreGenesis
