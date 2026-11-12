@@ -387,8 +387,9 @@ func prunedTreeExcluded(t *testing.T, key []byte, seed, reopen bool) {
 	if !errors.As(out.Err, &engine) || engine.Class != EngineCapacity || engine.Code != codeENOSPC {
 		t.Fatalf("A9 exclusion commit error %v", out.Err)
 	}
-	// D2: the consumed Store retains truth NEW (mdbx_cgo.go:2363, refusedUpdate at
-	// :2432-2438), so the following refusal is NEW/Prewrite, as a direct UpdateTreeV1 call returns.
+	// D2: the commit error consumed the Store (mdbx_cgo.go:2369-2370), which is closed and
+	// retains truth NEW (refusedUpdate, :2432-2438), so the following refusal is
+	// NEW/Prewrite, as a direct UpdateTreeV1 call returns.
 	again := sc.s.SelectPrunedTreeProfileV1(true, nil, sc.o)
 	var direct tsResult
 	mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
@@ -418,10 +419,12 @@ func prunedTreeExcluded(t *testing.T, key []byte, seed, reopen bool) {
 	}))
 }
 
-// TestPrunedTreeProfileProjection is X4's helper-level proxy evidence for D14
-// (contract X4): no existing hook returns these tuples for a pair-only plan. Only
-// the exact sentinel at OLD/Prewrite becomes Decision, only NEW/CommitMayHaveCrossed
-// sets Authority, and every other tuple keeps its error by identity.
+// TestPrunedTreeProfileProjection pins the D14 projection over the full tuple table,
+// including tuples no existing hook returns for a pair-only plan. X4 through the public
+// method is TestPrunedTreeProfileConsulted; the sentinel and new crossed rows are also
+// reached through it by the decision and commit tests. Only the exact sentinel at
+// OLD/Prewrite becomes Decision, only NEW/CommitMayHaveCrossed sets Authority, and every
+// other tuple keeps its error by identity.
 func TestPrunedTreeProfileProjection(t *testing.T) {
 	sentinel, other := errors.New("decision"), errors.New("other")
 	joined := errors.Join(sentinel, other)

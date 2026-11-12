@@ -7,7 +7,9 @@ import (
 	"errors"
 )
 
-// PrunedTreeProfileOutcomeV1 preserves the UpdateTreeV1 truth, stage and error.
+// PrunedTreeProfileOutcomeV1 is OLD/Prewrite with the refusal for a nil Store or a
+// WithOperation refusal before its callback; otherwise it carries the UpdateTreeV1
+// truth and stage, and its error except that a decision clears Err.
 // Decision is set only with Err nil at OLD/Prewrite; Authority is set only at
 // NEW/CommitMayHaveCrossed and is the planned envelope owned by this call.
 type PrunedTreeProfileOutcomeV1 struct {
