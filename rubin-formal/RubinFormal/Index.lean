@@ -47,6 +47,7 @@ import RubinFormal.MerkleStructure
 import RubinFormal.NativeRegistryResolution
 import RubinFormal.NativeSpendCreateGate
 import RubinFormal.NativeSuiteRotation
+import RubinFormal.OutpointInsertionV1
 import RubinFormal.PerTxStateMachine
 import RubinFormal.PrimitiveEncodingRoundtrip
 import RubinFormal.RefinementBridgeV1

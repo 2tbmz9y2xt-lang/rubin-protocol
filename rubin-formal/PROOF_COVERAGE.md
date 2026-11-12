@@ -146,6 +146,25 @@ critical operations of the refinement bridge and the pin
 manifest (`source_rebind.active_path_manifest` in `proof_coverage.json` and in
 `refinement_bridge.json`) carry the hash of the edited registry-truth checker.
 
+The `utxo_state_model` row also registers the single
+`RubinFormal.OutpointInsertionV1.outpoint_insertion_contract` in
+`OutpointInsertionV1.lean`, a kernel-checked property of a bounded model of the
+proposed rule on the single insertion of an outpoint and of the proposed failed
+check for a parent-view entry or leaf at an inserted outpoint. Over abstract
+cores, identifier functions, chains, outpoint sets and read-event sequences it
+states: under the premise that equal identifiers have equal cores, applied
+identifiers are distinct, every insertion finds its outpoint absent and none
+follows a removal of it; a premise break gives no result from its block on;
+and the first unavailable read or failing obtain decides, a block without a
+result having no outcome. It has no bridge to Go or Rust code and does not
+prove hashing, bytes, the transaction encoding, store reads, the derivation of
+Root(U_candidate), how a result comes to identify a leaf, the rules the model
+does not represent or any client behavior. Registration adds one theorem
+reference and one unique theorem name; the row stays
+`proved/compiler_trusted/machine_checked_universal` for its other theorems. The
+pin `spec_section_hashes_sha3_256` is unchanged; both manifest copies carry the
+hash of the edited registry-truth checker.
+
 ## Текущая раскладка evidence levels
 
 - `machine_checked_universal`: 22
