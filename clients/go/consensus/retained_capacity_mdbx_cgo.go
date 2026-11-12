@@ -595,7 +595,7 @@ func (f *retainedFiniteV1) artifactRowV1(m *mdbx.Mutation) bool {
 	if m.DBI.Rank == 3 {
 		return retainedInsertV1(m) && f.op.HeaderSlot == nil
 	}
-	return retainedInsertV1(m)
+	return retainedInsertV1(m) && x.Coverage.BodyKind == 1
 }
 
 // deletedV1 returns the kind bits whose row the Pair deletes for hash.

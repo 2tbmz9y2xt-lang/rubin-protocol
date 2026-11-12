@@ -4,6 +4,7 @@ package consensus
 
 import (
 	"crypto/sha3"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -226,7 +227,7 @@ func retainedCapacityInitialControlsV1(t *testing.T) {
 		if *a != before || *dst != (DirectRetainedProofV1{}) {
 			t.Fatalf("control %d changed owner or token", i)
 		}
-		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errors.New("refused"), true); !errors.Is(err, errRetainedApplyAPIV1) || a.valid {
+		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errors.New("refused"), true); !errors.Is(err, errRetainedApplyAPIV1) || !retainedCapacityClearedV1(a) {
 			t.Fatalf("control %d apply: %v valid=%v", i, err, a.valid)
 		}
 	}
@@ -251,7 +252,7 @@ func retainedCapacityInitialControlsV1(t *testing.T) {
 	if err := a.PlanDirectMDBX(fresh, nil, account, op); !errors.Is(err, errRetainedPlanAPIV1) || !a.valid {
 		t.Fatalf("nil Reader: %v", err)
 	}
-	if err := a.ApplyDirectMDBX(fresh, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errors.New("refused"), true); !errors.Is(err, errRetainedApplyAPIV1) || a.valid || fresh.applied {
+	if err := a.ApplyDirectMDBX(fresh, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, errors.New("refused"), true); !errors.Is(err, errRetainedApplyAPIV1) || !retainedCapacityClearedV1(a) || fresh.applied {
 		t.Fatalf("nil Reader apply: %v valid=%v", err, a.valid)
 	}
 	a = retainedCapacityCachedV1()
@@ -347,7 +348,7 @@ func retainedCapacityApplyMatrixV1(t *testing.T) {
 	// A non-reusable binding never yields a cached successor.
 	a := retainedCapacityCachedV1()
 	p := accepted(a)
-	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); err != nil || a.valid || a.active != nil {
+	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); err != nil || !retainedCapacityClearedV1(a) || a.active != nil {
 		t.Fatalf("non-reusable success: %v valid=%v", err, a.valid)
 	}
 	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); !errors.Is(err, errRetainedApplyAPIV1) {
@@ -357,18 +358,23 @@ func retainedCapacityApplyMatrixV1(t *testing.T) {
 	// recognized missing/foreign proof row: applied, invalidated, nil.
 	a = retainedCapacityCachedV1()
 	p = retainedCapacityStructuralV1(a)
-	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); err != nil || a.valid || a.active != nil || !p.applied {
+	if err := a.ApplyDirectMDBX(p, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); err != nil || !retainedCapacityClearedV1(a) || a.active != nil || !p.applied {
 		t.Fatalf("missing proof row: %v valid=%v", err, a.valid)
 	}
-	// An unprepared refused attempt is consumed; a clean refusal keeps a matching completed pre.
+	// An unprepared op-only refusal is consumed; it has no completed pre of its own, so the clean witness clears the cache (D8).
 	a = retainedCapacityCachedV1()
 	dst := &DirectRetainedProofV1{}
 	op := retainedCapacityDirectOpV1()
 	op.Primitives[0].Source = nil
 	logicalMDBXAssert(t, errors.Is(a.PlanDirectMDBX(dst, &mdbx.Reader{}, &mdbx.OperationAccount{}, op), errRetainedShapeAPIV1), "nil Source plan")
-	if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, boom, true); err != nil || a.active != nil || !dst.applied {
+	if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, boom, true); err != nil || a.active != nil || !dst.applied || !retainedCapacityClearedV1(a) {
 		t.Fatalf("unprepared apply: %v", err)
 	}
+}
+
+// retainedCapacityClearedV1 reports the invalidated cache: no valid flag, Ret, binding or facts.
+func retainedCapacityClearedV1(a *RetainedAccountingV1) bool {
+	return !a.valid && a.exactRet == 0 && a.binding == (mdbx.MutationBindingV1{}) && a.complete == [2]retainedCompleteV1{}
 }
 
 // retainedCapacityPlanV1 sorts op's Pair into the (rank, key) order native admission requires (tree_stream_cgo.go:18-19)
@@ -500,15 +506,25 @@ func TestRetainedCapacityMDBXPlanPre(t *testing.T) {
 func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 	w, _, _ := riGenesis(t)
 	denied := uint64(402653184 - retainedPlanFrameV1 + 1)
-	// D8/T1: the op-only refusal precedes the temporary frame; the frame itself is cost-1 denied.
-	a, dst, op := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}, retainedCapacityDirectOpV1()
-	op.Primitives[0].Source = nil
-	if err := retainedCapacityPlanV1(t, w, a, dst, op, denied); !errors.Is(err, errRetainedShapeAPIV1) || a.valid || a.active != dst {
-		t.Fatalf("op-only under denied frame: %v", err)
+	// D8/T1: the op-only refusals precede the temporary frame, itself cost-1 denied here, so the initializer never runs:
+	// nil Source, Undo 0 (outside native treeUndoAllowedV1) and a stored BodyKind 2 x body literal in the Pair.
+	var a *RetainedAccountingV1
+	var dst *DirectRetainedProofV1
+	var op *mdbx.TreeOperationV1
+	for name, mutate := range map[string]func(*mdbx.TreeOperationV1){
+		"nil_source": func(op *mdbx.TreeOperationV1) { op.Primitives[0].Source = nil },
+		"undo_0":     func(op *mdbx.TreeOperationV1) { op.Primitives[0].Undo = 0 },
+		"stored_body_literal": func(op *mdbx.TreeOperationV1) {
+			x := op.Primitives[0].Block
+			op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 298)})
+		},
+	} {
+		a, dst, op = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}, retainedCapacityBoundOpV1(t, w)
+		mutate(op)
+		if err := retainedCapacityPlanV1(t, w, a, dst, op, denied); !errors.Is(err, errRetainedShapeAPIV1) || a.valid || a.active != dst || dst.roles != ([2]retainedRoleV1{}) {
+			t.Fatalf("%s op-only under denied frame: %v", name, err)
+		}
 	}
-	op = retainedCapacityDirectOpV1()
-	op.Primitives[0].Undo = 0 // outside native treeUndoAllowedV1: op-only, before the frame
-	logicalMDBXAssert(t, errors.Is(retainedCapacityPlanV1(t, w, NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}, op, denied), errRetainedShapeAPIV1), "undo 0 under denied frame")
 	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 	err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityDirectOpV1(), denied)
 	if !mdbx.IsOperationReservationCapacity(err) || a.valid || dst.pre != 0 || dst.roles != ([2]retainedRoleV1{}) {
@@ -549,6 +565,21 @@ func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 			t.Fatalf("%s clean witness lost completed pre: %v", name, err)
 		}
 	}
+	// D8: a clean refusal raised before this attempt's pre tuple has no completed pre of its own, so it clears the
+	// same-binding pre an earlier attempt cached (marked +7); the next Plan's pre is the cold value, not the mark.
+	want := a.exactRet
+	a.exactRet += 7
+	op, dst = retainedCapacityBoundOpV1(t, w), &DirectRetainedProofV1{}
+	op.Primitives[0].Generation, op.Primitives[0].Coverage.Generation = 9, 9
+	err = retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+	logicalMDBXAssert(t, errors.Is(err, errRetainedShapeAPIV1) && a.valid && dst.pre == 0, "relation refusal over a cached pre: %v", err)
+	if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, true); err != nil || !retainedCapacityClearedV1(a) {
+		t.Fatalf("clean refusal before the pre tuple kept the cache: %v ret=%d valid=%v", err, a.exactRet, a.valid)
+	}
+	dst = &DirectRetainedProofV1{}
+	if err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityBoundOpV1(t, w), 8192); err != nil || dst.pre != want || a.exactRet != want {
+		t.Fatalf("next plan after the cleared cache: %v pre=%d want %d", err, dst.pre, want)
+	}
 }
 
 func TestRetainedCapacityMDBXFinite(t *testing.T) {
@@ -568,14 +599,33 @@ func TestRetainedCapacityMDBXFinite(t *testing.T) {
 			op.HeaderSlot = &mdbx.TreeHeaderSlotV1{Hash: x}
 			op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[3], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 148)})
 		},
-		"stored_body_literal": func(op *mdbx.TreeOperationV1) {
-			x := op.Primitives[0].Block
-			op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 298)})
+		// A Pair state, x-keyed undo, tree-node, counter or root meta row of the CURRENT generation: native admission
+		// refuses each for every covered direct op (internal/mdbx/tree_stream_cgo.go:582-584, 655-691).
+		"state_row": func(op *mdbx.TreeOperationV1) {
+			op.Pair.Mutations = append(op.Pair.Mutations, btMutation(1, append(binary.BigEndian.AppendUint64(nil, op.Primitives[0].Generation), make([]byte, 36)...), []byte{1}))
+		},
+		"undo_row": func(op *mdbx.TreeOperationV1) {
+			op.Pair.Mutations = append(op.Pair.Mutations, btMutation(5, append(op.Primitives[0].Block[:], 0, 0, 0, 1), []byte{1}))
+		},
+		"tree_node_row": func(op *mdbx.TreeOperationV1) {
+			key, err := mdbx.TreeNodeKey(op.Primitives[0].Generation, mdbx.TreeNodeIDV1{Kind: mdbx.TreeNodeLeafV1, Depth: 288})
+			logicalMDBXAssert(t, err == nil, "tree node key: %v", err)
+			op.Pair.Mutations = append(op.Pair.Mutations, btMutation(8, key, []byte{1}))
+		},
+		"counter_meta": func(op *mdbx.TreeOperationV1) {
+			op.Pair.Mutations = append(op.Pair.Mutations, btMutation(0, binary.BigEndian.AppendUint64([]byte{0x10}, op.Primitives[0].Generation), []byte{1}))
+		},
+		"root_meta": func(op *mdbx.TreeOperationV1) {
+			op.Pair.Mutations = append(op.Pair.Mutations, btMutation(0, binary.BigEndian.AppendUint64([]byte{0x11}, op.Primitives[0].Generation), []byte{1}))
 		},
 	} {
 		a, dst, err := plan(mutate)
-		if !errors.Is(err, errRetainedFiniteAPIV1) || a.active != dst || dst.prepared || dst.pre == 0 {
+		if !errors.Is(err, errRetainedFiniteAPIV1) || a.active != dst || dst.prepared || dst.pre == 0 || !a.valid {
 			t.Fatalf("%s: %v prepared=%v", name, err, dst.prepared)
+		}
+		// Each refusal follows the pre tuple, so the clean witness keeps the completed pre.
+		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, true); err != nil || !a.valid || a.exactRet != dst.pre {
+			t.Fatalf("%s: clean witness lost the completed pre: %v", name, err)
 		}
 	}
 	// T5: a fresh nil-slot header insert of an absent x adds the canonical
@@ -1045,6 +1095,26 @@ func TestRetainedCapacityMDBXWPromotion(t *testing.T) {
 			t.Fatalf("SideLink row %d: %v", i, err)
 		}
 	}
+	// D8 order: a BodyKind 1 write of x while the selected side owns x's body is refused only after x's header
+	// settlement. The cache models a completed pre taken before x's selected header was lost with no native commit
+	// since; x's header charge then returns selected_damage first, and the clean witness keeps that pre.
+	w.pair(t, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[3], Key: x[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent})
+	op = retainedCapacityBoundOpV1(t, w)
+	op.Primitives[0].Coverage.BodyKind, op.Primitives[0].Coverage.CurrentBody = 1, child
+	retainedCapacityClearSideV1(t, w, op, 1, 0)
+	op.Pair.Mutations = append(op.Pair.Mutations, link)
+	a, dst = NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	cold := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+	logicalMDBXAssert(t, cold != nil && a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, cold, false) == nil, "cold plan: %v", cold)
+	a.binding, a.exactRet, a.valid, dst = dst.binding, 1077, true, &DirectRetainedProofV1{}
+	err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+	var failure *RetainedProofFailureV1
+	if !errors.As(err, &failure) || failure.Resource != "selected_damage" || failure.Damage.Artifact != "header" || failure.Damage.Hash != x || dst.pre != 1077 || dst.prepared || a.active != dst {
+		t.Fatalf("redundant write over a lost selected header: %T %v pre=%d", err, err, dst.pre)
+	}
+	if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, true); err != nil || !a.valid || a.exactRet != 1077 {
+		t.Fatalf("clean witness lost the completed pre: %v", err)
+	}
 }
 
 func retainedCapacityLinkDeleteV1(g, h uint64) mdbx.Mutation {
@@ -1170,7 +1240,7 @@ func TestRetainedCapacityMDBXReusableUnaccepted(t *testing.T) {
 		if c.report && !errors.Is(dst.Proof(&mdbx.TreeDeltaReportV1{}), errRetainedReportAPIV1) {
 			t.Fatalf("%s: report accepted", name)
 		}
-		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); err != nil || a.valid || dst.accepted {
+		if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, -1, nil, false); err != nil || !retainedCapacityClearedV1(a) || dst.accepted {
 			t.Fatalf("%s: %v valid=%v", name, err, a.valid)
 		}
 	}
@@ -1292,7 +1362,7 @@ func TestRetainedCapacityMDBXSourceForward(t *testing.T) {
 	if dst.prepared || a.active != dst || dst.pre != 0 || dst.add != 0 || dst.remove != 0 || a.valid {
 		t.Fatalf("after forward: prepared=%v pre=%d add=%d valid=%v", dst.prepared, dst.pre, dst.add, a.valid)
 	}
-	if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, true); err != nil || a.valid || a.active != nil || !dst.applied {
+	if err := a.ApplyDirectMDBX(dst, mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, -1, err, true); err != nil || !retainedCapacityClearedV1(a) || a.active != nil || !dst.applied {
 		t.Fatalf("apply forwarded refusal: %v valid=%v", err, a.valid)
 	}
 }
