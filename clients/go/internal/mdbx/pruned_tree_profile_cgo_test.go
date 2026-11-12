@@ -404,7 +404,8 @@ func TestPrunedTreeProfileSizeBound(t *testing.T) {
 
 // TestPrunedTreeProfileChargeSpan is D6's source-structure evidence: in
 // pruned_tree_profile_cgo.go the plan steps (D7 tip witness and suffix page, D8
-// binding read, D9/D12 checks and Encode) are reached only through
+// binding read, D9/D12 checks and Encode) and the reads they make (Get,
+// PrefixPage, ReadTreeRootBindingV1) are reached only through
 // prunedTreeOperation, and prunedTreeOperation is called only inside the
 // WithReservation callback of prunedTreeCompose, so the 1000-byte charge is held
 // until every plan step has returned.
@@ -426,6 +427,10 @@ func TestPrunedTreeProfileChargeSpan(t *testing.T) {
 		"prunedTreeBodyLimit":   {"prunedTreeOperation"},
 		"prunedTreeReplacement": {"prunedTreeOperation"},
 		"Encode":                {"prunedTreeReplacement"},
+		"prunedTreeTipRow":      {"prunedTreeTip"},
+		"Get":                   {"prunedTreeTipRow"},
+		"PrefixPage":            {"prunedTreeTip"},
+		"ReadTreeRootBindingV1": {"prunedTreeBodyLimit"},
 	}
 	for name, at := range want {
 		if !reflect.DeepEqual(sites[name], at) {

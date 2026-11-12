@@ -42,9 +42,10 @@ type PrunedTreeProfileOutcomeV1 struct {
 // charge is returned unchanged before any index or binding read. The charge is
 // held through the tip witness and suffix page, the binding read, the promise and
 // replacement checks and Encode, and is released when that one reservation
-// callback returns, before UpdateTreeV1 takes its own hold. That engine hold for
-// the Pair copies is separate: UpdateTreeV1 charges it after the callback, and
-// its refusal is a tuple of the projection below.
+// callback returns. UpdateTreeV1's own engine hold is separate: it is opened
+// before the plan callback runs and is grown for the Pair copies after that
+// callback returns, and a refusal of that growth is a tuple of the projection
+// below.
 //
 // The tip witness reads the rank-2 canonical index of ActiveGenerationID. For a
 // non-nil tip, an absent tip row is "STALE_LOCAL_PLAN"; a present row's work is
