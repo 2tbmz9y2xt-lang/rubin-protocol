@@ -56,10 +56,9 @@ type PrunedTreeProfileOutcomeV1 struct {
 // for the binding. It returns each read's error unchanged and stops at the
 // first one. Besides those reads and the refusals this doc names, its only
 // fallible steps are the tip row's HeightKey, which cannot fail because the
-// decoded envelope has nonzero generations, and the replacement Encode, which
-// cannot fail after the method's own validity and size checks and would return
-// the same LocalInvariant "invalid pruned tree profile replacement" with its
-// error as cause. Before it can record, each read
+// decoded envelope has nonzero generations, and the replacement Encode, whose
+// refusal is the same LocalInvariant "invalid pruned tree profile replacement"
+// with the Encode error as cause, not recorded on the Reader. Before it can record, each read
 // refuses without recording an unusable Reader and a request it rejects, and the
 // two tree reads also a non-format-3 Reader; on this method's path none of those
 // can occur, because the callback Reader is active and format 3, no read follows
