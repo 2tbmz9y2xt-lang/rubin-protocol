@@ -47,13 +47,22 @@ type PrunedTreeProfileOutcomeV1 struct {
 // "STALE_LOCAL_PLAN". Index read errors are returned unchanged.
 //
 // The LAG root binding is read with ReadTreeRootBindingV1(LagGenerationID); its
-// read error is returned unchanged. Once its Reader-usability and request
-// checks pass, each read (ReadTreeAuthorityV1 for the envelope, Get for the tip
-// row, PrefixPage for the index suffix, ReadTreeRootBindingV1 for the binding)
-// records every error it returns on the Reader, so the Store is consumed: among
-// them any native failure, an invalid result shape, a stored key or value
-// outside its domain or width bound, an absence-census or decode failure, and a
-// binding whose DatabaseID differs from the store.
+// read error is returned unchanged.
+//
+// The method makes four Reader reads (ReadTreeAuthorityV1 for the envelope, Get
+// for the tip row, PrefixPage for the index suffix, ReadTreeRootBindingV1 for the
+// binding), returns each read's error unchanged and stops at the first one; its
+// only other fallible step, the tip row's HeightKey, cannot fail because the
+// decoded envelope has nonzero generations. Before it can record, each read
+// refuses without recording an unusable Reader and a request it rejects, and the
+// two tree reads also a non-format-3 Reader; on this method's path none of those
+// can occur, because the callback Reader is active and format 3, no read follows
+// a failed one, and the method builds every request itself. Every
+// other error a read returns is recorded on the Reader, so the Store is consumed:
+// a native failure, an invalid result shape, a stored key or value outside its
+// domain or width bound, an absence-census or decode failure, or a binding whose
+// DatabaseID differs from the store. An absent binding is not a read error; it is
+// the latched "missing pruned tree profile root binding" route below.
 //
 // Three routes return Integrity/get/MDBX_INVALID with the named diagnostic and
 // no cause, latched on the Reader so the Store is consumed:
