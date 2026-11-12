@@ -839,7 +839,7 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	// G7 (D15, MP 1717, 2550-2557): in wo obsolete generation 5 also projects y; deleting y's header ends that projection in the
 	// planned image, so y's header leaves E with its projection-owned (here absent) undo family while SIDE keeps its body.
 	wo, leaveO := retainedCapacityWLSideV1(t)
-	retainedCapacityObsoleteYV1(t, wo, [32]byte(leaveO.Key))
+	retainedCapacityObsoleteYV1(t, wo, [32]byte(leaveO.Key), 2)
 	w, _, genesis := riGenesis(t)
 	kept := retainedCapacitySelectedV1(t, w, initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = genesis, blockStepsMedian+2 }), 1)
 	for name, c := range map[string]struct {
@@ -866,14 +866,14 @@ func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	retainedCapacityKeptSideV1(t, w)
 }
 
-// retainedCapacityObsoleteYV1 makes obsolete generation 5 project y, x's child at 2, under a TRUE fact: its own forward
-// and reverse name y with parent x, and y's healthy header is the selected side's.
-func retainedCapacityObsoleteYV1(t *testing.T, w *btWorld, y [32]byte) {
+// retainedCapacityObsoleteYV1 makes obsolete generation 5 project y, x's child, at h under a TRUE fact: its own forward
+// and reverse name y with parent x at h, and y's healthy header is stored.
+func retainedCapacityObsoleteYV1(t *testing.T, w *btWorld, y [32]byte, h uint64) {
 	t.Helper()
 	x, _ := retainedCapacityChildV1(t, w)
-	index, _ := mdbx.HeightKey(5, 2)
+	index, _ := mdbx.HeightKey(5, h)
 	owner, _ := mdbx.CanonicalOwnerKey(5, y)
-	w.pair(t, btMutation(2, index, mdbx.ChainValue(y, x, [40]byte{39: 3})), btMutation(7, owner, []byte{7: 2}))
+	w.pair(t, btMutation(2, index, mdbx.ChainValue(y, x, [40]byte{39: 3})), btMutation(7, owner, []byte{7: byte(h)}))
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
 		a.Authority.NextGenerationID = max(a.Authority.NextGenerationID, 6)
 		a.Authority.Phase, a.Authority.Cleanup = mdbx.StoragePhasePruneGCV1, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 5}}}

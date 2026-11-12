@@ -50,43 +50,59 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 			op := retainedCapacityBoundOpV1(t, w)
 			a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 			err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
-			if dst.complete[0] != (retainedCompleteV1{5, false}) {
-				t.Fatalf("fact %+v", dst.complete)
-			}
+			logicalMDBXAssert(t, dst.complete[0] == (retainedCompleteV1{5, false}), "fact %+v", dst.complete)
 			if member {
-				if err != nil || !dst.prepared || dst.add != 148 || dst.remove != 148 || !dst.undo.oldOwned {
-					t.Fatalf("positive: %v add=%d remove=%d undo=%+v", err, dst.add, dst.remove, dst.undo)
-				}
+				logicalMDBXAssert(t, err == nil && dst.prepared && dst.add == 148 && dst.remove == 148 && dst.undo.oldOwned, "positive: %v add=%d remove=%d undo=%+v", err, dst.add, dst.remove, dst.undo)
 				return
 			}
 			var failure *RetainedProofFailureV1
-			if !errors.As(err, &failure) || failure.Resource != "branch_data" || dst.prepared || a.active != dst || dst.add != 0 {
-				t.Fatalf("negative: %v prepared=%v", err, dst.prepared)
-			}
+			logicalMDBXAssert(t, errors.As(err, &failure) && failure.Resource == "branch_data" && !dst.prepared && a.active == dst && dst.add == 0, "negative: %v prepared=%v", err, dst.prepared)
 		})
 	}
 	t.Run("D4_D23_native_commit_and_companion", retainedCapacityNativeCommitV1)
 	t.Run("T18_w_row_beside_pending_side", retainedCapacityWBesidePendingV1)
 	t.Run("D4_native_frame_R_boundaries", retainedCapacityNativeBoundsV1)
 	t.Run("T19_rolling_merge_full_plan_proof", retainedCapacityRollingMergeV1)
-	t.Run("G7_D15_obsolete_leaving_header_family", func(t *testing.T) {
-		w, leave := retainedCapacityWLSideV1(t)
-		retainedCapacityObsoleteYV1(t, w, [32]byte(leave.Key))
-		rifFamily(t, w, [32]byte(leave.Key), 2, 2, "")
-		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-		err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityWLOpV1(t, w, 2, 2, leave), 8192)
-		// y's header 148 and its projection-only family 2*(36+20) leave E beside x's W header 148.
-		logicalMDBXAssert(t, err == nil && dst.prepared && dst.add == 148 && dst.remove == 296+2*(36+20), "plan: %v add=%d remove=%d", err, dst.add, dst.remove)
-		logicalMDBXAssert(t, dst.Proof(retainedCapacityGrowV1(dst, mdbx.TreeUndoChargeV1{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56})) == nil && dst.accepted, "proof")
-	})
-	// D15 W/L transfer whose Pair keeps y's unowned leaving header, no obsolete projection of y: that header leaves E
-	// as when the Pair deletes it (MP 2550-2557, 3169).
-	t.Run("D15_wl_kept_leaving_header", func(t *testing.T) {
-		w, _ := retainedCapacityWLSideV1(t)
-		a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-		err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityWLOpV1(t, w, 2, 2), 8192)
-		logicalMDBXAssert(t, err == nil && dst.prepared && dst.add == 148 && dst.remove == 296, "plan: %v add=%d remove=%d", err, dst.add, dst.remove)
-	})
+	// D15 (MP 1717, 2550-2557, 3169): the W/L op (side) or the bare op deletes y's header (x's child at 2), or the W/L Pair keeps it. Obsolete generation 5 projecting y at h (0:
+	// none) with y's family (manifest h, 2*(36+20)) owns, at its own height and fields, each kind no stronger owner holds; the deletion ends it: the selected y's header and family
+	// leave E beside x's W header 148 (F14_2: obsolete height 3, side row 2); the unowned y's header, body 298 and family leave E as the producer's cold Ret drops them (F14_1).
+	for name, c := range map[string]struct {
+		side, keep     bool
+		h, add, remove uint64
+	}{
+		"G7_D15_obsolete_leaving_header_family": {true, false, 2, 148, 296 + 112},
+		"D15_wl_kept_leaving_header":            {true, true, 0, 148, 296},
+		"F14_1_unowned_obsolete_header_deleted": {false, false, 2, 148 + 298, 148 + 298 + 112},
+		"F14_2_selected_obsolete_own_height":    {true, false, 3, 148, 296 + 112},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w, leave := retainedCapacityWLSideV1(t)
+			if !c.side {
+				w, _, _ = riGenesis(t)
+				x, _ := retainedCapacityChildV1(t, w)
+				raw := initial148BlockFrame(t, [][]byte{initial148BlockGenesisTx(t)}, func(h *initial148BlockHead) { h.parent, h.timestamp = x, blockStepsMedian+2 })
+				w.pair(t, btMutation(3, leave.Key, raw[:148]), btMutation(4, leave.Key, raw))
+			}
+			if c.h != 0 {
+				retainedCapacityObsoleteYV1(t, w, [32]byte(leave.Key), c.h)
+				rifFamily(t, w, [32]byte(leave.Key), c.h, 2, "")
+			}
+			op := retainedCapacityBoundOpV1(t, w)
+			if op.Pair.Mutations = append(op.Pair.Mutations, leave); c.side {
+				op = retainedCapacityWLOpV1(t, w, 2, 2, []mdbx.Mutation{leave}[:riBool(!c.keep)]...)
+			}
+			a, dst := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+			err := retainedCapacityPlanV1(t, w, a, dst, op, 8192)
+			logicalMDBXAssert(t, err == nil && dst.prepared && dst.add == c.add && dst.remove == c.remove, "plan: %v add=%d remove=%d", err, dst.add, dst.remove)
+			logicalMDBXAssert(t, dst.Proof(retainedCapacityGrowV1(dst, mdbx.TreeUndoChargeV1{Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 56})) == nil && dst.accepted, "proof")
+			if !c.side {
+				pre, errPre := riRead(t, w, nil)
+				w.pair(t, leave)
+				post, err := riRead(t, w, nil)
+				logicalMDBXAssert(t, errPre == nil && err == nil && pre.exactRet-post.exactRet == c.remove, "cold %v %v pre %d post %d", errPre, err, pre.exactRet, post.exactRet)
+			}
+		})
+	}
 	t.Run("D3_D14_D18_native_callback_refusal_witness_warm_no_cold_row", retainedCapacityCallbackRefusalV1)
 	t.Run("D29_native_context_window", retainedCapacityContextWindowV1)
 	t.Run("D14_native_fault_tuples", retainedCapacityFaultTuplesV1)
