@@ -66,9 +66,9 @@ func (a *RetainedAccountingV1) InvalidateV1() {
 	a.binding, a.exactRet, a.valid, a.complete, a.active = mdbx.MutationBindingV1{}, 0, false, [2]retainedCompleteV1{}, nil
 }
 
-// PlanDirectMDBX refuses invalid initial controls with no new attempt and no
-// Reader work, then owns exactly one attempt that stays active with
-// prepared=false on every later refusal.
+// PlanDirectMDBX refuses invalid initial controls with no new attempt and no Reader work, then owns exactly one attempt that stays active with prepared=false on every later refusal.
+// Caller precondition (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.6): a non-nil op.HeaderSlot declares x=Primitives[0].Block the healthy bound SIDE-sourced candidate, header x unowned in OLD and Header
+// its body's first 148 bytes. Plan checks Hash==x==Coverage.Block and BodyKind 2, not the premise, on which it skips stored header x: 0 in Ret(pre), cached or cold, and 148 once in Ret(post).
 func (a *RetainedAccountingV1) PlanDirectMDBX(dst *DirectRetainedProofV1, old *mdbx.Reader, account *mdbx.OperationAccount, op *mdbx.TreeOperationV1) error {
 	if err := a.initialV1(dst, old, account, op); err != nil {
 		return err
