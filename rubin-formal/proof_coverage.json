@@ -171,7 +171,7 @@
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
       "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"92865cb6823b9055b4297e3f3e204bc3cfc2788961bc793cf9d886c2f892a7aa"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"fde539d553fca78136ae1ef7502e9ac6a8096eb6d79657ecc091f59cf7a43c71"}
     }
   },
   "coverage": [
@@ -1231,7 +1231,8 @@
         "RubinFormal.addCoinbaseOutputs_preserves_full",
         "RubinFormal.utxo_apply_basic_universal_refinement",
         "RubinFormal.utxo_apply_basic_chain_refinement",
-        "RubinFormal.RootPathComparisonV1.root_path_comparison_contract"
+        "RubinFormal.RootPathComparisonV1.root_path_comparison_contract",
+        "RubinFormal.OutpointInsertionV1.outpoint_insertion_contract"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
@@ -1280,9 +1281,10 @@
         "RubinFormal.addCoinbaseOutputs_preserves_full": "rubin-formal/RubinFormal/UtxoMapProperties.lean",
         "RubinFormal.utxo_apply_basic_universal_refinement": "rubin-formal/RubinFormal/RefinementBridgeV1.lean",
         "RubinFormal.utxo_apply_basic_chain_refinement": "rubin-formal/RubinFormal/RefinementBridgeV1.lean",
-        "RubinFormal.RootPathComparisonV1.root_path_comparison_contract": "rubin-formal/RubinFormal/RootPathComparisonV1.lean"
+        "RubinFormal.RootPathComparisonV1.root_path_comparison_contract": "rubin-formal/RubinFormal/RootPathComparisonV1.lean",
+        "RubinFormal.OutpointInsertionV1.outpoint_insertion_contract": "rubin-formal/RubinFormal/OutpointInsertionV1.lean"
       },
-      "notes": "Block connection pipeline with coinbase, value conservation, and per-tx state machine. Current CORE_VAULT spend proofs remain registered; the retained experimental VaultStateMachine lifecycle corpus is not current-protocol evidence. Coinbase UTXO marking is covered by the current list-to-RBMap bridge and query-level semantics. Vault-policy replay is limited to the safe subset/default-order path. The bounded UtxoBasicV1 model refuses non-retained covenant tags, including 0x0105, through its invalid-type boundary; no live-client proof follows from this model alone. `RubinFormal.RootPathComparisonV1.root_path_comparison_contract` in rubin-formal/RubinFormal/RootPathComparisonV1.lean is a kernel-checked property of a bounded model of the proposed comparison of an obtained committed root and committed path nodes of U_parent with the outpoints resolved present.",
+      "notes": "Block connection pipeline with coinbase, value conservation, and per-tx state machine. Current CORE_VAULT spend proofs remain registered; the retained experimental VaultStateMachine lifecycle corpus is not current-protocol evidence. Coinbase UTXO marking is covered by the current list-to-RBMap bridge and query-level semantics. Vault-policy replay is limited to the safe subset/default-order path. The bounded UtxoBasicV1 model refuses non-retained covenant tags, including 0x0105, through its invalid-type boundary; no live-client proof follows from this model alone. `RubinFormal.RootPathComparisonV1.root_path_comparison_contract` in rubin-formal/RubinFormal/RootPathComparisonV1.lean is a kernel-checked property of a bounded model of the proposed comparison of an obtained committed root and committed path nodes of U_parent with the outpoints resolved present. RubinFormal.OutpointInsertionV1.outpoint_insertion_contract in rubin-formal/RubinFormal/OutpointInsertionV1.lean is a kernel-checked property of a bounded model.",
       "limitations": [
         "RUB-1774's proposed U_pre_genesis/U_parent selection, complete final-map accounting, mandatory growth and required-read handoff are modeled separately by canonical_utxo_state_model, not proved by these UTXO theorems. The <2^59 valid-total/<2^60 transient structural bounds, checked-u64 implementation sufficiency and concrete StateView integrity checks remain unproved here; no model result transfers to this row, actual root bytes, client parity or physical effects.",
         "CORE_SIMPLICITY 0x0106 and other non-retained types are outside this bounded replay model; its invalid-type refusal, including covenant tag 0x0105, is not a live-consensus claim. The manifest pin alone establishes no client behavior.",
@@ -1290,7 +1292,8 @@
         "vault_policy_default_order_safe_proved covers the spend-side safe subset / default-order path only and is not a full L1↔L2 equivalence theorem for every vault-policy branch.",
         "The current UTXO evidence does not prove RUB-1217's P0-S6 atomic publication boundary, accepted-nonce publication, transaction-index arbitration, or rejection-time absence of partial UTXO, replay, queue, or candidate-state publication.",
         "The registered UTXO theorems and fixture replays do not prove the canonical complete-state UTXO tree or its root bytes (RUBIN_CONSENSUS_STATE_MACHINE.md §2.6, RUBIN_L1_CANONICAL.md §18.5), the derivation of Root(U_candidate), or any IMAGE entry, cover, historical-membership, persisted-seed or COMPLETE obligation (RUBIN_MEMPOOL_POLICY.md §6.4.1.8); they do not relate a matching root or a received image to execution of the skipped history.",
-        "The added root_path_comparison_contract is a kernel-checked property of a bounded model of abstract 288-bit keys, positions, node identities and event sequences, with no bridge to Go or Rust code; it does not prove hashing, root bytes, the derivation of Root(U_candidate), store reads, how a result comes to identify a node or any client behavior, and the row's proved/compiler_trusted/machine_checked_universal classification describes its other theorems unchanged."
+        "The added root_path_comparison_contract is a kernel-checked property of a bounded model of abstract 288-bit keys, positions, node identities and event sequences, with no bridge to Go or Rust code; it does not prove hashing, root bytes, the derivation of Root(U_candidate), store reads, how a result comes to identify a node or any client behavior, and the row's proved/compiler_trusted/machine_checked_universal classification describes its other theorems unchanged.",
+        "The added outpoint_insertion_contract is a kernel-checked property of a bounded model of abstract cores, identifiers, chains, outpoint sets and read-event sequences, with no bridge to Go or Rust code; it does not prove hashing, bytes, the transaction encoding, store reads, the derivation of Root(U_candidate), how a result comes to identify a leaf or any client behavior, nor the rules that the model does not represent; it represents no failed check of the store other than the proposed one; and the row's proved/compiler_trusted/machine_checked_universal classification describes its other theorems unchanged."
       ],
       "evidence_level": "machine_checked_universal"
     },
@@ -1883,8 +1886,8 @@
     "proved_with_axiom_rows": 5,
     "stated_rows": 8,
     "deferred_rows": 0,
-    "theorem_references": 539,
-    "unique_theorem_names": 493,
+    "theorem_references": 540,
+    "unique_theorem_names": 494,
     "reused_theorem_names": [
       "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_params_bridge",
       "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff",
