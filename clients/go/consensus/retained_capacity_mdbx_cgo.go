@@ -66,9 +66,9 @@ func (a *RetainedAccountingV1) InvalidateV1() {
 	a.binding, a.exactRet, a.valid, a.complete, a.active = mdbx.MutationBindingV1{}, 0, false, [2]retainedCompleteV1{}, nil
 }
 
-// PlanDirectMDBX refuses invalid initial controls with no new attempt, no Reader or account work and the cache and any active attempt unchanged, then owns exactly one attempt that stays active with prepared=false on every later refusal.
-// It adds at most one temporary 4480400-byte reservation on account, released before return; nil means a prepared proof that keeps only scalars and the op borrow; Pair.ContextConsulted is never read or charged. Caller precondition
-// (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.6): a non-nil op.HeaderSlot declares x=Primitives[0].Block the healthy bound SIDE-sourced candidate, header x unowned in OLD and Header its body's first 148 bytes. Plan checks Hash==x==Coverage.Block and BodyKind 2, not the premise, on which it skips stored header x: 0 in Ret(pre), cached or cold, and 148 once in Ret(post).
+// PlanDirectMDBX refuses invalid initial controls with no new attempt, no Reader or account work and the cache and any active attempt unchanged, then owns exactly one attempt that stays active with prepared=false on every later refusal. Its errors are this file's preinitialized local API or storage_capacity errors, or exactly what the producer (its functions and its classifier) or the account returned: Plan adds no wrapper, join or merged result bit, so causes, Unwrap and errors.As stay the producer's.
+// Past the op-only checks it charges account one temporary 4480400-byte reservation for its callback; the producer's reservations on the same account (zero bytes at initialization, then its page, body and undo frames) nest inside it, and every reservation ends and the read and finite contexts are cleared before return, also on error, panic or Goexit. nil means a prepared proof that keeps only scalars and the op borrow; Pair.ContextConsulted is never read or charged.
+// op.HeaderSlot is optional and a nil slot is never refused. Caller precondition (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.6): a non-nil op.HeaderSlot declares x=Primitives[0].Block the healthy bound SIDE-sourced candidate, header x unowned in OLD and Header its body's first 148 bytes. Plan checks Hash==x==Coverage.Block and BodyKind 2, not the premise, on which it skips stored header x: 0 in Ret(pre), cached or cold, and 148 once in Ret(post).
 func (a *RetainedAccountingV1) PlanDirectMDBX(dst *DirectRetainedProofV1, old *mdbx.Reader, account *mdbx.OperationAccount, op *mdbx.TreeOperationV1) error {
 	if err := a.initialV1(dst, old, account, op); err != nil {
 		return err
@@ -423,7 +423,7 @@ func retainedAddV1(v uint64, values ...uint64) (uint64, bool) {
 }
 
 // ApplyDirectMDBX consumes the owned active attempt once, including one PlanDirectMDBX refused, with the raw native truth, stage, index and error the caller holds. Only the exact
-// accepted NEW/nil/CommitMayHaveCrossed/-1 tuple advances the cache; every other valid tuple invalidates unless a trusted clean callback refusal preserves a completed same-binding pre tuple.
+// accepted NEW/nil/CommitMayHaveCrossed/-1 tuple advances the cache; every other valid tuple invalidates, except that a trusted clean callback refusal keeps a cached completed pre tuple whose binding equals the one this attempt captured at its pre step; a refusal raised before that step (op-only, initializer, planned-decode or Pair/source relation) has no such binding and invalidates even an equal-for-reuse cache.
 // cleanCallbackRefusal is the caller's witness, set only for an OLD/Prewrite/-1 error of its own callback refusal before Proof, after a usable callback-end binding, with a clean abort and no Reader or cleanup failure.
 // Misuse (a nil, copied, foreign, used or inactive proof, a tuple outside the native domain or an impossible nil-error tuple) is a local API failure and invalidates. Otherwise it returns nil: the tuple was
 // applied, not that the operation succeeded; it never returns, wraps or replaces nativeErr, and the caller maps the tuple it holds. It makes no Reader, account or native call.
