@@ -1396,13 +1396,14 @@ example : applyChain tidB [[cbTx c0, spTx s0, spTx sR], [cbTx c1]] =
     [.valid [(5, 0)], .noResult] := by decide
 
 /-- T6: earlier transactions of the same block inserted and removed `(2, 0)`; the attempt
-under the injective `tidA` is `invalid`. -/
+under `tidA`, injective on the cores of the examples, is `invalid`. -/
 example : applyChain tidA [[cbTx c0], [cbTx c1, spTx sR, spTx c1]] =
     [.valid [(1, 0)], .invalid] := by decide
 
 /-- T6: in the same block `s1` inserts `(6, 0)` and `(6, 1)`, and `s2` removes `(6, 1)`; `s1`
 applied again, which would insert `(6, 0)`, still present, and `(6, 1)` again, is `invalid`
-under the injective `tidA`: its first application removed its input `(1, 0)` (`R1`). -/
+under `tidA`, injective on the cores of the examples: its first application removed its
+input `(1, 0)` (`R1`). -/
 example : applyChain tidA [[cbTx c0], [cbTx c1, spTx s1, spTx s2, spTx s1]] =
     [.valid [(1, 0)], .invalid] := by decide
 
@@ -1423,16 +1424,18 @@ example : applyChain tidB t8 = [.valid [(2, 0)], .noResult, .noResult] := by dec
 example : applyChain tidB [[cbTx c0], [cbTx c1, spTx s0]] = [.valid [(1, 0)], .noResult] := by
   decide
 
-/-- T9: under `tidB` the results of `runBase` on `t8` are three `valid` results. -/
+/-- T9: under `tidB` the results of `runBase` on `t8` are `valid [(2, 0)]`, `valid [(2, 0)]`
+and `valid [(2, 0), (3, 0)]`. -/
 example : (runBase tidB t8).1 = [.valid [(2, 0)], .valid [(2, 0)], .valid [(2, 0), (3, 0)]] := by
   decide
 
-/-- S1: keyed parent entry of the derivation at an inserted outpoint. -/
+/-- S1: keyed parent entry of the derivation, with `crossRowOk` false, at an inserted
+outpoint. -/
 example : insertionFinding 1 [(2, 0)] []
     [.parentEntry .derivation (2, 0) .keyed false, .consume .derivation] = some .failedCheck := by
   decide
 
-/-- S2: a multi-outpoint read. -/
+/-- S2: a multi-outpoint read: a parent entry of the derivation with `crossRowOk` false. -/
 example : insertionFinding 1 [(2, 0)] [] [.parentEntry .derivation (2, 0) .multi false] =
     some .failedCheck := by decide
 
@@ -1444,7 +1447,8 @@ example : insertionFinding 1 [(2, 0)] [] [.parentLeaf .derivation (2, 0) 7] =
 example : insertionFinding 1 [(2, 0)] [] [.parentLeaf .derivation (2, 0) 8] =
     some .failedCheck := by decide
 
-/-- S4: an entry at an output created earlier in the same block, which is not in `resolved`. -/
+/-- S4: a keyed entry with `crossRowOk` false at an output created earlier in the same block,
+which is not in `resolved`. -/
 example : insertionFinding 1 [(2, 0), (4, 0)] [(1, 0)]
     [.parentEntry .derivation (4, 0) .keyed false] = some .failedCheck := by decide
 
@@ -1452,7 +1456,8 @@ example : insertionFinding 1 [(2, 0), (4, 0)] [(1, 0)]
 example : insertionFinding 1 [(2, 0), (4, 0)] [(1, 0)] [.parentLeaf .derivation (4, 0) 3] =
     some .failedCheck := by decide
 
-/-- S5: an outpoint resolved as a present entry of `U_parent`. -/
+/-- S5: an outpoint resolved as a present entry of `U_parent`; the keyed entry of the
+derivation at it has `crossRowOk` true. -/
 example : insertionFinding 1 [(2, 0)] [(2, 0)] [.parentEntry .derivation (2, 0) .keyed true] =
     none := by decide
 
@@ -1462,33 +1467,35 @@ example : insertionFinding 1 [(2, 0)] [] [.parentAbsent .derivation (2, 0)] = no
 /-- S7: no event. -/
 example : insertionFinding 1 [(2, 0)] [] [] = none := by decide
 
-/-- S7: events only for other outpoints. -/
+/-- S7: events only for other outpoints: a keyed entry with `crossRowOk` true and a leaf. -/
 example : insertionFinding 1 [(2, 0)] [] [.parentEntry .derivation (3, 0) .keyed true,
     .parentLeaf .derivation (2, 1) 0] = none := by decide
 
 /-- S8: the private-candidate view. -/
 example : insertionFinding 1 [(2, 0)] [] [.candidateEntry .derivation (2, 0)] = none := by decide
 
-/-- S9: obtained by the operation that includes input resolution. -/
+/-- S9: a keyed entry with `crossRowOk` true obtained by the operation that includes input
+resolution. -/
 example : insertionFinding 1 [(2, 0)] [] [.parentEntry .resolution (2, 0) .keyed true] = none := by
   decide
 
 /-- S10: `ins` from a core with spendable output 0 and non-spendable output 1. -/
 example : spendKeys tidA cS10 = [(12, 0)] := by decide
 
-/-- S10: an entry at output 1. -/
+/-- S10: a keyed entry with `crossRowOk` true at output 1. -/
 example : insertionFinding 1 (spendKeys tidA cS10) [] [.parentEntry .derivation (12, 1) .keyed true] =
     none := by decide
 
 /-- S11: a definitive absence at height 0. -/
 example : insertionFinding 0 [(2, 0)] [] [.parentAbsent .derivation (2, 0)] = none := by decide
 
-/-- S11, the height clause of E4: an entry event at height 0, a state that the specification
-excludes (every parent-branch lookup at height 0 is a definitive absence). -/
+/-- S11, the height clause of E4: a keyed entry event with `crossRowOk` true at height 0, a
+state that the specification excludes (every parent-branch lookup at height 0 is a definitive
+absence). -/
 example : insertionFinding 0 [(2, 0)] [] [.parentEntry .derivation (2, 0) .keyed true] = none := by
   decide
 
-/-- S12: obtained after the last consumption. -/
+/-- S12: a keyed entry with `crossRowOk` false obtained after the last consumption. -/
 example : insertionFinding 1 [(2, 0)] [] [.consume .derivation,
     .parentEntry .derivation (2, 0) .keyed false] = some .failedCheck := by decide
 
@@ -1496,11 +1503,12 @@ example : insertionFinding 1 [(2, 0)] [] [.consume .derivation,
 example : insertionFinding 1 [(2, 0)] [] [.parentEntry .derivation (2, 0) .keyed true] =
     some .failedCheck := by decide
 
-/-- S14: an unavailable read first. -/
+/-- S14: an unavailable read first, then a keyed entry with `crossRowOk` false. -/
 example : insertionFinding 1 [(2, 0)] [] [.unavailable,
     .parentEntry .derivation (2, 0) .keyed false] = some .unavailableRead := by decide
 
-/-- S14: the failing obtain first. -/
+/-- S14: the failing obtain, a keyed entry with `crossRowOk` false, first, then an unavailable
+read. -/
 example : insertionFinding 1 [(2, 0)] [] [.parentEntry .derivation (2, 0) .keyed false,
     .unavailable] = some .failedCheck := by decide
 
@@ -1523,7 +1531,8 @@ example : baselineFinding [.parentAbsent .derivation (2, 0), .unavailable] =
 example : insertionFinding 1 [(2, 0)] [] [.parentAbsent .derivation (2, 0), .unavailable] =
     some .unavailableRead := by decide
 
-/-- S17: under `tidB` the coinbase core `c1` of block 1 of `t8` inserts `(2, 0)`. -/
+/-- S17: under `tidB` the keys that the coinbase core `c1` of block 1 of `t8` inserts are
+exactly `[(2, 0)]`. -/
 example : spendKeys tidB c1 = [(2, 0)] := by decide
 
 /-- S17: the S1 sequence alone gives a failed check. -/
@@ -1542,13 +1551,14 @@ sequence. -/
 example : storeOutcome ((applyChain tidB t8).getD 0 .invalid) 0 (spendKeys tidB c0) [] [] =
     .noFinding := by decide
 
-/-- S17: under the injective `tidA` every block of `t8` is `valid`. -/
+/-- S17: under `tidA`, injective on the cores of the examples, the results of the blocks of
+`t8` are `valid [(4, 0)]`, `valid [(4, 0), (2, 0)]` and `valid [(4, 0), (2, 0), (3, 0)]`. -/
 example : applyChain tidA t8 =
     [.valid [(4, 0)], .valid [(4, 0), (2, 0)], .valid [(4, 0), (2, 0), (3, 0)]] := by decide
 
 /-- S17: `storeOutcome` with the result of block 1 of `applyChain tidA t8`, height 1, the
 outpoints that `c1` inserts under `tidA`, an empty `resolved` and one keyed `parentEntry` of the
-derivation at `(2, 0)` gives the failed check. -/
+derivation at `(2, 0)` with `crossRowOk` true gives `finding failedCheck`. -/
 example : storeOutcome ((applyChain tidA t8).getD 1 .invalid) 1 (spendKeys tidA c1) []
     [.parentEntry .derivation (2, 0) .keyed true] = .finding .failedCheck := by decide
 
@@ -1564,16 +1574,19 @@ specification rejects such a transaction by the duplicate-outpoint scan, which t
 not represent. -/
 example : applyChain tidA [[cbTx c0, spTx dupIn]] = [.valid [(13, 0)]] := by decide
 
-/-- Hostile: an outpoint listed twice in `ins`. -/
+/-- Hostile: an outpoint listed twice in `ins`, and a keyed entry of the derivation with
+`crossRowOk` true at it. -/
 example : insertionFinding 1 [(2, 0), (2, 0)] [] [.parentEntry .derivation (2, 0) .keyed true] =
     some .failedCheck := by decide
 
-/-- Hostile: the outpoint once in `ins` and listed twice in `resolved`. -/
+/-- Hostile: the outpoint once in `ins` and listed twice in `resolved`, and a keyed entry of
+the derivation with `crossRowOk` true at it. -/
 example : insertionFinding 1 [(2, 0)] [(2, 0), (2, 0)]
     [.parentEntry .derivation (2, 0) .keyed true] = none := by decide
 
-/-- Hostile: the block result `invalid` given to `storeOutcome`, a value outside the states of
-the rule, since an earlier consensus error ends later reads. -/
+/-- Hostile: the block result `invalid` given to `storeOutcome` with the other arguments of the
+S1 example, a value outside the states of the rule, since an earlier consensus error ends
+later reads. -/
 example : storeOutcome .invalid 1 [(2, 0)] []
     [.parentEntry .derivation (2, 0) .keyed false, .consume .derivation] =
     .finding .failedCheck := by decide
