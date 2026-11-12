@@ -51,10 +51,10 @@ type PrunedTreeProfileOutcomeV1 struct {
 //
 // The method makes four Reader reads (ReadTreeAuthorityV1 for the envelope, Get
 // for the tip row, PrefixPage for the index suffix, ReadTreeRootBindingV1 for the
-// binding), returns each read's error unchanged and stops at the first one. On
-// the tip path the only fallible step that is not a read, the tip row's
-// HeightKey, cannot fail because the decoded envelope has nonzero generations;
-// the method's other refusals are the ones this doc names. Before it can record, each read
+// binding), returns each read's error unchanged and stops at the first one.
+// Besides those reads and the refusals this doc names, its only fallible step is
+// the tip row's HeightKey, which cannot fail because the decoded envelope has
+// nonzero generations. Before it can record, each read
 // refuses without recording an unusable Reader and a request it rejects, and the
 // two tree reads also a non-format-3 Reader; on this method's path none of those
 // can occur, because the callback Reader is active and format 3, no read follows
