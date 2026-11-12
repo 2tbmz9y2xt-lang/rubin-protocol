@@ -348,6 +348,23 @@ func TestPrunedTreeProfileMissingBinding(t *testing.T) {
 	prunedTreeLatched(t, s, path, out, before, "missing pruned tree profile root binding", o)
 }
 
+// TestPrunedTreeProfileSuffixBeforeBinding pins the D7-before-D8 order: with no LAG
+// binding, a stale suffix (a nil tip over a nonempty index, or a row above the tip)
+// returns STALE_LOCAL_PLAN, not R10's latched integrity.
+func TestPrunedTreeProfileSuffixBeforeBinding(t *testing.T) {
+	for _, tip := range []*AuthorityPointV1{nil, prunedTreeAt(0)} {
+		s, _, o := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0))
+		for _, height := range []uint64{0, 1} {
+			key, err := HeightKey(1, height)
+			mustEnvironment(t, err)
+			treeNativeSeed(t, s, 2, key, ChainValue(modelHash(height), [32]byte{}, modelWork(false)))
+		}
+		before := prunedTreeBytes(t, s)
+		prunedTreeDecision(t, s.SelectPrunedTreeProfileV1(true, tip, o), "STALE_LOCAL_PLAN", "D7 suffix before D8")
+		prunedTreeOpenUnchanged(t, s, before, "D7 suffix before D8")
+	}
+}
+
 // TestPrunedTreeProfileSizeBound is R11 (the tip row is paired with its rank-7
 // owner row, as the canonical pairing rule requires): the BLOCKS span (34 encoded bytes) moves
 // an Encode-accepted envelope past MaxMetadataBytes-27; one byte less commits. With p=4881
