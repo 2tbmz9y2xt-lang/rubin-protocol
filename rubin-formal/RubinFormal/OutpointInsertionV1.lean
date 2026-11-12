@@ -102,7 +102,12 @@ every input present (`R1`). -/
 def spendOk (s : State) (c : Core) : Bool :=
   !decide (c.nonce = 0) && !c.inputs.isEmpty && c.inputs.all (fun op => decide (op ∈ s))
 
-/-- Step (4): the transactions after the coinbase, from index `i`, in index order. -/
+/-- The transactions after the coinbase of a block at height `h`, from index `i`, in index
+order. One that passes `spendOk` is recorded as applied with height `h` and its index, its
+inputs are recorded as `rem` in order and removed, and its `spendKeys` are inserted by
+`insertKeys`; the first that fails `spendOk` gives `invalid` with no entry or effect of its
+own and ends the run; with no transaction left the result is `valid` with the current
+state. -/
 def runTxs (tid : Core → Nat) (h : Nat) :
     Nat → State → List Tx → BlockResult × List Applied × List Effect
   | _, s, [] => (.valid s, [], [])
@@ -210,6 +215,8 @@ inductive Event where
   | consume (who : Op)
   deriving DecidableEq
 
+/-- A finding: `failedCheck`, a failed check, or `unavailableRead`, an unavailable required
+read. -/
 inductive Finding where
   | failedCheck
   | unavailableRead
@@ -245,6 +252,7 @@ outcome that the specification gives. -/
 def baselineFinding (es : List Event) : Option Finding :=
   if Event.unavailable ∈ es then some .unavailableRead else none
 
+/-- The value of `storeOutcome`: `finding f` for a finding `f`, `noFinding`, or `noOutcome`. -/
 inductive StoreOutcome where
   | finding (f : Finding)
   | noFinding
@@ -284,6 +292,7 @@ def UnavFirst (h : Nat) (ins resolved : List Outpoint) (es : List Event) : Prop 
 
 /-! ## Part one: lemmas for parts (a) and (b) -/
 
+/-- A key `k` of `keysFrom id j bs` has identifier `id` and output index at least `j`. -/
 theorem keysFrom_mem {id j : Nat} {bs : List Bool} {k : Outpoint} (hk : k ∈ keysFrom id j bs) :
     k.1 = id ∧ j ≤ k.2 := by
   induction bs generalizing j with
@@ -299,6 +308,7 @@ theorem keysFrom_mem {id j : Nat} {bs : List Bool} {k : Outpoint} (hk : k ∈ ke
       simp only [keysFrom] at hk
       have := ih hk; exact ⟨this.1, Nat.le_of_succ_le this.2⟩
 
+/-- The keys of `keysFrom id j bs` are pairwise distinct. -/
 theorem keysFrom_nodup (id j : Nat) (bs : List Bool) : (keysFrom id j bs).Pairwise (· ≠ ·) := by
   induction bs generalizing j with
   | nil => exact List.Pairwise.nil
@@ -327,10 +337,13 @@ theorem insertKeys_fresh : ∀ (s : State) (ks : List Outpoint), (∀ k ∈ ks, 
       · exact hnd'.1 k hk (List.mem_singleton.1 h1).symm) hnd'.2
     simp [insertKeys, hop, ih]
 
+/-- `x` is in `removeAll s ops` exactly when it is in `s` and not in `ops`. -/
 theorem mem_removeAll {s ops : List Outpoint} {x : Outpoint} :
     x ∈ removeAll s ops ↔ x ∈ s ∧ x ∉ ops := by
   simp [removeAll, List.mem_filter]
 
+/-- `spendOk s c` holds exactly when the nonce of `c` is not 0, the input list of `c` is not
+empty, and every input of `c` is in `s`. -/
 theorem spendOk_iff (s : State) (c : Core) :
     spendOk s c = true ↔ c.nonce ≠ 0 ∧ c.inputs ≠ [] ∧ ∀ op ∈ c.inputs, op ∈ s := by
   cases hi : c.inputs <;> simp [spendOk, hi, List.all_eq_true]
@@ -338,9 +351,12 @@ theorem spendOk_iff (s : State) (c : Core) :
 /-- The identifiers of an applied list. -/
 def tids (tid : Core → Nat) (A : List Applied) : List Nat := A.map (fun a => tid a.core)
 
+/-- The identifiers `tids tid` of `A` with `a` appended are those of `A` followed by
+`tid a.core`. -/
 theorem tids_append (tid : Core → Nat) (A : List Applied) (a : Applied) :
     tids tid (A ++ [a]) = tids tid A ++ [tid a.core] := by simp [tids]
 
+/-- For `a` in `A`, `tid a.core` is in `tids tid A`. -/
 theorem mem_tids {tid : Core → Nat} {A : List Applied} {a : Applied} (ha : a ∈ A) :
     tid a.core ∈ tids tid A := List.mem_map_of_mem (fun a => tid a.core) ha
 
@@ -362,6 +378,7 @@ structure SInv (tid : Core → Nat) (A : List Applied) (s : State) (bound : Nat)
   spent : ∀ a ∈ A, a.core.nonce ≠ 0 → ∀ op ∈ a.core.inputs, op ∉ s ∧ op.1 ∈ tids tid A
   cb : ∀ a ∈ A, a.core.nonce = 0 → a.core.locktime < bound
 
+/-- A list `P` of effects none of which is an insertion satisfies `EffRel` pairwise. -/
 theorem pairwise_noIns : ∀ (P : List Effect), (∀ e ∈ P, ∀ op w, e ≠ .ins op w) → P.Pairwise EffRel
   | [], _ => List.Pairwise.nil
   | x :: P, hP => by
@@ -369,6 +386,9 @@ theorem pairwise_noIns : ∀ (P : List Effect), (∀ e ∈ P, ∀ op w, e ≠ .i
     intro y hy op w hyeq
     exact absurd hyeq (hP y (List.mem_cons_of_mem _ hy) op w)
 
+/-- If the outpoint of every effect of `X` has an identifier in `tids tid A`, `t` is not in
+`tids tid A`, and every insertion of `Y` is at an outpoint with identifier `t`, then
+`EffRel x y` holds for every `x` of `X` and every `y` of `Y`. -/
 theorem cross_fresh {tid : Core → Nat} {A : List Applied} {X Y : List Effect} {t : Nat}
     (hX : ∀ x ∈ X, x.op.1 ∈ tids tid A) (ht : t ∉ tids tid A)
     (hY : ∀ y ∈ Y, ∀ op w, y = .ins op w → op.1 = t) : ∀ x ∈ X, ∀ y ∈ Y, EffRel x y := by
@@ -461,6 +481,9 @@ theorem cb_fresh {tid : Core → Nat} {A : List Applied} {s : State} {h : Nat} {
   rw [hcore, hl] at this
   exact Nat.lt_irrefl _ this
 
+/-- From `SInv tid A s b`, an application `a` whose core passes `spendOk s` and whose identifier
+`tid a.core` is not in `tids tid A` gives `SInv` for `A` with `a` appended, the state `s`
+with the inputs of `a` removed and its `spendKeys` appended, and the same bound `b`. -/
 theorem spend_sinv {tid : Core → Nat} {A : List Applied} {s : State} {b : Nat} {a : Applied}
     (hs : SInv tid A s b) (hok : spendOk s a.core = true) (hfresh : tid a.core ∉ tids tid A) :
     SInv tid (A ++ [a]) (removeAll s a.core.inputs ++ spendKeys tid a.core) b := by
@@ -495,6 +518,9 @@ theorem spend_sinv {tid : Core → Nat} {A : List Applied} {s : State} {b : Nat}
     · exact hs.cb e h1 hen
     · rw [List.mem_singleton.1 h1] at hen; exact absurd hen hn
 
+/-- From `SInv tid A s h`, an application `a` whose core has nonce 0 and locktime `h` and whose
+identifier `tid a.core` is not in `tids tid A` gives `SInv` for `A` with `a` appended, the
+state `s` with the `spendKeys` of `a` appended, and the bound `h + 1`. -/
 theorem cb_sinv {tid : Core → Nat} {A : List Applied} {s : State} {h : Nat} {a : Applied}
     (hs : SInv tid A s h) (hn : a.core.nonce = 0) (hl : a.core.locktime = h)
     (hfresh : tid a.core ∉ tids tid A) :
@@ -522,10 +548,15 @@ theorem cb_sinv {tid : Core → Nat} {A : List Applied} {s : State} {h : Nat} {a
     · exact Nat.lt_succ_of_lt (hs.cb e h1 hen)
     · rw [List.mem_singleton.1 h1, hl]; exact Nat.lt_succ_self h
 
+/-- If `L ++ R` satisfies `Consistent tid`, so does `L`. -/
 theorem consistent_left {tid : Core → Nat} {L R : List Applied} (hc : Consistent tid (L ++ R)) :
     Consistent tid L :=
   fun a ha b hb => hc a (List.mem_append_left _ ha) b (List.mem_append_left _ hb)
 
+/-- From `Good tid A E` and `SInv tid A s (h + 1)`, if `A` followed by the applied list of
+`runTxs tid h i s txs` satisfies `Consistent tid`, then `A` and `E` extended by the applied
+list and the effects of that run satisfy `Good tid`, and when its result is `valid s'` the
+extended applied list satisfies `SInv` at the state `s'` and the bound `h + 1`. -/
 theorem runTxs_good (tid : Core → Nat) (h : Nat) : ∀ (txs : List Tx) (i : Nat) (s : State)
     (A : List Applied) (E : List Effect), Good tid A E → SInv tid A s (h + 1) →
     Consistent tid (A ++ (runTxs tid h i s txs).2.1) →
@@ -565,6 +596,10 @@ theorem runTxs_good (tid : Core → Nat) (h : Nat) : ∀ (txs : List Tx) (i : Na
       intro s' hs'
       cases hs'
 
+/-- From `Good tid A E` and `SInv tid A s h`, if `A` followed by the applied list of
+`runBlock tid h s b` satisfies `Consistent tid`, then `A` and `E` extended by the applied
+list and the effects of that block satisfy `Good tid`, and when its result is `valid s'` the
+extended applied list satisfies `SInv` at the state `s'` and the bound `h + 1`. -/
 theorem runBlock_good (tid : Core → Nat) (h : Nat) (s : State) (b : Block) (A : List Applied)
     (E : List Effect) (hg : Good tid A E) (hs : SInv tid A s h)
     (hc : Consistent tid (A ++ (runBlock tid h s b).2.1)) :
@@ -605,6 +640,9 @@ theorem runBlock_good (tid : Core → Nat) (h : Nat) (s : State) (b : Block) (A 
       simp only [List.append_nil]
       exact ⟨hg, fun s' hs' => by cases hs'⟩
 
+/-- From `Good tid A E` and `SInv tid A s h`, if `A` followed by the applied list of
+`runFrom tid h s chain` satisfies `Consistent tid`, then `A` and `E` extended by the applied
+list and the effects of that run satisfy `Good tid`. -/
 theorem runFrom_good (tid : Core → Nat) : ∀ (chain : Chain) (h : Nat) (s : State)
     (A : List Applied) (E : List Effect), Good tid A E → SInv tid A s h →
     Consistent tid (A ++ (runFrom tid h s chain).2.1) →
@@ -636,12 +674,14 @@ theorem runBase_good (tid : Core → Nat) (chain : Chain) (hp : Premise tid chai
     ⟨by simp, by simp, by simp⟩ (by simpa using hp)
   simpa using this
 
+/-- For an outpoint `k` of `insOps E`, some effect `ins k w` is in `E`. -/
 theorem mem_insOps {E : List Effect} {k : Outpoint} (hk : k ∈ insOps E) : ∃ w, Effect.ins k w ∈ E := by
   obtain ⟨e, he, hf⟩ := (List.mem_filterMap _ _).1 hk
   cases e with
   | ins op w => cases hf; exact ⟨w, he⟩
   | rem _ => cases hf
 
+/-- If `E` satisfies `EffRel` pairwise, the outpoints of `insOps E` are pairwise distinct. -/
 theorem insOps_nodup : ∀ (E : List Effect), E.Pairwise EffRel → (insOps E).Pairwise (· ≠ ·)
   | [], _ => List.Pairwise.nil
   | e :: E, hp => by
@@ -657,6 +697,8 @@ theorem insOps_nodup : ∀ (E : List Effect), E.Pairwise EffRel → (insOps E).P
     | rem op =>
       simpa [insOps, List.filterMap] using ih
 
+/-- If `E` satisfies `EffRel` pairwise, then for every split of `E` as `pre`, then `ins op w`,
+then `post`, the effect `rem op` is not in `pre`. -/
 theorem no_ins_after_rem {E : List Effect} (hp : E.Pairwise EffRel) :
     ∀ pre post op w, E = pre ++ Effect.ins op w :: post → Effect.rem op ∉ pre := by
   intro pre post op w heq hm
@@ -665,14 +707,17 @@ theorem no_ins_after_rem {E : List Effect} (hp : E.Pairwise EffRel) :
 
 /-! ## Part two: lemmas -/
 
+/-- `FailFirst h ins resolved` does not hold for the empty sequence. -/
 theorem failFirst_nil (h : Nat) (ins resolved : List Outpoint) : ¬ FailFirst h ins resolved [] := by
   rintro ⟨pre, e, post, heq, _, _⟩
   cases pre <;> simp at heq
 
+/-- `UnavFirst h ins resolved` does not hold for the empty sequence. -/
 theorem unavFirst_nil (h : Nat) (ins resolved : List Outpoint) : ¬ UnavFirst h ins resolved [] := by
   rintro ⟨pre, post, heq, _⟩
   cases pre <;> simp at heq
 
+/-- `failsE4 h ins resolved` is false for the event `unavailable`. -/
 theorem failsE4_unavailable (h : Nat) (ins resolved : List Outpoint) :
     failsE4 h ins resolved .unavailable = false := rfl
 
@@ -722,6 +767,8 @@ theorem unavFirst_cons (h : Nat) (ins resolved : List Outpoint) (e : Event) (es 
       · exact h1 ▸ hf
       · exact hp x h1
 
+/-- `insertionFinding h ins resolved es` is `some failedCheck` exactly when
+`FailFirst h ins resolved es`. -/
 theorem finding_failed_iff (h : Nat) (ins resolved : List Outpoint) :
     ∀ es, insertionFinding h ins resolved es = some .failedCheck ↔ FailFirst h ins resolved es
   | [] => by simp [insertionFinding, failFirst_nil]
@@ -733,6 +780,8 @@ theorem finding_failed_iff (h : Nat) (ins resolved : List Outpoint) :
       · simp [insertionFinding, hu, hf]
       · simp [insertionFinding, hu, hf, finding_failed_iff h ins resolved es]
 
+/-- `insertionFinding h ins resolved es` is `some unavailableRead` exactly when
+`UnavFirst h ins resolved es`. -/
 theorem finding_unav_iff (h : Nat) (ins resolved : List Outpoint) :
     ∀ es, insertionFinding h ins resolved es = some .unavailableRead ↔ UnavFirst h ins resolved es
   | [] => by simp [insertionFinding, unavFirst_nil]
@@ -744,6 +793,8 @@ theorem finding_unav_iff (h : Nat) (ins resolved : List Outpoint) :
       · simp [insertionFinding, hu, hf]
       · simp [insertionFinding, hu, hf, finding_unav_iff h ins resolved es]
 
+/-- `insertionFinding h ins resolved es` is `none` exactly when neither
+`FailFirst h ins resolved es` nor `UnavFirst h ins resolved es` holds. -/
 theorem finding_none_iff (h : Nat) (ins resolved : List Outpoint) (es : List Event) :
     insertionFinding h ins resolved es = none ↔
       ¬ FailFirst h ins resolved es ∧ ¬ UnavFirst h ins resolved es := by
@@ -752,6 +803,8 @@ theorem finding_none_iff (h : Nat) (ins resolved : List Outpoint) (es : List Eve
   | none => simp
   | some f => cases f <;> simp
 
+/-- Removing from `es` every event that satisfies `isConsume` does not change
+`insertionFinding h ins resolved es`. -/
 theorem finding_filter_consume (h : Nat) (ins resolved : List Outpoint) :
     ∀ es, insertionFinding h ins resolved (es.filter (fun e => !isConsume e)) =
       insertionFinding h ins resolved es
@@ -762,6 +815,7 @@ theorem finding_filter_consume (h : Nat) (ins resolved : List Outpoint) :
     have hc : ∀ w, failsE4 h ins resolved (.consume w) = false := fun _ => rfl
     cases e <;> simp [List.filter, isConsume, insertionFinding, ih, hc]
 
+/-- `failsE4 h ins resolved` has the same value on `forget e` as on `e`. -/
 theorem failsE4_forget (h : Nat) (ins resolved : List Outpoint) (e : Event) :
     failsE4 h ins resolved (forget e) = failsE4 h ins resolved e := by
   cases e with
@@ -769,9 +823,12 @@ theorem failsE4_forget (h : Nat) (ins resolved : List Outpoint) (e : Event) :
   | parentLeaf w op _ => cases w <;> rfl
   | _ => rfl
 
+/-- `forget e` is `unavailable` exactly when `e` is `unavailable`. -/
 theorem forget_unavailable (e : Event) : forget e = .unavailable ↔ e = .unavailable := by
   cases e <;> simp [forget]
 
+/-- Applying `forget` to every event of `es` does not change
+`insertionFinding h ins resolved es`. -/
 theorem finding_map_forget (h : Nat) (ins resolved : List Outpoint) :
     ∀ es, insertionFinding h ins resolved (es.map forget) = insertionFinding h ins resolved es
   | [] => rfl
@@ -779,6 +836,8 @@ theorem finding_map_forget (h : Nat) (ins resolved : List Outpoint) :
     simp only [List.map, insertionFinding, forget_unavailable, failsE4_forget,
       finding_map_forget h ins resolved es]
 
+/-- `baselineFinding` of `e` followed by `es` is `some unavailableRead` when `e` is
+`unavailable`, and `baselineFinding es` otherwise. -/
 theorem baseline_cons (e : Event) (es : List Event) :
     baselineFinding (e :: es) =
       if e = .unavailable then some .unavailableRead else baselineFinding es := by
@@ -787,6 +846,8 @@ theorem baseline_cons (e : Event) (es : List Event) :
   · have : ¬ Event.unavailable = e := fun h1 => hu h1.symm
     simp [baselineFinding, hu, this]
 
+/-- If no event of `es` satisfies `failsE4 h ins resolved`, then
+`insertionFinding h ins resolved es` equals `baselineFinding es`. -/
 theorem finding_eq_baseline (h : Nat) (ins resolved : List Outpoint) :
     ∀ es, (∀ e ∈ es, failsE4 h ins resolved e = false) →
       insertionFinding h ins resolved es = baselineFinding es
@@ -799,6 +860,8 @@ theorem finding_eq_baseline (h : Nat) (ins resolved : List Outpoint) :
     · simp [insertionFinding, hu]
     · simp [insertionFinding, hu, hf, ih]
 
+/-- `insertionFinding h ins resolved es` differs from `baselineFinding es` exactly when
+`FailFirst h ins resolved es`. -/
 theorem finding_ne_baseline_iff (h : Nat) (ins resolved : List Outpoint) :
     ∀ es, insertionFinding h ins resolved es ≠ baselineFinding es ↔ FailFirst h ins resolved es
   | [] => by simp [insertionFinding, baselineFinding, failFirst_nil]
@@ -812,10 +875,13 @@ theorem finding_ne_baseline_iff (h : Nat) (ins resolved : List Outpoint) :
         simp [insertionFinding, hu, hf, Ne.symm hb]
       · simp [insertionFinding, hu, hf, finding_ne_baseline_iff h ins resolved es]
 
+/-- `storeOutcome r h ins resolved es` is `noOutcome` exactly when `r` is `noResult`. -/
 theorem store_noOutcome_iff (r : BlockResult) (h : Nat) (ins resolved : List Outpoint)
     (es : List Event) : storeOutcome r h ins resolved es = .noOutcome ↔ r = .noResult := by
   cases r <;> cases hf : insertionFinding h ins resolved es <;> simp [storeOutcome, hf]
 
+/-- For `r` other than `noResult`, `storeOutcome r h ins resolved es` is `finding f` exactly
+when `insertionFinding h ins resolved es` is `some f`. -/
 theorem store_finding_iff (r : BlockResult) (h : Nat) (ins resolved : List Outpoint)
     (es : List Event) (hr : r ≠ .noResult) (f : Finding) :
     storeOutcome r h ins resolved es = .finding f ↔ insertionFinding h ins resolved es = some f := by
@@ -823,6 +889,8 @@ theorem store_finding_iff (r : BlockResult) (h : Nat) (ins resolved : List Outpo
   | noResult => exact absurd rfl hr
   | _ => cases hf : insertionFinding h ins resolved es <;> simp [storeOutcome, hf]
 
+/-- For `r` other than `noResult`, `storeOutcome r h ins resolved es` is `noFinding` exactly
+when `insertionFinding h ins resolved es` is `none`. -/
 theorem store_noFinding_iff (r : BlockResult) (h : Nat) (ins resolved : List Outpoint)
     (es : List Event) (hr : r ≠ .noResult) :
     storeOutcome r h ins resolved es = .noFinding ↔ insertionFinding h ins resolved es = none := by
@@ -832,6 +900,9 @@ theorem store_noFinding_iff (r : BlockResult) (h : Nat) (ins resolved : List Out
 
 /-! ## Part one: lemmas for part (c) -/
 
+/-- If the test of `breakAt` for `a` against `seen` is false (no entry `e` of `seen` has
+`tid e.core = tid a.core` and `e.core ≠ a.core`), then every entry `e` of `seen` with
+`tid e.core = tid a.core` has `e.core = a.core`. -/
 theorem any_false {tid : Core → Nat} {seen : List Applied} {a : Applied}
     (h : (seen.any fun e => decide (tid e.core = tid a.core) && !decide (e.core = a.core)) = false) :
     ∀ e ∈ seen, tid e.core = tid a.core → e.core = a.core := by
@@ -842,6 +913,7 @@ theorem any_false {tid : Core → Nat} {seen : List Applied} {a : Applied}
   rw [h] at this
   exact Bool.false_ne_true this
 
+/-- If `seen ++ L` satisfies `Consistent tid`, then `breakAt tid seen L` is `none`. -/
 theorem breakAt_none_of_consistent (tid : Core → Nat) :
     ∀ (L seen : List Applied), Consistent tid (seen ++ L) → breakAt tid seen L = none
   | [], _, _ => rfl
@@ -857,6 +929,9 @@ theorem breakAt_none_of_consistent (tid : Core → Nat) :
     simp only [breakAt, hany]
     exact breakAt_none_of_consistent tid L (seen ++ [a]) (by simpa using hc)
 
+/-- If `seen` satisfies `Consistent tid` and every entry `e` of `seen` with
+`tid e.core = tid a.core` has `e.core = a.core`, then `seen` with `a` appended satisfies
+`Consistent tid`. -/
 theorem consistent_snoc {tid : Core → Nat} {seen : List Applied} {a : Applied}
     (hc : Consistent tid seen) (hs : ∀ e ∈ seen, tid e.core = tid a.core → e.core = a.core) :
     Consistent tid (seen ++ [a]) := by
@@ -867,6 +942,8 @@ theorem consistent_snoc {tid : Core → Nat} {seen : List Applied} {a : Applied}
   · rw [List.mem_singleton.1 hx] at hxy ⊢; exact (hs y hy hxy.symm).symm
   · rw [List.mem_singleton.1 hx, List.mem_singleton.1 hy]
 
+/-- If `seen` satisfies `Consistent tid` and `breakAt tid seen L` is `none`, then `seen ++ L`
+satisfies `Consistent tid`. -/
 theorem consistent_of_breakAt_none (tid : Core → Nat) :
     ∀ (L seen : List Applied), Consistent tid seen → breakAt tid seen L = none →
       Consistent tid (seen ++ L)
@@ -878,6 +955,9 @@ theorem consistent_of_breakAt_none (tid : Core → Nat) :
       simpa using this
     · simp [breakAt, hx] at hb
 
+/-- If `breakAt tid seen L` is `some k`, then `L` splits as `pre`, then `a`, then `post`, where
+`a` has height `k`, some entry `e` of `seen ++ pre` has `tid e.core = tid a.core` and
+`e.core ≠ a.core`, and `breakAt tid seen pre` is `none`. -/
 theorem breakAt_some (tid : Core → Nat) :
     ∀ (L seen : List Applied) (k : Nat), breakAt tid seen L = some k →
       ∃ pre a post, L = pre ++ a :: post ∧ a.height = k ∧
@@ -896,6 +976,8 @@ theorem breakAt_some (tid : Core → Nat) :
       simp at hp
       exact ⟨[], a, L, rfl, Option.some.inj hb, ⟨e, by simpa using he, hp⟩, rfl⟩
 
+/-- If `breakAt tid seen L` is `none`, then `breakAt tid seen (L ++ R)` equals
+`breakAt tid (seen ++ L) R`. -/
 theorem breakAt_append_none (tid : Core → Nat) :
     ∀ (L seen R : List Applied), breakAt tid seen L = none →
       breakAt tid seen (L ++ R) = breakAt tid (seen ++ L) R
@@ -908,6 +990,7 @@ theorem breakAt_append_none (tid : Core → Nat) :
       simp [breakAt, hx, this]
     · simp [breakAt, hx] at hb
 
+/-- If `breakAt tid seen L` is `some k`, then `breakAt tid seen (L ++ R)` is `some k`. -/
 theorem breakAt_append_some (tid : Core → Nat) :
     ∀ (L seen R : List Applied) (k : Nat), breakAt tid seen L = some k →
       breakAt tid seen (L ++ R) = some k
@@ -921,6 +1004,7 @@ theorem breakAt_append_some (tid : Core → Nat) :
       simp only [List.cons_append, breakAt, hx, if_true]
       exact hb
 
+/-- `Premise tid chain` holds exactly when `firstBreak tid chain` is `none`. -/
 theorem premise_iff (tid : Core → Nat) (chain : Chain) :
     Premise tid chain ↔ firstBreak tid chain = none := by
   constructor
@@ -930,6 +1014,7 @@ theorem premise_iff (tid : Core → Nat) (chain : Chain) :
     have := consistent_of_breakAt_none tid _ [] (fun _ h1 => absurd h1 (List.not_mem_nil _)) hb
     simpa using this
 
+/-- Every entry of the applied list of `runTxs tid h i s txs` has height `h`. -/
 theorem runTxs_height (tid : Core → Nat) (h : Nat) :
     ∀ (txs : List Tx) (i : Nat) (s : State), ∀ a ∈ (runTxs tid h i s txs).2.1, a.height = h
   | [], _, _ => by simp [runTxs]
@@ -944,6 +1029,7 @@ theorem runTxs_height (tid : Core → Nat) (h : Nat) :
       rw [show runTxs tid h i s (t :: rest) = (.invalid, [], []) by simp [runTxs, hok]] at ha
       cases ha
 
+/-- Every entry of the applied list of `runBlock tid h s b` has height `h`. -/
 theorem runBlock_height (tid : Core → Nat) (h : Nat) (s : State) (b : Block) :
     ∀ a ∈ (runBlock tid h s b).2.1, a.height = h := by
   intro a ha
@@ -1026,6 +1112,8 @@ theorem runFrom_take (tid : Core → Nat) : ∀ (chain : Chain) (h : Nat) (s : S
       simp only [hr]
       exact ⟨by simp, [], by simp, by simp⟩
 
+/-- For `j ≤ k`, the first `j` elements of the first `k` elements of `l` are the first `j`
+elements of `l`. -/
 theorem take_take_of_le {α : Type} : ∀ (l : List α) (j k : Nat), j ≤ k → (l.take k).take j = l.take j
   | [], _, _, _ => by simp
   | _ :: _, 0, _, _ => by simp
@@ -1033,6 +1121,7 @@ theorem take_take_of_le {α : Type} : ∀ (l : List α) (j k : Nat), j ≤ k →
   | x :: l, j + 1, k + 1, hjk => by
     simp [take_take_of_le l j k (Nat.le_of_succ_le_succ hjk)]
 
+/-- For `m ≤ n`, the list of `m` copies of `x` is a prefix of the list of `n` copies of `x`. -/
 theorem replicate_prefix {α : Type} (x : α) : ∀ (m n : Nat), m ≤ n →
     List.replicate m x <+: List.replicate n x
   | 0, _, _ => List.nil_prefix _
@@ -1041,12 +1130,19 @@ theorem replicate_prefix {α : Type} (x : α) : ∀ (m n : Nat), m ≤ n →
     obtain ⟨t, ht⟩ := replicate_prefix x m n (Nat.le_of_succ_le_succ hmn)
     exact ⟨t, by simp [List.replicate, ht]⟩
 
+/-- If `a` is a prefix of `b`, then `l ++ a` is a prefix of `l ++ b`. -/
 theorem prefix_append_left {α : Type} (l : List α) {a b : List α} (h : a <+: b) :
     l ++ a <+: l ++ b := by
   obtain ⟨t, ht⟩ := h
   exact ⟨t, by rw [List.append_assoc, ht]⟩
 
-/-- The break half of part (c). -/
+/-- If `Premise tid chain` does not hold, then `firstBreak tid chain` is `some k` with `k`
+below the length of `chain`; the applied list of `runBase tid chain` splits as `pre`, then
+`a` at height `k`, then `post`, where `pre` satisfies `Consistent tid` and holds an entry `e`
+with `tid e.core = tid a.core` and `e.core ≠ a.core`; `runBase tid chain` has at least `k`
+results, the first `k` each `valid`; and `applyChain tid chain` is those `k` results
+followed by `noResult` for block `k` and each later block of `chain`. This is the statement
+of part (c) of `outpoint_insertion_contract` for a chain without `Premise`. -/
 theorem applyChain_break (tid : Core → Nat) (chain : Chain) (hp : ¬ Premise tid chain) :
     ∃ k, firstBreak tid chain = some k ∧ k < chain.length ∧
       (∃ pre a post, (runBase tid chain).2.1 = pre ++ a :: post ∧ a.height = k ∧
@@ -1067,7 +1163,9 @@ theorem applyChain_break (tid : Core → Nat) (chain : Chain) (hp : ¬ Premise t
       h3, h4, ?_⟩
     simp only [applyChain, hfb]
 
-/-- The prefix half of part (c). -/
+/-- For every `j`, `applyChain tid` of the first `j` blocks of `chain` is a prefix of
+`applyChain tid chain`: the prefix statement of part (c) of `outpoint_insertion_contract`.
+-/
 theorem applyChain_prefix (tid : Core → Nat) (chain : Chain) (j : Nat) :
     applyChain tid (chain.take j) <+: applyChain tid chain := by
   obtain ⟨hres, rest, happ, hrest⟩ := runFrom_take tid chain 0 [] j
@@ -1105,13 +1203,36 @@ theorem applyChain_prefix (tid : Core → Nat) (chain : Chain) (j : Nat) :
 
 /-! ## Registered theorem -/
 
-/-- The bounded model's contract: (a) and (b) under `Premise`, with no hypothesis on the block
-results; (c) the premise break, (d) to (f) the event-order classifier, (g) the composition.
-A chain whose every `applyChain` result is `valid` satisfies `Premise`, since by (c) a premise
-break gives `noResult` to a block of the chain, so (a) and (b) cover it. A chain whose every
-`runBase` result is `valid` need not satisfy `Premise`: on `t8` under `tidB` the T9 example
-shows three `valid` `runBase` results and the T8 example an `applyChain` result that differs
-from them, which by the premise half of (c) excludes `Premise`. -/
+/-- The bounded model's contract, for every `tid`, `chain`, block result `r`, height `h`,
+outpoint lists `ins` and `resolved`, and event sequence `es`, with no other hypothesis.
+(a) Under `Premise tid chain`, the identifiers `tid a.core` of the entries `a` of the applied
+list of `runBase tid chain` have no duplicate.
+(b) Under `Premise tid chain`, every effect `ins op w` of `runBase tid chain` has `w` false,
+`insOps` of its effects has no duplicate, and for every split of its effects as `pre`, then
+`ins op w`, then `post`, the effect `rem op` is not in `pre`.
+(c) Under `Premise tid chain`, `applyChain tid chain` equals the results of
+`runBase tid chain`. If `Premise tid chain` does not hold, then `firstBreak tid chain` is
+`some k` with `k` below the length of `chain`; the applied list of `runBase tid chain`
+splits as `pre`, then `a` at height `k`, then `post`, where `pre` satisfies `Consistent tid`
+and holds an entry `e` with `tid e.core = tid a.core` and `e.core ≠ a.core`;
+`runBase tid chain` has at least `k` results, the first `k` each `valid`; and
+`applyChain tid chain` is those `k` results followed by `noResult` for block `k` and each
+later block of `chain`. For every `j`, `applyChain tid` of the first `j` blocks of `chain` is
+a prefix of `applyChain tid chain`.
+(d) `insertionFinding h ins resolved es` is `some failedCheck` exactly when
+`FailFirst h ins resolved es`, `some unavailableRead` exactly when
+`UnavFirst h ins resolved es`, and `none` exactly when neither holds; removing from `es`
+every event that satisfies `isConsume` does not change it.
+(e) For every `es'` with `es'.map forget = es.map forget`,
+`insertionFinding h ins resolved es'` equals `insertionFinding h ins resolved es`.
+(f) If no event of `es` satisfies `failsE4 h ins resolved`, then
+`insertionFinding h ins resolved es` equals `baselineFinding es`; the two differ exactly
+when `FailFirst h ins resolved es`.
+(g) `storeOutcome r h ins resolved es` is `noOutcome` exactly when `r` is `noResult`; for `r`
+other than `noResult` it is `finding f` exactly when `insertionFinding h ins resolved es`
+is `some f`, and `noFinding` exactly when that is `none`.
+By (c), a chain whose every `applyChain` result is `valid` satisfies `Premise`, so (a) and
+(b) apply to it. -/
 theorem outpoint_insertion_contract (tid : Core → Nat) (chain : Chain) (r : BlockResult)
     (h : Nat) (ins resolved : List Outpoint) (es : List Event) :
     -- (a)
@@ -1170,18 +1291,31 @@ theorem outpoint_insertion_contract (tid : Core → Nat) (chain : Chain) (r : Bl
 
 namespace Examples
 
+/-- A core: nonce 0, no input, locktime 0, one spendable output. -/
 def c0 : Core := ⟨0, [], 0, [true]⟩
+/-- A core: nonce 0, no input, locktime 1, one spendable output. -/
 def c1 : Core := ⟨0, [], 1, [true]⟩
+/-- A core: nonce 0, no input, locktime 2, one spendable output. -/
 def c2 : Core := ⟨0, [], 2, [true]⟩
+/-- A core: nonce 1, input `(1, 0)`, locktime 0, one spendable output. -/
 def s0 : Core := ⟨1, [(1, 0)], 0, [true]⟩
+/-- A core: nonce 1, input `(2, 0)`, locktime 0, one spendable output. -/
 def sR : Core := ⟨1, [(2, 0)], 0, [true]⟩
+/-- A core: nonce 1, input `(1, 0)`, locktime 0, two spendable outputs. -/
 def s1 : Core := ⟨1, [(1, 0)], 0, [true, true]⟩
+/-- A core: nonce 1, input `(6, 1)`, locktime 0, one spendable output. -/
 def s2 : Core := ⟨1, [(6, 1)], 0, [true]⟩
+/-- A core: nonce 1, no input, locktime 0, one spendable output. -/
 def n0 : Core := ⟨1, [], 0, [true]⟩
+/-- A core: nonce 0, input `(1, 0)`, locktime 0, one spendable output. -/
 def z : Core := ⟨0, [(1, 0)], 0, [true]⟩
+/-- A core: nonce 0, no input, locktime 0, output 0 non-spendable and output 1 spendable. -/
 def c7 : Core := ⟨0, [], 0, [false, true]⟩
+/-- A core: nonce 0, no input, locktime 0, one non-spendable output. -/
 def cF : Core := ⟨0, [], 0, [false]⟩
+/-- A core: nonce 0, no input, locktime 1, output 0 spendable and output 1 non-spendable. -/
 def cS10 : Core := ⟨0, [], 1, [true, false]⟩
+/-- A core: nonce 1, the input `(1, 0)` listed twice, locktime 0, one spendable output. -/
 def dupIn : Core := ⟨1, [(1, 0), (1, 0)], 0, [true]⟩
 
 /-- Injective on the cores of the examples. -/
@@ -1194,8 +1328,10 @@ def tidA (c : Core) : Nat :=
 /-- Maps the different cores `s0` and `c1` to one identifier. -/
 def tidB (c : Core) : Nat := if c = s0 then 2 else tidA c
 
+/-- The transaction with core `c` and `cbRest` true. -/
 def cbTx (c : Core) : Tx := ⟨c, true⟩
 
+/-- The transaction with core `c` and `cbRest` false. -/
 def spTx (c : Core) : Tx := ⟨c, false⟩
 
 /-- T1: coinbases at heights 0 and 1; every insertion has `wasPresent` false. -/
@@ -1287,7 +1423,7 @@ example : applyChain tidB t8 = [.valid [(2, 0)], .noResult, .noResult] := by dec
 example : applyChain tidB [[cbTx c0], [cbTx c1, spTx s0]] = [.valid [(1, 0)], .noResult] := by
   decide
 
-/-- T9: the T8 chain under the baseline gives three `valid` results. -/
+/-- T9: under `tidB` the results of `runBase` on `t8` are three `valid` results. -/
 example : (runBase tidB t8).1 = [.valid [(2, 0)], .valid [(2, 0)], .valid [(2, 0), (3, 0)]] := by
   decide
 
@@ -1387,7 +1523,7 @@ example : baselineFinding [.parentAbsent .derivation (2, 0), .unavailable] =
 example : insertionFinding 1 [(2, 0)] [] [.parentAbsent .derivation (2, 0), .unavailable] =
     some .unavailableRead := by decide
 
-/-- S17: the premise-breaking coinbase of block 1 of the T8 chain inserts `(2, 0)`. -/
+/-- S17: under `tidB` the coinbase core `c1` of block 1 of `t8` inserts `(2, 0)`. -/
 example : spendKeys tidB c1 = [(2, 0)] := by decide
 
 /-- S17: the S1 sequence alone gives a failed check. -/
@@ -1400,17 +1536,19 @@ example : storeOutcome ((applyChain tidB t8).getD 1 .invalid) 1 (spendKeys tidB 
     [.parentEntry .derivation (2, 0) .keyed false, .consume .derivation] = .noOutcome := by
   decide
 
-/-- S17: with the result of block 0, `valid` by the T8 example, the empty sequence gives no
-finding. -/
+/-- S17: `storeOutcome` with the result of block 0 of `applyChain tidB t8`, height 0, the
+outpoints that `c0` inserts under `tidB` and an empty `resolved` gives `noFinding` on the empty
+sequence. -/
 example : storeOutcome ((applyChain tidB t8).getD 0 .invalid) 0 (spendKeys tidB c0) [] [] =
     .noFinding := by decide
 
-/-- S17: under the injective `tidA` every block of the T8 chain is `valid`. -/
+/-- S17: under the injective `tidA` every block of `t8` is `valid`. -/
 example : applyChain tidA t8 =
     [.valid [(4, 0)], .valid [(4, 0), (2, 0)], .valid [(4, 0), (2, 0), (3, 0)]] := by decide
 
-/-- S17: under `tidA` the result of block 1, `valid` by the example above, gives the failed
-check. -/
+/-- S17: `storeOutcome` with the result of block 1 of `applyChain tidA t8`, height 1, the
+outpoints that `c1` inserts under `tidA`, an empty `resolved` and one keyed `parentEntry` of the
+derivation at `(2, 0)` gives the failed check. -/
 example : storeOutcome ((applyChain tidA t8).getD 1 .invalid) 1 (spendKeys tidA c1) []
     [.parentEntry .derivation (2, 0) .keyed true] = .finding .failedCheck := by decide
 
