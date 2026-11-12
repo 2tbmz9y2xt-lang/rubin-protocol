@@ -88,7 +88,7 @@ class FormalRelevanceTests(unittest.TestCase):
         self.assert_jobs(state_model, True, True)
         self.assertEqual(
             (len(formal), len(refinement), len(formal & refinement), len(formal | refinement)),
-            (443, 366, 351, 458),
+            (444, 367, 352, 459),
         )
 
     def test_every_exact_input_uses_its_job_profile(self):
