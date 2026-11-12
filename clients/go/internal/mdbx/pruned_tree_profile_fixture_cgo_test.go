@@ -257,6 +257,23 @@ func TestPrunedTreeProfileStale(t *testing.T) {
 	}
 }
 
+// TestPrunedTreeProfileSuffixBeforeBinding pins the D7-before-D8 order: with no LAG
+// binding, a stale suffix (a nil tip over a nonempty index, or a row above the tip)
+// returns STALE_LOCAL_PLAN, not R10's latched integrity.
+func TestPrunedTreeProfileSuffixBeforeBinding(t *testing.T) {
+	for _, tip := range []*AuthorityPointV1{nil, prunedTreeAt(0)} {
+		s, _, o := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0))
+		for _, height := range []uint64{0, 1} {
+			key, err := HeightKey(1, height)
+			mustEnvironment(t, err)
+			treeNativeSeed(t, s, 2, key, ChainValue(modelHash(height), [32]byte{}, modelWork(false)))
+		}
+		before := prunedTreeBytes(t, s)
+		prunedTreeDecision(t, s.SelectPrunedTreeProfileV1(true, tip, o), "STALE_LOCAL_PLAN", "D7 suffix before D8")
+		prunedTreeOpenUnchanged(t, s, before, "D7 suffix before D8")
+	}
+}
+
 func TestPrunedTreeProfileLatched(t *testing.T) {
 	// "R8 U zero p at B'" also fails D12 (R9): D9 refuses the promises first.
 	for _, name := range []string{"R7 work before hash", "R7 work before suffix", "R8 U zero", "R8 U plus one", "R8 U zero p at B'", "X1 corrupt binding", "X1 database mismatch", "X2 index width", "D7 suffix read failure", "D7 nil tip read failure", "D3 envelope read failure"} {
