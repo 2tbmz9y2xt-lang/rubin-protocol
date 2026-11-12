@@ -70,6 +70,35 @@ func prunedTreeBytes(t *testing.T, s *Store) []byte {
 	return out
 }
 
+// prunedTreeImage is every committed row of every rank, length-prefixed in key
+// order; treeReadNextV1 reads rows that Reader.Get refuses (X2, D7).
+func prunedTreeImage(t *testing.T, s *Store) []byte {
+	t.Helper()
+	var out []byte
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		var err error
+		for rank := range r.dbis {
+			if out, err = prunedTreeRankImage(r, rank, out); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	return out
+}
+
+func prunedTreeRankImage(r *Reader, rank int, out []byte) ([]byte, error) {
+	for from := []byte{0}; ; {
+		key, value, ok, err := treeReadNextV1(r.txn, r.dbis[rank], from)
+		if err != nil || !ok {
+			return out, err
+		}
+		out = binary.BigEndian.AppendUint32(append(binary.BigEndian.AppendUint32(append(out, byte(rank)), uint32(len(key))), key...), uint32(len(value.value)))
+		out = append(out, value.value...)
+		from = append(bytes.Clone(key), 0)
+	}
+}
+
 func prunedTreeDecision(t *testing.T, out PrunedTreeProfileOutcomeV1, want, marker string) {
 	t.Helper()
 	if out.Decision != want || out.Authority != nil || out.Truth != CommitTruthOld || out.Stage != UpdateStagePrewrite || out.Err != nil {
@@ -106,7 +135,8 @@ func prunedTreeConsumed(t *testing.T, s *Store, out PrunedTreeProfileOutcomeV1, 
 	}
 }
 
-// prunedTreeLatched asserts the consumed-Store integrity route of R7, R8, R10, X1 and X2.
+// prunedTreeLatched asserts the consumed-Store integrity route of R7, R8, R10, X1 and X2;
+// before is the prunedTreeImage taken before the call.
 func prunedTreeLatched(t *testing.T, s *Store, path string, out PrunedTreeProfileOutcomeV1, before []byte, diagnostic string, owner *OperationReservationOwner) {
 	t.Helper()
 	if diagnostic != "" {
@@ -116,8 +146,8 @@ func prunedTreeLatched(t *testing.T, s *Store, path string, out PrunedTreeProfil
 	reopened, err := OpenTreeV1(path, environmentConfig(), [32]byte{7})
 	mustEnvironment(t, err)
 	defer func() { _ = reopened.Close() }()
-	if !bytes.Equal(prunedTreeBytes(t, reopened), before) {
-		t.Fatal("latched durable envelope changed")
+	if !bytes.Equal(prunedTreeImage(t, reopened), before) {
+		t.Fatal("latched durable rows changed")
 	}
 }
 
@@ -279,7 +309,7 @@ func TestPrunedTreeProfileCapacity(t *testing.T) {
 	// The absent-tip-row case separates a charge placed after the first index read.
 	for _, tip := range []*AuthorityPointV1{nil, {BlockHash: modelHash(1)}} {
 		s, path, o := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0))
-		before := prunedTreeBytes(t, s)
+		before, image := prunedTreeBytes(t, s), prunedTreeImage(t, s)
 		out := s.SelectPrunedTreeProfileV1(true, tip, reservationOwner(t, MinReservationLimit-1))
 		if !IsOperationReservationCapacity(out.Err) {
 			t.Fatalf("R5 capacity: %+v", out)
@@ -291,7 +321,7 @@ func TestPrunedTreeProfileCapacity(t *testing.T) {
 			prunedTreeDecision(t, out, "STALE_LOCAL_PLAN", "R5 follow-up stale")
 			continue
 		}
-		prunedTreeLatched(t, s, path, out, before, "missing pruned tree profile root binding", o)
+		prunedTreeLatched(t, s, path, out, image, "missing pruned tree profile root binding", o)
 	}
 	// D6 amount: 999 remaining owner bytes refuse the 1000-byte charge and 1000 admit it.
 	// The absent tip row returns before the engine's own hold for the Pair copies.
@@ -313,7 +343,7 @@ func TestPrunedTreeProfileCapacity(t *testing.T) {
 // U=1 also differs from the nil tip's promise 0 (R8), and D8 refuses the missing binding before D9.
 func TestPrunedTreeProfileMissingBinding(t *testing.T) {
 	s, path, o := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 1))
-	before := prunedTreeBytes(t, s)
+	before := prunedTreeImage(t, s)
 	out := s.SelectPrunedTreeProfileV1(true, nil, o)
 	prunedTreeLatched(t, s, path, out, before, "missing pruned tree profile root binding", o)
 }

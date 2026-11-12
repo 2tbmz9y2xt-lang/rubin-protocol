@@ -311,7 +311,7 @@ func TestPrunedTreeProfileLatched(t *testing.T) {
 				treeNativeSeed(t, sc.s, 0, []byte{2}, []byte{0x7f})
 				diagnostic = ""
 			}
-			before := prunedTreeBytes(t, sc.s)
+			before := prunedTreeImage(t, sc.s)
 			out := sc.s.SelectPrunedTreeProfileV1(true, call, sc.o)
 			if diagnostic == "" {
 				engine, direct := directTestEngineError(out.Err)
@@ -470,7 +470,7 @@ func TestPrunedTreeProfileZeroPromiseMismatch(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			sc := newPrunedTreeScene(t, row.u, row.tip, nil, nil)
-			before := prunedTreeBytes(t, sc.s)
+			before := prunedTreeImage(t, sc.s)
 			out := sc.s.SelectPrunedTreeProfileV1(true, row.tip, sc.o)
 			prunedTreeLatched(t, sc.s, sc.path, out, before, "pruned tree profile promises disagree with tip", sc.o)
 		})
