@@ -378,7 +378,9 @@ theorem cross_fresh {tid : Core → Nat} {A : List Applied} {X Y : List Effect} 
   rw [heq, h1] at h2
   exact ht h2
 
-/-- Appending one fresh application with its removals `P` and its insertions keeps `Good`. -/
+/-- From `Good`, appending one application with a fresh identifier, effects `P` that are not
+insertions and whose outpoints carry identifiers already applied, and the insertions of its
+keys with `wasPresent` false keeps `Good`. -/
 theorem good_step {tid : Core → Nat} {A : List Applied} {E : List Effect} {a : Applied}
     {P : List Effect} (hg : Good tid A E) (hfresh : tid a.core ∉ tids tid A)
     (hP : ∀ e ∈ P, e.op.1 ∈ tids tid A ∧ ∀ op w, e ≠ .ins op w) :
@@ -428,8 +430,8 @@ theorem good_step {tid : Core → Nat} {A : List Applied} {E : List Effect} {a :
       · exact cross_fresh (fun x hx => (hP x hx).1) hfresh hK
     · exact cross_fresh hg.old hfresh hPK
 
-/-- From a state with `SInv`, a transaction at an index above 0 that passes `spendOk` has a
-fresh identifier when the applied list extended by it satisfies `Consistent`. -/
+/-- From a state with `SInv`, an application whose core passes `spendOk` has a fresh
+identifier when the applied list extended by it satisfies `Consistent`. -/
 theorem spend_fresh {tid : Core → Nat} {A : List Applied} {s : State} {b : Nat} {a : Applied}
     {rest : List Applied} (hs : SInv tid A s b) (hok : spendOk s a.core = true)
     (hc : Consistent tid (A ++ a :: rest)) : tid a.core ∉ tids tid A := by
@@ -959,7 +961,8 @@ theorem runBlock_height (tid : Core → Nat) (h : Nat) (s : State) (b : Block) :
     · rw [show runBlock tid h s (cb :: rest) = (.invalid, [], []) by simp [runBlock, hp]] at ha
       cases ha
 
-/-- An applied entry lies in a block of the chain that has a result, after valid blocks. -/
+/-- An applied entry lies in a block of the chain, and every block before it has a `valid`
+result. -/
 theorem runFrom_height (tid : Core → Nat) : ∀ (chain : Chain) (h : Nat) (s : State),
     ∀ a ∈ (runFrom tid h s chain).2.1, h ≤ a.height ∧ a.height - h < chain.length ∧
       ((runFrom tid h s chain).1.take (a.height - h)).length = a.height - h ∧
@@ -1106,7 +1109,9 @@ theorem applyChain_prefix (tid : Core → Nat) (chain : Chain) (j : Nat) :
 results; (c) the premise break, (d) to (f) the event-order classifier, (g) the composition.
 A chain whose every `applyChain` result is `valid` satisfies `Premise`, since by (c) a premise
 break gives `noResult` to a block of the chain, so (a) and (b) cover it. A chain whose every
-`runBase` result is `valid` need not satisfy `Premise` (the T9 example). -/
+`runBase` result is `valid` need not satisfy `Premise`: on `t8` under `tidB` the T9 example
+shows three `valid` `runBase` results and the T8 example an `applyChain` result that differs
+from them, which by the premise half of (c) excludes `Premise`. -/
 theorem outpoint_insertion_contract (tid : Core → Nat) (chain : Chain) (r : BlockResult)
     (h : Nat) (ins resolved : List Outpoint) (es : List Event) :
     -- (a)
@@ -1259,9 +1264,9 @@ under the injective `tidA` is `invalid`. -/
 example : applyChain tidA [[cbTx c0], [cbTx c1, spTx sR, spTx c1]] =
     [.valid [(1, 0)], .invalid] := by decide
 
-/-- T6: in the same block `s1` inserts `(6, 1)` and `s2` removes it; `s1` applied again, which
-would insert `(6, 1)` again, is `invalid` under the injective `tidA`: its first application
-removed its input `(1, 0)` (`R1`). -/
+/-- T6: in the same block `s1` inserts `(6, 0)` and `(6, 1)`, and `s2` removes `(6, 1)`; `s1`
+applied again, which would insert `(6, 0)`, still present, and `(6, 1)` again, is `invalid`
+under the injective `tidA`: its first application removed its input `(1, 0)` (`R1`). -/
 example : applyChain tidA [[cbTx c0], [cbTx c1, spTx s1, spTx s2, spTx s1]] =
     [.valid [(1, 0)], .invalid] := by decide
 
@@ -1395,7 +1400,8 @@ example : storeOutcome ((applyChain tidB t8).getD 1 .invalid) 1 (spendKeys tidB 
     [.parentEntry .derivation (2, 0) .keyed false, .consume .derivation] = .noOutcome := by
   decide
 
-/-- S17: with the `valid` result of block 0 the empty sequence gives no finding. -/
+/-- S17: with the result of block 0, `valid` by the T8 example, the empty sequence gives no
+finding. -/
 example : storeOutcome ((applyChain tidB t8).getD 0 .invalid) 0 (spendKeys tidB c0) [] [] =
     .noFinding := by decide
 
@@ -1403,7 +1409,8 @@ example : storeOutcome ((applyChain tidB t8).getD 0 .invalid) 0 (spendKeys tidB 
 example : applyChain tidA t8 =
     [.valid [(4, 0)], .valid [(4, 0), (2, 0)], .valid [(4, 0), (2, 0), (3, 0)]] := by decide
 
-/-- S17: under `tidA` the `valid` result of block 1 gives the failed check. -/
+/-- S17: under `tidA` the result of block 1, `valid` by the example above, gives the failed
+check. -/
 example : storeOutcome ((applyChain tidA t8).getD 1 .invalid) 1 (spendKeys tidA c1) []
     [.parentEntry .derivation (2, 0) .keyed true] = .finding .failedCheck := by decide
 
