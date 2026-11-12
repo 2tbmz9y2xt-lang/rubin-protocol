@@ -54,6 +54,7 @@ import RubinFormal.RegistryResolutionLiveBridge
 import RubinFormal.ReplayDomainBehavioral
 import RubinFormal.ReplayDomainUniversal
 import RubinFormal.RetargetBehavioral
+import RubinFormal.RootPathComparisonV1
 import RubinFormal.RotationPrelude
 import RubinFormal.SighashAssumptionBridge
 import RubinFormal.SighashRefinementUpgrade
