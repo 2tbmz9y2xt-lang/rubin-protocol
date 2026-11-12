@@ -18,6 +18,7 @@ type prunedTreeScene struct {
 	tip   *AuthorityPointV1
 	key   []byte
 	value []byte
+	rest  []byte
 }
 
 // newPrunedTreeScene seeds ARCHIVE NONE/STABLE with U, an optional tip row and an optional binding.
@@ -36,6 +37,7 @@ func newPrunedTreeScene(t *testing.T, u uint64, tip *AuthorityPointV1, p *uint64
 		treeNativeSeed(t, s, 2, key, scene.value)
 	}
 	treeNativeSeed(t, s, 0, prunedTreeLagKey(), prunedTreeBindingBytes(t, p))
+	scene.rest = prunedTreeImageBesideMeta(t, s)
 	return scene
 }
 
@@ -75,6 +77,10 @@ func (sc *prunedTreeScene) committed(t *testing.T, out PrunedTreeProfileOutcomeV
 		}
 		return readErr
 	}))
+	// D13 Mutations: the commit wrote meta key 2 and no other durable row.
+	if !bytes.Equal(prunedTreeImageBesideMeta(t, reopened), sc.rest) {
+		t.Fatalf("%s: a durable row other than meta key 2 changed", marker)
+	}
 }
 
 func TestPrunedTreeProfileCommit(t *testing.T) {
