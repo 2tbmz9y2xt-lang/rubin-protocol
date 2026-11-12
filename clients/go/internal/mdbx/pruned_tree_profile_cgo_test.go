@@ -249,14 +249,14 @@ func TestPrunedTreeProfileStaticRefusals(t *testing.T) {
 	}
 	prunedTreeDecision(t, s.SelectPrunedTreeProfileV1(false, nil, o), "PROFILE_CONFIRMATION_REQUIRED", "R2 reusable")
 
-	v2, _, _, _ := prunedStore(t, modelBase(2, 0, 0), nil, modelWork(false))
-	v2Before := prunedImage(t, v2, nil)
+	v2, _, _, v2Rows := prunedStore(t, modelBase(2, 0, 0), nil, modelWork(false))
+	v2Before := prunedImage(t, v2, v2Rows)
 	for _, in := range inputs {
 		out = v2.SelectPrunedTreeProfileV1(in.confirmed, in.tip, o)
 		treeNativeError(t, out.Err, operationUpdate, EngineStateMismatch, -30779, "typed tree operation requires tree store", nil)
 		prunedTreeRefusal(t, out, "R3 format 2")
 	}
-	prunedUnchanged(t, v2, nil, v2Before, "R3 format 2")
+	prunedUnchanged(t, v2, v2Rows, v2Before, "R3 format 2")
 	prunedDecision(t, v2.SelectPrunedProfileV1(false, nil, o), "PROFILE_CONFIRMATION_REQUIRED", "R3 format-2 owner")
 
 	busy, _, _ := prunedTreeSeed(t, archive)

@@ -36,8 +36,10 @@ type PrunedTreeProfileOutcomeV1 struct {
 // confirmed false is "PROFILE_CONFIRMATION_REQUIRED". A tip above 0xffffffff
 // then returns InvalidInput/update/EINVAL "invalid pruned tree profile tip".
 // Only then is 1000 bytes charged to the operation account (the 344-byte index
-// evidence plus 656 bytes for the LAG root binding); a capacity refusal is
-// returned unchanged before any index or binding read.
+// evidence plus 656 bytes for the LAG root binding); a capacity refusal of this
+// charge is returned unchanged before any index or binding read. The engine's
+// own hold for the Pair copies is separate: UpdateTreeV1 charges it after the
+// callback, and its refusal is a tuple of the projection below.
 //
 // The tip witness reads the rank-2 canonical index of ActiveGenerationID. For a
 // non-nil tip, an absent tip row is "STALE_LOCAL_PLAN"; a present row's work is
@@ -49,16 +51,15 @@ type PrunedTreeProfileOutcomeV1 struct {
 // The LAG root binding is read with ReadTreeRootBindingV1(LagGenerationID); its
 // read error is returned unchanged.
 //
-// The method reads with at most four Reader reads, in this order and each only
-// when the path reaches it: ReadTreeAuthorityV1 for the envelope (always),
+// Inside the callback the method reads with at most four Reader reads, in this
+// order and each only when the path reaches it: ReadTreeAuthorityV1 for the envelope,
 // then, after the decision, tip input and charge checks, Get for the tip row
 // (non-nil tip only), PrefixPage for the index suffix, and ReadTreeRootBindingV1
 // for the binding. It returns each read's error unchanged and stops at the
-// first one. Besides those reads and the refusals this doc names, its only
-// fallible steps are the tip row's HeightKey, which cannot fail because the
-// decoded envelope has nonzero generations, and the replacement Encode, whose
-// refusal is the same LocalInvariant "invalid pruned tree profile replacement"
-// with the Encode error as cause, not recorded on the Reader. Before it can record, each read
+// first one. The tip row's HeightKey cannot fail because the decoded envelope
+// has nonzero generations. A replacement Encode refusal is the same
+// LocalInvariant "invalid pruned tree profile replacement" with the Encode error
+// as cause, not recorded on the Reader. Before it can record, each read
 // refuses without recording an unusable Reader and a request it rejects, and the
 // two tree reads also a non-format-3 Reader; on this method's path none of those
 // can occur, because the callback Reader is active and format 3, no read follows
