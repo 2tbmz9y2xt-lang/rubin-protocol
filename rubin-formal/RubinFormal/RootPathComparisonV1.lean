@@ -23,7 +23,7 @@ def bit : Key → Nat → Bool
   | b :: _, 0 => b
   | _ :: k, i + 1 => bit k i
 
-/-- `Mask36`: keeps bits below `d` and zeroes the rest; length is preserved. -/
+/-- The model of `Mask36`: keeps bits below `d` and zeroes the rest; length is preserved. -/
 def mask : Key → Nat → Key
   | [], _ => []
   | _ :: k, 0 => false :: mask k 0
@@ -35,8 +35,8 @@ inductive Node where
   | branch (depth : Nat) (pfx : Key)
   deriving DecidableEq
 
-/-- TOP is the canonical node of `U_parent`; CHILD is the child on `side` of an
-identified branch with depth `depth` and prefix `pfx`. -/
+/-- TOP is the position of the canonical node of `U_parent`; CHILD is the position of the
+child on `side` of an identified branch with depth `depth` and prefix `pfx`. -/
 inductive Pos where
   | top
   | child (depth : Nat) (pfx : Key) (side : Bool)
@@ -72,8 +72,8 @@ def nodeOk (w : Nat) (K : Key) (parent : Option Nat) : Node → Bool
         | some d => decide (d < d')) &&
       decide (d' ≤ w - 1) && decide (p = mask K d')
 
-/-- A CHILD is compared for `K` when its parent has a depth of at most `w - 1`,
-the prefix `mask K d` and the side `bit K d`. -/
+/-- True when the CHILD of a parent with depth `d` and prefix `p`, on side `s`, is compared for
+`K`: `d ≤ w - 1`, `p = mask K d` and `s = bit K d`. -/
 def comparedChild (w : Nat) (K : Key) (d : Nat) (p : Key) (s : Bool) : Bool :=
   decide (d ≤ w - 1) && decide (p = mask K d) && decide (s = bit K d)
 
@@ -89,7 +89,8 @@ def resultPassesFor (w : Nat) (K : Key) : Result → Bool
 def resultPasses (w : Nat) (present : List Key) (r : Result) : Bool :=
   present.all (fun K => resultPassesFor w K r)
 
-/-- The first unavailable event or obtain of a non-passing result decides. -/
+/-- The finding of the first event that is unavailable or obtains a non-passing result; none
+if there is no such event. -/
 def firstFinding (w : Nat) (present : List Key) : List Event → Option Finding
   | [] => none
   | .consume :: es => firstFinding w present es
@@ -250,8 +251,8 @@ theorem depth_gt_in_side {w d0 d : Nat} {p0 p : Key} {l r sl sr : Tree}
     · rw [hc.2.2.1 a ha', hc.2.2.1 b hb']
     · rw [hc.2.2.2.1 a ha', hc.2.2.2.1 b hb']
 
-/-- A branch of a canonical tree that holds `K` and whose prefix is `mask K d`
-holds `K`. -/
+/-- If `K` is a key of a canonical tree `t`, every branch subtree of `t` with prefix `mask K d`
+has `K` among its keys. -/
 theorem mem_of_sub_prefix {w : Nat} {K : Key} {s t : Tree} (h : Sub s t) :
     ∀ {d p sl sr}, s = .branch d p sl sr → Canonical w t → K ∈ t.keys → p = mask K d →
       K ∈ s.keys := by
@@ -364,8 +365,8 @@ theorem soundness {w : Nat} {K : Key} {t : Tree} (hc : Canonical w t) (hK : K �
 
 /-! Part (b): progress along the path of `K`. -/
 
-/-- The path position at step `i + 1` is the CHILD, on side `bit K d0`, of a branch of depth
-`d0` that the assignment gives at the step-`i` position. -/
+/-- If the path has position `pos` at step `i + 1`, then `pos` is the CHILD on side `bit K d0`
+of a branch of depth `d0` that the assignment gives at the step-`i` position. -/
 theorem pathAt_succ {K : Key} {f : Pos → Node} {i : Nat} {pos : Pos}
     (h : pathAt K f (i + 1) = some pos) :
     ∃ pos0 d0 p0, pathAt K f i = some pos0 ∧ f pos0 = .branch d0 p0 ∧
@@ -462,8 +463,8 @@ theorem branches_or_stop (K : Key) (f : Pos → Node) :
       · right; exact ⟨n, Nat.lt_succ_self n, hall, hb⟩
     · right; exact ⟨m, Nat.lt_succ_of_lt hm, hpre, hnot⟩
 
-/-- Part (b): for `0 < w`, if every path position passes, the first `n ≤ w` positions hold
-branches and the position at step `n` holds the leaf `K`. -/
+/-- Part (b): for `0 < w`, if every path position passes, there is an `n ≤ w` such that the
+positions at the steps below `n` hold branches and the position at step `n` holds the leaf `K`. -/
 theorem progress {w : Nat} (hw : 0 < w) (K : Key) (f : Pos → Node)
     (hpass : ∀ i pos, pathAt K f i = some pos → nodePasses w K pos (f pos) = true) :
     ∃ n, n ≤ w ∧ (∀ i, i < n → ∃ pos d p, pathAt K f i = some pos ∧ f pos = .branch d p) ∧
@@ -558,8 +559,8 @@ theorem unavailableFirst_nil {w : Nat} {present : List Key} : ¬ UnavailableFirs
   rintro ⟨pre, post, h, _⟩
   cases pre <;> simp at h
 
-/-- A sequence that starts with a passing obtain or a consume decides as its
-remainder. -/
+/-- If `e` is not unavailable and is not the obtain of a failing result, `FailsFirst` holds
+for `e :: es` iff it holds for `es`. -/
 theorem failsFirst_cons_skip {w : Nat} {present : List Key} {e : Event} {es : List Event}
     (he : e ≠ .unavailable) (hskip : ∀ r, e = .obtain r → resultPasses w present r = true) :
     FailsFirst w present (e :: es) ↔ FailsFirst w present es := by
