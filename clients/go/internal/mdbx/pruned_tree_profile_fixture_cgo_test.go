@@ -103,17 +103,31 @@ func TestPrunedTreeProfileCommit(t *testing.T) {
 		sc := newPrunedTreeScene(t, 0, nil, nil, nil)
 		sc.committed(t, sc.s.SelectPrunedTreeProfileV1(true, nil, sc.o), sc.expected(0, nil), "A9")
 	})
-	t.Run("A10 unchanged optional field", func(t *testing.T) {
-		branch := func(a *TreeAuthorityV1) {
-			a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 20001, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte{1}}
-		}
-		sc := newPrunedTreeScene(t, 18561, prunedTreeAt(20000), prunedTreeU64(4320), branch)
-		want := sc.expected(4881, prunedTreeU64(4320))
-		if want.Authority.ExcludedInvalidBranch == nil || want.Authority.ExcludedInvalidBranch.FirstInvalidHeight != 20001 {
-			t.Fatal("A10 field not set")
-		}
-		sc.committed(t, sc.s.SelectPrunedTreeProfileV1(true, sc.tip, sc.o), want, "A10 ExcludedInvalidBranch")
-	})
+	// A10 and A7: the two optional fields an ARCHIVE NONE/STABLE envelope may carry
+	// survive on both the positive and the zero L_body branch.
+	optional := func(a *TreeAuthorityV1) {
+		a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 20001, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte{1}}
+		a.Authority.SelectedSide = modelSide(3, 19000, 19001, 1, 117)
+	}
+	for _, row := range []struct {
+		name string
+		h, u uint64
+		p    *uint64
+		b    uint64
+		last *uint64
+	}{
+		{"A10 positive L_body", 20000, 18561, prunedTreeU64(4320), 4881, prunedTreeU64(4320)},
+		{"A7 zero L_body", 15500, 14061, nil, 381, nil},
+	} {
+		t.Run(row.name+" ExcludedInvalidBranch and SelectedSide unchanged", func(t *testing.T) {
+			sc := newPrunedTreeScene(t, row.u, prunedTreeAt(row.h), row.p, optional)
+			want := sc.expected(row.b, row.last)
+			if want.Authority.ExcludedInvalidBranch == nil || want.Authority.ExcludedInvalidBranch.FirstInvalidHeight != 20001 || want.Authority.SelectedSide == nil || want.Authority.SelectedSide.TipHeight != 19001 {
+				t.Fatal(row.name + ": optional fields not set")
+			}
+			sc.committed(t, sc.s.SelectPrunedTreeProfileV1(true, sc.tip, sc.o), want, row.name)
+		})
+	}
 }
 
 // TestPrunedTreeProfileConsulted drifts a consulted row before the write
