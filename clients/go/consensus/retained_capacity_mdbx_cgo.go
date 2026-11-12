@@ -4,7 +4,6 @@ package consensus
 
 import (
 	"bytes"
-	"encoding/binary"
 	"math"
 	"slices"
 
@@ -267,15 +266,17 @@ func retainedDirectCountV1(op *mdbx.TreeOperationV1) error {
 func retainedOpBindingV1(op *mdbx.TreeOperationV1) error {
 	p := &op.Primitives[0]
 	if p.Source == nil || p.Coverage == nil || p.Direction != mdbx.TreeForwardV1 || p.Kind != mdbx.TreeKindDirectApplyV1 ||
-		p.Undo < 1 || p.Undo > 6 || !retainedCoverageShapeV1(p.Coverage) {
+		p.Undo < 1 || p.Undo > 6 || !retainedCoverageShapeV1(op) {
 		return errRetainedShapeAPIV1
 	}
 	return retainedHeaderSlotV1(op)
 }
 
 // retainedCoverageShapeV1 admits HeaderBytes 148 and a stored BodyKind 2
-// without a current-body literal, or a current BodyKind 1 literal.
-func retainedCoverageShapeV1(c *mdbx.TreeSourceCoverageV1) bool {
+// without a current-body literal in Coverage or the Pair, or a current
+// BodyKind 1 literal.
+func retainedCoverageShapeV1(op *mdbx.TreeOperationV1) bool {
+	c := op.Primitives[0].Coverage
 	if c.HeaderBytes != 148 {
 		return false
 	}
@@ -283,7 +284,19 @@ func retainedCoverageShapeV1(c *mdbx.TreeSourceCoverageV1) bool {
 	case 1:
 		return len(c.CurrentBody) != 0
 	case 2:
-		return c.CurrentBody == nil
+		return c.CurrentBody == nil && !retainedBodyLiteralV1(op)
+	}
+	return false
+}
+
+// retainedBodyLiteralV1 reports a Pair body literal at x.
+func retainedBodyLiteralV1(op *mdbx.TreeOperationV1) bool {
+	x := op.Primitives[0].Block
+	for i := range op.Pair.Mutations {
+		m := &op.Pair.Mutations[i]
+		if m.DBI.Rank == 4 && m.AfterKind == mdbx.AfterLiteral && bytes.Equal(m.Key, x[:]) {
+			return true
+		}
 	}
 	return false
 }
@@ -529,15 +542,14 @@ func (f *retainedFiniteV1) pairV1() (retainedArtifactV1, error) {
 }
 
 // mutationV1 admits one mutation of the direct CURRENT domain and reports
-// whether it is x's CURRENT canonical index insert. CURRENT state, x's undo
-// family, CURRENT tree-node and counter/root rows are reduced from the native
-// report; every other namespace, generation or SideLink effect is refused.
+// whether it is x's CURRENT canonical index insert. A state, undo, tree-node
+// or counter/root row, which native admission refuses for every covered
+// direct op, and every other namespace, generation or SideLink effect is
+// refused as an unknown effect.
 func (f *retainedFiniteV1) mutationV1(m *mdbx.Mutation) (bool, bool) {
 	switch m.DBI.Rank {
 	case 0:
-		return f.metaV1(m), false
-	case 1, 5, 8:
-		return f.currentKeyV1(m), false
+		return len(m.Key) == 1 && m.Key[0] == 2, false
 	case 2:
 		ok := f.indexV1(m)
 		return ok, ok
@@ -567,31 +579,6 @@ func retainedInsertV1(m *mdbx.Mutation) bool {
 	return !m.BeforePresent && m.AfterKind == mdbx.AfterLiteral
 }
 
-// metaV1 admits the authority literal and the CURRENT counter/root rows.
-func (f *retainedFiniteV1) metaV1(m *mdbx.Mutation) bool {
-	if len(m.Key) == 1 {
-		return m.Key[0] == 2
-	}
-	if len(m.Key) != 9 || m.Key[0] != 0x10 && m.Key[0] != 0x11 {
-		return false
-	}
-	return binary.BigEndian.Uint64(m.Key[1:]) == f.read.roles[0].generation
-}
-
-// currentKeyV1 admits a state or tree-node row of the CURRENT generation
-// and a row of x's own undo family.
-func (f *retainedFiniteV1) currentKeyV1(m *mdbx.Mutation) bool {
-	g := f.read.roles[0].generation
-	switch m.DBI.Rank {
-	case 1:
-		return len(m.Key) == 44 && binary.BigEndian.Uint64(m.Key) == g
-	case 5:
-		return len(m.Key) >= 32 && [32]byte(m.Key[:32]) == f.op.Primitives[0].Block
-	}
-	ng, _, err := mdbx.DecodeTreeNodeKey(m.Key)
-	return err == nil && ng == g
-}
-
 func (f *retainedFiniteV1) indexV1(m *mdbx.Mutation) bool {
 	x := &f.op.Primitives[0]
 	key, _ := mdbx.HeightKey(f.read.roles[0].generation, x.Height)
@@ -608,7 +595,7 @@ func (f *retainedFiniteV1) artifactRowV1(m *mdbx.Mutation) bool {
 	if m.DBI.Rank == 3 {
 		return retainedInsertV1(m) && f.op.HeaderSlot == nil
 	}
-	return retainedInsertV1(m) && x.Coverage.BodyKind == 1
+	return retainedInsertV1(m)
 }
 
 // deletedV1 returns the kind bits whose row the Pair deletes for hash.
