@@ -95,11 +95,36 @@ type TreeProgressV1 struct {
 	Payload []byte
 }
 
+type TreeSourceIntentKindV1 uint8
+
+const (
+	TreeSourceIntentNoneV1  TreeSourceIntentKindV1 = 0
+	TreeSourceIntentImageV1 TreeSourceIntentKindV1 = 1
+)
+
+// TreeSourceIntentV1 is a retained first-install IMAGE source intent. Payload is
+// opaque here; its grammar belongs to the intent producer.
+type TreeSourceIntentV1 struct {
+	Kind    TreeSourceIntentKindV1
+	Payload []byte
+}
+
 type TreeAuthorityV1 struct {
 	Authority                              StorageAuthorityV1
 	LagGenerationID, TargetLagGenerationID uint64
 	SourceKind                             TreeSourceKindV1
 	Progress                               TreeProgressV1
+	// SourceIntent is the client-local encoding of the retained first-install
+	// IMAGE source intent outside ReplayV1 (RUBIN_MEMPOOL_POLICY.md 6.4.1.8:
+	// clearing ReplayV1 does not clear it). nil is intent none; a non-nil value
+	// must hold Kind IMAGE and a nonempty Payload. It is legal only in REPLAY with
+	// SourceKind IMAGE, PRUNE_GC/RECOVERY_REQUIRED and NONE/RECOVERY_REQUIRED, and
+	// the codec never requires it. A commit leaving RECOVERY_REQUIRED for STABLE
+	// must clear it. Every envelope writer other than the intent producer and its
+	// consumer must copy it unchanged and never mutate the pointee in place.
+	// Absence never establishes ordinary dispatch; a decode failure is integrity;
+	// borrowed inspection decode validates but does not materialize it.
+	SourceIntent *TreeSourceIntentV1
 }
 
 func validTreeOrigin(database [32]byte, current, lag uint64) bool {
@@ -356,16 +381,42 @@ func validTreeAuthority(tree TreeAuthorityV1) bool {
 	return validTreeAuthorityFor(tree, projectAuthority(tree.Authority, nil))
 }
 
-func validTreeAuthorityFor(tree TreeAuthorityV1, a authorityValidation) bool {
-	return validTreeSource(tree) && validTop(a.StorageAuthorityV1) && validPhasePayloadFor(a, true) && validDescriptorsFor(a, true) && validOwners(a) && validTreeRoles(tree, a)
+// treeIntentPhaseLegal is the legal-phase domain of a retained source intent.
+func treeIntentPhaseLegal(present bool, phase StoragePhaseV1, lifecycle StorageLifecycleV1, source TreeSourceKindV1) bool {
+	switch {
+	case !present:
+		return true
+	case phase == StoragePhaseReplayV1:
+		return source == TreeSourceImageV1
+	case phase == StoragePhaseNoneV1, phase == StoragePhasePruneGCV1:
+		return lifecycle == StorageLifecycleRecoveryRequiredV1
+	}
+	return false
 }
 
+func validTreeIntent(intent *TreeSourceIntentV1, phase StoragePhaseV1, lifecycle StorageLifecycleV1, source TreeSourceKindV1) bool {
+	if intent == nil {
+		return true
+	}
+	return all(intent.Kind == TreeSourceIntentImageV1, len(intent.Payload) > 0) && treeIntentPhaseLegal(true, phase, lifecycle, source)
+}
+
+func validTreeAuthorityFor(tree TreeAuthorityV1, a authorityValidation) bool {
+	return validTreeSource(tree) && validTreeIntent(tree.SourceIntent, tree.Authority.Phase, tree.Authority.Lifecycle, tree.SourceKind) && validTop(a.StorageAuthorityV1) && validPhasePayloadFor(a, true) && validDescriptorsFor(a, true) && validOwners(a) && validTreeRoles(tree, a)
+}
+
+// Encode returns the envelope bytes: tag 1 when SourceIntent is nil (the bytes
+// are those of an envelope without the field), tag 2 with carrier kind IMAGE and
+// the intent payload otherwise. It refuses with errSchema a tree that fails
+// validation, including a non-nil SourceIntent whose Kind is not IMAGE or whose
+// Payload is empty, an intent outside its legal phases, and an envelope larger
+// than MaxMetadataBytes, so Encode and DecodeTreeAuthorityV1 stay one-to-one.
 func (tree TreeAuthorityV1) Encode() ([]byte, error) {
 	if !validTreeAuthority(tree) {
 		return nil, errSchema
 	}
-	n, ok := authoritySize(tree.Authority)
-	if !ok || n < 40 || n > MaxMetadataBytes-27 || len(tree.Progress.Payload) > MaxMetadataBytes-27-n {
+	n, ok := treeEnvelopeAuthoritySize(&tree)
+	if !ok {
 		return nil, errSchema
 	}
 	out := []byte{1, byte(tree.SourceKind)}
@@ -375,9 +426,32 @@ func (tree TreeAuthorityV1) Encode() ([]byte, error) {
 	encodeAuthority(&out, tree.Authority)
 	out = append(out, byte(tree.Progress.Kind))
 	appendBlob(&out, tree.Progress.Payload)
+	if tree.SourceIntent != nil {
+		out[0] = 2
+		out = append(out, byte(tree.SourceIntent.Kind))
+		appendBlob(&out, tree.SourceIntent.Payload)
+	}
 	return out, nil
 }
 
+// treeEnvelopeAuthoritySize returns the inner authority length and whether the
+// whole envelope (outer 27 bytes, plus 5 carrier bytes and the intent payload
+// when present) fits MaxMetadataBytes; the length is meaningful only with true.
+// The checks before room keep it nonnegative; room-5 may be negative, and the
+// comparison then refuses every intent payload.
+func treeEnvelopeAuthoritySize(tree *TreeAuthorityV1) (int, bool) {
+	n, ok := authoritySize(tree.Authority)
+	if !ok || n < 40 || n > MaxMetadataBytes-27 || len(tree.Progress.Payload) > MaxMetadataBytes-27-n {
+		return 0, false
+	}
+	room := MaxMetadataBytes - 27 - n - len(tree.Progress.Payload)
+	return n, tree.SourceIntent == nil || len(tree.SourceIntent.Payload) <= room-5
+}
+
+// DecodeTreeAuthorityV1 parses and validates one envelope and returns errSchema
+// on any failure. Tag 1 yields SourceIntent nil; a legal tag 2 yields a fresh
+// pointee of Kind IMAGE whose Payload is a fresh copy sharing no byte with b or
+// with Progress.Payload. Progress.Payload is also a fresh copy of the input.
 func DecodeTreeAuthorityV1(b []byte) (TreeAuthorityV1, error) {
 	var control authorityDecodeControl
 	control.ordinary.Cursor = &control.cursor
@@ -400,19 +474,24 @@ func inspectTreeAuthorityV1(b []byte) error {
 	return err
 }
 
+// decodeTreeAuthorityV1 applies the carrier grammar and the intent phase check in
+// both modes. With inspection non-nil (borrowed) it allocates nothing and leaves
+// SourceIntent nil; otherwise SourceIntent is a fresh copy sharing no byte with b.
 func decodeTreeAuthorityV1(b []byte, control *authorityDecodeControl, inspection *authorityInspection) (TreeAuthorityV1, error) {
 	if !all(len(b) >= 67, len(b) <= MaxMetadataBytes) {
 		return TreeAuthorityV1{}, errSchema
 	}
 	r := authorityReader{b: b, ok: true, tree: true}
-	tree, authorityBytes := decodeTreeEnvelope(&r)
+	tree, authorityBytes, carrier := decodeTreeEnvelope(&r)
 	if !r.ok {
 		return TreeAuthorityV1{}, errSchema
 	}
 	inner := authorityReader{b: authorityBytes, ok: true, tree: true, borrowed: inspection != nil}
 	tree.Authority = decodeAuthority(&inner, control, inspection)
-	tree.Progress.Payload = r.take(r.remaining())
 	if !inner.ok || inner.remaining() != 0 {
+		return TreeAuthorityV1{}, errSchema
+	}
+	if !treeIntentPhaseLegal(carrier != nil, tree.Authority.Phase, tree.Authority.Lifecycle, tree.SourceKind) {
 		return TreeAuthorityV1{}, errSchema
 	}
 	if !validTreeAuthorityFor(tree, projectAuthority(tree.Authority, inspection)) {
@@ -420,34 +499,71 @@ func decodeTreeAuthorityV1(b []byte, control *authorityDecodeControl, inspection
 	}
 	if inspection == nil {
 		tree.Progress.Payload = append([]byte(nil), tree.Progress.Payload...)
+		tree.SourceIntent = materializeTreeIntent(carrier)
 	}
 	return tree, nil
 }
 
-func decodeTreeEnvelope(r *authorityReader) (TreeAuthorityV1, []byte) {
-	if r.tag(1) != 1 {
-		return TreeAuthorityV1{}, nil
+func materializeTreeIntent(carrier []byte) *TreeSourceIntentV1 {
+	if carrier == nil {
+		return nil
+	}
+	return &TreeSourceIntentV1{Kind: TreeSourceIntentImageV1, Payload: append([]byte(nil), carrier...)}
+}
+
+// decodeTreeEnvelope reads envelope tag 1 (no intent) or tag 2 (tag-1 fields,
+// then carrier kind 1 and a nonempty u32-length intent payload ending the input).
+// It returns the borrowed authority bytes and carrier payload, nil for tag 1.
+func decodeTreeEnvelope(r *authorityReader) (TreeAuthorityV1, []byte, []byte) {
+	tag := r.tag(2)
+	if !r.ok {
+		return TreeAuthorityV1{}, nil, nil
 	}
 	tree := TreeAuthorityV1{SourceKind: TreeSourceKindV1(r.u8()), LagGenerationID: r.u64(), TargetLagGenerationID: r.u64()}
 	if tree.SourceKind > 2 {
 		r.ok = false
-		return TreeAuthorityV1{}, nil
+		return TreeAuthorityV1{}, nil, nil
 	}
 	n := int64(r.u32())
 	if !all(n >= 40, n <= int64(r.remaining())) {
 		r.ok = false
-		return TreeAuthorityV1{}, nil
+		return TreeAuthorityV1{}, nil, nil
 	}
 	authorityBytes := r.take(int(n))
 	tree.Progress.Kind = TreeProgressKindV1(r.u8())
 	if tree.Progress.Kind > 2 {
 		r.ok = false
-		return TreeAuthorityV1{}, nil
+		return TreeAuthorityV1{}, nil, nil
 	}
-	payloadLength := int64(r.u32())
-	if !all(r.ok, payloadLength == int64(r.remaining())) {
+	var carrier []byte
+	tree.Progress.Payload, carrier = decodeTreeTail(r, tag)
+	if !r.ok {
+		return TreeAuthorityV1{}, nil, nil
+	}
+	return tree, authorityBytes, carrier
+}
+
+// decodeTreeTail returns the progress payload and, for tag 2, the carrier
+// payload. For tag 2 the progress length delimits only the progress bytes.
+func decodeTreeTail(r *authorityReader, tag uint8) ([]byte, []byte) {
+	n := int64(r.u32())
+	if !r.ok || n > int64(r.remaining()) || tag == 1 && n != int64(r.remaining()) {
 		r.ok = false
-		return TreeAuthorityV1{}, nil
+		return nil, nil
 	}
-	return tree, authorityBytes
+	progress := r.take(int(n))
+	if tag == 1 {
+		return progress, nil
+	}
+	return progress, decodeTreeCarrier(r)
+}
+
+func decodeTreeCarrier(r *authorityReader) []byte {
+	kind := r.u8()
+	n := int64(r.u32())
+	if !all(r.ok, kind == byte(TreeSourceIntentImageV1), n > 0, n == int64(r.remaining())) {
+		r.ok = false
+		return nil
+	}
+	return r.take(int(n))
 }

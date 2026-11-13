@@ -1575,7 +1575,7 @@ func eiFunding(t *testing.T) {
 			})
 		}
 	}
-	if unsafe.Sizeof(Reader{}) != 216 || unsafe.Sizeof(entryInventoryStateV1{}) != 3192 || unsafe.Sizeof(entryRowAccessV1{}) != 80 || unsafe.Sizeof(EntryInventoryRowV1{}) != 208 || unsafe.Sizeof(EntryInventoryFailureV1{}) != 120 || unsafe.Sizeof(treePublicEntryV1{}) != 40 || unsafe.Sizeof(operationHold{}) != 24 || unsafe.Sizeof(TreeOperationV1{}) != 104 || unsafe.Sizeof(treePlanV1{}) != 144 {
+	if unsafe.Sizeof(Reader{}) != 216 || unsafe.Sizeof(entryInventoryStateV1{}) != 3208 || unsafe.Sizeof(entryRowAccessV1{}) != 80 || unsafe.Sizeof(EntryInventoryRowV1{}) != 208 || unsafe.Sizeof(EntryInventoryFailureV1{}) != 120 || unsafe.Sizeof(treePublicEntryV1{}) != 40 || unsafe.Sizeof(operationHold{}) != 24 || unsafe.Sizeof(TreeOperationV1{}) != 104 || unsafe.Sizeof(treePlanV1{}) != 144 {
 		t.Fatal("funded typed-live layout changed")
 	}
 }

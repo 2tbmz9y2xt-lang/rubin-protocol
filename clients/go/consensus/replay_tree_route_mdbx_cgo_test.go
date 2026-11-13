@@ -907,3 +907,153 @@ func TestReplayTreeEntryCapacityRemainder(t *testing.T) {
 		logicalMDBXAssert(t, view.limits == nil && view.versions == nil, "%s: Q5 ran", label)
 	}
 }
+
+// rtIntentPayload is the opaque retained source intent payload P: 1 KiB of distinct bytes.
+func rtIntentPayload() []byte {
+	p := make([]byte, 1024)
+	for i := range p {
+		p[i] = byte(i*7 + 1)
+	}
+	return p
+}
+
+// rtImageReplay is the C1 IMAGE REPLAY envelope (active 1, lag 2, target 3, target lag 4, next 5, zero cursor, PARTIAL
+// progress) carrying a fresh copy of p as its retained source intent.
+func rtImageReplay(p []byte) mdbx.TreeAuthorityV1 {
+	e := rtStable()
+	e.Authority.Phase, e.Authority.Lifecycle = mdbx.StoragePhaseReplayV1, mdbx.StorageLifecycleRecoveryRequiredV1
+	e.Authority.Replay = &mdbx.ReplayV1{TargetProfile: mdbx.StorageProfileArchiveV1, TargetGenerationID: 3, Target: mdbx.RecoveryTargetV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}, TipHash: [32]byte{9}, TipHeight: 4, CumulativeChainwork: [40]byte{39: 5}}}
+	e.TargetLagGenerationID, e.SourceKind = 4, mdbx.TreeSourceImageV1
+	e.Progress = mdbx.TreeProgressV1{Kind: mdbx.TreeProgressPartialV1, Payload: []byte{0xa1, 0xa2}}
+	e.SourceIntent = &mdbx.TreeSourceIntentV1{Kind: mdbx.TreeSourceIntentImageV1, Payload: bytes.Clone(p)}
+	return e
+}
+
+// rtPendingIntent is the pending NONE/RECOVERY_REQUIRED envelope (pending ARCHIVE) carrying a fresh copy of p.
+func rtPendingIntent(p []byte) mdbx.TreeAuthorityV1 {
+	e := rtStable()
+	archive := mdbx.StorageProfileArchiveV1
+	e.Authority.Lifecycle, e.Authority.PendingTargetProfile = mdbx.StorageLifecycleRecoveryRequiredV1, &archive
+	e.SourceIntent = &mdbx.TreeSourceIntentV1{Kind: mdbx.TreeSourceIntentImageV1, Payload: bytes.Clone(p)}
+	return e
+}
+
+// rtIntentKept asserts e carries intent kind IMAGE with payload p byte-identical.
+func rtIntentKept(t *testing.T, e mdbx.TreeAuthorityV1, p []byte, label string) {
+	t.Helper()
+	logicalMDBXAssert(t, e.SourceIntent != nil && e.SourceIntent.Kind == mdbx.TreeSourceIntentImageV1 && bytes.Equal(e.SourceIntent.Payload, p), "%s: intent %+v", label, e.SourceIntent)
+}
+
+// rtReopened reopens w and asserts the persisted envelope is want, carries p and keeps next_generation_id.
+func rtReopened(t *testing.T, w *btWorld, want mdbx.TreeAuthorityV1, p []byte, label string) {
+	t.Helper()
+	w.reopen(t)
+	got := rtEnvelope(t, w)
+	logicalMDBXAssert(t, reflect.DeepEqual(got, want) && got.Authority.NextGenerationID == want.Authority.NextGenerationID, "%s reopen: %+v want %+v", label, got, want)
+	rtIntentKept(t, got, p, label+" reopen")
+}
+
+// C2, C4 conversion, H1: replayTreeConversion of a persisted IMAGE REPLAY envelope carrying P keeps P byte-identical
+// in the planned literal (tag 2, carrier kind 1, length and bytes) and through UpdateTreeV1 and reopen. The report is
+// built here (structural-only pre-state: a live PLAN_CHANGE needs an APPLIED cursor, a legal IMAGE REPLAY the zero one).
+func TestReplayTreeIntentConversion(t *testing.T) {
+	p := rtIntentPayload()
+	w := q148WorldOf(t)
+	before := rtImageReplay(p)
+	rtSet(t, w, before)
+	var batch mdbx.Batch
+	var planErr error
+	err := w.owner.WithOperation(mdbx.LaneOperation, func(a *mdbx.OperationAccount) error {
+		truth, stage, index, uerr := w.s.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+			read, present, rerr := r.ReadTreeAuthorityV1()
+			logicalMDBXAssert(t, rerr == nil && present, "C2 read: %t %v", present, rerr)
+			batch, planErr = replayTreeConversion(ReplayRecomputationV1{Report: ReplayRecomputationPlanChangeV1, envelope: read, activeTip: 2})
+			if planErr != nil {
+				return mdbx.TreeOperationV1{}, planErr
+			}
+			return replayTreeOperation(batch)
+		})
+		logicalMDBXAssert(t, uerr == nil && truth == mdbx.CommitTruthNew && index == -1, "C2 commit: %d/%d/%d %v", truth, stage, index, uerr)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil && planErr == nil && len(batch.Mutations) == 1, "C2 plan: %v %v %+v", err, planErr, batch)
+	want := rtConverted(before, 3, 4)
+	// Separate subtests: a fatal planned-literal assertion must not hide the C2 reopened assertion.
+	t.Run("C4 planned literal", func(t *testing.T) {
+		literal := batch.Mutations[0].Literal
+		carrier := append(binary.BigEndian.AppendUint32([]byte{1}, uint32(len(p))), p...)
+		logicalMDBXAssert(t, literal[0] == 2 && bytes.HasSuffix(literal, carrier), "C4 literal: tag %d, carrier suffix missing", literal[0])
+		decoded, err := mdbx.DecodeTreeAuthorityV1(literal)
+		logicalMDBXAssert(t, err == nil, "C4 decode: %v", err)
+		rtIntentKept(t, decoded, p, "C4 planned literal")
+		logicalMDBXAssert(t, reflect.DeepEqual(decoded, want), "C2 planned: %+v want %+v", decoded, want)
+	})
+	t.Run("C2 reopened", func(t *testing.T) {
+		rtReopened(t, w, want, p, "C2")
+	})
+}
+
+// C3: the post-drain representation (the C2 envelope with one GENERATION span left) and the pending
+// NONE/RECOVERY_REQUIRED envelope, each carrying P, commit through UpdateTreeV1 and read back after reopen.
+func TestReplayTreeIntentRetained(t *testing.T) {
+	p := rtIntentPayload()
+	drained := rtConverted(rtImageReplay(p), 3, 4)
+	drained.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 4}}}
+	for label, e := range map[string]mdbx.TreeAuthorityV1{"C3 drained": drained, "C3 pending": rtPendingIntent(p)} {
+		w := q148WorldOf(t)
+		rtSet(t, w, e)
+		rtReopened(t, w, e, p, label)
+	}
+}
+
+// C4 entry, H1: treeEntryBatch from the committed pending envelope carrying P (active CURRENT binding present) plans
+// no Batch: its GENESIS_REPLAY plan keeps P, which Encode refuses, mapped to storage_capacity with the Encode cause;
+// nothing is planned and the store keeps P. The intent-free pending envelope plans the entry with intent none.
+func TestReplayTreeIntentEntryRefused(t *testing.T) {
+	p := rtIntentPayload()
+	archive := mdbx.StorageProfileArchiveV1
+	for _, withIntent := range []bool{true, false} {
+		label := fmt.Sprintf("C4 intent %t", withIntent)
+		w, s, view := rtEntryWorld(t, func(e *mdbx.TreeAuthorityV1) {
+			e.Authority.Lifecycle, e.Authority.PendingTargetProfile = mdbx.StorageLifecycleRecoveryRequiredV1, &archive
+			if withIntent {
+				e.SourceIntent = &mdbx.TreeSourceIntentV1{Kind: mdbx.TreeSourceIntentImageV1, Payload: bytes.Clone(p)}
+			}
+		})
+		before := rtEnvelope(t, w.btWorld)
+		target := mdbx.RecoveryTargetV1{ChainID: w.g.ChainID, GenesisHash: s.hashes[0], TipHash: s.tip(), TipHeight: 3, CumulativeChainwork: s.work(t, 3)}
+		call := &replayEntryCall{owner: NewReplayEntryOwnerV1(view, w.g), sentinel: errors.New("c4 decision")}
+		var batch mdbx.Batch
+		var planErr error
+		err := w.s.View(func(r *mdbx.Reader) error {
+			envelope, present, rerr := r.ReadTreeAuthorityV1()
+			logicalMDBXAssert(t, rerr == nil && present, "%s read: %t %v", label, present, rerr)
+			batch, planErr = call.treeEntryBatch(r, envelope, 'd', target, 3)
+			return nil
+		})
+		logicalMDBXAssert(t, err == nil, "%s view: %v", label, err)
+		if !withIntent {
+			logicalMDBXAssert(t, planErr == nil && call.planned && len(batch.Mutations) == 5, "%s control: %v %+v", label, planErr, batch)
+			planned := rtLegal(t, batch.Mutations[0].Literal, label)
+			logicalMDBXAssert(t, planned.SourceIntent == nil && reflect.DeepEqual(planned, rtEntered(before, archive, target)), "%s control plan: %+v", label, planned)
+			continue
+		}
+		var f *selectedSideFailure
+		logicalMDBXAssert(t, errors.As(planErr, &f) && f.result == selectedSideCapacity && f.cause != nil, "%s refusal: %T %v", label, planErr, planErr)
+		logicalMDBXAssert(t, reflect.ValueOf(batch).IsZero() && !call.planned && call.replay == nil, "%s: batch %+v planned %t replay %+v", label, batch, call.planned, call.replay)
+		rtReopened(t, w.btWorld, before, p, label)
+	}
+}
+
+// C7: SelectPrunedTreeProfileV1 on the C2 PRUNE_GC/RECOVERY_REQUIRED and the pending NONE/RECOVERY_REQUIRED envelope,
+// each carrying P, decides RECOVERY_REQUIRED before any write; the envelope with P is unchanged after reopen.
+func TestReplayTreeIntentPrunedProfile(t *testing.T) {
+	p := rtIntentPayload()
+	for label, e := range map[string]mdbx.TreeAuthorityV1{"C7 converted": rtConverted(rtImageReplay(p), 3, 4), "C7 pending": rtPendingIntent(p)} {
+		w := q148WorldOf(t)
+		rtSet(t, w, e)
+		out := w.s.SelectPrunedTreeProfileV1(true, nil, w.owner)
+		logicalMDBXAssert(t, out.Decision == "RECOVERY_REQUIRED" && out.Err == nil && out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite && out.Authority == nil, "%s: %+v", label, out)
+		rtReopened(t, w, e, p, label)
+	}
+}

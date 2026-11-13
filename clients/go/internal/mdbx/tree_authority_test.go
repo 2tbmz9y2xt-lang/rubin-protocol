@@ -1331,3 +1331,255 @@ func TestTreeTopDecodeKind(t *testing.T) {
 		wantTreeRootError(t, literal)
 	}
 }
+
+// treeIntentImage is the C1 IMAGE REPLAY envelope: active 1, LAG 2, target 3,
+// target LAG 4, next 5, PARTIAL progress.
+func treeIntentImage() TreeAuthorityV1 {
+	a := modelReplay(1)
+	a.NextGenerationID, a.Replay.TargetGenerationID = 5, 3
+	a.Replay.Cursor = ReplayCursorV1{}
+	return TreeAuthorityV1{Authority: a, LagGenerationID: 2, TargetLagGenerationID: 4, SourceKind: 2, Progress: TreeProgressV1{1, []byte{0x80}}}
+}
+
+// treeIntentNoneLiteral frames the C1 envelope as tag 1 from the replay literal.
+func treeIntentNoneLiteral(t *testing.T) []byte {
+	t.Helper()
+	inner := bytes.Clone(codecLiteralCases(t)[7].b)
+	if binary.BigEndian.Uint64(inner[18:]) != 1 || binary.BigEndian.Uint64(inner[26:]) != 3 || binary.BigEndian.Uint64(inner[37:]) != 2 || inner[189] != 1 {
+		t.Fatal("replay literal offsets moved")
+	}
+	binary.BigEndian.PutUint64(inner[26:], 5)
+	binary.BigEndian.PutUint64(inner[37:], 3)
+	inner[189] = 0
+	b := treeEnvelopeLiteral(inner, 2, 1, []byte{0x80})
+	binary.BigEndian.PutUint64(b[2:], 2)
+	binary.BigEndian.PutUint64(b[10:], 4)
+	return b
+}
+
+func treeIntentPayload(size int) []byte {
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte(0xa0 + i%7)
+	}
+	return payload
+}
+
+// treeIntentLiteral assembles the tag-2 IMAGE REPLAY envelope from the recorded
+// grammar: tag-1 fields, then carrier kind, u32 length and the carrier bytes.
+func treeIntentLiteral(t *testing.T, kind byte, carrier []byte) []byte {
+	t.Helper()
+	b := treeIntentNoneLiteral(t)
+	b[0] = 2
+	b = append(b, kind)
+	b = binary.BigEndian.AppendUint32(b, uint32(len(carrier)))
+	return append(b, carrier...)
+}
+
+// treeIntentModelLiteral frames a no-intent model authority as tag 2 with carrier P.
+func treeIntentModelLiteral(tree TreeAuthorityV1, carrier []byte) []byte {
+	var inner []byte
+	encodeAuthority(&inner, tree.Authority)
+	b := treeEnvelopeLiteral(inner, byte(tree.SourceKind), byte(tree.Progress.Kind), tree.Progress.Payload)
+	binary.BigEndian.PutUint64(b[10:], tree.TargetLagGenerationID)
+	b[0] = 2
+	b = append(b, 1)
+	b = binary.BigEndian.AppendUint32(b, uint32(len(carrier)))
+	return append(b, carrier...)
+}
+
+func TestTreeSourceIntentRoundTrip(t *testing.T) {
+	// Replay inner194, progress1: tag-2 total is 32+194+1+len(P) <= 1048576.
+	for _, size := range []int{1, 1024, 1048349} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			tree := treeIntentImage()
+			tree.SourceIntent = &TreeSourceIntentV1{Kind: 1, Payload: treeIntentPayload(size)}
+			literal := treeIntentLiteral(t, 1, treeIntentPayload(size))
+			if !all(literal[0] == 2, binary.BigEndian.Uint64(literal[2:]) == 2, binary.BigEndian.Uint64(literal[10:]) == 4, binary.BigEndian.Uint32(literal[18:]) == 194, binary.BigEndian.Uint32(literal[217:]) == 1, literal[221] == 0x80,
+				literal[222] == 1, binary.BigEndian.Uint32(literal[223:]) == uint32(size), bytes.Equal(literal[227:], treeIntentPayload(size)), len(literal) == 227+size) {
+				t.Fatal("independent tag-2 literal framing")
+			}
+			if got := wantTreeAuthority(t, tree); !bytes.Equal(got, literal) {
+				t.Fatalf("tag-2 encode differs from literal at size %d", size)
+			}
+			decoded, err := DecodeTreeAuthorityV1(literal)
+			if err != nil || !reflect.DeepEqual(decoded, tree) || !bytes.Equal(decoded.Progress.Payload, []byte{0x80}) {
+				t.Fatalf("tag-2 literal decode = %v", err)
+			}
+		})
+	}
+	tree := treeIntentImage()
+	tree.SourceIntent = &TreeSourceIntentV1{Kind: 1, Payload: make([]byte, 1048350)}
+	wantTreeAuthorityEncodeError(t, tree)
+	wantTreeAuthorityDecodeError(t, treeIntentLiteral(t, 1, make([]byte, 1048350)))
+}
+
+func TestTreeSourceIntentNoneUnchanged(t *testing.T) {
+	// C6: IMAGE REPLAY with intent none is legal and keeps the tag-1 bytes.
+	tree := treeIntentImage()
+	literal := treeIntentNoneLiteral(t)
+	if got := wantTreeAuthority(t, tree); !bytes.Equal(got, literal) {
+		t.Fatalf("intent none encoding = %x; want %x", got, literal)
+	}
+	decoded, err := DecodeTreeAuthorityV1(literal)
+	if err != nil || decoded.SourceIntent != nil {
+		t.Fatalf("intent none decode = %#v, %v", decoded.SourceIntent, err)
+	}
+}
+
+func TestTreeSourceIntentLegalPhases(t *testing.T) {
+	pending := modelBase(1, 0, 0)
+	profile := StorageProfileV1(2)
+	pending.Lifecycle, pending.PendingTargetProfile = 2, &profile
+	for name, tree := range map[string]TreeAuthorityV1{
+		"NONE/RECOVERY_REQUIRED":     treeAuthorityFixture(pending),
+		"PRUNE_GC/RECOVERY_REQUIRED": treeAuthorityFixture(modelPrune(true)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			wantTreeAuthority(t, tree)
+			tree.SourceIntent = &TreeSourceIntentV1{Kind: 1, Payload: []byte{0x51, 0x52}}
+			literal := treeIntentModelLiteral(tree, []byte{0x51, 0x52})
+			if got := wantTreeAuthority(t, tree); !bytes.Equal(got, literal) {
+				t.Fatalf("legal intent encoding = %x; want %x", got, literal)
+			}
+			// R4: a converted envelope with malformed carrier framing is never intent none.
+			for _, mutate := range []func([]byte) []byte{
+				func(b []byte) []byte { b[len(b)-7] = 0; return b },
+				func(b []byte) []byte { b[len(b)-7] = 2; return b },
+				func(b []byte) []byte { b[len(b)-3]++; return b },
+				func(b []byte) []byte { return b[:len(b)-7] },
+				func(b []byte) []byte { b[0] = 1; return b },
+			} {
+				wantTreeAuthorityDecodeError(t, mutate(bytes.Clone(literal)))
+			}
+		})
+	}
+}
+
+func TestTreeSourceIntentIllegalPhases(t *testing.T) {
+	// R2: an intent outside its legal phase domain is refused both ways.
+	genesis := treeAuthorityFixture(modelReplay(1))
+	for name, tree := range map[string]TreeAuthorityV1{
+		"NONE/STABLE":             treeAuthorityFixture(modelBase(1, 0, 0)),
+		"PRUNE_GC/STABLE":         treeAuthorityFixture(modelPrune(false)),
+		"ORDINARY_APPLY/RECOVERY": treeAuthorityFixture(modelOrdinary(2, 0, 2, 0, 1, 0, 0)),
+		"REPLAY/GENESIS_REPLAY":   genesis,
+	} {
+		t.Run(name, func(t *testing.T) {
+			literal := treeIntentModelLiteral(tree, []byte{0x51})
+			// Selectivity control: the same bytes without the carrier are legal.
+			control := bytes.Clone(literal[:len(literal)-6])
+			control[0] = 1
+			if got := wantTreeAuthority(t, tree); !bytes.Equal(got, control) {
+				t.Fatalf("no-intent control = %x; want %x", got, control)
+			}
+			tree.SourceIntent = &TreeSourceIntentV1{Kind: 1, Payload: []byte{0x51}}
+			wantTreeAuthorityEncodeError(t, tree)
+			wantTreeAuthorityDecodeError(t, literal)
+		})
+	}
+}
+
+func TestTreeSourceIntentMalformed(t *testing.T) {
+	// R1: carrier grammar defects through DecodeTreeAuthorityV1 and ValidateTreeRow.
+	legal := treeIntentLiteral(t, 1, []byte{0x61, 0x62, 0x63})
+	wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{2}, legal, nil)
+	for _, row := range []struct {
+		name  string
+		input func() []byte
+	}{
+		{"tag0", func() []byte { b := bytes.Clone(legal); b[0] = 0; return b }},
+		{"tag3", func() []byte { b := bytes.Clone(legal); b[0] = 3; return b }},
+		{"tag255", func() []byte { b := bytes.Clone(legal); b[0] = 255; return b }},
+		{"tag1 trailing byte", func() []byte { b := treeIntentLiteral(t, 1, nil)[:222]; b[0] = 1; return append(b, 0) }},
+		{"tag2 no carrier", func() []byte { return bytes.Clone(legal[:222]) }},
+		{"carrier kind0", func() []byte { return treeIntentLiteral(t, 0, []byte{0x61}) }},
+		{"carrier kind2", func() []byte { return treeIntentLiteral(t, 2, []byte{0x61}) }},
+		{"carrier empty", func() []byte { return treeIntentLiteral(t, 1, nil) }},
+		{"carrier length long", func() []byte { b := bytes.Clone(legal); binary.BigEndian.PutUint32(b[223:], 4); return b }},
+		{"carrier length short", func() []byte { b := bytes.Clone(legal); binary.BigEndian.PutUint32(b[223:], 2); return b }},
+		{"carrier length overflow", func() []byte { b := bytes.Clone(legal); binary.BigEndian.PutUint32(b[223:], 0xffffffff); return b }},
+		{"progress overruns", func() []byte { b := bytes.Clone(legal); binary.BigEndian.PutUint32(b[217:], 10); return b }},
+		{"progress takes carrier", func() []byte { b := bytes.Clone(legal); binary.BigEndian.PutUint32(b[217:], 9); return b }},
+		{"total above maximum", func() []byte { return treeIntentLiteral(t, 1, make([]byte, 1048350)) }},
+	} {
+		t.Run(row.name, func(t *testing.T) { wantTreeAuthorityDecodeError(t, row.input()) })
+	}
+	for _, intent := range []*TreeSourceIntentV1{{Kind: 0, Payload: []byte{1}}, {Kind: 2, Payload: []byte{1}}, {Kind: 255, Payload: []byte{1}}, {Kind: 1}, {Kind: 1, Payload: []byte{}}} {
+		tree := treeIntentImage()
+		tree.SourceIntent = intent
+		wantTreeAuthorityEncodeError(t, tree)
+	}
+}
+
+func TestTreeSourceIntentTruncation(t *testing.T) {
+	// H3: every cut from the first carrier byte, and the tag-only change.
+	literal := treeIntentLiteral(t, 1, []byte{0x61, 0x62, 0x63})
+	for end := 222; end < len(literal); end++ {
+		wantTreeAuthorityDecodeError(t, bytes.Clone(literal[:end]))
+	}
+	tagOnly := bytes.Clone(literal)
+	tagOnly[0] = 1
+	wantTreeAuthorityDecodeError(t, tagOnly)
+}
+
+func TestTreeSourceIntentIsolation(t *testing.T) {
+	// H2: Encode and Decode share no byte with their inputs or with each other.
+	tree := treeIntentImage()
+	tree.SourceIntent = &TreeSourceIntentV1{Kind: 1, Payload: []byte{0x71, 0x72}}
+	encoded := wantTreeAuthority(t, tree)
+	tree.SourceIntent.Payload[0] = 0
+	if !bytes.Equal(encoded[len(encoded)-2:], []byte{0x71, 0x72}) {
+		t.Fatal("encoded intent retained input")
+	}
+	decoded, err := DecodeTreeAuthorityV1(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded[len(encoded)-2], encoded[221] = 0, 0
+	if !bytes.Equal(decoded.SourceIntent.Payload, []byte{0x71, 0x72}) || !bytes.Equal(decoded.Progress.Payload, []byte{0x80}) {
+		t.Fatal("decoded payloads alias the input buffer")
+	}
+	decoded.Progress.Payload[0] = 9
+	if !bytes.Equal(decoded.SourceIntent.Payload, []byte{0x71, 0x72}) {
+		t.Fatal("progress mutation changed intent")
+	}
+	decoded.SourceIntent.Payload[1] = 9
+	if decoded.Progress.Payload[0] != 9 || len(decoded.Progress.Payload) != 1 {
+		t.Fatal("intent mutation changed progress")
+	}
+	// Spare capacity is reachable by append: clear every byte up to each cap.
+	clear(decoded.Progress.Payload[:cap(decoded.Progress.Payload)])
+	if !bytes.Equal(decoded.SourceIntent.Payload, []byte{0x71, 9}) {
+		t.Fatal("progress capacity reaches intent")
+	}
+	clear(decoded.SourceIntent.Payload[:cap(decoded.SourceIntent.Payload)])
+	if !bytes.Equal(decoded.Progress.Payload, []byte{0}) {
+		t.Fatal("intent capacity reaches progress")
+	}
+}
+
+func TestTreeSourceIntentBorrowedInspection(t *testing.T) {
+	// C8: borrowed decode checks grammar and phase, allocates nothing and leaves
+	// SourceIntent nil.
+	legal := treeIntentLiteral(t, 1, []byte{0x61})
+	var control authorityDecodeControl
+	control.ordinary.Cursor = &control.cursor
+	control.ordinary.CapturedSelectedSide = &control.selected
+	control.ordinary.CarriedCleanup = &control.cleanup
+	control.ordinary.RecordedFailure = &control.failure
+	control.failure.FailedBlockHash = &control.hash
+	var inspection authorityInspection
+	var got TreeAuthorityV1
+	var err error
+	allocations := testing.AllocsPerRun(1, func() { got, err = decodeTreeAuthorityV1(legal, &control, &inspection) })
+	if err != nil || got.SourceIntent != nil || allocations != 0 {
+		t.Fatalf("borrowed decode = %#v, %v, allocs %v", got.SourceIntent, err, allocations)
+	}
+	wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{2}, legal, nil)
+	stable := treeIntentModelLiteral(treeAuthorityFixture(modelBase(1, 0, 0)), []byte{0x61})
+	if _, err := decodeTreeAuthorityV1(stable, &control, &inspection); !exactErr(err) {
+		t.Fatalf("borrowed NONE/STABLE intent = %v", err)
+	}
+	wantTreeAuthorityDecodeError(t, stable)
+}

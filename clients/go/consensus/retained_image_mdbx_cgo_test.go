@@ -25,7 +25,7 @@ func TestRetainedImageMDBX(t *testing.T) {
 	t.Run("D2-D5-D26-owner-union", riOptional)
 	t.Run("D3-ARCHIVE16385", riArchive)
 	t.Run("D12-acquisition-frames", riFrames)
-	if unsafe.Sizeof(retainedPreImageV1{}) != 64 || unsafe.Sizeof(retainedReadV1{}) != 576 {
+	if unsafe.Sizeof(retainedPreImageV1{}) != 64 || unsafe.Sizeof(retainedReadV1{}) != 584 {
 		t.Fatalf("source layouts result=%d context=%d", unsafe.Sizeof(retainedPreImageV1{}), unsafe.Sizeof(retainedReadV1{}))
 	}
 }
