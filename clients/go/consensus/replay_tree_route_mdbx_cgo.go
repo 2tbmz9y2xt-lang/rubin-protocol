@@ -145,7 +145,7 @@ func replayTreeConversion(report ReplayRecomputationV1) (mdbx.Batch, error) {
 }
 
 // replayTreeWholeTarget is the common whole-target conversion of a fixed REPLAY target pair (RUBIN_MEMPOOL_POLICY.md
-// Section 6.4.1.8 lines 5638-5647, Section 6.4.1.3 lines 1276-1286): PRUNE_GC/RECOVERY_REQUIRED, pending = the target
+// Section 6.4.1.8 lines 5650-5659, Section 6.4.1.3 lines 1276-1286): PRUNE_GC/RECOVERY_REQUIRED, pending = the target
 // profile, ReplayV1 none, CleanupV1 exactly the two target generations as ascending GENERATION spans, and the target
 // lag, source kind and progress none; every other envelope field (active pair, next_generation_id, the
 // InvalidBranchV1 slot and the retained source intent included) is the given one. It reads no cursor and allocates no
@@ -172,13 +172,13 @@ func replayTreeWholeTarget(envelope mdbx.TreeAuthorityV1, activeTip uint64) (mdb
 type ReplayTargetConversionCauseV1 uint8
 
 const (
-	// ReplayTargetConversionTargetLocalV1 is a qualified target-local finding (Section 6.4.1.8 lines 6332-6372). It keeps
+	// ReplayTargetConversionTargetLocalV1 is a qualified target-local finding (Section 6.4.1.8 lines 6344-6384). It keeps
 	// an empty slot empty and clears ReplayV1, so the caller passes it only with consistent authority and never while an
 	// invalidity hand-off of the same replay is pending; the planner cannot detect a pending hand-off.
 	ReplayTargetConversionTargetLocalV1 ReplayTargetConversionCauseV1 = 1
-	// ReplayTargetConversionInvalidityV1 is a qualified replay invalidity after its hand-off (lines 6374-6396).
+	// ReplayTargetConversionInvalidityV1 is a qualified replay invalidity after its hand-off (lines 6386-6408).
 	ReplayTargetConversionInvalidityV1 ReplayTargetConversionCauseV1 = 2
-	// ReplayTargetConversionRecoveryCoreV1 is a qualified recovery-core disposition (lines 6446-6484).
+	// ReplayTargetConversionRecoveryCoreV1 is a qualified recovery-core disposition (lines 6458-6496).
 	ReplayTargetConversionRecoveryCoreV1 ReplayTargetConversionCauseV1 = 3
 )
 
@@ -206,7 +206,7 @@ type ReplayTargetConversionInputV1 struct {
 }
 
 // PlanReplayWholeTargetConversionMDBX plans the common whole-target conversion (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.8
-// lines 5632-5647) of the fixed REPLAY target pair inside the caller's UpdateTreeV1 plan callback on reader. The caller
+// lines 5644-5659) of the fixed REPLAY target pair inside the caller's UpdateTreeV1 plan callback on reader. The caller
 // passes as reader, and as input.Reader, the Reader that callback received: the planner only compares the two and
 // cannot detect another Reader, while UpdateTreeV1 checks only the planned keys and Consulted rows against its own
 // snapshot. The caller submits the returned Batch only as replayTreeOperation(Batch) from that same callback. Cursor
@@ -219,7 +219,7 @@ type ReplayTargetConversionInputV1 struct {
 // ActiveTip or first-invalid height above 4294967295 is TERMINAL_LOCAL_INVARIANT(evidence); a planned envelope Encode
 // refuses is LOCAL_RESOURCE_UNAVAILABLE(storage_capacity), structural only under the caller's one-token precondition.
 // Otherwise the result is one pair-only Batch of one meta key 2 mutation whose literal is the reread envelope with
-// exactly these changes (Section 6.4.1.8 lines 5638-5647, Section 6.4.1.3 lines 1276-1286): phase PRUNE_GC, lifecycle
+// exactly these changes (Section 6.4.1.8 lines 5650-5659, Section 6.4.1.3 lines 1276-1286): phase PRUNE_GC, lifecycle
 // RECOVERY_REQUIRED, PendingTargetProfile = ReplayV1.TargetProfile, ReplayV1 none, CleanupV1 exactly two GENERATION
 // spans of the target CURRENT and target LAG IDs in ascending ID order, TargetLagGenerationID 0, SourceKind none and
 // Progress empty. Every other envelope and authority field is unchanged, including the active CURRENT/LAG IDs, ActiveProfile, B/U, NextGenerationID,
@@ -294,7 +294,7 @@ func replayTreeSlotEffect(a *mdbx.StorageAuthorityV1, input ReplayTargetConversi
 const replayTreeSnapshotMismatch = "OLD/write snapshot mismatch"
 
 // ProjectReplayWholeTargetConversionMDBX projects one UpdateTreeV1 attempt of a PlanReplayWholeTargetConversionMDBX
-// Batch as its CLEANUP-origin outcome (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.9 lines 7454-7474 and 7568-7573). Truth,
+// Batch as its CLEANUP-origin outcome (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.9 lines 7479-7499 and 7593-7598). Truth,
 // Stage and Err are kept exactly, wrappers and causes included; Decision is empty and Replay nil. A possibly crossed
 // commit with a nil Err is the normal outcome (CanonicalTruth from its truth, empty Result); with an Err it is
 // TERMINAL_PERSISTENCE(new|old|neither_or_unreadable) with CanonicalTruth NEW, OLD or UNKNOWN. Any other nil Err is OLD
