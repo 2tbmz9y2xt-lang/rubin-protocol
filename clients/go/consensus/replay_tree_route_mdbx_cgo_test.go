@@ -1009,11 +1009,15 @@ func rtSameBatch(a, b mdbx.Batch) bool {
 		len(a.ObsoleteDeletes)+len(b.ObsoleteDeletes)+len(a.ObsoleteConsulted)+len(b.ObsoleteConsulted) == 0
 }
 
-// C7 (RUB-1755): the PLAN_CHANGE adapter replayTreeConversion equals the common transform replayTreeWholeTarget on the
-// same envelope and active tip, for ascending and reversed target IDs, with and without an existing InvalidBranchV1
-// slot. Each plan is one meta key 2 mutation whose literal decodes to the independent rtConverted envelope (slot and
-// retained intent unchanged) with the active-tip Consulted rows, and the caller's envelope is not mutated. Every
-// expected slot is a separately allocated pointee, so an in-place write to the caller's slot cannot reach the oracle.
+// C7 (RUB-1755) support: the PLAN_CHANGE adapter replayTreeConversion's plan, for ascending and reversed target IDs,
+// with and without an existing InvalidBranchV1 slot, is one meta key 2 mutation whose literal decodes to the
+// independent rtConverted envelope (slot and retained intent unchanged) with the independent rtConsulted rows, and the
+// caller's envelope is not mutated. Those oracle comparisons are what this test can fail on; its adapter-versus-
+// replayTreeWholeTarget equality is not evidence, because the adapter is a one-line delegation to that transform.
+// Every expected slot is a separately allocated pointee, so an in-place write to the caller's slot cannot reach the
+// oracle. The C7 byte-identity evidence is the pre-branch PLAN_CHANGE tests, which pass unedited:
+// TestReplayTreeConversion, TestReplayTreeConversionNoCursor and TestReplayTreeIntentConversion in this file and
+// TestReplayRecomputePlanChangeConversion and TestReplayRecomputeConversionRefusals in replay_recovery_mdbx_cgo_test.go.
 func TestReplayTreeWholeTargetAdapter(t *testing.T) {
 	slot := func() *mdbx.InvalidBranchV1 {
 		return &mdbx.InvalidBranchV1{FirstInvalidHeight: 12, FirstInvalidBlockHash: [32]byte{0x12}, ExactConsensusError: []byte("BLOCK_ERR_WEIGHT_EXCEEDED")}

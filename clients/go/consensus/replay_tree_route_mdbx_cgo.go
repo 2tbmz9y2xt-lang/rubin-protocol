@@ -182,7 +182,8 @@ const (
 // ReplayTargetConversionInputV1 is the caller's qualified conversion input. Reader is the Reader of the UpdateTreeV1
 // callback in which the caller qualified Envelope, the complete envelope snapshot it qualified (fixed source, target
 // IDs, RecoveryTargetV1, progress, retained intent and slot). ActiveTip is the active tip that qualification
-// established, at most 4294967295; it selects only the Consulted rows. Invalidity is nil for TARGET_LOCAL and
+// established, at most 4294967295; it selects only the Batch's Consulted rows: the canonical-v1 height keys of the
+// active generation at heights 0 and 1, then tip and tip+1 when tip > 1, or 2 when tip = 1. Invalidity is nil for TARGET_LOCAL and
 // RECOVERY_CORE and, for REPLAY_INVALIDITY, the first-invalid tuple whose error the caller admitted as exactly one
 // Section 13 token. The caller invokes REPLAY_INVALIDITY only after its hand-off promotion is NEW. For RECOVERY_CORE a
 // P NEW is no input: the caller holds the qualified durable proof with its independently retained source before the
@@ -205,9 +206,15 @@ type ReplayTargetConversionInputV1 struct {
 // STALE_LOCAL_PLAN; a cause outside the three values, an Invalidity of the wrong nilness, an empty error, or an
 // ActiveTip or first-invalid height above 4294967295 is TERMINAL_LOCAL_INVARIANT(evidence); a planned envelope Encode
 // refuses is LOCAL_RESOURCE_UNAVAILABLE(storage_capacity), structural only under the caller's one-token precondition.
-// Otherwise the result is one pair-only Batch of one meta key 2 mutation: the reread envelope converted by
-// replayTreeWholeTarget, with the REPLAY_INVALIDITY tuple written into an empty InvalidBranchV1 slot and any existing
-// slot kept (first wins). The envelope is encoded before return, so the Batch literal owns its bytes and a later change
+// Otherwise the result is one pair-only Batch of one meta key 2 mutation whose literal is the reread envelope with
+// exactly these changes (Section 6.4.1.8 lines 5638-5647, Section 6.4.1.3 lines 1276-1286): phase PRUNE_GC, lifecycle
+// RECOVERY_REQUIRED, PendingTargetProfile = ReplayV1.TargetProfile, ReplayV1 none, CleanupV1 exactly two GENERATION
+// spans of the target CURRENT and target LAG IDs in ascending ID order, TargetLagGenerationID 0, SourceKind none and
+// Progress empty. Every other envelope and authority field is unchanged, including the active CURRENT/LAG IDs, ActiveProfile, B/U, NextGenerationID,
+// SelectedSide, DetachedSuffix and the retained SourceIntent; no generation is allocated. The InvalidBranchV1 slot is
+// kept for TARGET_LOCAL and RECOVERY_CORE; for REPLAY_INVALIDITY the caller's tuple is written only into an empty slot
+// and an existing slot is kept, identical or not (first wins, no refusal). The Batch's Consulted rows are exactly the
+// active-tip rows stated on ReplayTargetConversionInputV1.ActiveTip. The envelope is encoded before return, so the Batch literal owns its bytes and a later change
 // of the caller's tuple does not reach it. It allocates no generation, writes nothing, acquires and releases no guard
 // and publishes nothing; every failure returns an empty Batch.
 func PlanReplayWholeTargetConversionMDBX(reader *mdbx.Reader, input ReplayTargetConversionInputV1) (mdbx.Batch, error) {
