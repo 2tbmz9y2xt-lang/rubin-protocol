@@ -142,7 +142,8 @@ func replayTreeConversion(report ReplayRecomputationV1) (mdbx.Batch, error) {
 // profile, ReplayV1 none, CleanupV1 exactly the two target generations as ascending GENERATION spans, and the target
 // lag, source kind and progress none; every other envelope field (active pair, next_generation_id, the
 // InvalidBranchV1 slot and the retained source intent included) is the given one. It reads no cursor and allocates no
-// generation. Consulted is the baseline observation set of activeTip.
+// generation. Consulted is the baseline observation set of activeTip. Precondition: envelope.Authority.Replay is
+// non-nil (a REPLAY envelope read from the store); the caller establishes it before calling, and a nil Replay panics.
 func replayTreeWholeTarget(envelope mdbx.TreeAuthorityV1, activeTip uint64) (mdbx.Batch, error) {
 	a := &envelope.Authority
 	target, lag, profile := a.Replay.TargetGenerationID, envelope.TargetLagGenerationID, a.Replay.TargetProfile
