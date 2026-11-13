@@ -1009,8 +1009,9 @@ func rtSameBatch(a, b mdbx.Batch) bool {
 		len(a.ObsoleteDeletes)+len(b.ObsoleteDeletes)+len(a.ObsoleteConsulted)+len(b.ObsoleteConsulted) == 0
 }
 
-// C7 (RUB-1755) support: the PLAN_CHANGE adapter replayTreeConversion's plan, for ascending and reversed target IDs,
-// with and without an existing InvalidBranchV1 slot, is one meta key 2 mutation whose literal decodes to the
+// C7 (RUB-1755) support: the PLAN_CHANGE adapter replayTreeConversion's plan, in exactly three rows (ascending target
+// IDs without a slot, reversed target IDs without a slot, ascending target IDs with an existing InvalidBranchV1 slot;
+// no row runs reversed target IDs with a slot), is one meta key 2 mutation whose literal decodes to the
 // independent rtConverted envelope (slot and retained intent unchanged) with the independent rtConsulted rows, and the
 // caller's envelope is not mutated. Those oracle comparisons are what this test can fail on; its adapter-versus-
 // replayTreeWholeTarget equality is not evidence, because the adapter is a one-line delegation to that transform.
@@ -1243,7 +1244,8 @@ func rtWholeRefused(t *testing.T, w *btWorld, image [][]byte, c rtWholeRun, clas
 
 // C1, C2, C9, C11, R3 (GENESIS_REPLAY creates no intent): TARGET_LOCAL and RECOVERY_CORE convert the fixed target pair
 // into ascending GENERATION spans with pending = the target profile and nothing else changed; reversed target IDs give
-// the same ascending order. Only meta key 2 changes; next_generation_id and every counter and binding stay.
+// the same ascending order (run under TARGET_LOCAL only). Only meta key 2 changes; next_generation_id and every counter
+// and binding stay.
 func TestReplayWholeTargetConversion(t *testing.T) {
 	reversed := rtWhole()
 	reversed.Authority.NextGenerationID, reversed.Authority.Replay.TargetGenerationID, reversed.TargetLagGenerationID = 10, 9, 8
@@ -1584,7 +1586,8 @@ func rtWholeOutcome(t *testing.T, out ReplayEntryOutcomeV1, truth mdbx.CommitTru
 		out.Decision == "" && out.Replay == nil, "%s: %+v want %s/%s", label, out, result, canon)
 }
 
-// C8, C13, R5, R11: the CLEANUP projection of each stage and truth, by raw tuple. Normal NEW and OLD keep an empty
+// C8, C13, R5, R11: the CLEANUP projection of each stage and each truth, by raw tuple (not every stage-truth pair:
+// WRITE_STARTED_DEFINITELY_PRECOMMIT runs with truth OLD only). Normal NEW and OLD keep an empty
 // Result; crossed outcomes map their raw truth; precommit keeps an integrity or invariant cause; the owner's exact
 // step-5 capacity refusal at PREWRITE is storage_capacity (wrapped, it is no such refusal); PREWRITE otherwise
 // classifies each direct cause by native storage class; only the write snapshot mismatch is STALE_LOCAL_PLAN, any

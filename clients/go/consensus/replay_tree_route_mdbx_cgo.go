@@ -218,7 +218,10 @@ type ReplayTargetConversionInputV1 struct {
 // lines 5644-5659) of the fixed REPLAY target pair inside the caller's UpdateTreeV1 plan callback on reader. The caller
 // passes as reader, and as input.Reader, the Reader that callback received: the planner only compares the two and
 // cannot detect another Reader, while UpdateTreeV1 checks only the planned keys and Consulted rows against its own
-// snapshot. The caller submits the returned Batch only as replayTreeOperation(Batch) from that same callback. Cursor
+// snapshot. The caller submits the returned Batch only as replayTreeOperation(Batch) from that same callback. Because
+// replayTreeOperation is unexported and is the only route from that Batch to UpdateTreeV1, the caller is code in
+// package consensus; code in another package cannot follow this route and never submits the Batch through a
+// TreeOperationV1 it builds itself. Cursor
 // hash/path, target self-consistency and ActiveTip as the established active tip are caller-qualified
 // (ReplayTargetConversionInputV1); the planner does not check them (ActiveTip only against 4294967295, never against
 // the Reader's active height index) and is never called after a failed qualification or a stale view guard. IMAGE keeps its own legal zero
