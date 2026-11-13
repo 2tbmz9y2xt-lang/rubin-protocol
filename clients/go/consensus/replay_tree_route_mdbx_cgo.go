@@ -61,10 +61,11 @@ func replayTreeRefused(err error, want replayTreeRefusal) bool {
 	return replayTreeRefusal{e.Class, e.Operation, e.Code, e.Diagnostic, e.ReopenRequired} == want
 }
 
-// replayTreeEncode encodes a planned envelope. Every writer plans from a decoded legal envelope, so the reachable
-// Encode refusals are the metadata size bound and a retained source intent (TreeAuthorityV1.SourceIntent) copied into
-// a planned phase where it is illegal, as in treeEntryBatch's GENESIS_REPLAY plan. Both map to
-// LOCAL_RESOURCE_UNAVAILABLE(storage_capacity).
+// replayTreeEncode encodes a planned envelope. Every writer plans from a decoded legal envelope, the whole-target
+// conversion adding at most the caller's InvalidBranchV1 tuple, so the reachable Encode refusals are the metadata size
+// bound (an inserted slot can exceed mdbx.MaxMetadataBytes) and a retained source intent
+// (TreeAuthorityV1.SourceIntent) copied into a planned phase where it is illegal, as in treeEntryBatch's GENESIS_REPLAY
+// plan. Both map to LOCAL_RESOURCE_UNAVAILABLE(storage_capacity).
 func replayTreeEncode(envelope mdbx.TreeAuthorityV1) ([]byte, error) {
 	encoded, err := envelope.Encode()
 	if err != nil {
@@ -196,9 +197,10 @@ type ReplayTargetConversionInputV1 struct {
 // unchanged; proved absence, an envelope outside REPLAY/RECOVERY_REQUIRED, input.Reader other than reader, or a reread
 // envelope whose canonical encoding differs from that of input.Envelope (or either encoding refused) is
 // STALE_LOCAL_PLAN; a cause outside the three values, an Invalidity of the wrong nilness, an empty error, or an
-// ActiveTip or first-invalid height above 4294967295 is TERMINAL_LOCAL_INVARIANT(evidence). Otherwise the result is
-// one pair-only Batch of one meta key 2 mutation: the reread envelope converted by replayTreeWholeTarget, with the
-// REPLAY_INVALIDITY tuple copied into an empty InvalidBranchV1 slot and any existing slot kept (first wins). It
+// ActiveTip or first-invalid height above 4294967295 is TERMINAL_LOCAL_INVARIANT(evidence); a planned envelope Encode
+// refuses (the inserted slot exceeding mdbx.MaxMetadataBytes) is LOCAL_RESOURCE_UNAVAILABLE(storage_capacity). Otherwise
+// the result is one pair-only Batch of one meta key 2 mutation: the reread envelope converted by replayTreeWholeTarget,
+// with the REPLAY_INVALIDITY tuple copied into an empty InvalidBranchV1 slot and any existing slot kept (first wins). It
 // allocates no generation, writes nothing, acquires and releases no guard and publishes nothing; every failure returns
 // an empty Batch.
 func PlanReplayWholeTargetConversionMDBX(reader *mdbx.Reader, input ReplayTargetConversionInputV1) (mdbx.Batch, error) {

@@ -1260,13 +1260,12 @@ func TestReplayWholeTargetConversion(t *testing.T) {
 func TestReplayWholeTargetSlot(t *testing.T) {
 	cause37 := func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED") }
 	slots := map[string]func() *mdbx.InvalidBranchV1{
-		"none":           func() *mdbx.InvalidBranchV1 { return nil },
-		"identical":      cause37,
-		"different":      func() *mdbx.InvalidBranchV1 { return rtTuple(12, 0x12, "BLOCK_ERR_WEIGHT_EXCEEDED") },
-		"height only":    func() *mdbx.InvalidBranchV1 { return rtTuple(12, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED") },
-		"hash only":      func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x12, "BLOCK_ERR_SUBSIDY_EXCEEDED") },
-		"error only":     func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x37, "BLOCK_ERR_WEIGHT_EXCEEDED") },
-		"error byte one": func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDEE") },
+		"none":        func() *mdbx.InvalidBranchV1 { return nil },
+		"identical":   cause37,
+		"different":   func() *mdbx.InvalidBranchV1 { return rtTuple(12, 0x12, "BLOCK_ERR_WEIGHT_EXCEEDED") },
+		"height only": func() *mdbx.InvalidBranchV1 { return rtTuple(12, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED") },
+		"hash only":   func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x12, "BLOCK_ERR_SUBSIDY_EXCEEDED") },
+		"error only":  func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x37, "BLOCK_ERR_WEIGHT_EXCEEDED") },
 	}
 	causes := map[string]ReplayTargetConversionCauseV1{"TARGET_LOCAL": ReplayTargetConversionTargetLocalV1, "REPLAY_INVALIDITY": ReplayTargetConversionInvalidityV1, "RECOVERY_CORE": ReplayTargetConversionRecoveryCoreV1}
 	for causeLabel, cause := range causes {
@@ -1318,8 +1317,9 @@ func TestReplayWholeTargetIntent(t *testing.T) {
 	}
 }
 
-// C10: outside the closed cause/payload/ActiveTip domain the planner is TERMINAL_LOCAL_INVARIANT(evidence) with no
-// Batch and nothing written, and a nil reader parameter is refused the same way; the bounds 0 and 4294967295 of
+// C10: outside the closed cause/payload/ActiveTip domain the planner returns its own TERMINAL_LOCAL_INVARIANT(evidence)
+// refusal (a *selectedSideFailure, never a Reader EngineError) with no Batch and nothing written, with the slot empty or
+// already set; a nil reader parameter is refused the same way before any read; the bounds 0 and 4294967295 of
 // ActiveTip and of the first-invalid height are admitted.
 func TestReplayWholeTargetInputDomain(t *testing.T) {
 	tl, inv, rc := ReplayTargetConversionTargetLocalV1, ReplayTargetConversionInvalidityV1, ReplayTargetConversionRecoveryCoreV1
@@ -1368,30 +1368,37 @@ func TestReplayWholeTargetInputDomain(t *testing.T) {
 			return r
 		},
 	} {
-		w := rtNew(t, rtWhole())
-		image := rtImage(t, w)
-		envelope := rtEnvelope(t, w)
-		run := rtWholePlan(t, w, func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1) {
-			in := ReplayTargetConversionInputV1{Reader: r, Envelope: envelope, Cause: tl}
-			return edit(r, &in), in
-		}, nil)
-		rtWholeRefused(t, w, image, run, selectedSideInvariant, "C10 "+label)
+		for _, slot := range []*mdbx.InvalidBranchV1{nil, rtTuple(12, 0x12, "BLOCK_ERR_WEIGHT_EXCEEDED")} {
+			stored := rtWhole()
+			stored.Authority.ExcludedInvalidBranch = slot
+			w := rtNew(t, stored)
+			image := rtImage(t, w)
+			envelope := rtEnvelope(t, w)
+			run := rtWholePlan(t, w, func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1) {
+				in := ReplayTargetConversionInputV1{Reader: r, Envelope: envelope, Cause: tl}
+				reader := edit(r, &in)
+				return reader, in
+			}, nil)
+			var own *selectedSideFailure
+			logicalMDBXAssert(t, reflect.TypeOf(run.planErr) == reflect.TypeOf(own), "C10 %s slot %v: not the planner's own refusal: %T %v", label, slot != nil, run.planErr, run.planErr)
+			rtWholeRefused(t, w, image, run, selectedSideInvariant, "C10 "+label)
+		}
 	}
-	bound := tuple()
-	bound.FirstInvalidHeight = math.MaxUint32
+	bound, zero := tuple(), tuple()
+	bound.FirstInvalidHeight, zero.FirstInvalidHeight = math.MaxUint32, 0
 	for _, c := range []struct {
 		label      string
 		tip        uint64
 		invalidity *mdbx.InvalidBranchV1
 		consulted  []uint64
-	}{{"ActiveTip 4294967295", math.MaxUint32, nil, []uint64{0, 1, math.MaxUint32, 1 << 32}}, {"first-invalid 4294967295", 0, bound, []uint64{0, 1}}} {
+	}{{"ActiveTip 4294967295", math.MaxUint32, nil, []uint64{0, 1, math.MaxUint32, 1 << 32}}, {"first-invalid 4294967295", 0, bound, []uint64{0, 1}}, {"first-invalid 0", 0, zero, []uint64{0, 1}}} {
 		w := rtNew(t, rtWhole())
 		image := rtImage(t, w)
 		envelope := rtEnvelope(t, w)
 		cause := tl
 		want := rtWholeDone(5, 6, nil)
 		if c.invalidity != nil {
-			cause, want.Authority.ExcludedInvalidBranch = inv, rtTuple(math.MaxUint32, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED")
+			cause, want.Authority.ExcludedInvalidBranch = inv, rtTuple(map[string]uint64{"first-invalid 4294967295": 4294967295, "first-invalid 0": 0}[c.label], 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED")
 		}
 		run := rtWholePlan(t, w, func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1) {
 			return r, ReplayTargetConversionInputV1{Reader: r, Envelope: envelope, ActiveTip: c.tip, Cause: cause, Invalidity: c.invalidity}
@@ -1428,8 +1435,10 @@ func TestReplayWholeTargetContext(t *testing.T) {
 		stored mdbx.TreeAuthorityV1
 		edit   func(e *mdbx.TreeAuthorityV1)
 	}{
-		"current ID": {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.TargetGenerationID, e.TargetLagGenerationID = 6, 5 }},
-		"lag ID":     {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.LagGenerationID, e.Authority.NextGenerationID = 7, 8 }},
+		"target current ID": {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.TargetGenerationID = 2 }},
+		"target lag ID":     {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.TargetLagGenerationID = 1 }},
+		"active ID":         {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.ActiveGenerationID = 1 }},
+		"active lag ID":     {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.LagGenerationID = 2 }},
 		"source kind": {rtWhole(), func(e *mdbx.TreeAuthorityV1) {
 			e.SourceKind, e.Authority.Replay.Cursor, e.Progress = mdbx.TreeSourceImageV1, mdbx.ReplayCursorV1{}, image.Progress
 		}},
