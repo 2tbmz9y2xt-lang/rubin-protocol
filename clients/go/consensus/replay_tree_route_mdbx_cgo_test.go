@@ -11,6 +11,7 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -1158,9 +1159,7 @@ func rtWholeConsulted(t *testing.T, g uint64, heights ...uint64) []mdbx.Consulte
 	return rows
 }
 
-// rtWholeRun is one conversion attempt: build supplies the reader parameter and the input from the callback Reader;
-// the planner runs inside UpdateTreeV1's callback; after, when non-nil, runs once the planner has returned and before
-// the Batch is handed to replayTreeOperation.
+// rtWholeRun is one conversion attempt: the planner's Batch and error and the raw UpdateTreeV1 tuple.
 type rtWholeRun struct {
 	batch   mdbx.Batch
 	planErr error
@@ -1170,6 +1169,9 @@ type rtWholeRun struct {
 	err     error
 }
 
+// rtWholePlan runs one conversion attempt: build supplies the reader parameter and the input from the callback Reader;
+// the planner runs inside UpdateTreeV1's callback; after, when non-nil, runs once the planner has returned and before
+// the Batch is handed to replayTreeOperation.
 func rtWholePlan(t *testing.T, w *btWorld, build func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1), after func()) rtWholeRun {
 	t.Helper()
 	var c rtWholeRun
@@ -1409,9 +1411,10 @@ func TestReplayWholeTargetInputDomain(t *testing.T) {
 
 // R2, R4 absence, R6, R9: an envelope outside the fixed REPLAY target (NONE/STABLE, PRUNE_GC/STABLE, an already
 // converted envelope), proved exact-empty absence, an input Reader other than the callback Reader, and any field of
-// the complete qualified envelope differing from the reread one, or an input envelope Encode refuses, are
-// STALE_LOCAL_PLAN with no Batch and nothing written; the mismatch wins over a malformed cause. Value-equal inputs
-// (fresh pointees, a nil versus an empty progress payload) are the same envelope and convert.
+// the complete qualified envelope differing from the reread one (active profile with its B/U included), or an input
+// envelope Encode refuses, are STALE_LOCAL_PLAN with no Batch and nothing written; the domain miss, the absence, the
+// envelope mismatch and the Reader mismatch each win over a malformed cause. Value-equal inputs (fresh pointees, a nil
+// versus an empty progress payload) are the same envelope and convert.
 func TestReplayWholeTargetContext(t *testing.T) {
 	tl := ReplayTargetConversionTargetLocalV1
 	for label, c := range map[string]struct {
@@ -1424,6 +1427,7 @@ func TestReplayWholeTargetContext(t *testing.T) {
 		"R4 exact-empty":   {mdbx.TreeAuthorityV1{}, rtWhole(), tl},
 		"R6 before cause":  {rtWhole(), rtWholeDone(5, 6, nil), 0},
 		"R2 before domain": {rtStable(), rtStable(), 255},
+		"R4 before cause":  {mdbx.TreeAuthorityV1{}, rtWhole(), 0},
 	} {
 		w := rtNew(t, c.stored)
 		image := rtImage(t, w)
@@ -1449,6 +1453,10 @@ func TestReplayWholeTargetContext(t *testing.T) {
 		}},
 		"target profile": {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.TargetProfile = mdbx.StorageProfilePrunedV1 }},
 		"sequence":       {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.NextGenerationID = 8 }},
+		"active profile": {rtWhole(), func(e *mdbx.TreeAuthorityV1) {
+			e.Authority.ActiveProfile, e.Authority.B, e.Authority.U = mdbx.StorageProfileArchiveV1, 0, 0
+		}},
+		"B/U":            {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.B, e.Authority.U = 11, 13_691 }},
 		"progress":       {image, func(e *mdbx.TreeAuthorityV1) { e.Progress.Payload = []byte{0xa1, 0xa3} }},
 		"intent payload": {image, func(e *mdbx.TreeAuthorityV1) { e.SourceIntent.Payload = []byte{0xa2} }},
 		"intent absent":  {image, func(e *mdbx.TreeAuthorityV1) { e.SourceIntent = nil }},
@@ -1468,12 +1476,14 @@ func TestReplayWholeTargetContext(t *testing.T) {
 		var other *mdbx.Reader
 		logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error { other = r; return nil }) == nil, "other Reader view")
 		for label, reader := range map[string]func(r *mdbx.Reader) *mdbx.Reader{"nil": func(*mdbx.Reader) *mdbx.Reader { return nil }, "other": func(*mdbx.Reader) *mdbx.Reader { return other }} {
-			image := rtImage(t, w)
-			envelope := rtEnvelope(t, w)
-			run := rtWholePlan(t, w, func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1) {
-				return r, ReplayTargetConversionInputV1{Reader: reader(r), Envelope: envelope, Cause: tl}
-			}, nil)
-			rtWholeRefused(t, w, image, run, replayEntryStale, "R6 Reader "+label)
+			for _, cause := range []ReplayTargetConversionCauseV1{tl, 0} {
+				image := rtImage(t, w)
+				envelope := rtEnvelope(t, w)
+				run := rtWholePlan(t, w, func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1) {
+					return r, ReplayTargetConversionInputV1{Reader: reader(r), Envelope: envelope, Cause: cause}
+				}, nil)
+				rtWholeRefused(t, w, image, run, replayEntryStale, fmt.Sprintf("R6 Reader %s cause %d", label, cause))
+			}
 		}
 	})
 	p := []byte{0xa1, 0xa2}
@@ -1499,7 +1509,8 @@ func TestReplayWholeTargetContext(t *testing.T) {
 }
 
 // H3: the caller's tuple bytes, hash and height mutated after the planner returned (before the Batch is committed)
-// change neither the planned literal nor the stored slot.
+// change neither the planned literal nor the stored slot. The planner encodes the envelope before it returns, so the
+// Batch carries only that encoded copy; this row fails if the returned literal shares the caller's bytes.
 func TestReplayWholeTargetTupleIsolation(t *testing.T) {
 	w := rtNew(t, rtWhole())
 	image := rtImage(t, w)
@@ -1520,9 +1531,11 @@ func rtWholeOutcome(t *testing.T, out ReplayEntryOutcomeV1, truth mdbx.CommitTru
 }
 
 // C8, C13, R5, R11: the CLEANUP projection of each stage and truth, by raw tuple. Normal NEW and OLD keep an empty
-// Result; crossed outcomes map their raw truth; precommit keeps an integrity or invariant cause; PREWRITE classifies by
-// native storage class; only the write snapshot mismatch is STALE_LOCAL_PLAN, any other StateMismatch (the format-2
-// typed-operation refusal) is TERMINAL_LOCAL_INVARIANT, also when joined with the snapshot mismatch.
+// Result; crossed outcomes map their raw truth; precommit keeps an integrity or invariant cause; the owner's exact
+// step-5 capacity refusal at PREWRITE is storage_capacity (wrapped, it is no such refusal); PREWRITE otherwise
+// classifies each direct cause by native storage class; only the write snapshot mismatch is STALE_LOCAL_PLAN, any
+// other direct StateMismatch (the format-2 typed-operation refusal) is TERMINAL_LOCAL_INVARIANT, also when joined with
+// the snapshot mismatch, while one wrapped inside another cause is not inspected.
 func TestReplayWholeTargetProjection(t *testing.T) {
 	engine := func(class mdbx.EngineClass, diagnostic string) error {
 		return &mdbx.EngineError{Class: class, Operation: "update", Code: -30779, Diagnostic: diagnostic}
@@ -1533,6 +1546,9 @@ func TestReplayWholeTargetProjection(t *testing.T) {
 	crossed := func(truth mdbx.CommitTruth) error {
 		return &mdbx.CommitError{Truth: truth, Cause: engine(mdbx.EngineCapacity, "full")}
 	}
+	full, _ := mdbx.NewOperationReservationOwner(mdbx.MinReservationLimit - 1)
+	step5 := full.WithReservation(1, func() error { return nil })
+	logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(step5), "step-5 capacity premise: %v", step5)
 	old, nw, unknown := mdbx.CommitTruthOld, mdbx.CommitTruthNew, mdbx.CommitTruthUnknown
 	pre, started, may := mdbx.UpdateStagePrewrite, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, mdbx.UpdateStageCommitMayHaveCrossed
 	for _, c := range []struct {
@@ -1557,29 +1573,49 @@ func TestReplayWholeTargetProjection(t *testing.T) {
 		{"R11 snapshot", old, pre, snapshot, "STALE_LOCAL_PLAN", "OLD"},
 		{"R11 format-2 refusal", old, pre, format2, "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
 		{"R11 joined", old, pre, errors.Join(snapshot, format2), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
+		{"R11 snapshot with a wrapped refusal", old, pre, errors.Join(snapshot, &selectedSideFailure{result: "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", cause: format2}), "STALE_LOCAL_PLAN", "OLD"},
+		{"R5 step-5 capacity", old, pre, step5, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD"},
+		{"R5 wrapped step-5 capacity", old, pre, fmt.Errorf("charge: %w", step5), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
 		{"R2 stale planner", old, pre, &selectedSideFailure{result: "STALE_LOCAL_PLAN", cause: io}, "STALE_LOCAL_PLAN", "OLD"},
 	} {
 		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(c.truth, c.stage, c.err), c.truth, c.stage, c.err, c.result, c.canon, c.label)
 	}
 }
 
-// C8, C13, R5, R11 through the planner and UpdateTreeV1: a normal commit of each cause is NEW with an empty Result; an
-// inserted slot the metadata bound refuses is LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)/OLD with nothing written;
-// the planner on a format-2 store never runs and the typed-operation refusal is TERMINAL_LOCAL_INVARIANT, never STALE.
+// C8, C13, R5, R11 through the planner and UpdateTreeV1: a normal commit of each cause is NEW with an empty Result; the
+// engine's step-5 Pair charge refused by the full owner aggregate after the planner returned its Batch is
+// LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)/OLD with the raw refusal kept and nothing written; the plan callback on
+// a format-2 store never runs and the typed-operation refusal is TERMINAL_LOCAL_INVARIANT, never STALE.
 func TestReplayWholeTargetProjectedCommit(t *testing.T) {
-	for label, cause := range map[string]ReplayTargetConversionCauseV1{"C8 target-local": ReplayTargetConversionTargetLocalV1, "C13 recovery-core": ReplayTargetConversionRecoveryCoreV1} {
+	tuple := func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED") }
+	for _, c := range []struct {
+		label      string
+		cause      ReplayTargetConversionCauseV1
+		invalidity *mdbx.InvalidBranchV1
+	}{{"C8 target-local", ReplayTargetConversionTargetLocalV1, nil}, {"C8 invalidity", ReplayTargetConversionInvalidityV1, tuple()}, {"C13 recovery-core", ReplayTargetConversionRecoveryCoreV1, nil}} {
 		w := rtNew(t, rtWhole())
 		image := rtImage(t, w)
-		run := rtWholePlan(t, w, rtWholeInput(rtEnvelope(t, w), cause, nil), nil)
-		rtWholeConverted(t, w, image, run, rtWholeDone(5, 6, nil), rtWholeConsulted(t, 3, 0, 1), label)
-		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, nil, "", "NEW", label)
+		run := rtWholePlan(t, w, rtWholeInput(rtEnvelope(t, w), c.cause, c.invalidity), nil)
+		var slot *mdbx.InvalidBranchV1
+		if c.invalidity != nil {
+			slot = tuple()
+		}
+		rtWholeConverted(t, w, image, run, rtWholeDone(5, 6, slot), rtWholeConsulted(t, 3, 0, 1), c.label)
+		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, nil, "", "NEW", c.label)
 	}
-	w := rtNew(t, rtWhole())
-	image := rtImage(t, w)
-	huge := rtTuple(37, 0x37, string(bytes.Repeat([]byte{'B'}, int(mdbx.MaxMetadataBytes))))
-	run := rtWholePlan(t, w, rtWholeInput(rtEnvelope(t, w), ReplayTargetConversionInvalidityV1, huge), nil)
-	rtWholeRefused(t, w, image, run, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "R5 oversized slot")
-	rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, run.err, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD", "R5 oversized slot")
+	for _, cause := range []ReplayTargetConversionCauseV1{ReplayTargetConversionTargetLocalV1, ReplayTargetConversionRecoveryCoreV1} {
+		label := fmt.Sprintf("R5 step-5 capacity cause %d", cause)
+		w := rtNew(t, rtWhole())
+		image := rtImage(t, w)
+		envelope := rtEnvelope(t, w)
+		var run rtWholeRun
+		rtCharges(t, w.owner, mdbx.MinReservationLimit, func() {
+			run = rtWholePlan(t, w, rtWholeInput(envelope, cause, nil), nil)
+		})
+		logicalMDBXAssert(t, run.planErr == nil && len(run.batch.Mutations) == 1 && mdbx.IsOperationReservationCapacity(run.err) && run.index == -1, "%s premise: %+v %v %v %d", label, run.batch, run.planErr, run.err, run.index)
+		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, run.err, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD", label)
+		logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)), "%s: image changed", label)
+	}
 	legacy := newReplayWorld(t, 4)
 	called := false
 	var truth mdbx.CommitTruth
@@ -1595,4 +1631,19 @@ func TestReplayWholeTargetProjectedCommit(t *testing.T) {
 	var e *mdbx.EngineError
 	logicalMDBXAssert(t, !called && errors.As(err, &e) && e.Class == mdbx.EngineStateMismatch && e.Diagnostic == "typed tree operation requires tree store", "R11 format-2 premise: %v", err)
 	rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(truth, stage, err), mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, err, "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD", "R11 format-2 refusal")
+}
+
+// interface_contract: the cause constants, the input fields and the planner and projector signatures are exactly the
+// contract's (pinned as independent literals).
+func TestReplayWholeTargetExportedSignatures(t *testing.T) {
+	logicalMDBXAssert(t, reflect.TypeFor[ReplayTargetConversionCauseV1]().Kind() == reflect.Uint8 &&
+		ReplayTargetConversionTargetLocalV1 == 1 && ReplayTargetConversionInvalidityV1 == 2 && ReplayTargetConversionRecoveryCoreV1 == 3, "cause type and constants")
+	input := reflect.TypeFor[ReplayTargetConversionInputV1]()
+	fields := make([]string, input.NumField())
+	for i := range fields {
+		fields[i] = input.Field(i).Name + " " + input.Field(i).Type.String()
+	}
+	logicalMDBXAssert(t, slices.Equal(fields, []string{"Reader *mdbx.Reader", "Envelope mdbx.TreeAuthorityV1", "ActiveTip uint64", "Cause consensus.ReplayTargetConversionCauseV1", "Invalidity *mdbx.InvalidBranchV1"}), "input fields: %v", fields)
+	logicalMDBXAssert(t, reflect.TypeOf(PlanReplayWholeTargetConversionMDBX).String() == "func(*mdbx.Reader, consensus.ReplayTargetConversionInputV1) (mdbx.Batch, error)" &&
+		reflect.TypeOf(ProjectReplayWholeTargetConversionMDBX).String() == "func(mdbx.CommitTruth, mdbx.UpdateStage, error) consensus.ReplayEntryOutcomeV1", "planner and projector signatures")
 }

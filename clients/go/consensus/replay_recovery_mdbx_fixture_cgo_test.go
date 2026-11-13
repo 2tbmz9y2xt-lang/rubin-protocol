@@ -446,7 +446,8 @@ func TestReplayTreeFixtureRecomputeEIO(t *testing.T) {
 // R1: a raw meta key 2 row the decoder refuses (APPLIED cursor above the target tip; target lag ID 0, equal to the
 // target CURRENT ID, equal to either active ID, or not below next_generation_id) makes the planner return the Reader's
 // EngineIntegrity error unchanged, TERMINAL_STORE_INTEGRITY(canonical), before any input interpretation: the input
-// also names another Reader and cause 0, and no Batch exists. The control (the legal row) converts.
+// also names another Reader and cause 0, and no Batch exists. The raw UpdateTreeV1 tuple projects to
+// TERMINAL_STORE_INTEGRITY(canonical)/OLD. The control (the legal row) converts.
 func TestReplayWholeTargetFixtureMalformed(t *testing.T) {
 	legal, err := rtWhole().Encode()
 	logicalMDBXAssert(t, err == nil && bytes.Equal(legal[10:18], []byte{0, 0, 0, 0, 0, 0, 0, 6}), "target lag premise: %v %x", err, legal[10:18])
@@ -490,11 +491,13 @@ func TestReplayWholeTargetFixtureMalformed(t *testing.T) {
 			"R1 %s: not the Reader's integrity error: %T %v", label, run.planErr, run.planErr)
 		logicalMDBXAssert(t, errors.Is(run.err, run.planErr) && reflect.ValueOf(run.batch).IsZero() && recoveryClass(run.planErr, "") == selectedSideIntegrity &&
 			run.truth == mdbx.CommitTruthOld && run.stage == mdbx.UpdateStagePrewrite && run.index == -1, "R1 %s: %+v %d/%d %v", label, run.batch, run.truth, run.stage, run.err)
+		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, run.err, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", "R1 "+label)
 	}
 }
 
 // R4: a transient native failure of the envelope get is the Reader's EngineIO error unchanged,
-// LOCAL_RESOURCE_UNAVAILABLE(storage_io), never an empty Batch with a nil error; nothing is written.
+// LOCAL_RESOURCE_UNAVAILABLE(storage_io), never an empty Batch with a nil error, and the raw UpdateTreeV1 tuple projects
+// to LOCAL_RESOURCE_UNAVAILABLE(storage_io)/OLD; nothing is written.
 func TestReplayWholeTargetFixtureReadEIO(t *testing.T) {
 	w := rtNew(t, rtWhole())
 	image := rtImage(t, w)
@@ -507,6 +510,7 @@ func TestReplayWholeTargetFixtureReadEIO(t *testing.T) {
 	var engine *mdbx.EngineError
 	logicalMDBXAssert(t, reflect.TypeOf(run.planErr) == reflect.TypeOf(engine) && errors.As(run.planErr, &engine) && engine.Class == mdbx.EngineIO && reflect.ValueOf(run.batch).IsZero() &&
 		recoveryClass(run.planErr, "") == "LOCAL_RESOURCE_UNAVAILABLE(storage_io)" && errors.Is(run.err, run.planErr) && run.truth == mdbx.CommitTruthOld, "R4: %+v %v %v", run.batch, run.planErr, run.err)
+	rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, run.err, "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", "OLD", "R4 EIO")
 	w.reopen(t)
 	logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)), "R4: image changed")
 }
@@ -561,10 +565,12 @@ func TestReplayWholeTargetFixtureCrossed(t *testing.T) {
 	}
 }
 
-// R5, C8: native faults of the conversion transaction: a failed write begin is
+// R5, C8, C13: native faults of the conversion transaction for every cause: a failed write begin (a definite abort) is
 // LOCAL_RESOURCE_UNAVAILABLE(storage_transaction)/OLD at PREWRITE, a failed put of the envelope is
-// LOCAL_PERSISTENCE_ERROR(precommit)/OLD at WRITE_STARTED_DEFINITELY_PRECOMMIT; nothing is committed in either.
+// LOCAL_PERSISTENCE_ERROR(precommit)/OLD at WRITE_STARTED_DEFINITELY_PRECOMMIT; nothing is committed in either and the
+// replay image stays for a retry.
 func TestReplayWholeTargetFixtureFaults(t *testing.T) {
+	tuple := rtTuple(37, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED")
 	for _, c := range []struct {
 		label    string
 		scenario mdbx.SelectedDamageScenario
@@ -575,17 +581,20 @@ func TestReplayWholeTargetFixtureFaults(t *testing.T) {
 		{"write begin", mdbx.SelectedDamageWriteBeginTxnFull, nil, mdbx.UpdateStagePrewrite, "LOCAL_RESOURCE_UNAVAILABLE(storage_transaction)"},
 		{"envelope put", mdbx.SelectedDamagePutEIO, []byte{2}, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, "LOCAL_PERSISTENCE_ERROR(precommit)"},
 	} {
-		w := rtNew(t, rtWhole())
-		image := rtImage(t, w)
-		envelope := rtEnvelope(t, w)
-		var run rtWholeRun
-		evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, c.scenario, 0, c.key, func() {
-			run = rtWholePlan(t, w, rtWholeInput(envelope, ReplayTargetConversionTargetLocalV1, nil), nil)
-		})
-		logicalMDBXAssert(t, err == nil && evidence.Faults == 1 && evidence.Commits == 0 && run.planErr == nil && run.err != nil, "%s fixture: %v %+v %v", c.label, err, evidence, run.err)
-		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthOld, c.stage, run.err, c.result, "OLD", c.label)
-		w.reopen(t)
-		logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)), "%s: image changed", c.label)
+		for cause, invalidity := range map[ReplayTargetConversionCauseV1]*mdbx.InvalidBranchV1{ReplayTargetConversionTargetLocalV1: nil, ReplayTargetConversionInvalidityV1: tuple, ReplayTargetConversionRecoveryCoreV1: nil} {
+			label := fmt.Sprintf("%s cause %d", c.label, cause)
+			w := rtNew(t, rtWhole())
+			image := rtImage(t, w)
+			envelope := rtEnvelope(t, w)
+			var run rtWholeRun
+			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, c.scenario, 0, c.key, func() {
+				run = rtWholePlan(t, w, rtWholeInput(envelope, cause, invalidity), nil)
+			})
+			logicalMDBXAssert(t, err == nil && evidence.Faults == 1 && evidence.Commits == 0 && run.planErr == nil && len(run.batch.Mutations) == 1 && run.err != nil, "%s fixture: %v %+v %v", label, err, evidence, run.err)
+			rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthOld, c.stage, run.err, c.result, "OLD", label)
+			w.reopen(t)
+			logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)), "%s: image changed", label)
+		}
 	}
 }
 

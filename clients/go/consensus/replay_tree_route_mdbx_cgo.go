@@ -18,8 +18,9 @@ import (
 // 6.4.1.8). No production caller. On a tree store each writer reads the TreeAuthorityV1 envelope; a plan it builds
 // itself is one pair-only Batch whose meta key 2 row is the encoding of the planned envelope. The selected-side intent
 // branch instead returns the clear planner's result, which on a tree Reader is always its ReadStorageAuthorityV1
-// tree-Reader refusal with an empty ReadResource (RUB-1729 owns that branch). replayTreeOperation is the only route
-// from such a Batch to Store.UpdateTreeV1.
+// tree-Reader refusal with an empty ReadResource (RUB-1729 owns that branch). Inside this package replayTreeOperation
+// is the only route from such a Batch to Store.UpdateTreeV1; the caller of PlanReplayWholeTargetConversionMDBX submits
+// the returned Batch itself as the pair-only operation.
 
 // replayTreeRefusal is the comparable identity of a direct EngineError with a nil Cause and nil TreeObservation.
 type replayTreeRefusal struct {
@@ -61,11 +62,11 @@ func replayTreeRefused(err error, want replayTreeRefusal) bool {
 	return replayTreeRefusal{e.Class, e.Operation, e.Code, e.Diagnostic, e.ReopenRequired} == want
 }
 
-// replayTreeEncode encodes a planned envelope. Every writer plans from a decoded legal envelope, the whole-target
-// conversion adding at most the caller's InvalidBranchV1 tuple, so the reachable Encode refusals are the metadata size
-// bound (an inserted slot can exceed mdbx.MaxMetadataBytes) and a retained source intent
-// (TreeAuthorityV1.SourceIntent) copied into a planned phase where it is illegal, as in treeEntryBatch's GENESIS_REPLAY
-// plan. Both map to LOCAL_RESOURCE_UNAVAILABLE(storage_capacity).
+// replayTreeEncode encodes a planned envelope. Every writer plans from a decoded legal envelope, so the reachable Encode
+// refusal is a retained source intent (TreeAuthorityV1.SourceIntent) copied into a planned phase where it is illegal,
+// as in treeEntryBatch's GENESIS_REPLAY plan. The whole-target conversion adds at most the caller's InvalidBranchV1
+// tuple, whose error the caller admits as exactly one Section 13 token, so its metadata size refusal is structural only.
+// Every refusal maps to LOCAL_RESOURCE_UNAVAILABLE(storage_capacity).
 func replayTreeEncode(envelope mdbx.TreeAuthorityV1) ([]byte, error) {
 	encoded, err := envelope.Encode()
 	if err != nil {
@@ -180,9 +181,11 @@ const (
 // IDs, RecoveryTargetV1, progress, retained intent and slot). ActiveTip is the active tip that qualification
 // established, at most 4294967295; it selects only the Consulted rows. Invalidity is nil for TARGET_LOCAL and
 // RECOVERY_CORE and, for REPLAY_INVALIDITY, the first-invalid tuple whose error the caller admitted as exactly one
-// Section 13 token. The input is a process precondition of the caller, not an authentication certificate: the caller
-// owns source qualification, role/ownership controls, cause admission and the view guard held until UpdateTreeV1
-// returns.
+// Section 13 token. The caller invokes REPLAY_INVALIDITY only after its hand-off promotion is NEW. For RECOVERY_CORE a
+// P NEW is no input: the caller holds the qualified durable proof with its independently retained source before the
+// call and the planner reads neither. The input is a process precondition of the caller, not an authentication
+// certificate: the caller owns source qualification, role/ownership controls, cause admission and the view guard held
+// until UpdateTreeV1 returns.
 type ReplayTargetConversionInputV1 struct {
 	Reader     *mdbx.Reader
 	Envelope   mdbx.TreeAuthorityV1
@@ -195,14 +198,15 @@ type ReplayTargetConversionInputV1 struct {
 // lines 5632-5647) of the fixed REPLAY target pair inside the caller's UpdateTreeV1 plan callback on reader. In order:
 // a nil reader is TERMINAL_LOCAL_INVARIANT(evidence); the envelope is reread and a read or decode error is returned
 // unchanged; proved absence, an envelope outside REPLAY/RECOVERY_REQUIRED, input.Reader other than reader, or a reread
-// envelope whose canonical encoding differs from that of input.Envelope (or either encoding refused) is
+// envelope whose canonical encoding differs from that of input.Envelope (or an input.Envelope Encode refuses) is
 // STALE_LOCAL_PLAN; a cause outside the three values, an Invalidity of the wrong nilness, an empty error, or an
 // ActiveTip or first-invalid height above 4294967295 is TERMINAL_LOCAL_INVARIANT(evidence); a planned envelope Encode
-// refuses (the inserted slot exceeding mdbx.MaxMetadataBytes) is LOCAL_RESOURCE_UNAVAILABLE(storage_capacity). Otherwise
-// the result is one pair-only Batch of one meta key 2 mutation: the reread envelope converted by replayTreeWholeTarget,
-// with the REPLAY_INVALIDITY tuple copied into an empty InvalidBranchV1 slot and any existing slot kept (first wins). It
-// allocates no generation, writes nothing, acquires and releases no guard and publishes nothing; every failure returns
-// an empty Batch.
+// refuses is LOCAL_RESOURCE_UNAVAILABLE(storage_capacity), structural only under the caller's one-token precondition.
+// Otherwise the result is one pair-only Batch of one meta key 2 mutation: the reread envelope converted by
+// replayTreeWholeTarget, with the REPLAY_INVALIDITY tuple written into an empty InvalidBranchV1 slot and any existing
+// slot kept (first wins). The envelope is encoded before return, so the Batch literal owns its bytes and a later change
+// of the caller's tuple does not reach it. It allocates no generation, writes nothing, acquires and releases no guard
+// and publishes nothing; every failure returns an empty Batch.
 func PlanReplayWholeTargetConversionMDBX(reader *mdbx.Reader, input ReplayTargetConversionInputV1) (mdbx.Batch, error) {
 	if reader == nil {
 		return mdbx.Batch{}, replayTreeMisuse("whole-target conversion without a Reader")
@@ -225,8 +229,8 @@ func replayTreeMisuse(message string) error {
 }
 
 // replayTreeQualified reports the R2/R6 binding: the reread envelope is the fixed REPLAY/RECOVERY_REQUIRED target, the
-// input names this Reader, and both envelopes have the same canonical encoding (value equality; a refused encoding
-// is a mismatch).
+// input names this Reader, and both envelopes have the same canonical encoding (value equality; an input envelope
+// Encode refuses is a mismatch).
 func replayTreeQualified(reader *mdbx.Reader, envelope mdbx.TreeAuthorityV1, input ReplayTargetConversionInputV1) bool {
 	a := envelope.Authority
 	if a.Phase != mdbx.StoragePhaseReplayV1 || a.Lifecycle != mdbx.StorageLifecycleRecoveryRequiredV1 || a.Replay == nil || input.Reader != reader {
@@ -254,14 +258,13 @@ func replayTreeConversionShape(input ReplayTargetConversionInputV1) bool {
 	return false
 }
 
-// replayTreeSlotEffect is the first-wins slot effect: only REPLAY_INVALIDITY writes, and only into an empty slot; the
-// written tuple owns a copy of the caller's error bytes.
+// replayTreeSlotEffect is the first-wins slot effect: only REPLAY_INVALIDITY writes, and only into an empty slot. The
+// written tuple shares the caller's error bytes until replayTreeWholeTarget encodes it within the same planner call.
 func replayTreeSlotEffect(a *mdbx.StorageAuthorityV1, input ReplayTargetConversionInputV1) {
 	if input.Cause != ReplayTargetConversionInvalidityV1 || a.ExcludedInvalidBranch != nil {
 		return
 	}
 	slot := *input.Invalidity
-	slot.ExactConsensusError = bytes.Clone(slot.ExactConsensusError)
 	a.ExcludedInvalidBranch = &slot
 }
 
@@ -269,14 +272,18 @@ func replayTreeSlotEffect(a *mdbx.StorageAuthorityV1, input ReplayTargetConversi
 const replayTreeSnapshotMismatch = "OLD/write snapshot mismatch"
 
 // ProjectReplayWholeTargetConversionMDBX projects one UpdateTreeV1 attempt of a PlanReplayWholeTargetConversionMDBX
-// Batch as its CLEANUP-origin outcome (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.9 lines 7453-7473 and 7567-7572). Truth,
+// Batch as its CLEANUP-origin outcome (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.9 lines 7454-7474 and 7568-7573). Truth,
 // Stage and Err are kept exactly, wrappers and causes included; Decision is empty and Replay nil. A possibly crossed
 // commit with a nil Err is the normal outcome (CanonicalTruth from its truth, empty Result); with an Err it is
 // TERMINAL_PERSISTENCE(new|old|neither_or_unreadable) with CanonicalTruth NEW, OLD or UNKNOWN. Any other nil Err is OLD
 // with an empty Result. WRITE_STARTED_DEFINITELY_PRECOMMIT keeps an integrity or invariant cause, else
-// LOCAL_PERSISTENCE_ERROR(precommit). Otherwise the merged cause walk classifies Err by native storage class with no
-// read-artifact override; an EngineStateMismatch cause is STALE_LOCAL_PLAN when every such cause is the write snapshot
-// mismatch, else TERMINAL_LOCAL_INVARIANT(evidence). It never returns the detecting step's result.
+// LOCAL_PERSISTENCE_ERROR(precommit). The engine's step-5 Pair charge refused by the owner aggregate (an Err that is
+// exactly that capacity refusal at OLD/PREWRITE) is LOCAL_RESOURCE_UNAVAILABLE(storage_capacity). Otherwise the merged
+// cause walk classifies each direct cause of Err by native storage class with no read-artifact override; a direct
+// EngineStateMismatch cause is STALE_LOCAL_PLAN when every such cause is the write snapshot mismatch, else
+// TERMINAL_LOCAL_INVARIANT(evidence). It never returns the detecting step's result. The caller retains the raw
+// UpdateTreeV1 index and the native owner disposition, applies the latch and terminal admission gates in its own owner,
+// and keeps the earlier detecting result independently.
 func ProjectReplayWholeTargetConversionMDBX(truth mdbx.CommitTruth, stage mdbx.UpdateStage, err error) ReplayEntryOutcomeV1 {
 	out := ReplayEntryOutcomeV1{CanonicalTruth: "OLD", Truth: truth, Stage: stage, Err: err}
 	switch {
@@ -287,16 +294,20 @@ func ProjectReplayWholeTargetConversionMDBX(truth mdbx.CommitTruth, stage mdbx.U
 	case stage == mdbx.UpdateStageWriteStartedDefinitelyPrecommit:
 		out.Result = replayEntryPrecommit(replayEntryCauses(err, &replayEntryCall{}))
 		return out
+	case replayTreeStepCapacity(out):
+		out.Result = selectedSideCapacity
+		return out
 	}
 	out.Result = replayEntryCauses(err, &replayEntryCall{planned: replayTreeSnapshotOnly(err)})
 	return out
 }
 
-// replayTreeSnapshotOnly reports whether every EngineStateMismatch cause of err is the write snapshot mismatch.
+// replayTreeSnapshotOnly reports whether every direct EngineStateMismatch cause of err (the causes replayEntryPart
+// classifies; a wrapped one is not inspected) is the write snapshot mismatch.
 func replayTreeSnapshotOnly(err error) bool {
 	for _, part := range genesisMDBXCauses(err) {
 		var e *mdbx.EngineError
-		if errors.As(part, &e) && e != nil && e.Class == mdbx.EngineStateMismatch && e.Diagnostic != replayTreeSnapshotMismatch {
+		if errors.As(part, &e) && reflect.TypeOf(part) == reflect.TypeOf(e) && e != nil && e.Class == mdbx.EngineStateMismatch && e.Diagnostic != replayTreeSnapshotMismatch {
 			return false
 		}
 	}
