@@ -442,3 +442,71 @@ func TestReplayTreeFixtureRecomputeEIO(t *testing.T) {
 		logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)), "D3 %s: image changed", label)
 	}
 }
+
+// R1: a raw meta key 2 row the decoder refuses (APPLIED cursor above the target tip; target lag ID 0, equal to the
+// target CURRENT ID, equal to either active ID, or not below next_generation_id) makes the planner return the Reader's
+// EngineIntegrity error unchanged, TERMINAL_STORE_INTEGRITY(canonical), before any input interpretation: the input
+// also names another Reader and cause 0, and no Batch exists. The control (the legal row) converts.
+func TestReplayWholeTargetFixtureMalformed(t *testing.T) {
+	legal, err := rtWhole().Encode()
+	logicalMDBXAssert(t, err == nil && bytes.Equal(legal[10:18], []byte{0, 0, 0, 0, 0, 0, 0, 6}), "target lag premise: %v %x", err, legal[10:18])
+	lower := rtWhole()
+	lower.Authority.Replay.Cursor.Height = 35
+	other, err := lower.Encode()
+	logicalMDBXAssert(t, err == nil && len(other) == len(legal), "cursor encode: %v", err)
+	cursorAbove := bytes.Clone(legal)
+	for i := range legal {
+		if legal[i] != other[i] {
+			logicalMDBXAssert(t, legal[i] == 36 && other[i] == 35, "cursor height byte premise at %d: %d/%d", i, legal[i], other[i])
+			cursorAbove[i] = 38
+		}
+	}
+	logicalMDBXAssert(t, !bytes.Equal(cursorAbove, legal), "cursor height byte not found")
+	damaged := map[string][]byte{"control": legal, "cursor above tip": cursorAbove}
+	for label, lag := range map[string]byte{"target lag zero": 0, "target lag = target": 5, "target lag = active": 3, "target lag = active lag": 4, "target lag = next": 7, "target lag above next": 8} {
+		value := bytes.Clone(legal)
+		value[17] = lag
+		damaged[label] = value
+	}
+	for label, value := range damaged {
+		w := rtNew(t, rtStable())
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, []byte{2}, value) == nil, "%s seed", label)
+		image := rtImage(t, w)
+		var stale *mdbx.Reader
+		logicalMDBXAssert(t, label == "control" || w.s.View(func(r *mdbx.Reader) error { stale = r; return nil }) == nil, "%s other Reader", label)
+		run := rtWholePlan(t, w, func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1) {
+			if label == "control" {
+				return r, ReplayTargetConversionInputV1{Reader: r, Envelope: rtWhole(), Cause: ReplayTargetConversionTargetLocalV1}
+			}
+			return r, ReplayTargetConversionInputV1{Reader: stale, Envelope: rtWhole()}
+		}, nil)
+		logicalMDBXAssert(t, label == "control" || stale != nil, "R1 %s: no other Reader", label)
+		if label == "control" {
+			rtWholeConverted(t, w, image, run, rtWholeDone(5, 6, nil), rtWholeConsulted(t, 3, 0, 1), "R1 control")
+			continue
+		}
+		var engine *mdbx.EngineError
+		logicalMDBXAssert(t, reflect.TypeOf(run.planErr) == reflect.TypeOf(engine) && errors.As(run.planErr, &engine) && engine.Class == mdbx.EngineIntegrity,
+			"R1 %s: not the Reader's integrity error: %T %v", label, run.planErr, run.planErr)
+		logicalMDBXAssert(t, errors.Is(run.err, run.planErr) && reflect.ValueOf(run.batch).IsZero() && recoveryClass(run.planErr, "") == selectedSideIntegrity &&
+			run.truth == mdbx.CommitTruthOld && run.stage == mdbx.UpdateStagePrewrite && run.index == -1, "R1 %s: %+v %d/%d %v", label, run.batch, run.truth, run.stage, run.err)
+	}
+}
+
+// R4: a transient native failure of the envelope get is the Reader's EngineIO error unchanged,
+// LOCAL_RESOURCE_UNAVAILABLE(storage_io), never an empty Batch with a nil error; nothing is written.
+func TestReplayWholeTargetFixtureReadEIO(t *testing.T) {
+	w := rtNew(t, rtWhole())
+	image := rtImage(t, w)
+	envelope := rtEnvelope(t, w)
+	var run rtWholeRun
+	evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, []byte{2}, func() {
+		run = rtWholePlan(t, w, rtWholeInput(envelope, ReplayTargetConversionTargetLocalV1, nil), nil)
+	})
+	logicalMDBXAssert(t, err == nil && evidence.Faults == 1, "R4 fixture: %v %+v", err, evidence)
+	var engine *mdbx.EngineError
+	logicalMDBXAssert(t, reflect.TypeOf(run.planErr) == reflect.TypeOf(engine) && errors.As(run.planErr, &engine) && engine.Class == mdbx.EngineIO && reflect.ValueOf(run.batch).IsZero() &&
+		recoveryClass(run.planErr, "") == "LOCAL_RESOURCE_UNAVAILABLE(storage_io)" && errors.Is(run.err, run.planErr) && run.truth == mdbx.CommitTruthOld, "R4: %+v %v %v", run.batch, run.planErr, run.err)
+	w.reopen(t)
+	logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)), "R4: image changed")
+}

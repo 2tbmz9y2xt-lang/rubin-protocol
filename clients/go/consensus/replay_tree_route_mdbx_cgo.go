@@ -3,6 +3,7 @@
 package consensus
 
 import (
+	"bytes"
 	"crypto/sha3"
 	"encoding/binary"
 	"errors"
@@ -158,6 +159,108 @@ func replayTreeWholeTarget(envelope mdbx.TreeAuthorityV1, activeTip uint64) (mdb
 		return mdbx.Batch{}, err
 	}
 	return replayRecoveryAuthorityBatch(literal, replayEntryConsulted(a.ActiveGenerationID, activeTip)), nil
+}
+
+// ReplayTargetConversionCauseV1 is the qualified cause of a whole-target conversion. Exactly the three named values
+// are admitted by PlanReplayWholeTargetConversionMDBX; every other value is local misuse.
+type ReplayTargetConversionCauseV1 uint8
+
+const (
+	// ReplayTargetConversionTargetLocalV1 is a qualified target-local finding (Section 6.4.1.8 lines 6332-6372).
+	ReplayTargetConversionTargetLocalV1 ReplayTargetConversionCauseV1 = 1
+	// ReplayTargetConversionInvalidityV1 is a qualified replay invalidity after its hand-off (lines 6374-6396).
+	ReplayTargetConversionInvalidityV1 ReplayTargetConversionCauseV1 = 2
+	// ReplayTargetConversionRecoveryCoreV1 is a qualified recovery-core disposition (lines 6446-6484).
+	ReplayTargetConversionRecoveryCoreV1 ReplayTargetConversionCauseV1 = 3
+)
+
+// ReplayTargetConversionInputV1 is the caller's qualified conversion input. Reader is the Reader of the UpdateTreeV1
+// callback in which the caller qualified Envelope, the complete envelope snapshot it qualified (fixed source, target
+// IDs, RecoveryTargetV1, progress, retained intent and slot). ActiveTip is the active tip that qualification
+// established, at most 4294967295; it selects only the Consulted rows. Invalidity is nil for TARGET_LOCAL and
+// RECOVERY_CORE and, for REPLAY_INVALIDITY, the first-invalid tuple whose error the caller admitted as exactly one
+// Section 13 token. The input is a process precondition of the caller, not an authentication certificate: the caller
+// owns source qualification, role/ownership controls, cause admission and the view guard held until UpdateTreeV1
+// returns.
+type ReplayTargetConversionInputV1 struct {
+	Reader     *mdbx.Reader
+	Envelope   mdbx.TreeAuthorityV1
+	ActiveTip  uint64
+	Cause      ReplayTargetConversionCauseV1
+	Invalidity *mdbx.InvalidBranchV1
+}
+
+// PlanReplayWholeTargetConversionMDBX plans the common whole-target conversion (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.8
+// lines 5632-5647) of the fixed REPLAY target pair inside the caller's UpdateTreeV1 plan callback on reader. In order:
+// a nil reader is TERMINAL_LOCAL_INVARIANT(evidence); the envelope is reread and a read or decode error is returned
+// unchanged; proved absence, an envelope outside REPLAY/RECOVERY_REQUIRED, input.Reader other than reader, or a reread
+// envelope whose canonical encoding differs from that of input.Envelope (or either encoding refused) is
+// STALE_LOCAL_PLAN; a cause outside the three values, an Invalidity of the wrong nilness, an empty error, or an
+// ActiveTip or first-invalid height above 4294967295 is TERMINAL_LOCAL_INVARIANT(evidence). Otherwise the result is
+// one pair-only Batch of one meta key 2 mutation: the reread envelope converted by replayTreeWholeTarget, with the
+// REPLAY_INVALIDITY tuple copied into an empty InvalidBranchV1 slot and any existing slot kept (first wins). It
+// allocates no generation, writes nothing, acquires and releases no guard and publishes nothing; every failure returns
+// an empty Batch.
+func PlanReplayWholeTargetConversionMDBX(reader *mdbx.Reader, input ReplayTargetConversionInputV1) (mdbx.Batch, error) {
+	if reader == nil {
+		return mdbx.Batch{}, replayTreeMisuse("whole-target conversion without a Reader")
+	}
+	envelope, present, err := reader.ReadTreeAuthorityV1()
+	switch {
+	case err != nil:
+		return mdbx.Batch{}, err
+	case !present || !replayTreeQualified(reader, envelope, input):
+		return mdbx.Batch{}, &selectedSideFailure{result: replayEntryStale, cause: errors.New("whole-target conversion input is not the current envelope")}
+	case !replayTreeConversionShape(input):
+		return mdbx.Batch{}, replayTreeMisuse("whole-target conversion input outside its cause domain")
+	}
+	replayTreeSlotEffect(&envelope.Authority, input)
+	return replayTreeWholeTarget(envelope, input.ActiveTip)
+}
+
+func replayTreeMisuse(message string) error {
+	return &selectedSideFailure{result: selectedSideInvariant, cause: errors.New(message)}
+}
+
+// replayTreeQualified reports the R2/R6 binding: the reread envelope is the fixed REPLAY/RECOVERY_REQUIRED target, the
+// input names this Reader, and both envelopes have the same canonical encoding (value equality; a refused encoding
+// is a mismatch).
+func replayTreeQualified(reader *mdbx.Reader, envelope mdbx.TreeAuthorityV1, input ReplayTargetConversionInputV1) bool {
+	a := envelope.Authority
+	if a.Phase != mdbx.StoragePhaseReplayV1 || a.Lifecycle != mdbx.StorageLifecycleRecoveryRequiredV1 || a.Replay == nil || input.Reader != reader {
+		return false
+	}
+	current, err := envelope.Encode()
+	if err != nil {
+		return false
+	}
+	qualified, err := input.Envelope.Encode()
+	return err == nil && bytes.Equal(current, qualified)
+}
+
+// replayTreeConversionShape reports the closed C10 input domain.
+func replayTreeConversionShape(input ReplayTargetConversionInputV1) bool {
+	if input.ActiveTip > math.MaxUint32 {
+		return false
+	}
+	switch input.Cause {
+	case ReplayTargetConversionTargetLocalV1, ReplayTargetConversionRecoveryCoreV1:
+		return input.Invalidity == nil
+	case ReplayTargetConversionInvalidityV1:
+		return input.Invalidity != nil && len(input.Invalidity.ExactConsensusError) != 0 && input.Invalidity.FirstInvalidHeight <= math.MaxUint32
+	}
+	return false
+}
+
+// replayTreeSlotEffect is the first-wins slot effect: only REPLAY_INVALIDITY writes, and only into an empty slot; the
+// written tuple owns a copy of the caller's error bytes.
+func replayTreeSlotEffect(a *mdbx.StorageAuthorityV1, input ReplayTargetConversionInputV1) {
+	if input.Cause != ReplayTargetConversionInvalidityV1 || a.ExcludedInvalidBranch != nil {
+		return
+	}
+	slot := *input.Invalidity
+	slot.ExactConsensusError = bytes.Clone(slot.ExactConsensusError)
+	a.ExcludedInvalidBranch = &slot
 }
 
 // replayTreeStoreRefused reports the F1 discriminator: Store.Update's exact tree-store refusal at OLD/PREWRITE.
