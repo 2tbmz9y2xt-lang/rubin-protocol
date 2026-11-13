@@ -1548,6 +1548,15 @@ func TestTreeSourceIntentIsolation(t *testing.T) {
 	if decoded.Progress.Payload[0] != 9 || len(decoded.Progress.Payload) != 1 {
 		t.Fatal("intent mutation changed progress")
 	}
+	// Spare capacity is reachable by append: clear every byte up to each cap.
+	clear(decoded.Progress.Payload[:cap(decoded.Progress.Payload)])
+	if !bytes.Equal(decoded.SourceIntent.Payload, []byte{0x71, 9}) {
+		t.Fatal("progress capacity reaches intent")
+	}
+	clear(decoded.SourceIntent.Payload[:cap(decoded.SourceIntent.Payload)])
+	if !bytes.Equal(decoded.Progress.Payload, []byte{0}) {
+		t.Fatal("intent capacity reaches progress")
+	}
 }
 
 func TestTreeSourceIntentBorrowedInspection(t *testing.T) {

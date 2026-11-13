@@ -434,9 +434,11 @@ func (tree TreeAuthorityV1) Encode() ([]byte, error) {
 	return out, nil
 }
 
-// treeEnvelopeAuthoritySize returns the inner authority length when the whole
-// envelope (outer 27 bytes, plus 5 carrier bytes and the intent payload when
-// present) fits MaxMetadataBytes. Each bound is checked before it is subtracted.
+// treeEnvelopeAuthoritySize returns the inner authority length and whether the
+// whole envelope (outer 27 bytes, plus 5 carrier bytes and the intent payload
+// when present) fits MaxMetadataBytes; the length is meaningful only with true.
+// The checks before room keep it nonnegative; room-5 may be negative, and the
+// comparison then refuses every intent payload.
 func treeEnvelopeAuthoritySize(tree *TreeAuthorityV1) (int, bool) {
 	n, ok := authoritySize(tree.Authority)
 	if !ok || n < 40 || n > MaxMetadataBytes-27 || len(tree.Progress.Payload) > MaxMetadataBytes-27-n {
