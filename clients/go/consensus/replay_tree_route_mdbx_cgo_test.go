@@ -1510,3 +1510,89 @@ func TestReplayWholeTargetTupleIsolation(t *testing.T) {
 	rtWholeConverted(t, w, image, run, rtWholeDone(5, 6, rtTuple(37, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED")), rtWholeConsulted(t, 3, 0, 1), "H3")
 	logicalMDBXAssert(t, string(invalidity.ExactConsensusError) == "XLOCK_ERR_SUBSIDY_EXCEEDED", "H3 premise: the caller tuple was not mutated")
 }
+
+// rtWholeOutcome asserts a projected CLEANUP outcome: the raw tuple kept exactly, the given Result and CanonicalTruth,
+// and no Decision or Replay.
+func rtWholeOutcome(t *testing.T, out ReplayEntryOutcomeV1, truth mdbx.CommitTruth, stage mdbx.UpdateStage, err error, result, canon, label string) {
+	t.Helper()
+	logicalMDBXAssert(t, out.Truth == truth && out.Stage == stage && reflect.ValueOf(out.Err).Equal(reflect.ValueOf(err)) && out.Result == result && out.CanonicalTruth == canon &&
+		out.Decision == "" && out.Replay == nil, "%s: %+v want %s/%s", label, out, result, canon)
+}
+
+// C8, C13, R5, R11: the CLEANUP projection of each stage and truth, by raw tuple. Normal NEW and OLD keep an empty
+// Result; crossed outcomes map their raw truth; precommit keeps an integrity or invariant cause; PREWRITE classifies by
+// native storage class; only the write snapshot mismatch is STALE_LOCAL_PLAN, any other StateMismatch (the format-2
+// typed-operation refusal) is TERMINAL_LOCAL_INVARIANT, also when joined with the snapshot mismatch.
+func TestReplayWholeTargetProjection(t *testing.T) {
+	engine := func(class mdbx.EngineClass, diagnostic string) error {
+		return &mdbx.EngineError{Class: class, Operation: "update", Code: -30779, Diagnostic: diagnostic}
+	}
+	snapshot := engine(mdbx.EngineStateMismatch, "OLD/write snapshot mismatch")
+	format2 := engine(mdbx.EngineStateMismatch, "typed tree operation requires tree store")
+	io, integrity := engine(mdbx.EngineIO, "io"), engine(mdbx.EngineIntegrity, "integrity")
+	crossed := func(truth mdbx.CommitTruth) error {
+		return &mdbx.CommitError{Truth: truth, Cause: engine(mdbx.EngineCapacity, "full")}
+	}
+	old, nw, unknown := mdbx.CommitTruthOld, mdbx.CommitTruthNew, mdbx.CommitTruthUnknown
+	pre, started, may := mdbx.UpdateStagePrewrite, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, mdbx.UpdateStageCommitMayHaveCrossed
+	for _, c := range []struct {
+		label         string
+		truth         mdbx.CommitTruth
+		stage         mdbx.UpdateStage
+		err           error
+		result, canon string
+	}{
+		{"C8 normal NEW", nw, may, nil, "", "NEW"},
+		{"C8 normal OLD", old, pre, nil, "", "OLD"},
+		{"C8 crossed old", old, may, crossed(old), "TERMINAL_PERSISTENCE(old)", "OLD"},
+		{"C8 crossed new", nw, may, crossed(nw), "TERMINAL_PERSISTENCE(new)", "NEW"},
+		{"C8 crossed unknown", unknown, may, crossed(unknown), "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN"},
+		{"R5 capacity", old, pre, engine(mdbx.EngineCapacity, "full"), "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD"},
+		{"R5 planner capacity", old, pre, &selectedSideFailure{result: "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", cause: io}, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD"},
+		{"R4 io", old, pre, io, "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", "OLD"},
+		{"R1 integrity", old, pre, integrity, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD"},
+		{"R5 precommit io", old, started, io, "LOCAL_PERSISTENCE_ERROR(precommit)", "OLD"},
+		{"R5 precommit integrity", old, started, errors.Join(io, integrity), "TERMINAL_STORE_INTEGRITY(canonical)", "OLD"},
+		{"R5 precommit invariant", old, started, engine(mdbx.EngineLocalInvariant, "x"), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
+		{"R11 snapshot", old, pre, snapshot, "STALE_LOCAL_PLAN", "OLD"},
+		{"R11 format-2 refusal", old, pre, format2, "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
+		{"R11 joined", old, pre, errors.Join(snapshot, format2), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
+		{"R2 stale planner", old, pre, &selectedSideFailure{result: "STALE_LOCAL_PLAN", cause: io}, "STALE_LOCAL_PLAN", "OLD"},
+	} {
+		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(c.truth, c.stage, c.err), c.truth, c.stage, c.err, c.result, c.canon, c.label)
+	}
+}
+
+// C8, C13, R5, R11 through the planner and UpdateTreeV1: a normal commit of each cause is NEW with an empty Result; an
+// inserted slot the metadata bound refuses is LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)/OLD with nothing written;
+// the planner on a format-2 store never runs and the typed-operation refusal is TERMINAL_LOCAL_INVARIANT, never STALE.
+func TestReplayWholeTargetProjectedCommit(t *testing.T) {
+	for label, cause := range map[string]ReplayTargetConversionCauseV1{"C8 target-local": ReplayTargetConversionTargetLocalV1, "C13 recovery-core": ReplayTargetConversionRecoveryCoreV1} {
+		w := rtNew(t, rtWhole())
+		image := rtImage(t, w)
+		run := rtWholePlan(t, w, rtWholeInput(rtEnvelope(t, w), cause, nil), nil)
+		rtWholeConverted(t, w, image, run, rtWholeDone(5, 6, nil), rtWholeConsulted(t, 3, 0, 1), label)
+		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, nil, "", "NEW", label)
+	}
+	w := rtNew(t, rtWhole())
+	image := rtImage(t, w)
+	huge := rtTuple(37, 0x37, string(bytes.Repeat([]byte{'B'}, int(mdbx.MaxMetadataBytes))))
+	run := rtWholePlan(t, w, rtWholeInput(rtEnvelope(t, w), ReplayTargetConversionInvalidityV1, huge), nil)
+	rtWholeRefused(t, w, image, run, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "R5 oversized slot")
+	rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, run.err, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD", "R5 oversized slot")
+	legacy := newReplayWorld(t, 4)
+	called := false
+	var truth mdbx.CommitTruth
+	var stage mdbx.UpdateStage
+	var err error
+	logicalMDBXAssert(t, legacy.owner.WithOperation(mdbx.LaneOperation, func(a *mdbx.OperationAccount) error {
+		truth, stage, _, err = legacy.store.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+			called = true
+			return mdbx.TreeOperationV1{}, nil
+		})
+		return nil
+	}) == nil, "format-2 account")
+	var e *mdbx.EngineError
+	logicalMDBXAssert(t, !called && errors.As(err, &e) && e.Class == mdbx.EngineStateMismatch && e.Diagnostic == "typed tree operation requires tree store", "R11 format-2 premise: %v", err)
+	rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(truth, stage, err), mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, err, "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD", "R11 format-2 refusal")
+}

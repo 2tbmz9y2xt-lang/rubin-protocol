@@ -265,6 +265,44 @@ func replayTreeSlotEffect(a *mdbx.StorageAuthorityV1, input ReplayTargetConversi
 	a.ExcludedInvalidBranch = &slot
 }
 
+// replayTreeSnapshotMismatch is the Diagnostic of UpdateTreeV1's write snapshot refusal (treeSnapshotMismatchV1).
+const replayTreeSnapshotMismatch = "OLD/write snapshot mismatch"
+
+// ProjectReplayWholeTargetConversionMDBX projects one UpdateTreeV1 attempt of a PlanReplayWholeTargetConversionMDBX
+// Batch as its CLEANUP-origin outcome (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.9 lines 7453-7473 and 7567-7572). Truth,
+// Stage and Err are kept exactly, wrappers and causes included; Decision is empty and Replay nil. A possibly crossed
+// commit with a nil Err is the normal outcome (CanonicalTruth from its truth, empty Result); with an Err it is
+// TERMINAL_PERSISTENCE(new|old|neither_or_unreadable) with CanonicalTruth NEW, OLD or UNKNOWN. Any other nil Err is OLD
+// with an empty Result. WRITE_STARTED_DEFINITELY_PRECOMMIT keeps an integrity or invariant cause, else
+// LOCAL_PERSISTENCE_ERROR(precommit). Otherwise the merged cause walk classifies Err by native storage class with no
+// read-artifact override; an EngineStateMismatch cause is STALE_LOCAL_PLAN when every such cause is the write snapshot
+// mismatch, else TERMINAL_LOCAL_INVARIANT(evidence). It never returns the detecting step's result.
+func ProjectReplayWholeTargetConversionMDBX(truth mdbx.CommitTruth, stage mdbx.UpdateStage, err error) ReplayEntryOutcomeV1 {
+	out := ReplayEntryOutcomeV1{CanonicalTruth: "OLD", Truth: truth, Stage: stage, Err: err}
+	switch {
+	case stage == mdbx.UpdateStageCommitMayHaveCrossed:
+		return replayEntryCrossed(out, &replayEntryCall{})
+	case err == nil:
+		return out
+	case stage == mdbx.UpdateStageWriteStartedDefinitelyPrecommit:
+		out.Result = replayEntryPrecommit(replayEntryCauses(err, &replayEntryCall{}))
+		return out
+	}
+	out.Result = replayEntryCauses(err, &replayEntryCall{planned: replayTreeSnapshotOnly(err)})
+	return out
+}
+
+// replayTreeSnapshotOnly reports whether every EngineStateMismatch cause of err is the write snapshot mismatch.
+func replayTreeSnapshotOnly(err error) bool {
+	for _, part := range genesisMDBXCauses(err) {
+		var e *mdbx.EngineError
+		if errors.As(part, &e) && e != nil && e.Class == mdbx.EngineStateMismatch && e.Diagnostic != replayTreeSnapshotMismatch {
+			return false
+		}
+	}
+	return true
+}
+
 // replayTreeStoreRefused reports the F1 discriminator: Store.Update's exact tree-store refusal at OLD/PREWRITE.
 func replayTreeStoreRefused(out ReplayEntryOutcomeV1) bool {
 	return out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite && replayTreeRefused(out.Err, replayTreeStoreRefusal)
