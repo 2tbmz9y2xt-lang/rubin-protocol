@@ -131,12 +131,19 @@ func (o *ReplayEntryOwnerV1) replayTreeRecompute(reader *mdbx.Reader, limit uint
 	return report, err
 }
 
-// replayTreeConversion is the whole-target conversion of a PLAN_CHANGE report's REPLAY envelope (GEN 1185-1188, REPLAY
-// 4369-4384): PRUNE_GC/RECOVERY_REQUIRED, pending = the target profile, ReplayV1 none, CleanupV1 exactly the two
-// target generations as ascending GENERATION spans, and the target lag, source kind and progress none; every other
-// envelope field is the read one. It reads no cursor. Consulted is the baseline observation set of the active tip.
+// replayTreeConversion is the PLAN_CHANGE adapter of replayTreeWholeTarget: the conversion of a PLAN_CHANGE report's
+// read REPLAY envelope with Consulted for the report's active tip. It adds no slot effect.
 func replayTreeConversion(report ReplayRecomputationV1) (mdbx.Batch, error) {
-	envelope := report.envelope
+	return replayTreeWholeTarget(report.envelope, report.activeTip)
+}
+
+// replayTreeWholeTarget is the common whole-target conversion of a fixed REPLAY target pair (RUBIN_MEMPOOL_POLICY.md
+// Section 6.4.1.8 lines 5638-5647, Section 6.4.1.3 lines 1276-1286): PRUNE_GC/RECOVERY_REQUIRED, pending = the target
+// profile, ReplayV1 none, CleanupV1 exactly the two target generations as ascending GENERATION spans, and the target
+// lag, source kind and progress none; every other envelope field (active pair, next_generation_id, the
+// InvalidBranchV1 slot and the retained source intent included) is the given one. It reads no cursor and allocates no
+// generation. Consulted is the baseline observation set of activeTip.
+func replayTreeWholeTarget(envelope mdbx.TreeAuthorityV1, activeTip uint64) (mdbx.Batch, error) {
 	a := &envelope.Authority
 	target, lag, profile := a.Replay.TargetGenerationID, envelope.TargetLagGenerationID, a.Replay.TargetProfile
 	a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{
@@ -149,7 +156,7 @@ func replayTreeConversion(report ReplayRecomputationV1) (mdbx.Batch, error) {
 	if err != nil {
 		return mdbx.Batch{}, err
 	}
-	return replayRecoveryAuthorityBatch(literal, replayEntryConsulted(a.ActiveGenerationID, report.activeTip)), nil
+	return replayRecoveryAuthorityBatch(literal, replayEntryConsulted(a.ActiveGenerationID, activeTip)), nil
 }
 
 // replayTreeStoreRefused reports the F1 discriminator: Store.Update's exact tree-store refusal at OLD/PREWRITE.

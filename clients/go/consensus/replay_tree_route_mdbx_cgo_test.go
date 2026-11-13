@@ -993,6 +993,57 @@ func TestReplayTreeIntentConversion(t *testing.T) {
 	})
 }
 
+// rtSameBatch reports whether a and b are equal in every Batch field; the obsolete-row fields (whose element types
+// carry errors) must be empty in both, as for every pair-only conversion Batch.
+func rtSameBatch(a, b mdbx.Batch) bool {
+	return reflect.DeepEqual(a.Mutations, b.Mutations) && a.Reverse == b.Reverse && reflect.DeepEqual(a.Consulted, b.Consulted) &&
+		reflect.DeepEqual(a.ContextConsulted, b.ContextConsulted) && reflect.DeepEqual(a.LargeConsulted, b.LargeConsulted) &&
+		len(a.ObsoleteDeletes)+len(b.ObsoleteDeletes)+len(a.ObsoleteConsulted)+len(b.ObsoleteConsulted) == 0
+}
+
+// C7 (RUB-1755): the PLAN_CHANGE adapter replayTreeConversion equals the common transform replayTreeWholeTarget on the
+// same envelope and active tip, for ascending and reversed target IDs, with and without an existing InvalidBranchV1
+// slot. Each plan is one meta key 2 mutation whose literal decodes to the independent rtConverted envelope (slot and
+// retained intent unchanged) with the active-tip Consulted rows, and the caller's envelope is not mutated.
+func TestReplayTreeWholeTargetAdapter(t *testing.T) {
+	slot := &mdbx.InvalidBranchV1{FirstInvalidHeight: 12, FirstInvalidBlockHash: [32]byte{0x12}, ExactConsensusError: []byte("BLOCK_ERR_WEIGHT_EXCEEDED")}
+	cases := []struct {
+		label       string
+		target, lag uint64
+		slot        *mdbx.InvalidBranchV1
+		lo, hi      uint64
+	}{
+		{"ascending", 3, 4, nil, 3, 4},
+		{"reversed", 4, 3, nil, 3, 4},
+		{"slot kept", 3, 4, slot, 3, 4},
+	}
+	for _, c := range cases {
+		t.Run(c.label, func(t *testing.T) {
+			p := rtIntentPayload()
+			before := rtImageReplay(p)
+			before.Authority.Replay.TargetGenerationID, before.TargetLagGenerationID = c.target, c.lag
+			before.Authority.ExcludedInvalidBranch = c.slot
+			_, err := before.Encode()
+			logicalMDBXAssert(t, err == nil, "%s: fixture envelope illegal: %v", c.label, err)
+			snapshot := rtImageReplay(p)
+			snapshot.Authority.Replay.TargetGenerationID, snapshot.TargetLagGenerationID = c.target, c.lag
+			snapshot.Authority.ExcludedInvalidBranch = c.slot
+			adapter, aerr := replayTreeConversion(ReplayRecomputationV1{Report: ReplayRecomputationPlanChangeV1, envelope: before, activeTip: 2})
+			common, cerr := replayTreeWholeTarget(before, 2)
+			logicalMDBXAssert(t, aerr == nil && cerr == nil && rtSameBatch(adapter, common), "%s: adapter %+v %v, common %+v %v", c.label, adapter, aerr, common, cerr)
+			logicalMDBXAssert(t, len(adapter.Mutations) == 1 && bytes.Equal(adapter.Mutations[0].Key, []byte{0x02}), "%s: mutations %+v", c.label, adapter.Mutations)
+			logicalMDBXAssert(t, reflect.DeepEqual(adapter.Consulted, rtConsulted(t)), "%s: consulted %+v", c.label, adapter.Consulted)
+			decoded, err := mdbx.DecodeTreeAuthorityV1(adapter.Mutations[0].Literal)
+			logicalMDBXAssert(t, err == nil, "%s: decode %v", c.label, err)
+			want := rtConverted(snapshot, c.lo, c.hi)
+			logicalMDBXAssert(t, reflect.DeepEqual(decoded, want), "%s: planned %+v want %+v", c.label, decoded, want)
+			logicalMDBXAssert(t, reflect.DeepEqual(decoded.Authority.ExcludedInvalidBranch, c.slot), "%s: slot %+v", c.label, decoded.Authority.ExcludedInvalidBranch)
+			rtIntentKept(t, decoded, p, c.label)
+			logicalMDBXAssert(t, reflect.DeepEqual(before, snapshot), "%s: caller envelope mutated: %+v", c.label, before)
+		})
+	}
+}
+
 // C3: the post-drain representation (the C2 envelope with one GENERATION span left) and the pending
 // NONE/RECOVERY_REQUIRED envelope, each carrying P, commit through UpdateTreeV1 and read back after reopen.
 func TestReplayTreeIntentRetained(t *testing.T) {
