@@ -405,6 +405,12 @@ func validTreeAuthorityFor(tree TreeAuthorityV1, a authorityValidation) bool {
 	return validTreeSource(tree) && validTreeIntent(tree.SourceIntent, tree.Authority.Phase, tree.Authority.Lifecycle, tree.SourceKind) && validTop(a.StorageAuthorityV1) && validPhasePayloadFor(a, true) && validDescriptorsFor(a, true) && validOwners(a) && validTreeRoles(tree, a)
 }
 
+// Encode returns the envelope bytes: tag 1 when SourceIntent is nil (the bytes
+// are those of an envelope without the field), tag 2 with carrier kind IMAGE and
+// the intent payload otherwise. It refuses with errSchema a tree that fails
+// validation, including a non-nil SourceIntent whose Kind is not IMAGE or whose
+// Payload is empty, an intent outside its legal phases, and an envelope larger
+// than MaxMetadataBytes, so Encode and DecodeTreeAuthorityV1 stay one-to-one.
 func (tree TreeAuthorityV1) Encode() ([]byte, error) {
 	if !validTreeAuthority(tree) {
 		return nil, errSchema
@@ -440,6 +446,10 @@ func treeEnvelopeAuthoritySize(tree *TreeAuthorityV1) (int, bool) {
 	return n, tree.SourceIntent == nil || len(tree.SourceIntent.Payload) <= room-5
 }
 
+// DecodeTreeAuthorityV1 parses and validates one envelope and returns errSchema
+// on any failure. Tag 1 yields SourceIntent nil; a legal tag 2 yields a fresh
+// pointee of Kind IMAGE whose Payload is a fresh copy sharing no byte with b or
+// with Progress.Payload. Progress.Payload is also a fresh copy of the input.
 func DecodeTreeAuthorityV1(b []byte) (TreeAuthorityV1, error) {
 	var control authorityDecodeControl
 	control.ordinary.Cursor = &control.cursor
