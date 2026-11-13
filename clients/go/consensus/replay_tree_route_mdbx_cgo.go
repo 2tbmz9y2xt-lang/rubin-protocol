@@ -60,8 +60,10 @@ func replayTreeRefused(err error, want replayTreeRefusal) bool {
 	return replayTreeRefusal{e.Class, e.Operation, e.Code, e.Diagnostic, e.ReopenRequired} == want
 }
 
-// replayTreeEncode encodes a planned envelope. Every writer plans a legal tree envelope from a decoded legal one, so
-// the only reachable Encode refusal is the metadata size bound: LOCAL_RESOURCE_UNAVAILABLE(storage_capacity).
+// replayTreeEncode encodes a planned envelope. Every writer plans from a decoded legal envelope, so the reachable
+// Encode refusals are the metadata size bound and a retained source intent (TreeAuthorityV1.SourceIntent) copied into
+// a planned phase where it is illegal, as in treeEntryBatch's GENESIS_REPLAY plan. Both map to
+// LOCAL_RESOURCE_UNAVAILABLE(storage_capacity).
 func replayTreeEncode(envelope mdbx.TreeAuthorityV1) ([]byte, error) {
 	encoded, err := envelope.Encode()
 	if err != nil {
