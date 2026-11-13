@@ -977,15 +977,20 @@ func TestReplayTreeIntentConversion(t *testing.T) {
 		return nil
 	})
 	logicalMDBXAssert(t, err == nil && planErr == nil && len(batch.Mutations) == 1, "C2 plan: %v %v %+v", err, planErr, batch)
-	literal := batch.Mutations[0].Literal
-	carrier := append(binary.BigEndian.AppendUint32([]byte{1}, uint32(len(p))), p...)
-	logicalMDBXAssert(t, literal[0] == 2 && bytes.HasSuffix(literal, carrier), "C4 literal: tag %d, carrier suffix missing", literal[0])
-	decoded, err := mdbx.DecodeTreeAuthorityV1(literal)
-	logicalMDBXAssert(t, err == nil, "C4 decode: %v", err)
-	rtIntentKept(t, decoded, p, "C4 planned literal")
 	want := rtConverted(before, 3, 4)
-	logicalMDBXAssert(t, reflect.DeepEqual(decoded, want), "C2 planned: %+v want %+v", decoded, want)
-	rtReopened(t, w, want, p, "C2")
+	// Separate subtests: a fatal planned-literal assertion must not hide the C2 reopened assertion.
+	t.Run("C4 planned literal", func(t *testing.T) {
+		literal := batch.Mutations[0].Literal
+		carrier := append(binary.BigEndian.AppendUint32([]byte{1}, uint32(len(p))), p...)
+		logicalMDBXAssert(t, literal[0] == 2 && bytes.HasSuffix(literal, carrier), "C4 literal: tag %d, carrier suffix missing", literal[0])
+		decoded, err := mdbx.DecodeTreeAuthorityV1(literal)
+		logicalMDBXAssert(t, err == nil, "C4 decode: %v", err)
+		rtIntentKept(t, decoded, p, "C4 planned literal")
+		logicalMDBXAssert(t, reflect.DeepEqual(decoded, want), "C2 planned: %+v want %+v", decoded, want)
+	})
+	t.Run("C2 reopened", func(t *testing.T) {
+		rtReopened(t, w, want, p, "C2")
+	})
 }
 
 // C3: the post-drain representation (the C2 envelope with one GENERATION span left) and the pending
