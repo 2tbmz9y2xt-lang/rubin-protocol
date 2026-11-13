@@ -1448,6 +1448,13 @@ func TestReplayWholeTargetContext(t *testing.T) {
 		rtWholeRefused(t, w, image, run, "STALE_LOCAL_PLAN", label)
 	}
 	image := rtImageReplay([]byte{0xa1})
+	slotted := rtWhole()
+	slotted.Authority.ExcludedInvalidBranch = rtTuple(12, 0x12, "BLOCK_ERR_WEIGHT_EXCEEDED")
+	// A GENESIS_REPLAY cursor of one kind at height 0 has exactly one legal hash (tree_authority.go:326,
+	// authority_descriptors.go:64-70), so the cursor kind row also changes the hash: PRE_GENESIS versus APPLIED at the
+	// genesis hash.
+	preGenesis := rtWhole()
+	preGenesis.Authority.Replay.Cursor = mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorPreGenesisV1}
 	for label, c := range map[string]struct {
 		stored mdbx.TreeAuthorityV1
 		edit   func(e *mdbx.TreeAuthorityV1)
@@ -1474,6 +1481,20 @@ func TestReplayWholeTargetContext(t *testing.T) {
 		"intent payload": {image, func(e *mdbx.TreeAuthorityV1) { e.SourceIntent.Payload = []byte{0xa2} }},
 		"intent absent":  {image, func(e *mdbx.TreeAuthorityV1) { e.SourceIntent = nil }},
 		"encode refused": {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Version = 0 }},
+		"slot height":    {slotted, func(e *mdbx.TreeAuthorityV1) { e.Authority.ExcludedInvalidBranch.FirstInvalidHeight = 13 }},
+		"slot hash":      {slotted, func(e *mdbx.TreeAuthorityV1) { e.Authority.ExcludedInvalidBranch.FirstInvalidBlockHash[0] = 0x13 }},
+		"slot error bytes": {slotted, func(e *mdbx.TreeAuthorityV1) {
+			e.Authority.ExcludedInvalidBranch.ExactConsensusError = []byte("BLOCK_ERR_WEIGHT_EXCEEDEE")
+		}},
+		"target chain ID":     {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Target.ChainID[0] = 0xd1 }},
+		"target genesis hash": {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Target.GenesisHash[0] = 0xd2 }},
+		"target tip height":   {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Target.TipHeight = 38 }},
+		"target chainwork":    {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Target.CumulativeChainwork[39] = 2 }},
+		"cursor hash":         {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Cursor.BlockHash[0] = 0x35 }},
+		"cursor kind": {preGenesis, func(e *mdbx.TreeAuthorityV1) {
+			e.Authority.Replay.Cursor = mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorAppliedV1, BlockHash: rtWholeTarget.GenesisHash}
+		}},
+		"progress kind": {image, func(e *mdbx.TreeAuthorityV1) { e.Progress.Kind = mdbx.TreeProgressCompleteV1 }},
 	} {
 		w := rtNew(t, c.stored)
 		before := rtImage(t, w)
@@ -1563,6 +1584,11 @@ func TestReplayWholeTargetProjection(t *testing.T) {
 	step5 := full.WithReservation(1, func() error { return nil })
 	logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(step5), "step-5 capacity premise: %v", step5)
 	old, nw, unknown := mdbx.CommitTruthOld, mdbx.CommitTruthNew, mdbx.CommitTruthUnknown
+	// A Store latched by a crossed commit refuses a later UpdateTreeV1 at PREWRITE with its retained terminal truth and
+	// error (refusedUpdate, observationStateError): the raw Truth stays NEW or UNKNOWN, CanonicalTruth is OLD and the
+	// Result is the PREWRITE row of the Section 6.4.1.9 stage table for the retained causes.
+	latchedNew := &mdbx.CommitError{Truth: nw, Cause: engine(mdbx.EngineCapacity, "full")}
+	latchedUnknown := &mdbx.CommitError{Truth: unknown, Cause: engine(mdbx.EngineCapacity, "full"), ReadbackCause: integrity}
 	pre, started, may := mdbx.UpdateStagePrewrite, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, mdbx.UpdateStageCommitMayHaveCrossed
 	for _, c := range []struct {
 		label         string
@@ -1590,6 +1616,8 @@ func TestReplayWholeTargetProjection(t *testing.T) {
 		{"R5 step-5 capacity", old, pre, step5, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD"},
 		{"R5 wrapped step-5 capacity", old, pre, fmt.Errorf("charge: %w", step5), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
 		{"R2 stale planner", old, pre, &selectedSideFailure{result: "STALE_LOCAL_PLAN", cause: io}, "STALE_LOCAL_PLAN", "OLD"},
+		{"latched NEW", nw, pre, latchedNew, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD"},
+		{"latched UNKNOWN", unknown, pre, latchedUnknown, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD"},
 	} {
 		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(c.truth, c.stage, c.err), c.truth, c.stage, c.err, c.result, c.canon, c.label)
 	}
