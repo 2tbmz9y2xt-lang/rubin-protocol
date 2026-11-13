@@ -19,8 +19,9 @@ import (
 // itself is one pair-only Batch whose meta key 2 row is the encoding of the planned envelope. The selected-side intent
 // branch instead returns the clear planner's result, which on a tree Reader is always its ReadStorageAuthorityV1
 // tree-Reader refusal with an empty ReadResource (RUB-1729 owns that branch). Inside this package replayTreeOperation
-// is the only route from such a Batch to Store.UpdateTreeV1; the caller of PlanReplayWholeTargetConversionMDBX submits
-// the returned Batch itself as the pair-only operation.
+// is the only route from such a Batch to Store.UpdateTreeV1, including the Batch PlanReplayWholeTargetConversionMDBX
+// returns: its in-package caller returns replayTreeOperation(Batch), whose Mutations and Consulted rows are the pair-only
+// TreeOperationV1 of the same UpdateTreeV1 callback.
 
 // replayTreeRefusal is the comparable identity of a direct EngineError with a nil Cause and nil TreeObservation.
 type replayTreeRefusal struct {
@@ -171,7 +172,9 @@ func replayTreeWholeTarget(envelope mdbx.TreeAuthorityV1, activeTip uint64) (mdb
 type ReplayTargetConversionCauseV1 uint8
 
 const (
-	// ReplayTargetConversionTargetLocalV1 is a qualified target-local finding (Section 6.4.1.8 lines 6332-6372).
+	// ReplayTargetConversionTargetLocalV1 is a qualified target-local finding (Section 6.4.1.8 lines 6332-6372). It keeps
+	// an empty slot empty and clears ReplayV1, so the caller passes it only with consistent authority and never while an
+	// invalidity hand-off of the same replay is pending; the planner cannot detect a pending hand-off.
 	ReplayTargetConversionTargetLocalV1 ReplayTargetConversionCauseV1 = 1
 	// ReplayTargetConversionInvalidityV1 is a qualified replay invalidity after its hand-off (lines 6374-6396).
 	ReplayTargetConversionInvalidityV1 ReplayTargetConversionCauseV1 = 2
@@ -179,13 +182,14 @@ const (
 	ReplayTargetConversionRecoveryCoreV1 ReplayTargetConversionCauseV1 = 3
 )
 
-// ReplayTargetConversionInputV1 is the caller's qualified conversion input. Reader is the Reader of the UpdateTreeV1
-// callback in which the caller qualified Envelope, the complete envelope snapshot it qualified (fixed source, target
+// ReplayTargetConversionInputV1 is the caller's qualified conversion input. Reader is the Reader the UpdateTreeV1
+// callback received, in which the caller qualified Envelope, the complete envelope snapshot it qualified (fixed source, target
 // IDs, RecoveryTargetV1, progress, retained intent and slot). ActiveTip is the active tip that qualification
 // established, at most 4294967295; it selects only the Batch's Consulted rows: the canonical-v1 height keys of the
 // active generation at heights 0 and 1, then tip and tip+1 when tip > 1, or 2 when tip = 1. Invalidity is nil for TARGET_LOCAL and
 // RECOVERY_CORE and, for REPLAY_INVALIDITY, the first-invalid tuple whose error the caller admitted as exactly one
-// Section 13 token. The caller invokes REPLAY_INVALIDITY only after its hand-off promotion is NEW. For RECOVERY_CORE a
+// Section 13 token. The caller invokes REPLAY_INVALIDITY only after its hand-off promotion is NEW, and TARGET_LOCAL only
+// with consistent authority and never while an invalidity hand-off of the same replay is pending. For RECOVERY_CORE a
 // P NEW is no input: the caller holds the qualified durable proof with its independently retained source before the
 // call and the planner reads neither. The input is a process precondition of the caller, not an authentication
 // certificate: the caller owns source qualification, role/ownership controls, cause admission and the view guard held
@@ -199,7 +203,10 @@ type ReplayTargetConversionInputV1 struct {
 }
 
 // PlanReplayWholeTargetConversionMDBX plans the common whole-target conversion (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.8
-// lines 5632-5647) of the fixed REPLAY target pair inside the caller's UpdateTreeV1 plan callback on reader. In order:
+// lines 5632-5647) of the fixed REPLAY target pair inside the caller's UpdateTreeV1 plan callback on reader. The caller
+// passes as reader, and as input.Reader, the Reader that callback received: the planner only compares the two and
+// cannot detect another Reader, while UpdateTreeV1 checks only the planned keys and Consulted rows against its own
+// snapshot. The caller submits the returned Batch only as replayTreeOperation(Batch) from that same callback. In order:
 // a nil reader is TERMINAL_LOCAL_INVARIANT(evidence); the envelope is reread and a read or decode error is returned
 // unchanged; proved absence, an envelope outside REPLAY/RECOVERY_REQUIRED, input.Reader other than reader, or a reread
 // envelope whose canonical encoding differs from that of input.Envelope (or an input.Envelope Encode refuses) is
@@ -240,7 +247,7 @@ func replayTreeMisuse(message string) error {
 
 // replayTreeQualified reports the R2/R6 binding: the reread envelope is the fixed REPLAY/RECOVERY_REQUIRED target, the
 // input names this Reader, and both envelopes have the same canonical encoding (value equality; an input envelope
-// Encode refuses is a mismatch).
+// Encode refuses is a mismatch). That reader is the UpdateTreeV1 callback's own only by the caller's precondition.
 func replayTreeQualified(reader *mdbx.Reader, envelope mdbx.TreeAuthorityV1, input ReplayTargetConversionInputV1) bool {
 	a := envelope.Authority
 	if a.Phase != mdbx.StoragePhaseReplayV1 || a.Lifecycle != mdbx.StorageLifecycleRecoveryRequiredV1 || a.Replay == nil || input.Reader != reader {
@@ -292,8 +299,10 @@ const replayTreeSnapshotMismatch = "OLD/write snapshot mismatch"
 // cause walk classifies each direct cause of Err by native storage class with no read-artifact override; a direct
 // EngineStateMismatch cause is STALE_LOCAL_PLAN when every such cause is the write snapshot mismatch, else
 // TERMINAL_LOCAL_INVARIANT(evidence). It never returns the detecting step's result. The caller retains the raw
-// UpdateTreeV1 index and the native owner disposition, applies the latch and terminal admission gates in its own owner,
-// and keeps the earlier detecting result independently.
+// UpdateTreeV1 index and the native owner disposition, applies the latch and terminal admission gates in its own owner
+// before any call, and keeps the earlier detecting result independently. On a Store already latched terminal,
+// UpdateTreeV1 refuses at PREWRITE with the retained terminal truth (OLD, NEW or UNKNOWN); this projection keeps that raw
+// Truth and reports CanonicalTruth OLD, since this attempt wrote nothing, with the cause walk's Result for the refusal.
 func ProjectReplayWholeTargetConversionMDBX(truth mdbx.CommitTruth, stage mdbx.UpdateStage, err error) ReplayEntryOutcomeV1 {
 	out := ReplayEntryOutcomeV1{CanonicalTruth: "OLD", Truth: truth, Stage: stage, Err: err}
 	switch {
