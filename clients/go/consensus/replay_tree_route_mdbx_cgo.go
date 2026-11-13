@@ -195,8 +195,15 @@ const (
 // certificate: the caller owns source qualification, role/ownership controls, cause admission and the view guard held
 // until UpdateTreeV1 returns. Source qualification includes two checks the envelope decoder does not make (it checks a
 // GENESIS_REPLAY cursor only against the target tip height and the genesis/tip hashes): the cursor hash lies on the
-// target header path, and the target tuple is self-consistent. The planner does not make them either. The caller never
-// calls the planner after a failed qualification or a stale view guard.
+// target header path, and the target tuple is self-consistent. The planner does not make them either. For an IMAGE
+// source, the legal zero ReplayCursorV1 is not a GENESIS_REPLAY cursor and receives no cursor check; the complete
+// source-qualified checkpoint or progress is established by the IMAGE caller, never inferred from the presence of
+// opaque progress or retained-intent bytes, and an absent progress producer supplies no admission. For
+// REPLAY_INVALIDITY, FirstInvalidHeight and FirstInvalidBlockHash on the target path, with the error token, are the
+// caller's qualified first-invalid finding of the replay step, admitted through the caller's hand-off gate and
+// writer-side token check; the planner checks that tuple only for its C10 shape (non-nil, nonempty error, height at most
+// 4294967295), never its path membership or token. The caller never calls the planner after a failed qualification or a
+// stale view guard.
 type ReplayTargetConversionInputV1 struct {
 	Reader     *mdbx.Reader
 	Envelope   mdbx.TreeAuthorityV1
@@ -211,7 +218,9 @@ type ReplayTargetConversionInputV1 struct {
 // cannot detect another Reader, while UpdateTreeV1 checks only the planned keys and Consulted rows against its own
 // snapshot. The caller submits the returned Batch only as replayTreeOperation(Batch) from that same callback. Cursor
 // hash/path and target self-consistency are caller-qualified (ReplayTargetConversionInputV1); the planner does not check
-// them and is never called after a failed qualification or a stale view guard. In order:
+// them and is never called after a failed qualification or a stale view guard. IMAGE keeps its own legal zero
+// ReplayCursorV1 and caller-qualified checkpoint, which the planner neither checks nor infers from payload presence. A
+// REPLAY_INVALIDITY tuple is the caller's qualified first-invalid finding; the planner checks only its shape. In order:
 // a nil reader is TERMINAL_LOCAL_INVARIANT(evidence); the envelope is reread and a read or decode error is returned
 // unchanged; proved absence, an envelope outside REPLAY/RECOVERY_REQUIRED, input.Reader other than reader, or a reread
 // envelope whose canonical encoding differs from that of input.Envelope (or an input.Envelope Encode refuses) is
@@ -305,8 +314,10 @@ const replayTreeSnapshotMismatch = "OLD/write snapshot mismatch"
 // EngineStateMismatch cause is STALE_LOCAL_PLAN when every such cause is the write snapshot mismatch, else
 // TERMINAL_LOCAL_INVARIANT(evidence). It never returns the detecting step's result. The caller retains the raw
 // UpdateTreeV1 index and the native owner disposition, applies the terminal admission and latch gates in its own owner
-// to this projected outcome (the projection applies neither), and keeps the earlier detecting result independently. On a Store already latched terminal,
-// UpdateTreeV1 refuses at PREWRITE with the retained terminal truth (OLD, NEW or UNKNOWN); this projection keeps that raw
+// to this projected outcome (the projection applies neither), and keeps the earlier detecting result independently. The
+// caller's latch and terminal admission gate runs before it plans or submits any conversion, so a Store already latched
+// terminal is refused by that gate first and no Result of this projection is ever a retry signal. Should UpdateTreeV1
+// nevertheless refuse at PREWRITE with a retained terminal truth (OLD, NEW or UNKNOWN), this projection keeps that raw
 // Truth and reports CanonicalTruth OLD, since this attempt wrote nothing, with the cause walk's Result for the refusal.
 func ProjectReplayWholeTargetConversionMDBX(truth mdbx.CommitTruth, stage mdbx.UpdateStage, err error) ReplayEntryOutcomeV1 {
 	out := ReplayEntryOutcomeV1{CanonicalTruth: "OLD", Truth: truth, Stage: stage, Err: err}

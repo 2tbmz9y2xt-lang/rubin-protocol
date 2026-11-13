@@ -1015,9 +1015,10 @@ func rtSameBatch(a, b mdbx.Batch) bool {
 // caller's envelope is not mutated. Those oracle comparisons are what this test can fail on; its adapter-versus-
 // replayTreeWholeTarget equality is not evidence, because the adapter is a one-line delegation to that transform.
 // Every expected slot is a separately allocated pointee, so an in-place write to the caller's slot cannot reach the
-// oracle. The C7 byte-identity evidence is the pre-branch PLAN_CHANGE tests, which pass unedited:
-// TestReplayTreeConversion, TestReplayTreeConversionNoCursor and TestReplayTreeIntentConversion in this file and
-// TestReplayRecomputePlanChangeConversion and TestReplayRecomputeConversionRefusals in replay_recovery_mdbx_cgo_test.go.
+// oracle. The C7 format-3 byte-identity evidence is the pre-branch PLAN_CHANGE tests in this file, which pass unedited:
+// TestReplayTreeConversion, TestReplayTreeConversionNoCursor and TestReplayTreeIntentConversion. The unedited
+// TestReplayRecomputePlanChangeConversion and TestReplayRecomputeConversionRefusals in replay_recovery_mdbx_cgo_test.go
+// run through Store.Update, which refuses a format-3 store, so they pin only the format-2 branch and are no C7 evidence.
 func TestReplayTreeWholeTargetAdapter(t *testing.T) {
 	slot := func() *mdbx.InvalidBranchV1 {
 		return &mdbx.InvalidBranchV1{FirstInvalidHeight: 12, FirstInvalidBlockHash: [32]byte{0x12}, ExactConsensusError: []byte("BLOCK_ERR_WEIGHT_EXCEEDED")}
@@ -1569,7 +1570,9 @@ func rtWholeOutcome(t *testing.T, out ReplayEntryOutcomeV1, truth mdbx.CommitTru
 // step-5 capacity refusal at PREWRITE is storage_capacity (wrapped, it is no such refusal); PREWRITE otherwise
 // classifies each direct cause by native storage class; only the write snapshot mismatch is STALE_LOCAL_PLAN, any
 // other direct StateMismatch (the format-2 typed-operation refusal) is TERMINAL_LOCAL_INVARIANT, also when joined with
-// the snapshot mismatch, while one wrapped inside another cause is not inspected.
+// the snapshot mismatch, while one wrapped inside another cause is not inspected. The walk classifies only direct
+// causes, so an fmt.Errorf-wrapped EngineError or selectedSideFailure is an unclassified cause:
+// TERMINAL_LOCAL_INVARIANT(evidence), not its inner class. Each row is its own subtest.
 func TestReplayWholeTargetProjection(t *testing.T) {
 	engine := func(class mdbx.EngineClass, diagnostic string) error {
 		return &mdbx.EngineError{Class: class, Operation: "update", Code: -30779, Diagnostic: diagnostic}
@@ -1584,11 +1587,10 @@ func TestReplayWholeTargetProjection(t *testing.T) {
 	step5 := full.WithReservation(1, func() error { return nil })
 	logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(step5), "step-5 capacity premise: %v", step5)
 	old, nw, unknown := mdbx.CommitTruthOld, mdbx.CommitTruthNew, mdbx.CommitTruthUnknown
-	// A Store latched by a crossed commit refuses a later UpdateTreeV1 at PREWRITE with its retained terminal truth and
-	// error (refusedUpdate, observationStateError): the raw Truth stays NEW or UNKNOWN, CanonicalTruth is OLD and the
-	// Result is the PREWRITE row of the Section 6.4.1.9 stage table for the retained causes.
-	latchedNew := &mdbx.CommitError{Truth: nw, Cause: engine(mdbx.EngineCapacity, "full")}
-	latchedUnknown := &mdbx.CommitError{Truth: unknown, Cause: engine(mdbx.EngineCapacity, "full"), ReadbackCause: integrity}
+	// A bare CommitError with a NEW or UNKNOWN raw Truth at PREWRITE (a constructed input shape, not the joined terminal
+	// error a latched Store retains): the raw Truth is kept, CanonicalTruth is OLD and the Result is the cause walk's.
+	prewriteNew := &mdbx.CommitError{Truth: nw, Cause: engine(mdbx.EngineCapacity, "full")}
+	prewriteUnknown := &mdbx.CommitError{Truth: unknown, Cause: engine(mdbx.EngineCapacity, "full"), ReadbackCause: integrity}
 	pre, started, may := mdbx.UpdateStagePrewrite, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, mdbx.UpdateStageCommitMayHaveCrossed
 	for _, c := range []struct {
 		label         string
@@ -1616,10 +1618,14 @@ func TestReplayWholeTargetProjection(t *testing.T) {
 		{"R5 step-5 capacity", old, pre, step5, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD"},
 		{"R5 wrapped step-5 capacity", old, pre, fmt.Errorf("charge: %w", step5), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
 		{"R2 stale planner", old, pre, &selectedSideFailure{result: "STALE_LOCAL_PLAN", cause: io}, "STALE_LOCAL_PLAN", "OLD"},
-		{"latched NEW", nw, pre, latchedNew, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD"},
-		{"latched UNKNOWN", unknown, pre, latchedUnknown, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD"},
+		{"PREWRITE CommitError NEW", nw, pre, prewriteNew, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD"},
+		{"PREWRITE CommitError UNKNOWN", unknown, pre, prewriteUnknown, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD"},
+		{"wrapped EngineError", old, pre, fmt.Errorf("read: %w", io), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
+		{"wrapped selectedSideFailure", old, pre, fmt.Errorf("plan: %w", &selectedSideFailure{result: "STALE_LOCAL_PLAN", cause: io}), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
 	} {
-		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(c.truth, c.stage, c.err), c.truth, c.stage, c.err, c.result, c.canon, c.label)
+		t.Run(c.label, func(t *testing.T) {
+			rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(c.truth, c.stage, c.err), c.truth, c.stage, c.err, c.result, c.canon, c.label)
+		})
 	}
 }
 
