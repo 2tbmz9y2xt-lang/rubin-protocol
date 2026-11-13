@@ -447,7 +447,10 @@ func TestReplayTreeFixtureRecomputeEIO(t *testing.T) {
 // target CURRENT ID, equal to either active ID, or not below next_generation_id) makes the planner return the Reader's
 // EngineIntegrity error unchanged, TERMINAL_STORE_INTEGRITY(canonical), before any input interpretation: the input
 // also names another Reader and cause 0, and no Batch exists. The raw UpdateTreeV1 tuple projects to
-// TERMINAL_STORE_INTEGRITY(canonical)/OLD. The control (the legal row) converts.
+// TERMINAL_STORE_INTEGRITY(canonical)/OLD. The control (the legal row) converts. Identity, not a value-equal copy: the
+// Reader records its failure, and UpdateTreeV1 returns that recorded *EngineError itself only when the callback returned
+// the same pointer (readPrimary), otherwise it joins both, so the raw error equals the planner's error only when the
+// planner returned the Reader's error.
 func TestReplayWholeTargetFixtureMalformed(t *testing.T) {
 	legal, err := rtWhole().Encode()
 	logicalMDBXAssert(t, err == nil && bytes.Equal(legal[10:18], []byte{0, 0, 0, 0, 0, 0, 0, 6}), "target lag premise: %v %x", err, legal[10:18])
@@ -489,7 +492,8 @@ func TestReplayWholeTargetFixtureMalformed(t *testing.T) {
 		var engine *mdbx.EngineError
 		logicalMDBXAssert(t, reflect.TypeOf(run.planErr) == reflect.TypeOf(engine) && errors.As(run.planErr, &engine) && engine.Class == mdbx.EngineIntegrity,
 			"R1 %s: not the Reader's integrity error: %T %v", label, run.planErr, run.planErr)
-		logicalMDBXAssert(t, errors.Is(run.err, run.planErr) && reflect.ValueOf(run.batch).IsZero() && recoveryClass(run.planErr, "") == selectedSideIntegrity &&
+		logicalMDBXAssert(t, run.err == run.planErr, "R1 %s: the raw error is not the planner's error itself (the Reader's recorded failure): %v vs %v", label, run.err, run.planErr)
+		logicalMDBXAssert(t, errors.Is(run.err, run.planErr) && reflect.ValueOf(run.batch).IsZero() && recoveryClass(run.planErr, "") == "TERMINAL_STORE_INTEGRITY(canonical)" &&
 			run.truth == mdbx.CommitTruthOld && run.stage == mdbx.UpdateStagePrewrite && run.index == -1, "R1 %s: %+v %d/%d %v", label, run.batch, run.truth, run.stage, run.err)
 		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, run.err, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", "R1 "+label)
 	}
@@ -497,7 +501,8 @@ func TestReplayWholeTargetFixtureMalformed(t *testing.T) {
 
 // R4: a transient native failure of the envelope get is the Reader's EngineIO error unchanged,
 // LOCAL_RESOURCE_UNAVAILABLE(storage_io), never an empty Batch with a nil error, and the raw UpdateTreeV1 tuple projects
-// to LOCAL_RESOURCE_UNAVAILABLE(storage_io)/OLD; nothing is written.
+// to LOCAL_RESOURCE_UNAVAILABLE(storage_io)/OLD; nothing is written. The raw error is the planner's error itself (the
+// R1 identity argument).
 func TestReplayWholeTargetFixtureReadEIO(t *testing.T) {
 	w := rtNew(t, rtWhole())
 	image := rtImage(t, w)
@@ -507,6 +512,7 @@ func TestReplayWholeTargetFixtureReadEIO(t *testing.T) {
 		run = rtWholePlan(t, w, rtWholeInput(envelope, ReplayTargetConversionTargetLocalV1, nil), nil)
 	})
 	logicalMDBXAssert(t, err == nil && evidence.Faults == 1, "R4 fixture: %v %+v", err, evidence)
+	logicalMDBXAssert(t, run.err == run.planErr, "R4: the raw error is not the planner's error itself (the Reader's recorded failure): %v vs %v", run.err, run.planErr)
 	var engine *mdbx.EngineError
 	logicalMDBXAssert(t, reflect.TypeOf(run.planErr) == reflect.TypeOf(engine) && errors.As(run.planErr, &engine) && engine.Class == mdbx.EngineIO && reflect.ValueOf(run.batch).IsZero() &&
 		recoveryClass(run.planErr, "") == "LOCAL_RESOURCE_UNAVAILABLE(storage_io)" && errors.Is(run.err, run.planErr) && run.truth == mdbx.CommitTruthOld, "R4: %+v %v %v", run.batch, run.planErr, run.err)

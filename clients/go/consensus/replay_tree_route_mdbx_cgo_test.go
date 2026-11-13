@@ -939,6 +939,13 @@ func rtPendingIntent(p []byte) mdbx.TreeAuthorityV1 {
 	return e
 }
 
+// rtPendingBare is the pending NONE/RECOVERY_REQUIRED envelope (pending ARCHIVE) with intent none.
+func rtPendingBare() mdbx.TreeAuthorityV1 {
+	e := rtPendingIntent(nil)
+	e.SourceIntent = nil
+	return e
+}
+
 // rtIntentKept asserts e carries intent kind IMAGE with payload p byte-identical.
 func rtIntentKept(t *testing.T, e mdbx.TreeAuthorityV1, p []byte, label string) {
 	t.Helper()
@@ -1383,7 +1390,7 @@ func TestReplayWholeTargetInputDomain(t *testing.T) {
 			}, nil)
 			var own *selectedSideFailure
 			logicalMDBXAssert(t, reflect.TypeOf(run.planErr) == reflect.TypeOf(own), "C10 %s slot %v: not the planner's own refusal: %T %v", label, slot != nil, run.planErr, run.planErr)
-			rtWholeRefused(t, w, image, run, selectedSideInvariant, "C10 "+label)
+			rtWholeRefused(t, w, image, run, "TERMINAL_LOCAL_INVARIANT(evidence)", "C10 "+label)
 		}
 	}
 	bound, zero := tuple(), tuple()
@@ -1409,8 +1416,8 @@ func TestReplayWholeTargetInputDomain(t *testing.T) {
 	}
 }
 
-// R2, R4 absence, R6, R9: an envelope outside the fixed REPLAY target (NONE/STABLE, PRUNE_GC/STABLE, an already
-// converted envelope), proved exact-empty absence, an input Reader other than the callback Reader, and any field of
+// R2, R4 absence, R6, R9: an envelope outside the fixed REPLAY target (NONE/STABLE, PRUNE_GC/STABLE, a pending
+// NONE/RECOVERY_REQUIRED image with and without a retained intent, an already converted envelope), proved exact-empty absence, an input Reader other than the callback Reader, and any field of
 // the complete qualified envelope differing from the reread one (active profile with its B/U included), or an input
 // envelope Encode refuses, are STALE_LOCAL_PLAN with no Batch and nothing written; the domain miss, the absence, the
 // envelope mismatch and the Reader mismatch each win over a malformed cause. Value-equal inputs (fresh pointees, a nil
@@ -1421,18 +1428,20 @@ func TestReplayWholeTargetContext(t *testing.T) {
 		stored, input mdbx.TreeAuthorityV1
 		cause         ReplayTargetConversionCauseV1
 	}{
-		"R2 NONE/STABLE":   {rtStable(), rtStable(), tl},
-		"R2 PRUNE_GC":      {rtPrune(), rtPrune(), tl},
-		"R9 converted":     {rtWholeDone(5, 6, nil), rtWholeDone(5, 6, nil), ReplayTargetConversionRecoveryCoreV1},
-		"R4 exact-empty":   {mdbx.TreeAuthorityV1{}, rtWhole(), tl},
-		"R6 before cause":  {rtWhole(), rtWholeDone(5, 6, nil), 0},
-		"R2 before domain": {rtStable(), rtStable(), 255},
-		"R4 before cause":  {mdbx.TreeAuthorityV1{}, rtWhole(), 0},
+		"R2 NONE/STABLE":                      {rtStable(), rtStable(), tl},
+		"R2 PRUNE_GC":                         {rtPrune(), rtPrune(), tl},
+		"R2 NONE/RECOVERY_REQUIRED":           {rtPendingIntent([]byte{0xa1}), rtPendingIntent([]byte{0xa1}), tl},
+		"R2 NONE/RECOVERY_REQUIRED no intent": {rtPendingBare(), rtPendingBare(), tl},
+		"R9 converted":                        {rtWholeDone(5, 6, nil), rtWholeDone(5, 6, nil), ReplayTargetConversionRecoveryCoreV1},
+		"R4 exact-empty":                      {mdbx.TreeAuthorityV1{}, rtWhole(), tl},
+		"R6 before cause":                     {rtWhole(), rtWholeDone(5, 6, nil), 0},
+		"R2 before domain":                    {rtStable(), rtStable(), 255},
+		"R4 before cause":                     {mdbx.TreeAuthorityV1{}, rtWhole(), 0},
 	} {
 		w := rtNew(t, c.stored)
 		image := rtImage(t, w)
 		run := rtWholePlan(t, w, rtWholeInput(c.input, c.cause, nil), nil)
-		rtWholeRefused(t, w, image, run, replayEntryStale, label)
+		rtWholeRefused(t, w, image, run, "STALE_LOCAL_PLAN", label)
 	}
 	image := rtImageReplay([]byte{0xa1})
 	for label, c := range map[string]struct {
@@ -1469,7 +1478,7 @@ func TestReplayWholeTargetContext(t *testing.T) {
 		_, eerr := input.Encode()
 		logicalMDBXAssert(t, (eerr != nil) == (label == "encode refused"), "R6 %s premise: encode %v", label, eerr)
 		run := rtWholePlan(t, w, rtWholeInput(input, tl, nil), nil)
-		rtWholeRefused(t, w, before, run, replayEntryStale, "R6 "+label)
+		rtWholeRefused(t, w, before, run, "STALE_LOCAL_PLAN", "R6 "+label)
 	}
 	t.Run("R6 Reader", func(t *testing.T) {
 		w := rtNew(t, rtWhole())
@@ -1482,7 +1491,7 @@ func TestReplayWholeTargetContext(t *testing.T) {
 				run := rtWholePlan(t, w, func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1) {
 					return r, ReplayTargetConversionInputV1{Reader: reader(r), Envelope: envelope, Cause: cause}
 				}, nil)
-				rtWholeRefused(t, w, image, run, replayEntryStale, fmt.Sprintf("R6 Reader %s cause %d", label, cause))
+				rtWholeRefused(t, w, image, run, "STALE_LOCAL_PLAN", fmt.Sprintf("R6 Reader %s cause %d", label, cause))
 			}
 		}
 	})
