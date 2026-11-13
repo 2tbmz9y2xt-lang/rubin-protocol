@@ -186,7 +186,9 @@ const (
 // callback received, in which the caller qualified Envelope, the complete envelope snapshot it qualified (fixed source, target
 // IDs, RecoveryTargetV1, progress, retained intent and slot). ActiveTip is the active tip that qualification
 // established, at most 4294967295; it selects only the Batch's Consulted rows: the canonical-v1 height keys of the
-// active generation at heights 0 and 1, then tip and tip+1 when tip > 1, or 2 when tip = 1. Invalidity is nil for TARGET_LOCAL and
+// active generation at heights 0 and 1, then tip and tip+1 when tip > 1, or 2 when tip = 1. The planner checks
+// ActiveTip only against that bound, never against the active generation's height index on the Reader: that it is the
+// established active tip is the caller's qualification. Invalidity is nil for TARGET_LOCAL and
 // RECOVERY_CORE and, for REPLAY_INVALIDITY, the first-invalid tuple whose error the caller admitted as exactly one
 // Section 13 token. The caller invokes REPLAY_INVALIDITY only after its hand-off promotion is NEW, and TARGET_LOCAL only
 // with consistent authority and never while an invalidity hand-off of the same replay is pending. For RECOVERY_CORE a
@@ -217,8 +219,9 @@ type ReplayTargetConversionInputV1 struct {
 // passes as reader, and as input.Reader, the Reader that callback received: the planner only compares the two and
 // cannot detect another Reader, while UpdateTreeV1 checks only the planned keys and Consulted rows against its own
 // snapshot. The caller submits the returned Batch only as replayTreeOperation(Batch) from that same callback. Cursor
-// hash/path and target self-consistency are caller-qualified (ReplayTargetConversionInputV1); the planner does not check
-// them and is never called after a failed qualification or a stale view guard. IMAGE keeps its own legal zero
+// hash/path, target self-consistency and ActiveTip as the established active tip are caller-qualified
+// (ReplayTargetConversionInputV1); the planner does not check them (ActiveTip only against 4294967295, never against
+// the Reader's active height index) and is never called after a failed qualification or a stale view guard. IMAGE keeps its own legal zero
 // ReplayCursorV1 and caller-qualified checkpoint, which the planner neither checks nor infers from payload presence. A
 // REPLAY_INVALIDITY tuple is the caller's qualified first-invalid finding; the planner checks only its shape. In order:
 // a nil reader is TERMINAL_LOCAL_INVARIANT(evidence); the envelope is reread and a read or decode error is returned
@@ -308,17 +311,21 @@ const replayTreeSnapshotMismatch = "OLD/write snapshot mismatch"
 // commit with a nil Err is the normal outcome (CanonicalTruth from its truth, empty Result); with an Err it is
 // TERMINAL_PERSISTENCE(new|old|neither_or_unreadable) with CanonicalTruth NEW, OLD or UNKNOWN. Any other nil Err is OLD
 // with an empty Result. WRITE_STARTED_DEFINITELY_PRECOMMIT keeps an integrity or invariant cause, else
-// LOCAL_PERSISTENCE_ERROR(precommit). The engine's step-5 Pair charge refused by the owner aggregate (an Err that is
-// exactly that capacity refusal at OLD/PREWRITE) is LOCAL_RESOURCE_UNAVAILABLE(storage_capacity). Otherwise the merged
+// LOCAL_PERSISTENCE_ERROR(precommit). An Err at OLD/PREWRITE that is exactly the operation reservation owner's capacity
+// refusal (mdbx.IsOperationReservationCapacity), which any refused reservation charge returns, such as the engine's
+// step-5 Pair charge, whether the account's ceiling, the owner's limit or the owner's aggregate refused it, is
+// LOCAL_RESOURCE_UNAVAILABLE(storage_capacity). Otherwise the merged
 // cause walk classifies each direct cause of Err by native storage class with no read-artifact override; a direct
 // EngineStateMismatch cause is STALE_LOCAL_PLAN when every such cause is the write snapshot mismatch, else
 // TERMINAL_LOCAL_INVARIANT(evidence). It never returns the detecting step's result. The caller retains the raw
 // UpdateTreeV1 index and the native owner disposition, applies the terminal admission and latch gates in its own owner
-// to this projected outcome (the projection applies neither), and keeps the earlier detecting result independently. The
-// caller's latch and terminal admission gate runs before it plans or submits any conversion, so a Store already latched
-// terminal is refused by that gate first and no Result of this projection is ever a retry signal. Should UpdateTreeV1
-// nevertheless refuse at PREWRITE with a retained terminal truth (OLD, NEW or UNKNOWN), this projection keeps that raw
-// Truth and reports CanonicalTruth OLD, since this attempt wrote nothing, with the cause walk's Result for the refusal.
+// to this projected outcome (the projection applies neither), and keeps the earlier detecting result independently. A
+// PREWRITE refusal keeps its raw Truth, including the retained terminal truth (OLD, NEW or UNKNOWN) with which
+// UpdateTreeV1 refuses on a Store already latched terminal, and reports CanonicalTruth OLD, since this attempt wrote
+// nothing (Section 6.4.1.9 line 7596); its Result follows the rules above. For RECOVERY_CORE (Section 6.4.1.8
+// lines 6486-6489) a STALE_LOCAL_PLAN, definite abort or precommit OLD outcome preserves the complete replay image and
+// durable proof for only the caller's freshly guarded disposition retry, NEW proves this one conversion, and UNKNOWN
+// keeps the proof and the existing gates.
 func ProjectReplayWholeTargetConversionMDBX(truth mdbx.CommitTruth, stage mdbx.UpdateStage, err error) ReplayEntryOutcomeV1 {
 	out := ReplayEntryOutcomeV1{CanonicalTruth: "OLD", Truth: truth, Stage: stage, Err: err}
 	switch {

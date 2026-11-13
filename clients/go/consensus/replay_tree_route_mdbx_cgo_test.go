@@ -1333,8 +1333,9 @@ func TestReplayWholeTargetIntent(t *testing.T) {
 
 // C10: outside the closed cause/payload/ActiveTip domain the planner returns its own TERMINAL_LOCAL_INVARIANT(evidence)
 // refusal (a *selectedSideFailure, never a Reader EngineError) with no Batch and nothing written, with the slot empty or
-// already set; a nil reader parameter is refused the same way before any read; the bounds 0 and 4294967295 of
-// ActiveTip and of the first-invalid height are admitted.
+// already set; a nil reader parameter is refused the same way before any read; ActiveTip 4294967296 is refused under
+// each cause, REPLAY_INVALIDITY with an otherwise valid tuple included; the bounds 0 and 4294967295 of ActiveTip and of
+// the first-invalid height are admitted.
 func TestReplayWholeTargetInputDomain(t *testing.T) {
 	tl, inv, rc := ReplayTargetConversionTargetLocalV1, ReplayTargetConversionInvalidityV1, ReplayTargetConversionRecoveryCoreV1
 	tuple := func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED") }
@@ -1381,6 +1382,10 @@ func TestReplayWholeTargetInputDomain(t *testing.T) {
 			in.Cause, in.ActiveTip = rc, 1<<32
 			return r
 		},
+		"REPLAY_INVALIDITY ActiveTip 2^32": func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader {
+			in.Cause, in.Invalidity, in.ActiveTip = inv, tuple(), 1<<32
+			return r
+		},
 	} {
 		for _, slot := range []*mdbx.InvalidBranchV1{nil, rtTuple(12, 0x12, "BLOCK_ERR_WEIGHT_EXCEEDED")} {
 			stored := rtWhole()
@@ -1421,20 +1426,34 @@ func TestReplayWholeTargetInputDomain(t *testing.T) {
 	}
 }
 
-// R2, R4 absence, R6, R9: an envelope outside the fixed REPLAY target (NONE/STABLE, PRUNE_GC/STABLE, a pending
-// NONE/RECOVERY_REQUIRED image with and without a retained intent, an already converted envelope), proved exact-empty absence, an input Reader other than the callback Reader, and any field of
+// R2, R4 absence, R6, R9: an envelope outside the fixed REPLAY target (NONE/STABLE, PRUNE_GC/STABLE,
+// ORDINARY_APPLY/RECOVERY_REQUIRED, a pending NONE/RECOVERY_REQUIRED image with and without a retained intent, an
+// already converted envelope), proved exact-empty absence, an input Reader other than the callback Reader, and any field of
 // the complete qualified envelope differing from the reread one (active profile with its B/U included), or an input
 // envelope Encode refuses, are STALE_LOCAL_PLAN with no Batch and nothing written; the domain miss, the absence, the
 // envelope mismatch and the Reader mismatch each win over a malformed cause. Value-equal inputs (fresh pointees, a nil
 // versus an empty progress payload) are the same envelope and convert.
 func TestReplayWholeTargetContext(t *testing.T) {
 	tl := ReplayTargetConversionTargetLocalV1
+	// ORDINARY_APPLY/RECOVERY_REQUIRED over rtStable: a DISCONNECT stage of one old and one new point at height 5 with
+	// the captured side in generation 3 (the recoveryOrdinaryApply precedent); rtNew seeds it through Encode.
+	ordinary := func() mdbx.TreeAuthorityV1 {
+		e := rtStable()
+		oldPoint, newPoint := mdbx.AuthorityPointV1{Height: 5, BlockHash: [32]byte{0x51}}, mdbx.AuthorityPointV1{Height: 5, BlockHash: [32]byte{0x52}}
+		e.Authority.Phase, e.Authority.Lifecycle = mdbx.StoragePhaseOrdinaryApplyV1, mdbx.StorageLifecycleRecoveryRequiredV1
+		e.Authority.Ordinary = &mdbx.OrdinaryApplyV1{
+			Stage: mdbx.OrdinaryStageDisconnectV1, Target: newPoint, OldSuffix: []mdbx.AuthorityPointV1{oldPoint}, NewSuffix: []mdbx.AuthorityPointV1{newPoint},
+			CapturedSelectedSide: &mdbx.SelectedSideV1{GenerationID: 3, F: 4, TipHeight: 5, TipHash: newPoint.BlockHash, CumulativeChainwork: sideWorldWork(1), RowCount: 1, LogicalBytes: 1},
+		}
+		return e
+	}
 	for label, c := range map[string]struct {
 		stored, input mdbx.TreeAuthorityV1
 		cause         ReplayTargetConversionCauseV1
 	}{
 		"R2 NONE/STABLE":                      {rtStable(), rtStable(), tl},
 		"R2 PRUNE_GC":                         {rtPrune(), rtPrune(), tl},
+		"R2 ORDINARY_APPLY":                   {ordinary(), ordinary(), tl},
 		"R2 NONE/RECOVERY_REQUIRED":           {rtPendingIntent([]byte{0xa1}), rtPendingIntent([]byte{0xa1}), tl},
 		"R2 NONE/RECOVERY_REQUIRED no intent": {rtPendingBare(), rtPendingBare(), tl},
 		"R9 converted":                        {rtWholeDone(5, 6, nil), rtWholeDone(5, 6, nil), ReplayTargetConversionRecoveryCoreV1},

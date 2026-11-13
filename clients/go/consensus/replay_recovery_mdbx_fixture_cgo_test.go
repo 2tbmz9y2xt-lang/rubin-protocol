@@ -574,7 +574,7 @@ func TestReplayWholeTargetFixtureCrossed(t *testing.T) {
 // R5, C8, C13: native faults of the conversion transaction for every cause: a failed write begin (a definite abort) is
 // LOCAL_RESOURCE_UNAVAILABLE(storage_transaction)/OLD at PREWRITE, a failed put of the envelope is
 // LOCAL_PERSISTENCE_ERROR(precommit)/OLD at WRITE_STARTED_DEFINITELY_PRECOMMIT; nothing is committed in either and the
-// replay image stays for a retry.
+// replay image is unchanged.
 func TestReplayWholeTargetFixtureFaults(t *testing.T) {
 	tuple := rtTuple(37, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED")
 	for _, c := range []struct {
