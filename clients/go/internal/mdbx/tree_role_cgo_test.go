@@ -258,7 +258,7 @@ func treeRoleSizesV1(t *testing.T) {
 		{"TreeNodeIDV1", unsafe.Sizeof(TreeNodeIDV1{}), 76},
 		{"TreeRoleObservationV1", unsafe.Sizeof(TreeRoleObservationV1{}), 312},
 		{"TreePairQualificationV1", unsafe.Sizeof(TreePairQualificationV1{}), 640},
-		{"TreeRoleBindingRequestV1", unsafe.Sizeof(TreeRoleBindingRequestV1{}), 232},
+		{"TreeRoleBindingRequestV1", unsafe.Sizeof(TreeRoleBindingRequestV1{}), 240},
 		{"TreeRoleRequestV1", unsafe.Sizeof(TreeRoleRequestV1{}), 416},
 		// Producer-frame inventory types (S1: RootBindingV1 256, treeRoleVisitV1 200).
 		{"RootBindingV1", unsafe.Sizeof(RootBindingV1{}), 256},
