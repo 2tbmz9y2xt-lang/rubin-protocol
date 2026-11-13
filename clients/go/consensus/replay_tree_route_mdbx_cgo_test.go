@@ -1035,7 +1035,9 @@ func TestReplayTreeWholeTargetAdapter(t *testing.T) {
 			adapter, aerr := replayTreeConversion(ReplayRecomputationV1{Report: ReplayRecomputationPlanChangeV1, envelope: before, activeTip: 2})
 			common, cerr := replayTreeWholeTarget(before, 2)
 			logicalMDBXAssert(t, aerr == nil && cerr == nil && rtSameBatch(adapter, common), "%s: adapter %+v %v, common %+v %v", c.label, adapter, aerr, common, cerr)
-			logicalMDBXAssert(t, len(adapter.Mutations) == 1 && bytes.Equal(adapter.Mutations[0].Key, []byte{0x02}), "%s: mutations %+v", c.label, adapter.Mutations)
+			logicalMDBXAssert(t, len(adapter.Mutations) == 1, "%s: mutations %+v", c.label, adapter.Mutations)
+			m := adapter.Mutations[0]
+			logicalMDBXAssert(t, m.DBI == mdbx.TreeSchemaV1DBIs()[0] && bytes.Equal(m.Key, []byte{0x02}) && m.AfterKind == mdbx.AfterLiteral && m.BeforePresent, "%s: mutation %+v", c.label, m)
 			logicalMDBXAssert(t, reflect.DeepEqual(adapter.Consulted, rtConsulted(t)), "%s: consulted %+v", c.label, adapter.Consulted)
 			decoded, err := mdbx.DecodeTreeAuthorityV1(adapter.Mutations[0].Literal)
 			logicalMDBXAssert(t, err == nil, "%s: decode %v", c.label, err)
