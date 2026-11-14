@@ -104,6 +104,7 @@ type hcEntry struct {
 }
 
 type hcPlan struct {
+	context *hctxReservation
 	adds    []HeaderCandidateRecord148V1
 	prov    []HeaderCandidateRecord148V1
 	retired [][32]byte
@@ -131,6 +132,7 @@ type HeaderCandidateOwner148V1 struct {
 	prepared    *HeaderCandidatePrepared148V1
 	leased      map[[32]byte]uint64
 	leases      uint64
+	context     *hctxState
 }
 
 // HeaderCandidatePrepared148V1 is the single outstanding prepared transition; its first handle call consumes it.
@@ -183,6 +185,7 @@ func (o *HeaderCandidateOwner148V1) VersionV1() uint64 { return o.version.Load()
 func (o *HeaderCandidateOwner148V1) CloseV1() {
 	o.mu.Lock()
 	o.closed = true
+	o.closeContext()
 	o.cond.Broadcast()
 	o.mu.Unlock()
 }
@@ -347,6 +350,7 @@ func (h *HeaderCandidatePrepared148V1) PublishV1() (HeaderCandidatePublication14
 	if out := h.consume(); out != HeaderCandidateOK148V1 {
 		return HeaderCandidatePublication148V1{}, out
 	}
+	defer o.finishContext(h.plan.context)
 	if h.plan.changed {
 		if out := o.waitGuards(); out != HeaderCandidateOK148V1 {
 			return HeaderCandidatePublication148V1{}, out
@@ -365,6 +369,7 @@ func (h *HeaderCandidatePrepared148V1) AbortV1() HeaderCandidateOutcome148V1 {
 	if out := h.consume(); out != HeaderCandidateOK148V1 {
 		return out
 	}
+	defer o.finishContext(h.plan.context)
 	o.prepared = nil
 	return HeaderCandidateOK148V1
 }
@@ -381,6 +386,7 @@ func (h *HeaderCandidatePrepared148V1) UnknownV1() HeaderCandidateOutcome148V1 {
 	if out := h.consume(); out != HeaderCandidateOK148V1 {
 		return out
 	}
+	defer o.finishContext(h.plan.context)
 	if out := o.waitGuards(); out != HeaderCandidateOK148V1 {
 		return out
 	}
@@ -474,6 +480,7 @@ func (o *HeaderCandidateOwner148V1) protectedSet() map[[32]byte]struct{} {
 
 // apply commits a validated plan and returns an independent receipt; mu is held.
 func (o *HeaderCandidateOwner148V1) apply(p *hcPlan) HeaderCandidatePublication148V1 {
+	o.applyContext(p)
 	if !p.changed {
 		return HeaderCandidatePublication148V1{Version: o.version.Load(), Added: [][32]byte{}, Retired: [][32]byte{}}
 	}
