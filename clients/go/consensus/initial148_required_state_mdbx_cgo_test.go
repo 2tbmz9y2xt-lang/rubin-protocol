@@ -615,7 +615,7 @@ func irLargeCapacityV1(t *testing.T) {
 	w := btNew(t)
 	logicalMDBXAssert(t, w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
 		return w.s.View(func(reader *mdbx.Reader) error {
-			request := irPrepareV1(t, reader, account, irEventsRequestV1(0, 58, 2046), mdbx.TreeEndpointV1{})
+			request := irPrepareV1(t, reader, account, irEventsRequestV1(1, 58, 2046), mdbx.TreeEndpointV1{Kind: 1, CumulativeChainwork: [40]byte{39: 1}})
 			logicalMDBXAssert(t, request.Source.coverage.BlockMeta.EventCount == 2046, "large event boundary changed")
 			for _, extra := range []uint64{0, 1} {
 				called := false
