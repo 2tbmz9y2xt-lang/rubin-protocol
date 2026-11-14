@@ -20,7 +20,12 @@ import (
 // ErrHeaderCandidateConfig148V1 is the only constructor refusal: a zero or maximum limit field, or incarnation zero.
 var ErrHeaderCandidateConfig148V1 = errors.New("header candidate 148: invalid configuration")
 
-// HeaderCandidateLimits148V1 are the finite local ceilings captured at construction.
+// HeaderCandidateLimits148V1 are the finite local ceilings captured at construction (RUB-1550 api_contract,
+// first_refusal_order). MaxTips, MaxHeaders and MaxRetainedBytes are the row 12 ceilings over the post-transition
+// received set; one record is charged 252 bytes (148 raw, 32 hash, 32 parent, 8 height, 32 provenance) plus the
+// minimal big-endian byte length of its Work. MaxTransitionHeaders bounds only len(Additions)+len(Retired) (EstablishV1:
+// len(records)) at row 5, MaxSnapshotBytes bounds only Inventory148V1 Bytes, and MaxLeases bounds only the outstanding
+// leases of AcquireDependencyV1.
 type HeaderCandidateLimits148V1 struct {
 	MaxTips              uint64
 	MaxHeaders           uint64
@@ -77,8 +82,10 @@ const (
 	HeaderCandidateConsumed148V1
 )
 
-// HeaderCandidatePublication148V1 is the receipt of an applied publication. Added and Retired are independent of owner
-// state; Retired includes capacity victims and their exclusive ancestry.
+// HeaderCandidatePublication148V1 is the receipt of an applied publication (RUB-1550 D7). Added and Retired are
+// independent of owner state. Added lists the hashes of the Additions not received before the operation, in input
+// order. Retired lists the transition's Retired in its order, then each chosen capacity reclaim in choice order: the
+// victim tip first, then its exclusive ancestry downward. A Changed-false receipt keeps the version and has both empty.
 type HeaderCandidatePublication148V1 struct {
 	Changed bool
 	Version uint64
@@ -176,10 +183,11 @@ func (o *HeaderCandidateOwner148V1) CloseV1() {
 	o.mu.Unlock()
 }
 
-// ProtectV1 takes a shared guard and never waits, also while a publication waits for guards. current is true exactly
-// when the owner is established, not latched, not closed and version is current. The release is non-nil on every return
-// and a second call of one release is a no-op. Every guard, whatever its current value, holds back PublishV1,
-// EstablishV1 and UnknownV1 until its release runs.
+// ProtectV1 takes a shared guard; it holds mu only briefly and never waits for another guard or for a publication that
+// waits for guards. current is true exactly when the owner is established, not latched, not closed and version is
+// current. The release is non-nil on every return and a second call of one release is a no-op. Every guard, whatever
+// its current value, holds back EstablishV1, UnknownV1 and a state-changing PublishV1 until its release runs; a
+// Changed-false PublishV1 does not wait.
 func (o *HeaderCandidateOwner148V1) ProtectV1(version uint64) (bool, func()) {
 	o.mu.Lock()
 	o.guards++
@@ -249,8 +257,8 @@ func (o *HeaderCandidateOwner148V1) gate(wantEstablished bool) HeaderCandidateOu
 
 // EstablishV1 is the once-per-owner complete startup source join; it performs no replacement. It evaluates rows 1-3, 5,
 // 7, 8, 11 and 12 of the first-refusal order with records read as Additions, waits for guards under the PublishV1 rule,
-// and on OK advances the version by exactly one with Changed true. Every non-OK return carries the zero publication and
-// leaves the owner not established with an unchanged version.
+// and on OK advances the version by exactly one with Changed true and Retired empty. Every non-OK return carries the
+// zero publication and changes no owner state: an owner that was not established stays so, with an unchanged version.
 func (o *HeaderCandidateOwner148V1) EstablishV1(source [32]byte, records []HeaderCandidateRecord148V1) (HeaderCandidatePublication148V1, HeaderCandidateOutcome148V1) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -276,8 +284,12 @@ func (o *HeaderCandidateOwner148V1) EstablishV1(source [32]byte, records []Heade
 	return o.apply(&plan), HeaderCandidateOK148V1
 }
 
-// PrepareV1 validates and reserves the whole transition without changing membership or version, and never waits. At
-// most one prepared transition exists per owner. Every non-OK return carries a nil handle.
+// PrepareV1 validates and reserves the whole transition without changing membership or version; it does not wait for
+// guards. It returns the first true row of the RUB-1550 first_refusal_order: Closed, UnknownSource, NotEstablished,
+// Busy, Invalid, Stale, Conflict, MissingParent, NoCoverage, Protected, VersionExhausted, Capacity. Before Capacity it
+// runs the D5 replacement walk: when a new qualified tip exists, unprotected tips strictly outranked by the weakest new
+// tip are chosen weakest first with their exclusive ancestry until every row 12 ceiling fits. At most one prepared
+// transition exists per owner. Every non-OK return carries a nil handle.
 func (o *HeaderCandidateOwner148V1) PrepareV1(t HeaderCandidateTransition148V1) (*HeaderCandidatePrepared148V1, HeaderCandidateOutcome148V1) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -501,7 +513,7 @@ func (o *HeaderCandidateOwner148V1) remove(h [32]byte) {
 }
 
 // hcCharge is 148 raw + 32 hash + 32 parent + 8 height + 32 provenance + the minimal big-endian Work length.
-func hcCharge(w *big.Int) uint64 { return 252 + uint64(len(w.Bytes())) }
+func hcCharge(w *big.Int) uint64 { return 252 + uint64((w.BitLen()+7)/8) }
 
 func hcAddSat(a, b uint64) uint64 {
 	s, c := bits.Add64(a, b, 0)
@@ -545,6 +557,10 @@ func (o *HeaderCandidateOwner148V1) planTransition(t HeaderCandidateTransition14
 		return hcPlan{}, HeaderCandidateCapacity148V1
 	}
 	p.retired = append(p.retired, victims...)
+	// Work is copied only after row 12 accepted the plan, so the caller's value cannot reach owner state.
+	for i := range p.adds {
+		p.adds[i].Work = new(big.Int).Set(p.adds[i].Work)
+	}
 	return p, HeaderCandidateOK148V1
 }
 
@@ -710,7 +726,6 @@ func (x *hcTx) build() hcPlan {
 		e := o.recs[a.Hash]
 		switch {
 		case e == nil:
-			a.Work = new(big.Int).Set(a.Work)
 			p.adds = append(p.adds, a)
 			p.added = append(p.added, a.Hash)
 		case e.rec.Provenance != a.Provenance:
@@ -877,20 +892,18 @@ func hcInventoryBytes(tips, headers uint64) (uint64, bool) {
 	return sum, th == 0 && hh == 0 && c == 0
 }
 
-// copyInventory copies every tip hash and raw header into new arrays, sorted by hash; mu is held.
+// copyInventory copies every tip hash and raw header into the two charged arrays only, each sorted in place so the
+// output never depends on map iteration; mu is held.
 func (o *HeaderCandidateOwner148V1) copyInventory() ([][32]byte, [][148]byte) {
-	hashes := make([][32]byte, 0, len(o.recs))
-	for h := range o.recs {
-		hashes = append(hashes, h)
-	}
-	slices.SortFunc(hashes, func(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) })
 	tips := make([][32]byte, 0, o.tips)
-	headers := make([][148]byte, 0, len(hashes))
-	for _, h := range hashes {
+	headers := make([][148]byte, 0, len(o.recs))
+	for h, e := range o.recs {
 		if o.kids[h] == 0 {
 			tips = append(tips, h)
 		}
-		headers = append(headers, o.recs[h].rec.Raw)
+		headers = append(headers, e.rec.Raw)
 	}
+	slices.SortFunc(tips, func(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) })
+	slices.SortFunc(headers, func(a, b [148]byte) int { return bytes.Compare(a[:], b[:]) })
 	return tips, headers
 }

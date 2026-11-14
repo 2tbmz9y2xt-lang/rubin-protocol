@@ -3,11 +3,13 @@ package node
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -143,25 +145,55 @@ func hcBase(t testing.TB, lim HeaderCandidateLimits148V1) (*HeaderCandidateOwner
 	return o, r0, r1
 }
 
-// hcInner is the complete comparable owner state a refusal must leave unchanged.
+// hcInner is the complete comparable owner state a refusal must leave unchanged: scalars and counters, every stored
+// record field with its charge, child counts, per-hash lease counts, guards and the prepared slot.
 type hcInner struct {
-	version, bytes, tips, leases uint64
-	headers                      int
-	members                      string
-	established, latched, closed bool
-	source                       [32]byte
-	prepared                     *HeaderCandidatePrepared148V1
+	version, bytes, tips, leases, guards uint64
+	headers                              int
+	members, kids, leased                string
+	established, latched, closed         bool
+	source                               [32]byte
+	prepared                             *HeaderCandidatePrepared148V1
 }
 
 func hcInnerOf(o *HeaderCandidateOwner148V1) hcInner {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	keys := make([]string, 0, len(o.recs))
-	for h := range o.recs {
-		keys = append(keys, string(h[:]))
+	recs := make([]string, 0, len(o.recs))
+	for h, e := range o.recs {
+		r := e.rec
+		recs = append(recs, fmt.Sprintf("%x|%x|%x|%d|%s|%x|%v|%d", h, r.Raw, r.Parent, r.Height, r.Work, r.Provenance, r.External, e.charge))
 	}
-	slices.Sort(keys)
-	return hcInner{o.version.Load(), o.bytes, o.tips, o.leases, len(o.recs), strings.Join(keys, ""), o.established, o.latched, o.closed, o.source, o.prepared}
+	slices.Sort(recs)
+	return hcInner{o.version.Load(), o.bytes, o.tips, o.leases, o.guards, len(o.recs), strings.Join(recs, ","), hcCounts(o.kids), hcCounts(o.leased), o.established, o.latched, o.closed, o.source, o.prepared}
+}
+
+func hcCounts(m map[[32]byte]uint64) string {
+	s := make([]string, 0, len(m))
+	for h, n := range m {
+		s = append(s, fmt.Sprintf("%x=%d", h, n))
+	}
+	slices.Sort(s)
+	return strings.Join(s, ",")
+}
+
+// hcPrepOK and hcLeaseOK are for calls whose result the test then uses: any non-OK outcome fails at the call.
+func hcPrepOK(t testing.TB, o *HeaderCandidateOwner148V1, tr HeaderCandidateTransition148V1) *HeaderCandidatePrepared148V1 {
+	t.Helper()
+	h, out := o.PrepareV1(tr)
+	if out != HeaderCandidateOK148V1 || h == nil {
+		t.Fatalf("prepare: %d", out)
+	}
+	return h
+}
+
+func hcLeaseOK(t testing.TB, o *HeaderCandidateOwner148V1, hash [32]byte) *HeaderCandidateLease148V1 {
+	t.Helper()
+	l, out := o.AcquireDependencyV1(hash)
+	if out != HeaderCandidateOK148V1 || l == nil {
+		t.Fatalf("lease: %d", out)
+	}
+	return l
 }
 
 // Each refused call goes through one of these wrappers: it snapshots the owner right before the call and asserts
@@ -208,15 +240,13 @@ func TestHeaderCandidate148Classification(t *testing.T) {
 		return hcEst(t, o, source, nil)
 	}
 	latch := func(t *testing.T, o *HeaderCandidateOwner148V1) {
-		h, _ := o.PrepareV1(hcTr(o, nil))
-		if h.UnknownV1() != HeaderCandidateOK148V1 {
+		if hcPrepOK(t, o, hcTr(o, nil)).UnknownV1() != HeaderCandidateOK148V1 {
 			t.Fatal("unknown")
 		}
 	}
-	lease := func(t *testing.T, o *HeaderCandidateOwner148V1, h [32]byte) {
-		if _, out := o.AcquireDependencyV1(h); out != HeaderCandidateOK148V1 {
-			t.Fatalf("lease %d", out)
-		}
+	lease := func(t *testing.T, o *HeaderCandidateOwner148V1, h [32]byte) { hcLeaseOK(t, o, h) }
+	estRecs := func(t *testing.T, recs ...HeaderCandidateRecord148V1) HeaderCandidateOutcome148V1 {
+		return hcEst(t, hcNew(t, hcHeaders(2)), hcSrc1, recs)
 	}
 	child := func(t *testing.T, r HeaderCandidateRecord148V1, n uint64) HeaderCandidateRecord148V1 {
 		return hcMk(t, r.Hash, r.Height+1, r.Work.Int64()+1, n)
@@ -251,11 +281,11 @@ func TestHeaderCandidate148Classification(t *testing.T) {
 			return est(t, o, [32]byte{}), nil
 		}},
 		{"row4 busy", HeaderCandidateBusy148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			h, _ := o.PrepareV1(hcTr(o, nil))
+			h := hcPrepOK(t, o, hcTr(o, nil))
 			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), func() { h.AbortV1() }
 		}},
 		{"rows4+5 busy wins over invalid", HeaderCandidateBusy148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			h, _ := o.PrepareV1(hcTr(o, nil))
+			h := hcPrepOK(t, o, hcTr(o, nil))
 			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Work = nil })})), func() { h.AbortV1() }
 		}},
 		{"row5 bad hash", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
@@ -266,6 +296,9 @@ func TestHeaderCandidate148Classification(t *testing.T) {
 		}},
 		{"row5 nonpositive work", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Work = big.NewInt(0) })})), nil
+		}},
+		{"row5 negative work", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Work = big.NewInt(-1) })})), nil
 		}},
 		{"row5 zero provenance", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Provenance = [32]byte{} })})), nil
@@ -380,6 +413,15 @@ func TestHeaderCandidate148Classification(t *testing.T) {
 		{"row12 capacity", HeaderCandidateCapacity148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			o, _, r1 := hcBase(t, hcHeaders(2))
 			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
+		}},
+		{"row7 establish parent height", HeaderCandidateConflict148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, r0, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
+			return estRecs(t, r0, hcMk(t, r0.Hash, r0.Height+2, 200, 3)), nil
+		}},
+		{"row8 establish missing parent", HeaderCandidateMissingParent148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
+			return estRecs(t, hcMk(t, [32]byte{0x55}, 5, 50, 3)), nil
+		}},
+		{"row12 establish capacity", HeaderCandidateCapacity148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, r0, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
+			return estRecs(t, r0, r1, child(t, r1, 3)), nil
 		}},
 		{"row3 not established prepare", HeaderCandidateNotEstablished148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			o := hcNew(t, hcLim())
@@ -553,10 +595,25 @@ func TestHeaderCandidate148Receipts(t *testing.T) {
 	if out != HeaderCandidateOK148V1 || rec.Changed || rec.Version != v || o.VersionV1() != v || len(rec.Added) != 0 || len(rec.Retired) != 0 {
 		t.Fatalf("duplicate: %+v", rec)
 	}
-	tr := hcTr(o, nil, r0.Hash)
+	// D7 source-only: Changed true, a new Version, Added and Retired empty; NewSource equal to the current source is a no-op.
+	tr := hcTr(o, nil)
 	tr.NewSource = hcSrc2
 	rec, out = hcPublish(t, o, tr)
-	if out != HeaderCandidateOK148V1 || !rec.Changed || rec.Version != v+1 || o.source != hcSrc2 {
+	if out != HeaderCandidateOK148V1 || !rec.Changed || rec.Version != v+1 || o.VersionV1() != v+1 || o.source != hcSrc2 {
+		t.Fatalf("source only: %d %+v", out, rec)
+	}
+	hcEqual(t, "source-only added", rec.Added, nil)
+	hcEqual(t, "source-only retired", rec.Retired, nil)
+	tr = hcTr(o, nil)
+	tr.NewSource = hcSrc2
+	rec, out = hcPublish(t, o, tr)
+	if out != HeaderCandidateOK148V1 || rec.Changed || rec.Version != v+1 || o.VersionV1() != v+1 {
+		t.Fatalf("same source: %d %+v", out, rec)
+	}
+	tr = hcTr(o, nil, r0.Hash)
+	tr.NewSource = hcSrc1
+	rec, out = hcPublish(t, o, tr)
+	if out != HeaderCandidateOK148V1 || !rec.Changed || rec.Version != v+2 || o.source != hcSrc1 {
 		t.Fatalf("retire+source: %d %+v", out, rec)
 	}
 	hcEqual(t, "retired", rec.Retired, hcHashes(r0))
@@ -620,7 +677,8 @@ func TestHeaderCandidate148Capacity(t *testing.T) {
 		if _, out := o.AcquireDependencyV1(r["A2"].Hash); out != HeaderCandidateOK148V1 {
 			t.Fatal("lease")
 		}
-		// Three additions over a full owner need three removals: A, then B, which leaves S an exclusive tip.
+		// Three additions over a full owner need three removals: A, then B together with S, which is B's exclusive
+		// ancestor once A is chosen; S is never a tip.
 		n := hcChain(t, r["K"], 3)
 		rec, out := hcPublish(t, o, hcTr(o, n))
 		if out != HeaderCandidateOK148V1 {
@@ -880,7 +938,7 @@ func TestHeaderCandidate148WorkingSets(t *testing.T) {
 // TestHeaderCandidate148Leases covers X2, D6 and V3.
 func TestHeaderCandidate148Leases(t *testing.T) {
 	o, r0, r1 := hcBase(t, hcLim())
-	if _, out := o.AcquireDependencyV1([32]byte{0x77}); out != HeaderCandidateMissing148V1 {
+	if out := hcAcq(t, o, [32]byte{0x77}); out != HeaderCandidateMissing148V1 {
 		t.Fatal("missing")
 	}
 	h, out := o.PrepareV1(hcTr(o, nil, r0.Hash))
@@ -948,6 +1006,20 @@ func TestHeaderCandidate148Leases(t *testing.T) {
 			t.Fatalf("lease after abort %s: %d", k, out)
 		}
 	}
+	// Order Missing, Protected, Capacity with MaxLeases reached: an absent hash is Missing, a planned victim Protected.
+	lim.MaxLeases = 1
+	f, r := hcCapFixture(t, lim)
+	hcLeaseOK(t, f, r["K"].Hash)
+	h = hcPrepOK(t, f, hcTr(f, []HeaderCandidateRecord148V1{hcMk(t, r["K"].Hash, 12, 60, 8)}))
+	t.Cleanup(func() { h.AbortV1() })
+	for _, c := range []struct {
+		hash [32]byte
+		want HeaderCandidateOutcome148V1
+	}{{[32]byte{0x77}, HeaderCandidateMissing148V1}, {r["A2"].Hash, HeaderCandidateProtected148V1}, {r["B"].Hash, HeaderCandidateCapacity148V1}} {
+		if out := hcAcq(t, f, c.hash); out != c.want {
+			t.Fatalf("full leases: %d want %d", out, c.want)
+		}
+	}
 }
 
 // TestHeaderCandidate148Aliasing covers R2 for points and LookupV1 and R3 zero allocation on over-length input.
@@ -976,6 +1048,15 @@ func TestHeaderCandidate148Aliasing(t *testing.T) {
 	got.Work.SetInt64(1)
 	if got2, _ := o.LookupV1(r1.Hash); got2.Work.Cmp(r1.Work) != 0 {
 		t.Fatal("LookupV1 Work aliased")
+	}
+	// The caller's addition Work mutated after PublishV1 does not reach the stored record.
+	add := hcMk(t, r1.Hash, 12, 140, 11)
+	if _, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{add})); out != HeaderCandidateOK148V1 {
+		t.Fatal("publish addition")
+	}
+	add.Work.SetInt64(7)
+	if stored, ok := o.LookupV1(add.Hash); !ok || stored.Work.Cmp(big.NewInt(140)) != 0 {
+		t.Fatal("addition Work aliased")
 	}
 	// R3: a transition longer than MaxTransitionHeaders allocates nothing. The input also holds a duplicate and a
 	// parent-after-child order so a set check placed before the length check would allocate.
@@ -1042,7 +1123,7 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		n := hcMk(t, r1.Hash, 12, 120, 9)
 		tr := hcTr(o, []HeaderCandidateRecord148V1{n})
 		before := hcTake(o, r0, r1, n)
-		h, _ := o.PrepareV1(tr)
+		h := hcPrepOK(t, o, tr)
 		if h.AbortV1() != HeaderCandidateOK148V1 || !before.same(hcTake(o, r0, r1, n)) {
 			t.Fatal("abort changed state")
 		}
@@ -1054,7 +1135,7 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		if _, out := h.PublishV1(); out != HeaderCandidateConsumed148V1 || !before.same(hcTake(o, r0, r1, n)) {
 			t.Fatal("consumed publish")
 		}
-		h, _ = o.PrepareV1(tr)
+		h = hcPrepOK(t, o, tr)
 		if _, out := h.PublishV1(); out != HeaderCandidateOK148V1 || !hcPresent(o, n)[0] {
 			t.Fatal("publish")
 		}
@@ -1075,27 +1156,34 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		if cur {
 			t.Fatal("stale guard current")
 		}
-		h, _ := o.PrepareV1(hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 121, 10)}))
+		h := hcPrepOK(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 121, 10)}))
 		done := make(chan struct{})
 		go func() { h.PublishV1(); close(done) }()
 		hcBlocked(t, done)
-		// R5: shared reads and guards return while the publication waits.
+		// R5: shared reads and guards return while the publication waits, and answer the unchanged state.
+		var c2, hdrOK, lookOK bool
+		var dst [148]byte
+		var got HeaderCandidateRecord148V1
+		var lout HeaderCandidateOutcome148V1
 		hcWithin(t, "reads under waiting publish", func() {
-			c2, r2 := o.ProtectV1(o.VersionV1())
-			var dst [148]byte
-			o.Header148V1(r1.Hash, &dst)
-			o.LookupV1(r1.Hash)
-			if l, out := o.AcquireDependencyV1(r1.Hash); out == HeaderCandidateOK148V1 {
+			var r2 func()
+			c2, r2 = o.ProtectV1(o.VersionV1())
+			hdrOK = o.Header148V1(r1.Hash, &dst)
+			got, lookOK = o.LookupV1(r1.Hash)
+			var l *HeaderCandidateLease148V1
+			if l, lout = o.AcquireDependencyV1(r1.Hash); lout == HeaderCandidateOK148V1 {
 				l.ReleaseV1()
 			}
-			_ = c2
 			r2()
 		})
+		if !c2 || !hdrOK || dst != r1.Raw || !lookOK || got.Hash != r1.Hash || got.Height != r1.Height || got.Work.Cmp(r1.Work) != 0 || lout != HeaderCandidateOK148V1 {
+			t.Fatalf("reads under waiting publish: current %v header %v lookup %v lease %d", c2, hdrOK, lookOK, lout)
+		}
 		rel()
 		hcWithin(t, "publish after release", func() { <-done })
 		// X1: the second call of the same release is a no-op, so a later state-changing publication still proceeds.
 		rel()
-		later, _ := o.PrepareV1(hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 122, 11)}))
+		later := hcPrepOK(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 122, 11)}))
 		var out HeaderCandidateOutcome148V1
 		hcWithin(t, "publish after double release", func() { _, out = later.PublishV1() })
 		if out != HeaderCandidateOK148V1 {
@@ -1104,9 +1192,9 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 	})
 	t.Run("unknown latch", func(t *testing.T) {
 		o, r0, r1 := hcBase(t, hcLim())
-		lease, _ := o.AcquireDependencyV1(r1.Hash)
+		lease := hcLeaseOK(t, o, r1.Hash)
 		n := hcMk(t, r1.Hash, 12, 120, 9)
-		h, _ := o.PrepareV1(hcTr(o, []HeaderCandidateRecord148V1{n}))
+		h := hcPrepOK(t, o, hcTr(o, []HeaderCandidateRecord148V1{n}))
 		v := o.VersionV1()
 		if h.UnknownV1() != HeaderCandidateOK148V1 || o.VersionV1() != v+1 {
 			t.Fatal("unknown")
@@ -1188,30 +1276,39 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 			if kind == "establish" {
 				o = hcNew(t, hcLim())
 			} else {
-				h, _ = o.PrepareV1(hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 120, 9)}))
+				h = hcPrepOK(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 120, 9)}))
 			}
 			v := o.VersionV1()
 			_, rel := o.ProtectV1(v)
 			t.Cleanup(rel)
-			done := make(chan HeaderCandidateOutcome148V1, 1)
+			type res struct {
+				pub HeaderCandidatePublication148V1
+				out HeaderCandidateOutcome148V1
+			}
+			done := make(chan res, 1)
 			go func() {
 				switch kind {
 				case "publish":
-					_, out := h.PublishV1()
-					done <- out
+					p, out := h.PublishV1()
+					done <- res{p, out}
 				case "unknown":
-					done <- h.UnknownV1()
+					done <- res{out: h.UnknownV1()}
 				default:
-					_, out := o.EstablishV1(hcSrc1, []HeaderCandidateRecord148V1{r0})
-					done <- out
+					p, out := o.EstablishV1(hcSrc1, []HeaderCandidateRecord148V1{r0})
+					done <- res{p, out}
 				}
 			}()
-			time.Sleep(50 * time.Millisecond)
+			select {
+			case <-done:
+				t.Fatalf("%s returned while a guard was held", kind)
+			case <-time.After(50 * time.Millisecond):
+			}
 			o.CloseV1()
 			select {
-			case out := <-done:
-				if out != HeaderCandidateClosed148V1 {
-					t.Fatalf("%s: %d", kind, out)
+			case r := <-done:
+				zero := !r.pub.Changed && r.pub.Version == 0 && r.pub.Added == nil && r.pub.Retired == nil
+				if r.out != HeaderCandidateClosed148V1 || !zero {
+					t.Fatalf("%s: %d %+v", kind, r.out, r.pub)
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatalf("%s not woken", kind)
@@ -1229,8 +1326,8 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 	})
 	t.Run("close with handle guard and lease outstanding", func(t *testing.T) {
 		o, r0, r1 := hcBase(t, hcLim())
-		l, _ := o.AcquireDependencyV1(r1.Hash)
-		h, _ := o.PrepareV1(hcTr(o, nil))
+		l := hcLeaseOK(t, o, r1.Hash)
+		h := hcPrepOK(t, o, hcTr(o, nil))
 		_, rel := o.ProtectV1(o.VersionV1())
 		t.Cleanup(rel)
 		v := o.VersionV1()
@@ -1244,7 +1341,11 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		}
 		rel2()
 		rel()
+		closedState := hcInnerOf(o)
 		l.ReleaseV1()
+		if hcInnerOf(o) != closedState || o.leases != 1 {
+			t.Fatal("lease release after close changed state")
+		}
 		if h.AbortV1() != HeaderCandidateClosed148V1 || h.AbortV1() != HeaderCandidateConsumed148V1 {
 			t.Fatal("closed handle")
 		}
@@ -1255,11 +1356,7 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		if got, ok := o.LookupV1(r0.Hash); ok || got.Work != nil || o.IncarnationV1() != 7 {
 			t.Fatal("closed lookup or incarnation")
 		}
-		for _, out := range []HeaderCandidateOutcome148V1{
-			func() HeaderCandidateOutcome148V1 { _, o2 := o.PrepareV1(hcTr(o, nil)); return o2 }(),
-			func() HeaderCandidateOutcome148V1 { _, o2 := o.EstablishV1(hcSrc1, nil); return o2 }(),
-			func() HeaderCandidateOutcome148V1 { _, o2 := o.AcquireDependencyV1(r1.Hash); return o2 }(),
-		} {
+		for _, out := range []HeaderCandidateOutcome148V1{hcPrep(t, o, hcTr(o, nil)), hcEst(t, o, hcSrc1, nil), hcAcq(t, o, r1.Hash)} {
 			if out != HeaderCandidateClosed148V1 {
 				t.Fatalf("mutator after close: %d", out)
 			}
@@ -1286,12 +1383,24 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 	})
 }
 
-// TestHeaderCandidate148Race covers E6 under go test -race: two concurrent publishers (tolerating Busy, Stale and
-// Capacity), guards, leases and readers. Readers run a bounded number of short guard sections, so guards reach zero and
-// each publication can proceed without relying on scheduling luck.
+// TestHeaderCandidate148Race covers E6 under go test -race: a canonical-promotion publisher retires the prefix of a
+// chain while readers lease every chain hash, a provenance publisher races it (both tolerating Busy, Stale and
+// Protected), and readers take guards and point reads. Every record is built before any goroutine starts. Afterwards
+// each publisher reached its target, no successful lease ever named a removed hash, and the retired prefix is gone.
 func TestHeaderCandidate148Race(t *testing.T) {
-	o, _, r1 := hcBase(t, hcLim())
+	const target = 6
+	o := hcNew(t, hcLim())
 	t.Cleanup(o.CloseV1)
+	c0 := hcExt(hcMk(t, hcRoot, 10, 100, 1))
+	chain := append([]HeaderCandidateRecord148V1{c0}, hcChain(t, c0, target+1)...)
+	z := hcExt(hcMk(t, [32]byte{0x5A}, 10, 10, 3))
+	hcEstablish(t, o, chain[0], chain[1], z)
+	provs := make([]HeaderCandidateRecord148V1, target)
+	for i := range provs {
+		provs[i] = z
+		provs[i].Provenance = [32]byte{byte(i) + 1, 7}
+	}
+	var dangling atomic.Int64
 	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
@@ -1300,25 +1409,29 @@ func TestHeaderCandidate148Race(t *testing.T) {
 			for j := 0; j < 200; j++ {
 				_, rel := o.ProtectV1(o.VersionV1())
 				var dst [148]byte
-				o.Header148V1(r1.Hash, &dst)
-				o.LookupV1(r1.Hash)
-				if l, out := o.AcquireDependencyV1(r1.Hash); out == HeaderCandidateOK148V1 {
+				o.Header148V1(z.Hash, &dst)
+				rel()
+				h := chain[j%len(chain)].Hash
+				if l, out := o.AcquireDependencyV1(h); out == HeaderCandidateOK148V1 {
+					if _, ok := o.LookupV1(h); !ok {
+						dangling.Add(1)
+					}
 					l.ReleaseV1()
 				}
-				rel()
 			}
 		}()
 	}
-	publish := func(id uint64, rec func(n uint64) HeaderCandidateRecord148V1) {
+	var oks [2]int
+	publish := func(id int, tr func(k int) HeaderCandidateTransition148V1) {
 		defer wg.Done()
-		for n, ok := uint64(0), 0; ok < 6 && n < 10000; n++ {
-			h, out := o.PrepareV1(hcTr(o, []HeaderCandidateRecord148V1{rec(n)}))
+		for n := 0; oks[id] < target && n < 100000; n++ {
+			h, out := o.PrepareV1(tr(oks[id]))
 			switch out {
 			case HeaderCandidateOK148V1:
 				if _, out := h.PublishV1(); out == HeaderCandidateOK148V1 {
-					ok++
+					oks[id]++
 				}
-			case HeaderCandidateBusy148V1, HeaderCandidateStale148V1, HeaderCandidateCapacity148V1:
+			case HeaderCandidateBusy148V1, HeaderCandidateStale148V1, HeaderCandidateProtected148V1:
 			default:
 				t.Errorf("publisher %d: %d", id, out)
 				return
@@ -1326,11 +1439,17 @@ func TestHeaderCandidate148Race(t *testing.T) {
 		}
 	}
 	wg.Add(2)
-	go publish(1, func(n uint64) HeaderCandidateRecord148V1 { return hcMk(t, r1.Hash, 12, int64(200+n), 2000+n) })
-	go publish(2, func(n uint64) HeaderCandidateRecord148V1 {
-		u := r1
-		u.Provenance = [32]byte{byte(n%250) + 1, 7}
-		return u
+	go publish(0, func(k int) HeaderCandidateTransition148V1 {
+		return hcTr(o, []HeaderCandidateRecord148V1{chain[k+2]}, chain[k].Hash)
 	})
+	go publish(1, func(k int) HeaderCandidateTransition148V1 { return hcTr(o, []HeaderCandidateRecord148V1{provs[k]}) })
 	hcWithin(t, "concurrent publishers and readers", wg.Wait)
+	if oks != [2]int{target, target} || dangling.Load() != 0 || o.leases != 0 {
+		t.Fatalf("publishers %v dangling leases %d outstanding %d", oks, dangling.Load(), o.leases)
+	}
+	for i, r := range chain {
+		if _, ok := o.LookupV1(r.Hash); ok != (i >= target) {
+			t.Fatalf("chain[%d] present %v", i, ok)
+		}
+	}
 }

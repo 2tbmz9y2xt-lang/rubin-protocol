@@ -81,8 +81,7 @@ func TestHeaderCandidate148Inventory(t *testing.T) {
 	}
 	fresh := hcNew(t, hcLim())
 	hcRefused(t, "new incarnation", fresh.Inventory148V1(1<<20), consensus.HeaderCandidateIncompleteV1, 1)
-	h, _ := o.PrepareV1(hcTr(o, nil))
-	if h.UnknownV1() != HeaderCandidateOK148V1 {
+	if hcPrepOK(t, o, hcTr(o, nil)).UnknownV1() != HeaderCandidateOK148V1 {
 		t.Fatal("unknown")
 	}
 	hcRefused(t, "latched", o.Inventory148V1(1<<20), consensus.HeaderCandidateIncompleteV1, 3)
@@ -94,7 +93,7 @@ func TestHeaderCandidate148Inventory(t *testing.T) {
 // inventory stays the complete pre-latch view; after the release it is Incomplete.
 func TestHeaderCandidate148InventoryUnderBlockedUnknown(t *testing.T) {
 	o, _, _ := hcBase(t, hcLim())
-	h, _ := o.PrepareV1(hcTr(o, nil))
+	h := hcPrepOK(t, o, hcTr(o, nil))
 	v := o.VersionV1()
 	cur, rel := o.ProtectV1(v)
 	t.Cleanup(func() { rel(); o.CloseV1() })
@@ -114,4 +113,61 @@ func TestHeaderCandidate148InventoryUnderBlockedUnknown(t *testing.T) {
 		t.Fatalf("unknown: %d", out)
 	}
 	hcRefused(t, "after latch", o.Inventory148V1(1<<20), consensus.HeaderCandidateIncompleteV1, v+1)
+}
+
+// hcInvExact asserts a Complete inventory holding exactly the given tips and headers, with Bytes from the literal counts.
+func hcInvExact(t *testing.T, what string, inv consensus.HeaderCandidateInventory148V1, tips, headers []HeaderCandidateRecord148V1, bytes uint64) {
+	t.Helper()
+	if inv.Status != consensus.HeaderCandidateCompleteV1 || inv.Bytes != bytes || len(inv.Tips) != len(tips) || len(inv.Headers) != len(headers) {
+		t.Fatalf("%s: status %d bytes %d tips %d headers %d", what, inv.Status, inv.Bytes, len(inv.Tips), len(inv.Headers))
+	}
+	gotTips := map[[32]byte]bool{}
+	for _, h := range inv.Tips {
+		gotTips[h] = true
+	}
+	gotRaw := map[[148]byte]bool{}
+	for _, r := range inv.Headers {
+		gotRaw[r] = true
+	}
+	for _, r := range tips {
+		if !gotTips[r.Hash] {
+			t.Fatalf("%s: tip missing", what)
+		}
+	}
+	for _, r := range headers {
+		if !gotRaw[r.Raw] {
+			t.Fatalf("%s: header missing", what)
+		}
+	}
+}
+
+// TestHeaderCandidate148InventoryAfterRemoval covers V5, V6 and R1 for the tip and header counters: the inventory after
+// canonical promotions and after a capacity replacement that retires a tip and its exclusive ancestor.
+func TestHeaderCandidate148InventoryAfterRemoval(t *testing.T) {
+	lim := hcLim()
+	lim.MaxHeaders = 3
+	o := hcNew(t, lim)
+	prev := hcExt(hcMk(t, hcRoot, 10, 10, 1))
+	tip := hcMk(t, prev.Hash, 11, 11, 2)
+	z := hcExt(hcMk(t, [32]byte{0x5A}, 10, 10, 3))
+	hcEstablish(t, o, prev, tip, z)
+	for i := uint64(0); i < 4; i++ {
+		next := hcMk(t, tip.Hash, tip.Height+1, tip.Work.Int64()+1, 100+i)
+		if _, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{next}, prev.Hash)); out != HeaderCandidateOK148V1 {
+			t.Fatalf("promotion %d: %d", i, out)
+		}
+		prev, tip = tip, next
+	}
+	// Tips {tip, Z}, headers {prev, tip, Z}: 2*32 + 3*148.
+	hcInvExact(t, "after promotions", o.Inventory148V1(1<<20), []HeaderCandidateRecord148V1{tip, z}, []HeaderCandidateRecord148V1{prev, tip, z}, 508)
+	cl := hcLim()
+	cl.MaxHeaders = 7
+	c, r := hcCapFixture(t, cl)
+	n := hcMk(t, r["K"].Hash, 12, 60, 8)
+	if _, out := hcPublish(t, c, hcTr(c, []HeaderCandidateRecord148V1{n})); out != HeaderCandidateOK148V1 {
+		t.Fatalf("replacement: %d", out)
+	}
+	// A2 and its exclusive ancestor I are retired: tips {A, B, N}, headers {R0, S, A, B, K, N}: 3*32 + 6*148.
+	headers := []HeaderCandidateRecord148V1{r["R0"], r["S"], r["A"], r["B"], r["K"], n}
+	hcInvExact(t, "after replacement", c.Inventory148V1(1<<20), []HeaderCandidateRecord148V1{r["A"], r["B"], n}, headers, 984)
 }
