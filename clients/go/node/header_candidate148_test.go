@@ -705,7 +705,7 @@ func TestHeaderCandidate148Receipts(t *testing.T) {
 	tr = hcTr(o, nil, r0.Hash)
 	tr.NewSource = hcSrc1
 	rec, out = hcPublish(t, o, tr)
-	if out != HeaderCandidateOK148V1 || !rec.Changed || rec.Version != v+2 || o.source != hcSrc1 {
+	if out != HeaderCandidateOK148V1 || !rec.Changed || rec.Version != v+2 || o.source != hcSrc1 || len(rec.Added) != 0 {
 		t.Fatalf("retire+source: %d %+v", out, rec)
 	}
 	hcEqual(t, "retired", rec.Retired, hcHashes(r0))
@@ -739,8 +739,8 @@ func TestHeaderCandidate148Capacity(t *testing.T) {
 		t.Helper()
 		n := hcMk(t, r["K"].Hash, 12, 60, 8)
 		rec, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{n}))
-		if out != HeaderCandidateOK148V1 {
-			t.Fatalf("%d", out)
+		if out != HeaderCandidateOK148V1 || !rec.Changed || rec.Version != 3 {
+			t.Fatalf("%d %+v", out, rec)
 		}
 		hcEqual(t, "added", rec.Added, hcHashes(n))
 		hcEqual(t, "retired", rec.Retired, want)
@@ -773,8 +773,8 @@ func TestHeaderCandidate148Capacity(t *testing.T) {
 		// ancestor once A is chosen; S is never a tip.
 		n := hcChain(t, r["K"], 3)
 		rec, out := hcPublish(t, o, hcTr(o, n))
-		if out != HeaderCandidateOK148V1 {
-			t.Fatalf("%d", out)
+		if out != HeaderCandidateOK148V1 || !rec.Changed || rec.Version != 3 {
+			t.Fatalf("%d %+v", out, rec)
 		}
 		hcEqual(t, "added", rec.Added, hcHashes(n...))
 		hcEqual(t, "retired", rec.Retired, hcHashes(r["A"], r["B"], r["S"]))
@@ -788,8 +788,8 @@ func TestHeaderCandidate148Capacity(t *testing.T) {
 		o, r := hcCapFixture(t, lim)
 		n := hcMk(t, r["K"].Hash, 12, 60, 8)
 		rec, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{r["A2"], n}))
-		if out != HeaderCandidateOK148V1 {
-			t.Fatalf("%d", out)
+		if out != HeaderCandidateOK148V1 || !rec.Changed || rec.Version != 3 {
+			t.Fatalf("%d %+v", out, rec)
 		}
 		hcEqual(t, "added", rec.Added, [][32]byte{n.Hash})
 		hcEqual(t, "retired", rec.Retired, [][32]byte{r["A"].Hash})
@@ -804,8 +804,8 @@ func TestHeaderCandidate148Capacity(t *testing.T) {
 		o, r := hcCapFixture(t, l)
 		n := hcMk(t, r["R0"].Hash, 11, 60, 8)
 		rec, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{n}))
-		if out != HeaderCandidateOK148V1 {
-			t.Fatalf("%d", out)
+		if out != HeaderCandidateOK148V1 || !rec.Changed || rec.Version != 3 {
+			t.Fatalf("%d %+v", out, rec)
 		}
 		hcEqual(t, "retired", rec.Retired, hcHashes(r["A2"], r["I"]))
 	})
