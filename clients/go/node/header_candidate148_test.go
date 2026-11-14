@@ -2,7 +2,6 @@ package node
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -508,7 +507,7 @@ func TestHeaderCandidate148Constructor(t *testing.T) {
 		for _, v := range []uint64{0, math.MaxUint64} {
 			l := hcLim()
 			*f(&l) = v
-			if o, err := NewHeaderCandidateOwner148V1(l, 1); o != nil || !errors.Is(err, ErrHeaderCandidateConfig148V1) {
+			if o, err := NewHeaderCandidateOwner148V1(l, 1); o != nil || err != ErrHeaderCandidateConfig148V1 {
 				t.Fatalf("field %d value %d accepted", i, v)
 			}
 		}
@@ -518,7 +517,7 @@ func TestHeaderCandidate148Constructor(t *testing.T) {
 			t.Fatalf("field %d max-1 refused", i)
 		}
 	}
-	if o, err := NewHeaderCandidateOwner148V1(hcLim(), 0); o != nil || !errors.Is(err, ErrHeaderCandidateConfig148V1) {
+	if o, err := NewHeaderCandidateOwner148V1(hcLim(), 0); o != nil || err != ErrHeaderCandidateConfig148V1 {
 		t.Fatal("incarnation zero accepted")
 	}
 	o := hcNew(t, hcLim())
@@ -1613,7 +1612,7 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		if o.Header148V1(r0.Hash, &dst) || o.VersionV1() != v {
 			t.Fatal("closed reads")
 		}
-		if got, ok := o.LookupV1(r0.Hash); ok || got.Work != nil || o.IncarnationV1() != 7 {
+		if got, ok := o.LookupV1(r0.Hash); ok || got != (HeaderCandidateRecord148V1{}) || o.IncarnationV1() != 7 {
 			t.Fatal("closed lookup or incarnation")
 		}
 		for _, out := range []HeaderCandidateOutcome148V1{hcPrep(t, o, hcTr(o, nil)), hcEst(t, o, hcSrc1, nil), hcAcq(t, o, r1.Hash)} {
