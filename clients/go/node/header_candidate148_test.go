@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/big"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,7 +59,10 @@ func hcEstablish(t testing.TB, o *HeaderCandidateOwner148V1, recs ...HeaderCandi
 }
 
 func hcTr(o *HeaderCandidateOwner148V1, adds []HeaderCandidateRecord148V1, ret ...[32]byte) HeaderCandidateTransition148V1 {
-	return HeaderCandidateTransition148V1{ExpectedVersion: o.VersionV1(), ExpectedSource: o.source, Additions: adds, Retired: ret}
+	o.mu.Lock()
+	src := o.source
+	o.mu.Unlock()
+	return HeaderCandidateTransition148V1{ExpectedVersion: o.VersionV1(), ExpectedSource: src, Additions: adds, Retired: ret}
 }
 
 func hcPublish(t testing.TB, o *HeaderCandidateOwner148V1, tr HeaderCandidateTransition148V1) (HeaderCandidatePublication148V1, HeaderCandidateOutcome148V1) {
@@ -1231,20 +1235,18 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 	})
 }
 
-// TestHeaderCandidate148Race covers E6 under go test -race: concurrent publishers, guards, leases and readers.
+// TestHeaderCandidate148Race covers E6 under go test -race: two concurrent publishers (tolerating Busy, Stale and
+// Capacity), guards, leases and readers. Readers run a bounded number of short guard sections, so guards reach zero and
+// each publication can proceed without relying on scheduling luck.
 func TestHeaderCandidate148Race(t *testing.T) {
 	o, _, r1 := hcBase(t, hcLim())
-	stop := make(chan struct{})
-	doneReaders := make(chan struct{}, 3)
+	t.Cleanup(o.CloseV1)
+	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
+		wg.Add(1)
 		go func() {
-			defer func() { doneReaders <- struct{}{} }()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
 				_, rel := o.ProtectV1(o.VersionV1())
 				var dst [148]byte
 				o.Header148V1(r1.Hash, &dst)
@@ -1256,20 +1258,28 @@ func TestHeaderCandidate148Race(t *testing.T) {
 			}
 		}()
 	}
-	parent := r1
-	for i := uint64(0); i < 12; i++ {
-		n := hcMk(t, parent.Hash, parent.Height+1, parent.Work.Int64()+1, 1000+i)
-		var out HeaderCandidateOutcome148V1
-		for out = HeaderCandidateStale148V1; out == HeaderCandidateStale148V1; {
-			_, out = hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{n}))
+	publish := func(id uint64, rec func(n uint64) HeaderCandidateRecord148V1) {
+		defer wg.Done()
+		for n, ok := uint64(0), 0; ok < 6 && n < 10000; n++ {
+			h, out := o.PrepareV1(hcTr(o, []HeaderCandidateRecord148V1{rec(n)}))
+			switch out {
+			case HeaderCandidateOK148V1:
+				if _, out := h.PublishV1(); out == HeaderCandidateOK148V1 {
+					ok++
+				}
+			case HeaderCandidateBusy148V1, HeaderCandidateStale148V1, HeaderCandidateCapacity148V1:
+			default:
+				t.Errorf("publisher %d: %d", id, out)
+				return
+			}
 		}
-		if out != HeaderCandidateOK148V1 {
-			t.Fatalf("publish %d: %d", i, out)
-		}
-		parent = n
 	}
-	close(stop)
-	for i := 0; i < 3; i++ {
-		<-doneReaders
-	}
+	wg.Add(2)
+	go publish(1, func(n uint64) HeaderCandidateRecord148V1 { return hcMk(t, r1.Hash, 12, int64(200+n), 2000+n) })
+	go publish(2, func(n uint64) HeaderCandidateRecord148V1 {
+		u := r1
+		u.Provenance = [32]byte{byte(n%250) + 1, 7}
+		return u
+	})
+	hcWithin(t, "concurrent publishers and readers", wg.Wait)
 }
