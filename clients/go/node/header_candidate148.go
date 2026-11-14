@@ -251,7 +251,7 @@ func (o *HeaderCandidateOwner148V1) EstablishV1(source [32]byte, records []Heade
 		return HeaderCandidatePublication148V1{}, HeaderCandidateInvalid148V1
 	}
 	t := HeaderCandidateTransition148V1{NewSource: source, Additions: records}
-	plan, out := o.plan(t, true)
+	plan, out := o.planTransition(t, true)
 	if out != HeaderCandidateOK148V1 {
 		return HeaderCandidatePublication148V1{}, out
 	}
@@ -278,7 +278,7 @@ func (o *HeaderCandidateOwner148V1) PrepareV1(t HeaderCandidateTransition148V1) 
 	if hcTooLong(o.limits.MaxTransitionHeaders, uint64(len(t.Additions)), uint64(len(t.Retired))) {
 		return nil, HeaderCandidateInvalid148V1
 	}
-	plan, out := o.plan(t, false)
+	plan, out := o.planTransition(t, false)
 	if out != HeaderCandidateOK148V1 {
 		return nil, out
 	}
@@ -508,8 +508,8 @@ type hcTx struct {
 	retIdx map[[32]byte]int
 }
 
-// plan evaluates first-refusal rows 5-12 (row 5 length already checked) and returns the reservation.
-func (o *HeaderCandidateOwner148V1) plan(t HeaderCandidateTransition148V1, est bool) (hcPlan, HeaderCandidateOutcome148V1) {
+// planTransition evaluates first-refusal rows 5-12 (row 5 length already checked) and returns the reservation.
+func (o *HeaderCandidateOwner148V1) planTransition(t HeaderCandidateTransition148V1, est bool) (hcPlan, HeaderCandidateOutcome148V1) {
 	x := &hcTx{o: o, t: t, est: est}
 	for _, step := range [...]func() HeaderCandidateOutcome148V1{x.shape, x.stale, x.conflicts, x.parents, x.coverage, x.protected} {
 		if out := step(); out != HeaderCandidateOK148V1 {
@@ -727,12 +727,12 @@ func (x *hcTx) post() *hcPost {
 			s.nodes[a.Hash] = &hcEntry{rec: *a, charge: hcCharge(a.Work)}
 		}
 	}
-	s.count()
+	s.tally()
 	return s
 }
 
-// count derives children, tips, headers and saturating bytes of the post-transition set.
-func (s *hcPost) count() {
+// tally derives children, tips, headers and saturating bytes of the post-transition set.
+func (s *hcPost) tally() {
 	for _, e := range s.nodes {
 		s.kids[e.rec.Parent]++
 		s.bytes = hcAddSat(s.bytes, e.charge)
@@ -851,8 +851,8 @@ func hcInventoryBytes(tips, headers uint64) (uint64, bool) {
 	return sum, th == 0 && hh == 0 && c == 0
 }
 
-// snapshot copies every tip hash and raw header into new arrays, sorted by hash; mu is held.
-func (o *HeaderCandidateOwner148V1) snapshot() ([][32]byte, [][148]byte) {
+// copyInventory copies every tip hash and raw header into new arrays, sorted by hash; mu is held.
+func (o *HeaderCandidateOwner148V1) copyInventory() ([][32]byte, [][148]byte) {
 	hashes := make([][32]byte, 0, len(o.recs))
 	for h := range o.recs {
 		hashes = append(hashes, h)

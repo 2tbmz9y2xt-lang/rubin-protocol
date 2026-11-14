@@ -21,6 +21,6 @@ func (o *HeaderCandidateOwner148V1) Inventory148V1(limit uint64) consensus.Heade
 		return inv
 	}
 	inv.Status, inv.Bytes = consensus.HeaderCandidateCompleteV1, size
-	inv.Tips, inv.Headers = o.snapshot()
+	inv.Tips, inv.Headers = o.copyInventory()
 	return inv
 }
