@@ -42,7 +42,9 @@ type PrunedTreeProfileOutcomeV1 struct {
 // charge is returned unchanged before any index or binding read. The charge is
 // held through the tip witness and suffix page, the binding read, the promise and
 // replacement checks and Encode, and is released when that one reservation
-// callback returns. UpdateTreeV1's own engine hold is separate: it is opened
+// callback returns. A separate enclosing input hold grows250 before the plan's
+// keys/records and authoritySize+27 before Encode; it retains that original Pair
+// through UpdateTreeV1 completion. PrepaidReadBytes stays zero. UpdateTreeV1's own engine hold is separate: it is opened
 // before the plan callback runs and is grown for the Pair copies after that
 // callback returns, and a refusal of that growth is a tuple of the projection
 // below.
@@ -108,9 +110,11 @@ func (s *Store) SelectPrunedTreeProfileV1(confirmed bool, expectedTip *Authority
 	sentinel := errors.New("pruned tree profile decision")
 	var run prunedTreeRun
 	out.Err = reservations.WithOperation(LaneOperation, func(account *OperationAccount) error {
-		var err error
-		out.Truth, out.Stage, _, err = s.UpdateTreeV1(account, prunedTreePlan(account, confirmed, tip, &run, sentinel))
-		return err
+		return account.withHold(func(input *operationHold) error {
+			var err error
+			out.Truth, out.Stage, _, err = s.UpdateTreeV1(account, prunedTreePlan(account, input, confirmed, tip, &run, sentinel))
+			return err
+		})
 	})
 	return prunedTreeOutcome(out, run.planned, run.decision, sentinel)
 }
@@ -123,14 +127,14 @@ type prunedTreeRun struct {
 
 // prunedTreePlan returns the callback SelectPrunedTreeProfileV1 passes to
 // UpdateTreeV1 unwrapped, so the operation it returns is the one the engine receives.
-func prunedTreePlan(account *OperationAccount, confirmed bool, tip *AuthorityPointV1, run *prunedTreeRun, sentinel error) func(*Reader) (TreeOperationV1, error) {
+func prunedTreePlan(account *OperationAccount, input *operationHold, confirmed bool, tip *AuthorityPointV1, run *prunedTreeRun, sentinel error) func(*Reader) (TreeOperationV1, error) {
 	return func(reader *Reader) (op TreeOperationV1, err error) {
-		op, run.planned, err = prunedTreeCompose(reader, account, confirmed, tip, &run.decision, sentinel)
+		op, run.planned, err = prunedTreeCompose(reader, account, input, confirmed, tip, &run.decision, sentinel)
 		return op, err
 	}
 }
 
-func prunedTreeCompose(reader *Reader, account *OperationAccount, confirmed bool, tip *AuthorityPointV1, decision *string, sentinel error) (TreeOperationV1, *TreeAuthorityV1, error) {
+func prunedTreeCompose(reader *Reader, account *OperationAccount, input *operationHold, confirmed bool, tip *AuthorityPointV1, decision *string, sentinel error) (TreeOperationV1, *TreeAuthorityV1, error) {
 	a, present, err := reader.ReadTreeAuthorityV1()
 	if err != nil {
 		return TreeOperationV1{}, nil, err
@@ -144,8 +148,11 @@ func prunedTreeCompose(reader *Reader, account *OperationAccount, confirmed bool
 	}
 	var op TreeOperationV1
 	err = account.WithReservation(1000, func() error {
+		if inputErr := input.grow(250); inputErr != nil {
+			return inputErr
+		}
 		var planErr error
-		op, planErr = prunedTreeOperation(reader, &a, tip, decision, sentinel)
+		op, planErr = prunedTreeOperation(reader, input, &a, tip, decision, sentinel)
 		return planErr
 	})
 	return op, &a, err
@@ -167,7 +174,7 @@ func prunedTreeControl(present bool, a *StorageAuthorityV1, confirmed bool) stri
 	return ""
 }
 
-func prunedTreeOperation(reader *Reader, a *TreeAuthorityV1, tip *AuthorityPointV1, decision *string, sentinel error) (TreeOperationV1, error) {
+func prunedTreeOperation(reader *Reader, input *operationHold, a *TreeAuthorityV1, tip *AuthorityPointV1, decision *string, sentinel error) (TreeOperationV1, error) {
 	key, err := prunedTreeTip(reader, a.Authority.ActiveGenerationID, tip, sentinel)
 	if err != nil {
 		*decision = "STALE_LOCAL_PLAN"
@@ -177,12 +184,16 @@ func prunedTreeOperation(reader *Reader, a *TreeAuthorityV1, tip *AuthorityPoint
 	if err != nil {
 		return TreeOperationV1{}, err
 	}
-	encoded, err := prunedTreeReplacement(reader, a, tip, lbody)
+	encoded, err := prunedTreeReplacement(reader, input, a, tip, lbody)
 	if err != nil {
 		return TreeOperationV1{}, err
 	}
 	dbis := TreeSchemaV1DBIs()
-	consulted := []ConsultedRow{{DBI: dbis[0], Key: binary.BigEndian.AppendUint64([]byte{0x11}, a.LagGenerationID)}}
+	lagKey := make([]byte, 9)
+	lagKey[0] = 0x11
+	binary.BigEndian.PutUint64(lagKey[1:], a.LagGenerationID)
+	consulted := make([]ConsultedRow, 1, 2)
+	consulted[0] = ConsultedRow{DBI: dbis[0], Key: lagKey}
 	if key != nil {
 		consulted = append(consulted, ConsultedRow{DBI: dbis[2], Key: key})
 	}
@@ -245,7 +256,7 @@ func prunedTreeBodyLimit(reader *Reader, lag uint64) (uint64, error) {
 	return root.Endpoint.Height + 1, nil
 }
 
-func prunedTreeReplacement(reader *Reader, a *TreeAuthorityV1, tip *AuthorityPointV1, lbody uint64) ([]byte, error) {
+func prunedTreeReplacement(reader *Reader, input *operationHold, a *TreeAuthorityV1, tip *AuthorityPointV1, lbody uint64) ([]byte, error) {
 	height := uint64(0)
 	if tip != nil {
 		height = tip.Height
@@ -261,8 +272,18 @@ func prunedTreeReplacement(reader *Reader, a *TreeAuthorityV1, tip *AuthorityPoi
 	if !validTreeAuthority(*a) {
 		return nil, adapterError(operationUpdate, EngineLocalInvariant, codeProblem, "invalid pruned tree profile replacement", nil)
 	}
-	if n, fits := authoritySize(a.Authority); !fits || n > MaxMetadataBytes-27 {
+	return prunedTreeEncode(input, a)
+}
+
+// prunedTreeEncode funds the original literal after promise/legality and codec size.
+func prunedTreeEncode(input *operationHold, a *TreeAuthorityV1) ([]byte, error) {
+	n, fits := authoritySize(a.Authority)
+	if !fits || n < 0 || n > MaxMetadataBytes-27 {
 		return nil, updateBoundError()
+	}
+	err := input.grow(uint64(n) + 27)
+	if err != nil {
+		return nil, err
 	}
 	encoded, err := a.Encode()
 	if err != nil {

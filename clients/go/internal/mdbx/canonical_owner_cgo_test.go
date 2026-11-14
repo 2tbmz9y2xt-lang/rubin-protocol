@@ -381,7 +381,7 @@ func TestCanonicalOwnerPairingPartnerRead(t *testing.T) {
 			handles := store.dbis
 			handles[side.partner] = ^handles[side.partner]
 			mustEnvironment(t, store.View(func(reader *Reader) error {
-				return canonicalOldPaired(reader.txn, handles, plan, side)
+				return canonicalOldPaired(reader.txn, handles, plan, side, nil)
 			}))
 			requireUpdateCommit(t, store, "target partner paired deletion", canonicalDelete(forward), canonicalDelete(owner))
 			canonicalRequireImage(t, store, nil, []Mutation{forward, owner})

@@ -376,7 +376,15 @@ func (c *replayEntryCall) treeEnter(store *mdbx.Store) (ReplayEntryOutcomeV1, bo
 		ran := false
 		err := account.WithReservation(replayTreeOwnBytes, func() error {
 			ran, c.denied = true, false
-			out.Truth, out.Stage, _, out.Err = store.UpdateTreeV1(account, c.treePlan)
+			out.Truth, out.Stage, _, out.Err = store.UpdateTreeV1(account, func(reader *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+				op, planErr := c.treePlan(reader)
+				if planErr == nil {
+					// Original Pair <= P_PAIR remains live; the rest of OWN is now
+					// exclusively assigned to ordinary reads through native completion.
+					op.Pair.PrepaidReadBytes = 152505839
+				}
+				return op, planErr
+			})
 			return nil
 		})
 		if ran || err.Error() != selectedSideCapacityText {

@@ -23,6 +23,12 @@ import (
 type TreePairV1 struct {
 	Mutations []Mutation
 	Consulted []ConsultedRow
+	// PrepaidReadBytes declares same-account coverage exclusively assigned by a trusted
+	// caller to ordinary Pair reads through completion, including readback and cleanup.
+	// It excludes original input, PC, context and ENTRY data. Zero uses engine funding.
+	// Positive values require no primitives and cannot exceed the account ceiling.
+	// The engine neither authenticates this declaration nor releases the caller's grant.
+	PrepaidReadBytes uint64
 	// EntryInventory accepts the completed token for this same entry, account and Pair.
 	EntryInventory *EntryInventoryV1
 	// ContextConsulted is an optional canonical context window with the legacy Batch.ContextConsulted semantics
@@ -442,7 +448,19 @@ func treeAdmitSlotV1(op TreeOperationV1, account *OperationAccount, databaseID [
 	if err != nil {
 		return false, err
 	}
-	return over, treePairRelationsV1(op)
+	err = treePairRelationsV1(op)
+	if err != nil {
+		return false, err
+	}
+	return over, treePairPrepaidAdmitV1(op.Pair.PrepaidReadBytes, len(op.Primitives), account.shared.ceiling)
+}
+
+// treePairPrepaidAdmitV1 checks the trusted scalar only after ordinary Pair relations.
+func treePairPrepaidAdmitV1(credit uint64, primitives int, ceiling uint64) error {
+	if credit > ceiling || credit != 0 && primitives != 0 {
+		return updateInvalidBatch()
+	}
+	return nil
 }
 
 func treeCoverageAdmitV1(op TreeOperationV1, p TreePrimitiveV1, databaseID [32]byte) bool {
@@ -799,7 +817,7 @@ func treePlanCopyBytesV1(pair TreePairV1) uint64 {
 
 func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
 	extra := treeHeaderSlotRowsV1(op.HeaderSlot)
-	plan := treePlanV1{primitives: op.Primitives, slot: treeOwnHeaderSlotV1(op.HeaderSlot)}
+	plan := treePlanV1{primitives: op.Primitives, slot: treeOwnHeaderSlotV1(op.HeaderSlot), prepaidReadBytes: op.Pair.PrepaidReadBytes}
 	plan.pair = make([]ownedMutation, len(op.Pair.Mutations), len(op.Pair.Mutations)+extra)
 	plan.consulted = make([]ownedConsulted, len(op.Pair.Consulted), len(op.Pair.Consulted)+extra)
 	for j, m := range op.Pair.Mutations {

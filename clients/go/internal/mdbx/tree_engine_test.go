@@ -1,6 +1,7 @@
 package mdbx
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -110,5 +111,77 @@ func BenchmarkTreeBudgetDrawV1(b *testing.B) {
 		if !budget.drawV1(64) {
 			budget.used = 0
 		}
+	}
+}
+
+type pairReadTestLedgerV1 struct {
+	held uint64
+	err  error
+}
+
+type pairReadNilErrorV1 struct{}
+
+func (*pairReadNilErrorV1) Error() string { return "typed-nil ledger error" }
+
+func (l *pairReadTestLedgerV1) chargeV1(n uint64) error {
+	if l.err != nil {
+		return l.err
+	}
+	l.held += n
+	return nil
+}
+
+func (l *pairReadTestLedgerV1) releaseV1(n uint64) { l.held -= n }
+
+// The arithmetic owner admits complete windows, never wrapped or failed charges.
+func TestTreePairReadBudgetV1(t *testing.T) {
+	var typedNil *pairReadNilErrorV1
+	marker := errors.New("direct ledger cause")
+	for _, refusal := range []error{errOperationReservationCapacity, errOperationReservationInput, marker, fmt.Errorf("wrapped: %w", marker), typedNil} {
+		ledger := &pairReadTestLedgerV1{err: refusal}
+		b := treePairReadBudgetV1{credit: 17, ledger: ledger}
+		if err := b.requireV1(64); !treeSameErrorV1(err, refusal) || b.extra != 0 || ledger.held != 0 {
+			t.Fatal("ledger error identity/unchanged failed extra")
+		}
+	}
+	for _, row := range []struct{ credit, extra uint64 }{{0, 64}, {1, 63}, {17, 47}, {64, 0}} {
+		ledger := &pairReadTestLedgerV1{}
+		b := treePairReadBudgetV1{credit: row.credit, ledger: ledger}
+		if err := b.requireV1(64); err != nil || b.extra != row.extra || ledger.held != row.extra {
+			t.Fatalf("prepaid%d extra%d: %+v %v", row.credit, row.extra, b, err)
+		}
+		if err := b.requireV1(40); err != nil || ledger.held != row.extra {
+			t.Fatal("sequential scratch was summed or released")
+		}
+		ledger.err = errOperationReservationInput
+		if err := b.requireV1(65); !treeSameErrorV1(err, errOperationReservationInput) || b.extra != row.extra {
+			t.Fatal("failed grow changed state/input identity")
+		}
+	}
+	for _, row := range []struct {
+		n, scratch uint64
+		old        bool
+		want       uint64
+		refused    bool
+	}{
+		{0, 0, true, 0, false},
+		{32, 0, true, 64, false},
+		{70000, 0, true, 140000, false},
+		{104, 72, false, 176, false},
+		{8, 72, false, 80, false},
+		{104, 88, false, 192, false},
+		{9223372036854775807, 0, true, 18446744073709551614, false},
+		{9223372036854775808, 0, true, 0, true},
+		{18446744073709551615, 0, true, 0, true},
+		{18446744073709551615, 1, false, 0, true},
+	} {
+		got, err := treePairReadSizeV1(row.n, row.scratch, row.old)
+		if got != row.want || (err != nil) != row.refused || row.refused && !treeSameErrorV1(err, errOperationReservationCapacity) {
+			t.Fatalf("full-bound arithmetic %+v got%d/%v", row, got, err)
+		}
+	}
+	b := treePairReadBudgetV1{credit: 18446744073709551615, extra: 1}
+	if err := b.requireV1(0); !treeSameErrorV1(err, errOperationReservationCapacity) {
+		t.Fatal("credit+extra overflow admitted")
 	}
 }

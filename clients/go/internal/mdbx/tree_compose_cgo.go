@@ -34,14 +34,15 @@ func treeAdmittedPrimitiveV1(p *TreePrimitiveV1) treePrimitiveV1 {
 }
 
 type treePlanV1 struct {
-	primitives []TreePrimitiveV1 // immutable caller backing borrowed through completion
-	pair       []ownedMutation
-	consulted  []ownedConsulted
-	proof      func(*TreeDeltaReportV1) error // TreeOperationV1.Proof
-	report     *TreeDeltaReportV1             // step-5 charged backing, filled at the writer; nil without proof
-	slot       []byte                         // step-5 owned TreeOperationV1.HeaderSlot as Hash||Header; nil without a slot
-	inventory  *entryInventoryStateV1
-	context    CanonicalContextWindowV1 // owned Pair.ContextConsulted; Count 0 encodes no window
+	primitives       []TreePrimitiveV1 // immutable caller backing borrowed through completion
+	pair             []ownedMutation
+	consulted        []ownedConsulted
+	proof            func(*TreeDeltaReportV1) error // TreeOperationV1.Proof
+	report           *TreeDeltaReportV1             // step-5 charged backing, filled at the writer; nil without proof
+	slot             []byte                         // step-5 owned TreeOperationV1.HeaderSlot as Hash||Header; nil without a slot
+	inventory        *entryInventoryStateV1
+	context          CanonicalContextWindowV1 // owned Pair.ContextConsulted; Count 0 encodes no window
+	prepaidReadBytes uint64
 }
 
 // treeScopeV1 is one position's slots (op or the truth evaluator, D30, D35): the Reader slot, the recorder slot and
@@ -80,7 +81,9 @@ type treeComposeV1 struct {
 
 func newTreeScopeV1(s *Store, old *C.MDBX_txn, plan *treePlanV1, position treePositionV1, ledger treeLedgerV1) *treeScopeV1 {
 	e := &treeScopeV1{s: s, old: old, plan: plan, position: position, ledger: ledger}
-	e.call = e.sourceV1
+	if len(plan.primitives) != 0 {
+		e.call = e.sourceV1
+	}
 	return e
 }
 
@@ -397,6 +400,7 @@ func (c *treeComposeV1) runV1() {
 	}
 	w.t = t
 	t.covered = treeCoveredV1(w.plan.primitives)
+	t.pairOnly, t.pairReadLimit = len(w.plan.primitives) == 0, w.plan.prepaidReadBytes
 	var err error
 	if w.plan.context.Count != 0 {
 		err = t.pairPreflightContextV1(w.plan.pair, w.plan.consulted, w.plan.context)
@@ -529,6 +533,8 @@ func (c *treeComposeV1) commitV1() {
 		truth = c.truthV1
 	} else if w.plan.inventory != nil {
 		truth = c.entryTruthV1
+	} else {
+		truth = c.pairTruthV1
 	}
 	c.committed = true
 	if w.plan.context.Count != 0 {
@@ -549,6 +555,36 @@ func (c *treeComposeV1) truthV1(read *C.MDBX_txn, primary error) (CommitTruth, e
 	truth, err := c.readbackV1(e, read)
 	completed = true
 	return truth, err
+}
+
+// pairTruthV1 keeps the ordinary seal through complete strict readback, with no grow.
+func (c *treeComposeV1) pairTruthV1(read *C.MDBX_txn, _ error) (CommitTruth, error) {
+	w := c.writer
+	_, err := updateNativeImages(w.old, w.s.dbis, w.plan.pair)
+	if err != nil {
+		return CommitTruthUnknown, err
+	}
+	old, next, err := updateNativePairReadbackTargets(w.old, read, w.s.dbis, w.plan.pair, w.t.pairReadLimit)
+	if err != nil {
+		return CommitTruthUnknown, err
+	}
+	old, next, err = updateNativePairReadbackConsulted(w.old, read, w.s.dbis, w.plan.consulted, old, next, w.t.pairReadLimit)
+	if err != nil {
+		return CommitTruthUnknown, err
+	}
+	if w.plan.context.Count != 0 {
+		old, next, err = updateNativeReadbackScoped(w.old, read, w.s.dbis, w.plan.pair, nil, old, next, contextTreeScopeV1(w.plan.context))
+		if err != nil {
+			return CommitTruthUnknown, err
+		}
+	}
+	if old {
+		return CommitTruthOld, nil
+	}
+	if next {
+		return CommitTruthNew, nil
+	}
+	return CommitTruthUnknown, nil
 }
 
 // unwoundV1 records the readback Goexit outcome (RG): X = R_j from the capture, the snapshot abort, index -1.

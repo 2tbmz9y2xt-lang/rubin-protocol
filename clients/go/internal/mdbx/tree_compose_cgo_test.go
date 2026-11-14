@@ -711,7 +711,7 @@ func tcLastCharge(log []string) string {
 	return ""
 }
 
-// A3, M14, M30: zero primitives make no ledger call and keep the legacy pair readback.
+// A3, M14, M30: zero primitives charge only the ordinary Pair read window.
 func TestTreeComposeZeroPrimitivesV1(t *testing.T) {
 	for _, crossed := range []bool{false, true} {
 		t.Run(fmt.Sprint(crossed), func(t *testing.T) {
@@ -719,9 +719,6 @@ func TestTreeComposeZeroPrimitivesV1(t *testing.T) {
 			var r tcResult
 			if crossed {
 				evidence, err := fixtureLargeFault(s.store, 12, 0, tcOut(), func() { r = s.run(nil) })
-				if len(s.ledger.log) != 0 {
-					t.Errorf("zero primitives touched the ledger: %v", s.ledger.log)
-				}
 				mustEnvironment(t, err)
 				if evidence.commits < 1 {
 					t.Errorf("mode 12 did not commit")
@@ -731,12 +728,13 @@ func TestTreeComposeZeroPrimitivesV1(t *testing.T) {
 				r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 			} else {
 				r = s.run(nil)
-				if len(s.ledger.log) != 0 {
-					t.Errorf("zero primitives touched the ledger: %v", s.ledger.log)
-				}
 				r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 				r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 				mustEnvironment(t, r.err)
+			}
+			// tcF0 is an 11-byte NEW literal; no primitive charge is permitted.
+			if got := strings.Join(s.ledger.log, ","); got != "charge 11" {
+				t.Errorf("zero primitives ledger %q, want charge 11", got)
 			}
 			rows := []ttRow{{ttBlocks, tcB0[:], tcF0}}
 			if crossed {

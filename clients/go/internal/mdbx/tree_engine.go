@@ -77,6 +77,63 @@ type treeLedgerV1 interface {
 	releaseV1(n uint64)
 }
 
+// treePairReadBudgetV1 owns only the ordinary Pair read shortfall during preflight.
+// Credit belongs to the caller; extra stays on the enclosing engine hold.
+type treePairReadBudgetV1 struct {
+	credit uint64
+	extra  uint64
+	ledger treeLedgerV1
+}
+
+// availableV1 checks the complete prepaid window without consulting other holds.
+func (b *treePairReadBudgetV1) availableV1() (uint64, error) {
+	if b.extra > ^uint64(0)-b.credit {
+		return 0, errOperationReservationCapacity
+	}
+	return b.credit + b.extra, nil
+}
+
+// requireV1 grows only before acquisition and preserves a refused ledger's error.
+func (b *treePairReadBudgetV1) requireV1(n uint64) error {
+	return b.coverV1(n, 0)
+}
+
+// coverV1 checks a sealed limit when b is nil; mutable callers grow only the shortfall.
+func (b *treePairReadBudgetV1) coverV1(n, limit uint64) error {
+	if b == nil {
+		if n > limit {
+			return errOperationReservationCapacity
+		}
+		return nil
+	}
+	if b.extra > ^uint64(0)-b.credit {
+		return errOperationReservationCapacity
+	}
+	available := b.credit + b.extra
+	if n <= available {
+		return nil
+	}
+	if err := b.ledger.chargeV1(n - available); err != nil {
+		return err
+	}
+	b.extra = n - b.credit
+	return nil
+}
+
+// treePairReadSizeV1 checks the two-native-span window and any simultaneous scratch.
+func treePairReadSizeV1(n, scratch uint64, old bool) (uint64, error) {
+	if old {
+		if n > ^uint64(0)/2 {
+			return 0, errOperationReservationCapacity
+		}
+		n *= 2
+	}
+	if scratch > ^uint64(0)-n {
+		return 0, errOperationReservationCapacity
+	}
+	return n + scratch, nil
+}
+
 // treeBudgetV1 is engine-local sub-accounting inside bytes the ledger already holds (D5-1/D5-2, D6-6 E3).
 // drawV1 reports false (no ledger call) when used+n would exceed held; that is the D5-5 structural stop.
 // returnV1 with n > used is an engine defect handled fail-closed: used = 0 and held = 0, so every later drawV1 is false.

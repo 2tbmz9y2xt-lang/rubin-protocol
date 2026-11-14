@@ -7,6 +7,25 @@ package mdbx
 #include "../../../../third_party/libmdbx/mdbx.h"
 #include <string.h>
 #ifdef RUBIN_SELECTED_DAMAGE_FIXTURE
+typedef struct { uint64_t gets, comparisons, aliases, writes; } rubin_pair_counts;
+extern void rubinPairReadProbe(uintptr_t, unsigned);
+static struct { MDBX_env *env; MDBX_txn *old_txn; uintptr_t probe; rubin_pair_counts counts; } rubin_pair;
+int rubin_pair_arm(MDBX_env *env, uintptr_t probe) {
+	if (rubin_pair.env || !env) return MDBX_EINVAL;
+	memset(&rubin_pair, 0, sizeof(rubin_pair));
+	rubin_pair.env = env; rubin_pair.probe = probe;
+	return MDBX_SUCCESS;
+}
+void rubin_pair_disarm(rubin_pair_counts *counts) {
+	*counts = rubin_pair.counts; memset(&rubin_pair, 0, sizeof(rubin_pair));
+}
+static void rubin_pair_note(unsigned site, int alias) {
+	if (!rubin_pair.env) return;
+	if (site == 1) rubin_pair.counts.gets++;
+	if (site == 2) { rubin_pair.counts.comparisons++; rubin_pair.counts.aliases += alias != 0; }
+	if (site == 3) rubin_pair.counts.writes++;
+	if (rubin_pair.probe) rubinPairReadProbe(rubin_pair.probe, site);
+}
 // Endpoint-only fixture: counts and faults bind real cursor sites in one env.
 typedef struct { unsigned opens, gets, closes, queries, faults; } rubin_tip_counts;
 static pthread_mutex_t rubin_tip_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -86,7 +105,7 @@ static void rubin_tip_close(MDBX_cursor *cursor) {
 typedef struct { unsigned mode, calls, gets, commits, aborts, closes, drift; MDBX_env *env; MDBX_txn *old_txn, *write_txn, *read_txn; MDBX_dbi dbi; unsigned char key[65536]; size_t key_len; } rubin_li_state;
 static rubin_li_state rubin_li;
 int rubin_li_arm(MDBX_env *env, MDBX_dbi dbi, unsigned mode, const void *key, size_t length) {
-	if (rubin_li.mode || !env || mode < 1 || mode > 30 || length == 0 || length > sizeof(rubin_li.key) || !key) return MDBX_EINVAL;
+	if (rubin_li.mode || !env || mode < 1 || mode > 37 || length == 0 || length > sizeof(rubin_li.key) || !key) return MDBX_EINVAL;
 	memset(&rubin_li, 0, sizeof(rubin_li));
 	rubin_li.mode = mode; rubin_li.env = env; rubin_li.dbi = dbi; rubin_li.key_len = length;
 	memcpy(rubin_li.key, key, length);
@@ -198,6 +217,7 @@ static int rubin_sd_txn_begin(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t 
 		rubin_li.drift++;
 	}
 	int rc = mdbx_txn_begin(env, parent, flags, txn);
+	if (rc == MDBX_SUCCESS && env == rubin_pair.env && !rubin_pair.old_txn && (flags & MDBX_TXN_RDONLY) != 0) rubin_pair.old_txn = *txn;
 	if (rubin_li.mode && env == rubin_li.env && rc == MDBX_SUCCESS) {
 		if ((flags & MDBX_TXN_RDONLY) == 0) rubin_li.write_txn = *txn;
 		else if (!rubin_li.old_txn) rubin_li.old_txn = *txn;
@@ -219,7 +239,23 @@ static int rubin_sd_get_fault(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val 
 	return dbi == rubin_sd.fault_dbi && key->iov_len != 0 && key->iov_len == rubin_sd.key_len && memcmp(key->iov_base, rubin_sd.key, key->iov_len) == 0;
 }
 static int rubin_sd_get(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_val *data) {
+	if (txn && mdbx_txn_env(txn) == rubin_pair.env) rubin_pair_note(1, 0);
 	if (rubin_li.mode) rubin_li.calls++;
+	if (rubin_li.mode >= 31 && rubin_li.mode <= 37 && dbi == rubin_li.dbi && key->iov_len == rubin_li.key_len && memcmp(key->iov_base, rubin_li.key, key->iov_len) == 0 && (txn == rubin_li.write_txn || (rubin_li.mode == 35 && txn == rubin_li.old_txn))) {
+		static unsigned char distinct[70000];
+		int rc = mdbx_get(txn, dbi, key, data);
+		if (rc == MDBX_SUCCESS) {
+			rubin_li.gets++;
+			if (rubin_li.mode == 31) data->iov_len++;
+			if (rubin_li.mode == 32) { data->iov_base = NULL; data->iov_len = 0; return MDBX_NOTFOUND; }
+			if (rubin_li.mode == 33) { data->iov_base = NULL; data->iov_len = 1; }
+			if (rubin_li.mode == 34) return MDBX_EIO;
+			if (rubin_li.mode == 35) data->iov_len = SIZE_MAX;
+			if (rubin_li.mode == 36) data->iov_len = 0;
+			if (rubin_li.mode == 37 && data->iov_len <= sizeof(distinct)) { memcpy(distinct, data->iov_base, data->iov_len); data->iov_base = distinct; }
+		}
+		return rc;
+	}
 	int li_old_fault = (rubin_li.mode == 1 || rubin_li.mode == 2 || rubin_li.mode == 24 || rubin_li.mode == 28 || rubin_li.mode == 30) && txn == rubin_li.old_txn;
 	int li_read_fault = rubin_li.mode == 8 && txn == rubin_li.read_txn;
 	if ((li_old_fault || li_read_fault) && dbi == rubin_li.dbi && key->iov_len == rubin_li.key_len && memcmp(key->iov_base, rubin_li.key, key->iov_len) == 0) {
@@ -257,6 +293,7 @@ static int rubin_sd_get(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, 
 	return mdbx_get(txn, dbi, key, data);
 }
 static int rubin_sd_del(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, const MDBX_val *data) {
+	if (txn && mdbx_txn_env(txn) == rubin_pair.env) rubin_pair_note(3, 0);
 	if (rubin_li.mode) rubin_li.calls++;
 	int fault = 0;
 	pthread_mutex_lock(&rubin_sd_mu);
@@ -282,7 +319,7 @@ static int rubin_sd_third(void) {
 }
 static int rubin_sd_txn_commit(MDBX_txn *txn) {
 	if (rubin_li.mode) rubin_li.calls++;
-	if (rubin_li.mode >= 3 && txn == rubin_li.write_txn) {
+	if (rubin_li.mode >= 3 && rubin_li.mode <= 30 && txn == rubin_li.write_txn) {
 		rubin_li.commits++;
 		if (rubin_li.mode == 7 || rubin_li.mode == 19) mdbx_txn_break(txn);
 		int rc = mdbx_txn_commit(txn);
@@ -316,6 +353,8 @@ static int rubin_sd_txn_commit(MDBX_txn *txn) {
 	return ENOSPC;
 }
 static int rubin_sd_txn_abort(MDBX_txn *txn) {
+	int pair_old = txn != NULL && txn == rubin_pair.old_txn;
+	if (pair_old) rubin_pair_note(4, 0);
 	if (rubin_li.mode) rubin_li.calls++;
 	if ((rubin_li.mode == 15 || rubin_li.mode == 16 || rubin_li.mode == 19) && txn == rubin_li.read_txn) {
 		if (rubin_li.mode != 16) return MDBX_THREAD_MISMATCH;
@@ -326,6 +365,7 @@ static int rubin_sd_txn_abort(MDBX_txn *txn) {
 		rubin_li.aborts++;
 		if (rubin_li.mode == 2 || rubin_li.mode == 10) return MDBX_THREAD_MISMATCH;
 		int rc = mdbx_txn_abort(txn);
+		if (pair_old) rubin_pair_note(5, 0);
 		return rubin_li.mode == 9 && rc == MDBX_SUCCESS ? MDBX_EIO : rc;
 	}
 	int fault = 0;
@@ -339,6 +379,7 @@ static int rubin_sd_txn_abort(MDBX_txn *txn) {
 	pthread_mutex_unlock(&rubin_sd_mu);
 	if (probe != 0) rubinSelectedDamageProbe(probe);
 	int rc = mdbx_txn_abort(txn);
+	if (pair_old) rubin_pair_note(5, 0);
 	if (probe != 0) rubinSelectedDamageProbe(probe);
 	if (!fault) return rc;
 	pthread_mutex_lock(&rubin_sd_mu);
@@ -367,6 +408,7 @@ static int rubin_sd_prefix(const MDBX_txn *txn, MDBX_dbi dbi, MDBX_val *key, MDB
 }
 // rubin_sd_put fails exactly one armed write-transaction put of the armed DBI and key with EIO before libMDBX sees it.
 static int rubin_sd_put(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_val *data, MDBX_put_flags_t flags) {
+	if (txn && mdbx_txn_env(txn) == rubin_pair.env) rubin_pair_note(3, 0);
 	if (rubin_li.mode) rubin_li.calls++;
 	int fault = 0;
 	pthread_mutex_lock(&rubin_sd_mu);
@@ -440,6 +482,13 @@ static rubin_mdbx_prefix_result rubin_mdbx_cursor_get(MDBX_cursor *cursor, const
 	return result;
 }
 typedef struct { int rc; int equal; int valid; } rubin_mdbx_equal_result;
+static int rubin_mdbx_pair_equal(const void *left, const void *right, size_t length) {
+#ifdef RUBIN_SELECTED_DAMAGE_FIXTURE
+	rubin_pair_note(2, left == right);
+	if (rubin_li.mode == 35 && length == SIZE_MAX) return 0;
+#endif
+	return left == right || memcmp(left, right, length) == 0;
+}
 static rubin_mdbx_equal_result rubin_mdbx_get_equal(const MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len, int expected_present, const void *expected_bytes, size_t expected_len) { MDBX_val key = {(void *)key_bytes, key_len}, value = {0, 0}; rubin_mdbx_equal_result result = {MDBX_EINVAL, 0, 0}; if ((expected_present != 0 && expected_present != 1) || (expected_len != 0 && expected_bytes == NULL)) return result; result.rc = mdbx_get(txn, dbi, &key, &value); if (result.rc == MDBX_SUCCESS) { result.valid = value.iov_len == 0 || value.iov_base != NULL; if (expected_present && result.valid && value.iov_len == expected_len && (expected_len == 0 || memcmp(value.iov_base, expected_bytes, expected_len) == 0)) result.equal = 1; } else if (result.rc == MDBX_NOTFOUND) { result.valid = value.iov_base == NULL && value.iov_len == 0; if (!expected_present && result.valid) result.equal = 1; } return result; }
 static int rubin_mdbx_del_exact(MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len) { MDBX_val key = {(void *)key_bytes, key_len}; return mdbx_del(txn, dbi, &key, NULL); }
 static int rubin_mdbx_put_nooverwrite(MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len, const void *value_bytes, size_t value_len) { MDBX_val key = {(void *)key_bytes, key_len}, value = {(void *)value_bytes, value_len}; return mdbx_put(txn, dbi, &key, &value, MDBX_NOOVERWRITE); }
@@ -1633,6 +1682,124 @@ func updateNativeEqual(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected upd
 		return false, updateNativeInvariant("mdbx_get returned invalid result shape")
 	}
 	return value.equal != 0, nil
+}
+
+// updateNativePairEqual preserves the existing get position, then funds complete
+// equal-length payloads before comparing. A nil budget uses only the sealed limit.
+func updateNativePairEqual(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected updateImage, old bool, budget *treePairReadBudgetV1, limit uint64) (bool, error) {
+	if !validUpdateImage(expected) {
+		return false, updateNativeInvariant("invalid update image shape")
+	}
+	actual, err := updateNativeImage(txn, dbi, key)
+	if err != nil {
+		return false, err
+	}
+	if actual.present != expected.present || actual.length != expected.length {
+		return false, nil
+	}
+	if actual.length == 0 {
+		return true, nil
+	}
+	need, err := treePairReadSizeV1(uint64(actual.length), 0, old)
+	if err != nil {
+		return false, err
+	}
+	err = budget.coverV1(need, limit)
+	if err != nil {
+		return false, err
+	}
+	return C.rubin_mdbx_pair_equal(actual.bytes, expected.bytes, actual.length) != 0, nil
+}
+
+// updateNativePairOldEqual retains ORIGINAL OLD only through this comparison.
+func updateNativePairOldEqual(old, candidate *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, budget *treePairReadBudgetV1) (bool, error) {
+	image, err := updateNativeImage(old, dbi, key)
+	if err != nil {
+		return false, err
+	}
+	return updateNativePairEqual(candidate, dbi, key, image, true, budget, 0)
+}
+
+// updateNativePairVerify compares immutable PC literals against native candidates.
+func updateNativePairVerify(txn *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan []ownedMutation, limit uint64) error {
+	refAt := 0
+	for _, m := range plan {
+		image, err := updateNativeFinalImage(nil, dbis, m, nil, &refAt, 0)
+		if err != nil {
+			return err
+		}
+		equal, err := updateNativePairEqual(txn, dbis[m.dbi.Rank], m.key, image, false, nil, limit)
+		runtime.KeepAlive(m.literal)
+		if err != nil {
+			return err
+		}
+		if !equal {
+			return adapterError(operationUpdate, EngineStateMismatch, codeProblem, "final update image mismatch", nil)
+		}
+	}
+	return nil
+}
+
+// updateNativePairConsultedMatch checks ordinary consulted rows before the scoped domains.
+func updateNativePairConsultedMatch(old, candidate *C.MDBX_txn, dbis [9]C.MDBX_dbi, consulted []ownedConsulted, diagnostic string, budget *treePairReadBudgetV1, limit uint64) error {
+	for _, row := range consulted {
+		image, err := updateNativeImage(old, dbis[row.dbi.Rank], row.key)
+		if err != nil {
+			return err
+		}
+		equal, err := updateNativePairEqual(candidate, dbis[row.dbi.Rank], row.key, image, true, budget, limit)
+		if err != nil {
+			return err
+		}
+		if !equal {
+			return adapterError(operationUpdate, EngineStateMismatch, codeProblem, diagnostic, nil)
+		}
+	}
+	return nil
+}
+
+// updateNativePairReadbackTargets completes both predicates even after a false row.
+func updateNativePairReadbackTargets(old, read *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan []ownedMutation, limit uint64) (bool, bool, error) {
+	oldImage, newImage := true, true
+	refAt := 0
+	for _, m := range plan {
+		image, err := updateNativeImage(old, dbis[m.dbi.Rank], m.key)
+		if err != nil {
+			return false, false, err
+		}
+		equal, err := updateNativePairEqual(read, dbis[m.dbi.Rank], m.key, image, true, nil, limit)
+		if err != nil {
+			return false, false, err
+		}
+		oldImage = oldImage && equal
+		image, err = updateNativeFinalImage(nil, dbis, m, nil, &refAt, 0)
+		if err != nil {
+			return false, false, err
+		}
+		equal, err = updateNativePairEqual(read, dbis[m.dbi.Rank], m.key, image, false, nil, limit)
+		runtime.KeepAlive(m.literal)
+		if err != nil {
+			return false, false, err
+		}
+		newImage = newImage && equal
+	}
+	return oldImage, newImage, nil
+}
+
+// updateNativePairReadbackConsulted never skips a reached native error on false truth.
+func updateNativePairReadbackConsulted(old, read *C.MDBX_txn, dbis [9]C.MDBX_dbi, consulted []ownedConsulted, oldImage, newImage bool, limit uint64) (bool, bool, error) {
+	for _, row := range consulted {
+		image, err := updateNativeImage(old, dbis[row.dbi.Rank], row.key)
+		if err != nil {
+			return false, false, err
+		}
+		equal, err := updateNativePairEqual(read, dbis[row.dbi.Rank], row.key, image, true, nil, limit)
+		if err != nil {
+			return false, false, err
+		}
+		oldImage, newImage = oldImage && equal, newImage && equal
+	}
+	return oldImage, newImage, nil
 }
 
 // largePoint borrows a checked physical value; callers hold getMu and keep txn alive.

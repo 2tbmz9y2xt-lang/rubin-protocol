@@ -7,8 +7,124 @@ import (
 	"encoding/binary"
 	"errors"
 	"reflect"
+	"runtime"
 	"testing"
 )
+
+// Evidence1000 ends at builder return; original250+n, PC and ordinary H coexist
+// on the real Lane account at native use and are released by their own frames.
+func TestPrunedTreeProfileReadFundingNativeV1(t *testing.T) {
+	t.Run("introduced-frame-unwind", prunedTreeReadUnwindV1)
+	t.Run("promise-and-legality-before-literal", prunedTreeReadPrioritiesV1)
+	for _, row := range []struct {
+		name string
+		u    uint64
+		tip  *AuthorityPointV1
+		p    *uint64
+		b    uint64
+	}{
+		{"pre-genesis", 0, nil, nil, 0},
+		{"positive-body", 18561, prunedTreeAt(20000), prunedTreeU64(4320), 4881},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			sc := newPrunedTreeScene(t, row.u, row.tip, row.p, nil)
+			want := sc.expected(row.b, row.p)
+			next, err := want.Encode()
+			mustEnvironment(t, err)
+			old, err := sc.a.Encode()
+			mustEnvironment(t, err)
+			root := prunedTreeBindingBytes(t, row.p)
+			pc := uint64(186 + len(next))
+			window := max(uint64(2*len(old)), uint64(2*len(root)), uint64(len(next)))
+			if row.tip != nil {
+				pc = uint64(250 + len(next))
+				window = max(window, 208)
+			}
+			input := uint64(250 + len(next))
+			var out PrunedTreeProfileOutcomeV1
+			observed, err := FixturePairReadObservation(sc.s, func(site uint32) {
+				if site == 3 && reservationLive(sc.o) != input+pc+window {
+					t.Error("original Pair backing through engine completion/source+PC+H")
+				}
+			}, func() { out = sc.s.SelectPrunedTreeProfileV1(true, row.tip, sc.o) })
+			mustEnvironment(t, err)
+			if observed.Writes == 0 || reservationLive(sc.o) != 0 {
+				t.Fatal("native funding owner/release", observed)
+			}
+			sc.committed(t, out, want, "Pair read/input funding")
+		})
+	}
+}
+
+func prunedTreeReadUnwindV1(t *testing.T) {
+	for _, mode := range []string{"builder-panic", "engine-goexit"} {
+		t.Run(mode, func(t *testing.T) {
+			sc := newPrunedTreeScene(t, 0, nil, nil, nil)
+			marker := errors.New("input-funded builder panic")
+			fired, returned := false, false
+			var recovered any
+			run := func() {
+				defer func() { recovered = recover() }()
+				_, err := FixturePairReadObservation(sc.s, func(site uint32) {
+					if fired {
+						return
+					}
+					if mode == "builder-panic" && site == 1 && reservationLive(sc.o) == 1250 {
+						fired = true
+						panic(marker)
+					}
+					if mode == "engine-goexit" && site == 3 {
+						fired = true
+						runtime.Goexit()
+					}
+				}, func() { _ = sc.s.SelectPrunedTreeProfileV1(true, nil, sc.o) })
+				mustEnvironment(t, err)
+				returned = true
+			}
+			if mode == "engine-goexit" {
+				done := make(chan struct{})
+				go func() { defer close(done); run() }()
+				eiAwait(t, done)
+			} else {
+				run()
+			}
+			if !fired || returned || reservationLive(sc.o) != 0 || sc.s.state != storeOPEN {
+				t.Fatal("introduced input/H frame unwind cleanup", fired, returned, reservationLive(sc.o), sc.s.state)
+			}
+			if mode == "builder-panic" && recovered != marker || mode == "engine-goexit" && recovered != nil {
+				t.Fatal("input/H unwind identity", recovered)
+			}
+			tsFollowing(t, sc.s, sc.o)
+		})
+	}
+}
+
+func prunedTreeReadPrioritiesV1(t *testing.T) {
+	for _, illegal := range []bool{false, true} {
+		u, p := uint64(18562), uint64(4320)
+		if illegal {
+			u, p = 18561, 4881
+		}
+		sc := newPrunedTreeScene(t, u, prunedTreeAt(20000), &p, nil)
+		sc.o = reservationFilled(t, 1250)
+		out := sc.s.SelectPrunedTreeProfileV1(true, sc.tip, sc.o)
+		if illegal {
+			treeNativeError(t, out.Err, "update", "LocalInvariant", -30779, "invalid pruned tree profile replacement", nil)
+			prunedTreeRefusal(t, out, "legality before refused literal")
+			if sc.s.state != storeOPEN {
+				t.Fatal("illegal replacement consumed reusable Store")
+			}
+		} else {
+			engine := requireEnvironmentError(t, out.Err, "Integrity", "get", -30793, "pruned tree profile promises disagree with tip")
+			if engine.Cause != nil || !engine.ReopenRequired {
+				t.Fatal("promise error cause/reopen", engine)
+			}
+			if out.Truth != 1 || out.Stage != 1 || out.Authority != nil || sc.s.state != storeCLOSED {
+				t.Fatal("promise before refused literal", out, sc.s.state)
+			}
+		}
+	}
+}
 
 type prunedTreeScene struct {
 	s     *Store
@@ -215,13 +331,15 @@ func TestPrunedTreeProfileConsultedList(t *testing.T) {
 		mustEnvironment(t, err)
 		want := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: dbis[0], Key: []byte{0x02}, BeforePresent: true, AfterKind: AfterLiteral, Literal: encoded}}, Consulted: consulted}}
 		mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(account *OperationAccount) error {
-			return sc.s.View(func(r *Reader) error {
-				var run prunedTreeRun
-				op, err := prunedTreePlan(account, true, row.tip, &run, errors.New("stale"))(r)
-				if err != nil || run.decision != "" || !reflect.DeepEqual(op, want) {
-					t.Fatalf("D13 %s operation %+v (%v %q), want %+v", row.name, op, err, run.decision, want)
-				}
-				return nil
+			return account.withHold(func(input *operationHold) error {
+				return sc.s.View(func(r *Reader) error {
+					var run prunedTreeRun
+					op, err := prunedTreePlan(account, input, true, row.tip, &run, errors.New("stale"))(r)
+					if err != nil || run.decision != "" || !reflect.DeepEqual(op, want) {
+						t.Fatalf("D13 %s operation %+v (%v %q), want %+v", row.name, op, err, run.decision, want)
+					}
+					return nil
+				})
 			})
 		}))
 	}

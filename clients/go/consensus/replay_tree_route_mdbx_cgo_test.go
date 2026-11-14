@@ -184,7 +184,7 @@ func TestReplayTreeReaderRefusal(t *testing.T) {
 func TestReplayTreeOperation(t *testing.T) {
 	b := replayRecoveryAuthorityBatch([]byte{1}, []mdbx.ConsultedRow{{DBI: mdbx.TreeSchemaV1DBIs()[0], Key: []byte{3}}})
 	op, err := replayTreeOperation(b)
-	logicalMDBXAssert(t, err == nil && op.Primitives == nil && op.Proof == nil && op.HeaderSlot == nil && op.Pair.EntryInventory == nil &&
+	logicalMDBXAssert(t, err == nil && op.Primitives == nil && op.Proof == nil && op.HeaderSlot == nil && op.Pair.EntryInventory == nil && op.Pair.PrepaidReadBytes == 0 &&
 		&op.Pair.Mutations[0] == &b.Mutations[0] && &op.Pair.Consulted[0] == &b.Consulted[0] && len(op.Pair.Mutations) == 1 && len(op.Pair.Consulted) == 1, "K: %+v %v", op, err)
 	for label, edit := range map[string]func(b *mdbx.Batch){
 		"Reverse":           func(b *mdbx.Batch) { b.Reverse = true },
@@ -579,6 +579,7 @@ func TestReplayTreeEntry(t *testing.T) {
 // X2, M10: with competing charges leaving exactly LANE_MAX of an owner at MinReservationLimit, the entry plan commits:
 // OWN plus its step-5 charge fit the account ceiling and the aggregate (OWN = LANE_MAX - P_PAIR, compile-checked).
 func TestReplayTreeEntryAccountFit(t *testing.T) {
+	logicalMDBXAssert(t, replayTreeOwnBytes == 153558511 && replayTreePairBytes == 1052672 && replayInvLimit148(153558511) == 80438871, "OWN/P_PAIR/inventory source proof")
 	logicalMDBXAssert(t, replayTreeOwnBytes+replayTreePairBytes == mdbx.LaneMaxBytes && replayTreeOwnBytes <= mdbx.MaxOperationDataBytes && replayTreeOwnBytes >= replayRecoveryMin148Bytes, "OWN %d", replayTreeOwnBytes)
 	w, _, view := rtEntryWorld(t, nil)
 	var out ReplayEntryOutcomeV1

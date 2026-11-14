@@ -177,7 +177,7 @@ func TestPrunedTreeProfileExactEmpty(t *testing.T) {
 	}
 }
 
-func TestPrunedTreeProfileControl(t *testing.T) {
+func prunedTreeReadControlsV1(t *testing.T) {
 	recovery := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleRecoveryRequiredV1, 0)
 	pending := StorageProfilePrunedV1
 	recovery.Authority.PendingTargetProfile = &pending
@@ -308,7 +308,8 @@ func TestPrunedTreeProfileTipInput(t *testing.T) {
 	prunedTreeDecision(t, s.SelectPrunedTreeProfileV1(true, &AuthorityPointV1{BlockHash: modelHash(1)}, o), "STALE_LOCAL_PLAN", "R4 reusable")
 }
 
-func TestPrunedTreeProfileCapacity(t *testing.T) {
+func TestPrunedTreeProfileReadFundingV1(t *testing.T) {
+	t.Run("control-before-input", prunedTreeReadControlsV1)
 	// The absent-tip-row case separates a charge placed after the first index read.
 	for _, tip := range []*AuthorityPointV1{nil, {BlockHash: modelHash(1)}} {
 		s, path, o := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0))
@@ -326,19 +327,48 @@ func TestPrunedTreeProfileCapacity(t *testing.T) {
 		}
 		prunedTreeLatched(t, s, path, out, image, "missing pruned tree profile root binding", o)
 	}
-	// D6 amount: 999 remaining owner bytes refuse the 1000-byte charge and 1000 admit it.
+	// Evidence1000 precedes input250; each independent admission refuses before reads.
 	// The absent tip row returns before the engine's own hold for the Pair copies.
-	for _, remaining := range []uint64{999, 1000} {
+	for _, remaining := range []uint64{999, 1000, 1249, 1250} {
 		s, _, _ := prunedTreeSeed(t, prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0))
 		out := s.SelectPrunedTreeProfileV1(true, &AuthorityPointV1{BlockHash: modelHash(1)}, reservationFilled(t, remaining))
-		if remaining == 999 {
+		if remaining < 1250 {
 			if !IsOperationReservationCapacity(out.Err) {
 				t.Fatalf("R5 charge amount at 999: %+v", out)
 			}
 			prunedTreeRefusal(t, out, "R5 charge amount at 999")
 			continue
 		}
-		prunedTreeDecision(t, out, "STALE_LOCAL_PLAN", "R5 charge amount at 1000")
+		prunedTreeDecision(t, out, "STALE_LOCAL_PLAN", "R5 charge amount at 1250")
+	}
+	// Literal input is admitted after a valid binding, promise, legality and size.
+	a := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0)
+	s, _, o := prunedTreeSeed(t, a)
+	root := prunedTreeBindingBytes(t, nil)
+	r := tsRun(t, s, o, LaneOperation, TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: prunedTreeLagKey(), AfterKind: 2, Literal: root}}}})
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	before := prunedTreeBytes(t, s)
+	out := s.SelectPrunedTreeProfileV1(true, nil, reservationFilled(t, uint64(1250+len(before)-1)))
+	if !treeSameErrorV1(out.Err, errOperationReservationCapacity) {
+		t.Fatal("literal input grow before Encode", out)
+	}
+	prunedTreeRefusal(t, out, "literal input before Encode")
+	prunedTreeOpenUnchanged(t, s, before, "literal input before Encode")
+	// A larger legal OLD makes ordinary H the reached refusal after input and PC.
+	a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 9, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: bytes.Repeat([]byte{1}, 2048)}
+	s, path, o := prunedTreeSeed(t, a)
+	r = tsRun(t, s, o, LaneOperation, TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: prunedTreeLagKey(), AfterKind: 2, Literal: root}}}})
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	before = prunedTreeBytes(t, s)
+	out = s.SelectPrunedTreeProfileV1(true, nil, reservationFilled(t, uint64(436+4*len(before)-1)))
+	if !treeSameErrorV1(out.Err, errOperationReservationCapacity) || out.Truth != 1 || out.Stage != 1 || out.Authority != nil || out.Decision != "" || s.state != storeCLOSED {
+		t.Fatal("engine H refusal consumes after successful input/PC", out, s.state)
+	}
+	s = tsReopen(t, s, path)
+	if !bytes.Equal(prunedTreeBytes(t, s), before) {
+		t.Fatal("engine H refusal durable OLD")
 	}
 }
 
@@ -426,7 +456,8 @@ func TestPrunedTreeProfileChargeSpan(t *testing.T) {
 		"prunedTreeTip":         {"prunedTreeOperation"},
 		"prunedTreeBodyLimit":   {"prunedTreeOperation"},
 		"prunedTreeReplacement": {"prunedTreeOperation"},
-		"Encode":                {"prunedTreeReplacement"},
+		"prunedTreeEncode":      {"prunedTreeReplacement"},
+		"Encode":                {"prunedTreeEncode"},
 		"prunedTreeTipRow":      {"prunedTreeTip"},
 		"Get":                   {"prunedTreeTipRow"},
 		"PrefixPage":            {"prunedTreeTip"},

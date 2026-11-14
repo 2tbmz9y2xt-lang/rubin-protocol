@@ -1046,6 +1046,61 @@ func TestTreeStreamBorrowedPlanV1(t *testing.T) {
 	}
 }
 
+// Scalar admission is after Pair grammar/caps and before ENTRY/Proof/HeaderSlot.
+func TestTreePairReadCompatibilityV1(t *testing.T) {
+	for _, kind := range []OperationKind{LaneOperation, TreeOperation} {
+		ceiling := uint64(154611183)
+		if kind == TreeOperation {
+			ceiling = 402653184
+		}
+		for _, credit := range []uint64{0, 1, 17, 64, ceiling} {
+			op := tsPair(61)
+			op.Pair.PrepaidReadBytes = credit
+			mustEnvironment(t, reservationOwner(t, 805306368).WithOperation(kind, func(a *OperationAccount) error {
+				return treeAdmitV1(op, a, [32]byte{7})
+			}))
+			owned := treeOwnPlanV1(op)
+			op.Pair.PrepaidReadBytes = 0
+			op.Pair.Mutations[0].Key[8] ^= 1
+			if owned.prepaidReadBytes != credit || bytes.Equal(owned.pair[0].key, op.Pair.Mutations[0].Key) {
+				t.Fatal("owned scalar/Pair freeze")
+			}
+		}
+		for _, credit := range []uint64{ceiling + 1, 18446744073709551615} {
+			s, _, o := tsNew(t)
+			op := tsPair(62)
+			op.Pair.PrepaidReadBytes = credit
+			tsRefusal(t, tsRun(t, s, o, kind, op), false)
+			if s.state != storeOPEN {
+				t.Fatal("otherwise-valid scalar refusal consumed Store")
+			}
+			op.Pair.EntryInventory = &EntryInventoryV1{}
+			tsRefusal(t, tsRun(t, s, o, kind, op), false)
+			if s.state != storeOPEN {
+				t.Fatal("scalar admission consumed Store")
+			}
+			tsFollowing(t, s, o)
+			op.Pair.Mutations = tsMany(16385)
+			tsRefusal(t, tsRun(t, s, o, kind, op), true)
+			op.Pair.EntryInventory = nil
+			op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: []byte{2}, AfterKind: 99}}
+			tsRefusal(t, tsRun(t, s, o, kind, op), false)
+		}
+	}
+	s, _, o := tsNew(t)
+	calls := 0
+	op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return nil }))
+	op.Pair.PrepaidReadBytes = 1
+	tsRefusal(t, tsRun(t, s, o, TreeOperation, op), false)
+	if calls != 0 || s.state != storeOPEN {
+		t.Fatal("nonzero credit reached primitive source")
+	}
+	tsFollowing(t, s, o)
+	if unsafe.Sizeof(TreePairV1{}) != 72 || unsafe.Sizeof(TreeOperationV1{}) != 112 || unsafe.Sizeof(treePlanV1{}) != 152 || unsafe.Sizeof(treeSectionV1{}) != 168 || unsafe.Sizeof(treePairReadBudgetV1{}) != 32 {
+		t.Fatal("ordinary/ENTRY carrier qualification")
+	}
+}
+
 func TestTreeStreamPrimitiveCountDomainV1(t *testing.T) {
 	s, _, o := tsNew(t)
 	tsRoots(t, s, o, 1)
@@ -1121,14 +1176,16 @@ func TestTreeStreamPairOwnershipAndAccountingV1(t *testing.T) {
 			s, path, o := tsNew(t)
 			op := tsPair(10)
 			m := op.Pair.Mutations[0]
-			// Exactly PC logical bytes remain. Any engine draw on a pair-only plan
-			// would refuse; one fewer PC byte must refuse before native write.
+			// The caller's filler includes original input and the declared read
+			// credit; exactly PC remains for the independently owned engine copy.
 			ceiling := uint64(154_611_183)
 			if kind == TreeOperation {
 				ceiling = 402_653_184
 			}
 			for _, after := range []AfterKind{2, 1} {
+				op.Pair.PrepaidReadBytes = 104
 				if after == 1 {
+					op.Pair.PrepaidReadBytes = 208
 					m.AfterKind, m.BeforePresent, m.Literal = 1, true, nil
 					op.Pair.Mutations[0] = m
 				}
@@ -1215,6 +1272,97 @@ func TestTreeStreamPairOwnershipAndAccountingV1(t *testing.T) {
 		tsRead(t, s, originalTarget.DBI, key, value)
 		tsRead(t, s, body.DBI, bodyKey, bodyValue)
 	})
+}
+
+// The public entry owns account/R admission, durable truth and consuming cleanup.
+func TestTreePairReadAccountV1(t *testing.T) {
+	for _, kind := range []OperationKind{LaneOperation, TreeOperation} {
+		for _, c := range []uint64{0, 1, 17, 64} {
+			for _, aggregate := range []bool{false, true} {
+				for _, short := range []uint64{0, 1} {
+					t.Run(fmt.Sprintf("kind%d/C%d/R%v/short%d", kind, c, aggregate, short), func(t *testing.T) {
+						pairReadAccountCaseV1(t, kind, c, aggregate, short)
+					})
+				}
+			}
+		}
+	}
+}
+
+func pairReadAccountCaseV1(t *testing.T, kind OperationKind, credit uint64, aggregate bool, short uint64) {
+	t.Helper()
+	s, path, o := tsNew(t)
+	key := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}
+	old := bytes.Repeat([]byte{0x63}, 32)
+	requireUpdateTruth(t, runNativeUpdate(t, s, []ownedMutation{{dbi: TreeSchemaV1DBIs()[0], key: key, after: 2, literal: old}}), 2, true, nil, nil)
+	op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 1}}, PrepaidReadBytes: credit}}
+	// Independent source + PC =137 each; ordinary future OLD window=64.
+	ceiling := uint64(154611183)
+	if kind == TreeOperation {
+		ceiling = 402653184
+	}
+	if aggregate {
+		reservationFill(t, o, 805306368-338+short)
+	}
+	mustEnvironment(t, o.WithOperation(kind, func(a *OperationAccount) error {
+		return a.WithReservation(137+credit, func() error {
+			filler := ceiling - 338 + short
+			if aggregate {
+				filler = 0
+			}
+			return a.WithReservation(filler, func() error {
+				before := reservationLive(o)
+				r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil })
+				if short == 0 {
+					r.tuple(t, 2, 3, -1)
+					mustEnvironment(t, r.err)
+				} else if credit == 64 {
+					r.tuple(t, 1, 1, -1)
+					if !treeSameErrorV1(r.err, errOperationReservationCapacity) || s.state != storeOPEN {
+						t.Fatal("fully prepaid short PC admission/lifecycle", r, s.state)
+					}
+					mustEnvironment(t, s.View(func(*Reader) error { return nil }))
+				} else {
+					r.tuple(t, 1, 1, -1)
+					if !treeSameErrorV1(r.err, errOperationReservationCapacity) || s.state != storeCLOSED {
+						t.Fatal("ordinary read one-byte-short tuple/lifecycle", r, s.state)
+					}
+					original := r.err
+					if !treeSameErrorV1(s.terminal, original) {
+						t.Fatal("capacity terminal identity", s.terminal)
+					}
+					next := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
+						t.Fatal("closed callback")
+						return op, nil
+					})
+					next.tuple(t, 1, 1, -1)
+					if !treeSameErrorV1(next.err, original) {
+						t.Fatal("closed operation retains original terminal identity", next.err)
+					}
+				}
+				if reservationLive(o) != before {
+					t.Fatal("caller held bytes preserved/engine remainder zero")
+				}
+				return nil
+			})
+		})
+	}))
+	s = tsReopen(t, s, path)
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		image, err := updateNativeImage(r.txn, s.dbis[0], key)
+		if err != nil || image.present != (short == 1) {
+			t.Fatal("durable OLD/NEW", err, image.present)
+		}
+		if short == 1 {
+			expected, err := updateOwnedImage(old)
+			mustEnvironment(t, err)
+			equal, err := updateNativeEqual(r.txn, s.dbis[0], key, expected)
+			if err != nil || !equal {
+				t.Fatal("durable OLD bytes", err)
+			}
+		}
+		return nil
+	}))
 }
 
 func TestTreeStreamCapacityAndClosingV1(t *testing.T) {
@@ -3019,10 +3167,10 @@ func TestCtxTreeAccountBoundaryV1(t *testing.T) {
 		t.Fatalf("PC+343 = %v, want capacity", r.err)
 	}
 	ctxTreeOpen(t, s)
-	r = ctxTreeFree(t, s, pc+344, ctxTreeOp(11, window))
+	r = ctxTreeFree(t, s, pc+344+104, ctxTreeOp(11, window))
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
-	r = ctxTreeFree(t, s, pc, ctxTreeOp(12, nil))
+	r = ctxTreeFree(t, s, pc+104, ctxTreeOp(12, nil))
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
 	r = ctxTreeFree(t, s, pc-1, ctxTreeOp(13, nil))
