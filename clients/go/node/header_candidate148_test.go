@@ -85,7 +85,17 @@ func hcPublish(t testing.TB, o *HeaderCandidateOwner148V1, tr HeaderCandidateTra
 		}
 		return HeaderCandidatePublication148V1{}, out
 	}
-	return h.PublishV1()
+	// Bounded: a guard left counted by a faulty release fails here instead of hanging the test goroutine.
+	var pub HeaderCandidatePublication148V1
+	done := make(chan struct{})
+	go func() { pub, out = h.PublishV1(); close(done) }()
+	select {
+	case <-done:
+		return pub, out
+	case <-time.After(5 * time.Second):
+		t.Fatal("PublishV1 did not return")
+		return HeaderCandidatePublication148V1{}, HeaderCandidateClosed148V1
+	}
 }
 
 // hcReads renders VersionV1 and, for each record, every LookupV1 field and the Header148V1 result, so a V3 trigger can
@@ -556,6 +566,22 @@ func TestHeaderCandidate148Limits(t *testing.T) {
 			if out != want {
 				t.Fatalf("%s short=%v: %d", c.name, short, out)
 			}
+		}
+	}
+	// V9 MaxRetainedBytes through PrepareV1, a Work one byte wider: the limit is the contract charge, 252 plus the
+	// minimal big-endian Work length, for R0 (work 100, one byte), R1 (110, one byte) and a sibling of R1 whose Work
+	// 65536 = 0x010000 is three bytes. The same sibling with Work 1<<24 = 0x01000000 is four bytes and one byte over.
+	for _, wide := range []bool{false, true} {
+		l := hcLim()
+		l.MaxRetainedBytes = (252 + 1) + (252 + 1) + (252 + 3)
+		o, r0, r1 := hcBase(t, l)
+		hcLeaseOK(t, o, r1.Hash)
+		work, want := big.NewInt(65536), HeaderCandidateOK148V1
+		if wide {
+			work, want = big.NewInt(1<<24), HeaderCandidateCapacity148V1
+		}
+		if out := hcPrep(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMkW(t, r0.Hash, 11, work, 30)})); out != want {
+			t.Fatalf("work wide=%v: %d", wide, out)
 		}
 	}
 	ol := hcLim()
@@ -1323,8 +1349,46 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		if out := hcAcq(t, o, r1.Hash); out != HeaderCandidateUnknownSource148V1 {
 			t.Fatal("lease after latch")
 		}
-		if h.UnknownV1() != HeaderCandidateConsumed148V1 {
+		// The latched guard is still held: a second handle call must return Consumed without waiting for it.
+		var second HeaderCandidateOutcome148V1
+		hcWithin(t, "second unknown under a held guard", func() { second = h.UnknownV1() })
+		if second != HeaderCandidateConsumed148V1 {
 			t.Fatal("second unknown")
+		}
+	})
+	t.Run("unknown latch keeps planned removal", func(t *testing.T) {
+		// R0 is a lawful Retired (its parent is not received, R1 survives); N is a planned addition.
+		o, r0, r1 := hcBase(t, hcLim())
+		n := hcMk(t, r1.Hash, 12, 120, 9)
+		h := hcPrepOK(t, o, hcTr(o, []HeaderCandidateRecord148V1{n}, r0.Hash))
+		v := o.VersionV1()
+		before := hcInnerOf(o)
+		cur, rel := hcGuard(t, o, v)
+		t.Cleanup(func() { rel(); o.CloseV1() })
+		if !cur {
+			t.Fatal("guard not current")
+		}
+		done := make(chan HeaderCandidateOutcome148V1, 1)
+		go func() { done <- h.UnknownV1() }()
+		select {
+		case <-done:
+			t.Fatal("UnknownV1 returned while a guard was held")
+		case <-time.After(50 * time.Millisecond):
+		}
+		rel()
+		var got HeaderCandidateOutcome148V1
+		hcWithin(t, "unknown after release", func() { got = <-done })
+		if got != HeaderCandidateOK148V1 {
+			t.Fatalf("unknown: %d", got)
+		}
+		var dst [148]byte
+		if p := hcPresent(o, r0, r1, n); !p[0] || !p[1] || p[2] || !o.Header148V1(r0.Hash, &dst) || dst != r0.Raw {
+			t.Fatalf("latch applied the prepared transition: present %v", p)
+		}
+		// Only the latch and one version step differ; membership, charges, leases and the occupied slot are unchanged.
+		before.version, before.latched = v+1, true
+		if after := hcInnerOf(o); after != before || o.VersionV1() != v+1 {
+			t.Fatalf("latch state: %+v", after)
 		}
 	})
 	t.Run("unknown waits for guard on changed-false and at maximum version", func(t *testing.T) {
@@ -1409,7 +1473,9 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 				t.Fatalf("%s not woken", kind)
 			}
 			if h != nil {
-				if _, out := h.PublishV1(); out != HeaderCandidateConsumed148V1 {
+				var out HeaderCandidateOutcome148V1
+				hcWithin(t, "consumed publish under a held guard", func() { _, out = h.PublishV1() })
+				if out != HeaderCandidateConsumed148V1 {
 					t.Fatal("handle not consumed")
 				}
 			}

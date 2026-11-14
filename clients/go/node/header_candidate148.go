@@ -36,7 +36,9 @@ type HeaderCandidateLimits148V1 struct {
 }
 
 // HeaderCandidateRecord148V1 is one already-qualified publication. Provenance is an opaque nonzero producer tag.
-// External states that Parent is a durable active-canonical or accepted-target header; it is not record identity.
+// External is the producer's positive statement that Parent is a durable active-canonical or accepted-target header
+// under the transition's source; it is meaningful only when Parent is absent from the post-transition received set and
+// is not record identity (RUB-1550 api_contract HeaderCandidateRecord148V1).
 type HeaderCandidateRecord148V1 struct {
 	Raw        [148]byte
 	Hash       [32]byte
@@ -59,7 +61,8 @@ type HeaderCandidateTransition148V1 struct {
 
 // HeaderCandidateOutcome148V1 is the owner result. The numeric order is the contract's declaration order, not the
 // evaluation order: EstablishV1, PrepareV1 and AcquireDependencyV1 follow the first-refusal table, Missing and
-// AlreadyEstablished are evaluated where that table places them, and Consumed precedes Closed on a handle call.
+// AlreadyEstablished are evaluated where that table places them, and Consumed precedes Closed on a handle call. Every
+// non-OK outcome is a local refusal and establishes no candidate invalidity (RUB-1550 api_contract).
 type HeaderCandidateOutcome148V1 uint8
 
 // Owner outcomes.
@@ -221,7 +224,9 @@ func (o *HeaderCandidateOwner148V1) Header148V1(hash [32]byte, dst *[148]byte) b
 	return true
 }
 
-// LookupV1 returns an independent copy of the admitted record, with the External stored at first admission.
+// LookupV1 returns an independent copy of the admitted record, Work included, with the External stored at first
+// admission. It is callable while a guard is held, with the Header148V1 locking rule. On an absent hash or after
+// CloseV1 it returns the zero record (Work nil) and false (RUB-1550 api_contract LookupV1).
 func (o *HeaderCandidateOwner148V1) LookupV1(hash [32]byte) (HeaderCandidateRecord148V1, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -277,7 +282,7 @@ func (o *HeaderCandidateOwner148V1) EstablishV1(source [32]byte, records []Heade
 	if out := o.waitGuards(); out != HeaderCandidateOK148V1 {
 		return HeaderCandidatePublication148V1{}, out
 	}
-	// Rows 1-3 again: the owner may have been closed, latched or established while this call waited.
+	// Rows 1-3 again: the owner may have been latched or established while this call waited.
 	if out := o.gate(false); out != HeaderCandidateOK148V1 {
 		return HeaderCandidatePublication148V1{}, out
 	}
