@@ -791,9 +791,22 @@ func TestHeaderCandidate148WorkingSets(t *testing.T) {
 	if out != HeaderCandidateOK148V1 || rec.Changed || o.VersionV1() != v {
 		t.Fatalf("D9 identical: %d %+v", out, rec)
 	}
-	if got, _ := o.LookupV1(h.Hash); got.External {
-		t.Fatal("External recomputed")
+	// D9: External is neither consulted nor stored on a same-hash addition, for a duplicate and a provenance update.
+	hExt := hcExt(h)
+	if rec, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{hExt})); out != HeaderCandidateOK148V1 || rec.Changed {
+		t.Fatalf("D9 External-only duplicate: %d %+v", out, rec)
 	}
+	if got, _ := o.LookupV1(h.Hash); got.External {
+		t.Fatal("duplicate stored External")
+	}
+	hExt.Provenance = hcProvB
+	if rec, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{hExt})); out != HeaderCandidateOK148V1 || !rec.Changed {
+		t.Fatalf("D9 provenance update: %d %+v", out, rec)
+	}
+	if got, _ := o.LookupV1(h.Hash); got.External || got.Provenance != hcProvB {
+		t.Fatalf("provenance update stored External=%v provenance=%v", got.External, got.Provenance == hcProvB)
+	}
+	v = o.VersionV1()
 	k := hcMk(t, h.Hash, 11, 11, 5)
 	rec, out = hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{h, k}))
 	if out != HeaderCandidateOK148V1 || !rec.Changed || rec.Version != v+1 {
