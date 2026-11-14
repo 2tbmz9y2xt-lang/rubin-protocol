@@ -167,32 +167,49 @@ func TestInitial148CompleteBlockBodyTariffLiteral(t *testing.T) {
 		{1000, 0, 23599917}, {42133, 0, 155525269},
 	}
 	for _, row := range rows {
-		got, ok := initial148CompleteBodyTariffV1(row[0], row[1])
-		logicalMDBXAssert(t, ok && got == row[2], "body n=%d m=%d W=%d/%v want=%d", row[0], row[1], got, ok, row[2])
+		t.Run(fmt.Sprintf("n_%d_m_%d", row[0], row[1]), func(t *testing.T) {
+			got, ok := initial148CompleteBodyTariffV1(row[0], row[1])
+			logicalMDBXAssert(t, ok && got == row[2], "body n=%d m=%d W=%d/%v want=%d", row[0], row[1], got, ok, row[2])
+		})
 	}
 }
 
 func TestInitial148CompleteBlockMinimumWitness(t *testing.T) {
 	for _, base := range []struct {
+		name   string
 		params SuiteParams
 		want   uint64
-	}{{SuiteParams{SuiteID: 1, PubkeyLen: 2592, SigLen: 4627}, 7227}, {SuiteParams{SuiteID: 2, PubkeyLen: 11, SigLen: 21}, 36}} {
-		for _, extra := range []SuiteParams{{SuiteID: 3, PubkeyLen: -1}, {SuiteID: 3, SigLen: -1}, {SuiteID: 3, PubkeyLen: -1, SigLen: -1}} {
-			registry := NewSuiteRegistryFromParams([]SuiteParams{base.params, extra})
-			got, ok := initial148MinimumWitnessV1(registry)
-			logicalMDBXAssert(t, ok && got == base.want, "minimum %+v extra=%+v: %d/%v", base.params, extra, got, ok)
-		}
+	}{{"default", SuiteParams{SuiteID: 1, PubkeyLen: 2592, SigLen: 4627}, 7227}, {"test", SuiteParams{SuiteID: 2, PubkeyLen: 11, SigLen: 21}, 36}} {
+		t.Run(base.name, func(t *testing.T) {
+			for _, extra := range []struct {
+				name   string
+				params SuiteParams
+			}{
+				{"negativePubkey", SuiteParams{SuiteID: 3, PubkeyLen: -1}},
+				{"negativeSig", SuiteParams{SuiteID: 3, SigLen: -1}},
+				{"bothnegative", SuiteParams{SuiteID: 3, PubkeyLen: -1, SigLen: -1}},
+			} {
+				t.Run(extra.name, func(t *testing.T) {
+					registry := NewSuiteRegistryFromParams([]SuiteParams{base.params, extra.params})
+					got, ok := initial148MinimumWitnessV1(registry)
+					logicalMDBXAssert(t, ok && got == base.want, "minimum %+v extra=%+v: %d/%v", base.params, extra.params, got, ok)
+				})
+			}
+		})
 	}
 	for _, row := range []struct {
+		name     string
 		registry *SuiteRegistry
 		want     uint64
 	}{
-		{DefaultSuiteRegistry(), 7227}, {icbRegistryV1(), 36},
-		{NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: 3}}), 4},
-		{NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: 1, PubkeyLen: 2592, SigLen: 4627}, {SuiteID: 3}}), 4},
+		{"eligible/default", DefaultSuiteRegistry(), 7227}, {"eligible/test", icbRegistryV1(), 36},
+		{"eligible/zero", NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: 3}}), 4},
+		{"eligible/mixedZero", NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: 1, PubkeyLen: 2592, SigLen: 4627}, {SuiteID: 3}}), 4},
 	} {
-		got, ok := initial148MinimumWitnessV1(row.registry)
-		logicalMDBXAssert(t, ok && got == row.want, "eligible minimum=%d/%v want=%d", got, ok, row.want)
+		t.Run(row.name, func(t *testing.T) {
+			got, ok := initial148MinimumWitnessV1(row.registry)
+			logicalMDBXAssert(t, ok && got == row.want, "eligible minimum=%d/%v want=%d", got, ok, row.want)
+		})
 	}
 	maximum := int(^uint(0) >> 1)
 	_, ok := initial148MinimumWitnessV1(NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: 3, PubkeyLen: maximum, SigLen: maximum}}))
@@ -200,11 +217,19 @@ func TestInitial148CompleteBlockMinimumWitness(t *testing.T) {
 }
 
 func TestInitial148CompleteBlockMinimumWitnessIneligible(t *testing.T) {
-	for _, params := range [][]SuiteParams{nil, {{SuiteID: 3, PubkeyLen: -1}}, {{SuiteID: 3, SigLen: -1}}, {{SuiteID: 3, PubkeyLen: -1, SigLen: -1}}} {
-		got, ok := initial148MinimumWitnessV1(NewSuiteRegistryFromParams(params))
-		logicalMDBXAssert(t, ok && got == 0, "ineligible %+v minimum=%d/%v", params, got, ok)
-		w, funded := initial148CompleteBodyTariffV1(42133, got)
-		logicalMDBXAssert(t, funded && w == 155525269, "ineligible queue charge=%d/%v", w, funded)
+	for _, row := range []struct {
+		name   string
+		params []SuiteParams
+	}{
+		{"empty", nil}, {"negativePubkey", []SuiteParams{{SuiteID: 3, PubkeyLen: -1}}},
+		{"negativeSig", []SuiteParams{{SuiteID: 3, SigLen: -1}}}, {"bothnegative", []SuiteParams{{SuiteID: 3, PubkeyLen: -1, SigLen: -1}}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			got, ok := initial148MinimumWitnessV1(NewSuiteRegistryFromParams(row.params))
+			logicalMDBXAssert(t, ok && got == 0, "ineligible %+v minimum=%d/%v", row.params, got, ok)
+			w, funded := initial148CompleteBodyTariffV1(42133, got)
+			logicalMDBXAssert(t, funded && w == 155525269, "ineligible queue charge=%d/%v", w, funded)
+		})
 	}
 }
 
@@ -2418,8 +2443,8 @@ func icbRunGrowthOrderV1(t *testing.T, in initial148CompleteBlockInputV1, tc icb
 }
 
 // TestInitial148CompleteBlockCandidateGrowthOrder is candidate-boundary
-// ordering and disposal evidence for the valid funded census. It is not a
-// public-wrapper result: that wrapper's resource ceiling cannot admit this body.
+// ordering and disposal evidence with a supplied view and derive callback.
+// Its local context does not establish public admission or source bindings.
 func TestInitial148CompleteBlockCandidateGrowthOrder(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	rows := logicalGrowthParents(p2pkCovenantDataForPubkey(kp.PubkeyBytes()))
