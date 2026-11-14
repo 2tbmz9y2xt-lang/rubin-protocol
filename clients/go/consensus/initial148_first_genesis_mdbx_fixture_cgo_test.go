@@ -542,7 +542,7 @@ func TestInitial148FirstGenesisReservationBoundaries(t *testing.T) {
 		residual uint64
 		begins   uint64
 		mutate   string
-	}{{"B-one-short", 158365813, 0, ""}, {"B-exact", 158365814, 1, ""}, {"E-one-short", 159053970, 1, ""}, {"D-one-short", 159342482, 1, ""}, {"identity-before-B", 158365813, 0, "identity"}, {"zero-context-before-B", 158365813, 0, "context"}} {
+	}{{"B-one-short", 158365813, 0, ""}, {"B-exact", 158365814, 1, ""}, {"E-one-short", 158922730, 1, ""}, {"D-one-short", 159211242, 1, ""}, {"identity-before-B", 158365813, 0, "identity"}, {"zero-context-before-B", 158365813, 0, "context"}} {
 		t.Run(row.name, func(t *testing.T) {
 			w := fgNew(t, [32]byte{7}, 1, 2)
 			before := w.image(t)
@@ -787,7 +787,7 @@ func TestInitial148FirstGenesisFullValidationAndRelease(t *testing.T) {
 			input, published := bytes.Clone(w.raw), bytes.Clone(w.genesis.Published)
 			var out Initial148FirstGenesisOutcomeV1
 			if name == "coinbase-before-E" {
-				fgHeld(t, w.owner, 805306368-159053970, func() { out = w.call() })
+				fgHeld(t, w.owner, 805306368-158922730, func() { out = w.call() })
 			} else {
 				out = w.call()
 			}

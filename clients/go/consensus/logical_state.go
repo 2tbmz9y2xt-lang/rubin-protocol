@@ -71,6 +71,17 @@ type logicalStateView interface {
 	Lookup(Outpoint) logicalStateRowRead
 }
 
+type logicalStateRecordView interface {
+	logicalStateView
+	recordedV1(Outpoint) (length uint32, present, ok bool)
+}
+
+type logicalStatePlanRow struct {
+	entry             UtxoEntry
+	entryBytes        uint64
+	present, recorded bool
+}
+
 type logicalTouchedState struct {
 	Outpoint     Outpoint
 	FinalPresent bool
@@ -153,6 +164,7 @@ func logicalStateEntryBytes(op Outpoint, entry UtxoEntry) []byte {
 	return append(b, 0)
 }
 
+// buildLogicalStatePlan derives sorted effects from checked parent facts and final entries.
 func buildLogicalStatePlan[M any](height uint64, view logicalStateView, touched []logicalTouchedState, metadata M) (logicalStatePlan[M], *logicalStateFailure) {
 	parent, failure := readLogicalStateCounters(height, view)
 	if failure != nil {
@@ -164,11 +176,11 @@ func buildLogicalStatePlan[M any](height uint64, view logicalStateView, touched 
 	}
 	work := logicalStatePlanWork{parent: parent, result: parent}
 	for _, touch := range ordered {
-		entry, present, readFailure := readLogicalStateRow(height, view, touch.Outpoint)
+		row, readFailure := readLogicalStatePlanRow(height, view, touch.Outpoint)
 		if readFailure != nil {
 			return logicalStatePlan[M]{}, readFailure
 		}
-		failure = work.apply(touch, entry, present)
+		failure = work.apply(touch, row)
 		if failure != nil {
 			return logicalStatePlan[M]{}, failure
 		}
@@ -258,26 +270,31 @@ type logicalStatePlanWork struct {
 	putBytes uint64
 }
 
-func (w *logicalStatePlanWork) apply(touch logicalTouchedState, old UtxoEntry, oldPresent bool) *logicalStateFailure {
-	entryBytes := logicalStateEntryLength(old)
-	if failure := logicalStateParentFailure(w, entryBytes, oldPresent); failure != nil {
+// readLogicalStatePlanRow reuses recorded lengths without requesting row values.
+func readLogicalStatePlanRow(height uint64, view logicalStateView, op Outpoint) (logicalStatePlanRow, *logicalStateFailure) {
+	if records, ok := view.(logicalStateRecordView); ok && height != 0 {
+		if length, present, found := records.recordedV1(op); found {
+			return logicalStatePlanRow{entryBytes: uint64(length), present: present, recorded: true}, nil
+		}
+	}
+	entry, present, failure := readLogicalStateRow(height, view, op)
+	return logicalStatePlanRow{entry: entry, entryBytes: logicalStateEntryLength(entry), present: present}, failure
+}
+
+// apply validates parent and final state before emitting a row's accounting effects.
+func (w *logicalStatePlanWork) apply(touch logicalTouchedState, old logicalStatePlanRow) *logicalStateFailure {
+	entryBytes := old.entryBytes
+	if failure := logicalStateParentFailure(w, entryBytes, old.present); failure != nil {
 		return failure
 	}
 	if failure := logicalStateFinalFailure(touch); failure != nil {
 		return failure
 	}
-	if oldPresent {
-		if entryBytes > uint64(^uint32(0)) {
-			return localLogicalStateFailure("logical state DELETE length exceeds uint32")
+	if old.present {
+		unchanged, failure := w.remove(touch, old)
+		if unchanged || failure != nil {
+			return failure
 		}
-		w.oldCount++
-		w.oldBytes += entryBytes
-		if logicalStateEntriesEqual(old, touch.Final, touch.FinalPresent) {
-			return nil
-		}
-		w.result.entries--
-		w.result.bytes -= entryBytes
-		w.deletes = append(w.deletes, logicalStateDelete{Outpoint: touch.Outpoint, EntryBytes: uint32(entryBytes)})
 	}
 	if touch.FinalPresent {
 		entryBytes := logicalStateEntryLength(touch.Final)
@@ -290,6 +307,25 @@ func (w *logicalStatePlanWork) apply(touch logicalTouchedState, old UtxoEntry, o
 		w.puts = append(w.puts, logicalStatePut{Outpoint: touch.Outpoint, Entry: cloneUtxoEntry(touch.Final)})
 	}
 	return nil
+}
+
+// remove accounts for a checked parent row and emits its deletion when needed.
+func (w *logicalStatePlanWork) remove(touch logicalTouchedState, old logicalStatePlanRow) (bool, *logicalStateFailure) {
+	if old.entryBytes > uint64(^uint32(0)) {
+		return false, localLogicalStateFailure("logical state DELETE length exceeds uint32")
+	}
+	if old.recorded && touch.FinalPresent {
+		return false, localLogicalStateFailure("recorded parent row cannot be compared with its final entry")
+	}
+	w.oldCount++
+	w.oldBytes += old.entryBytes
+	if logicalStateEntriesEqual(old.entry, touch.Final, touch.FinalPresent) {
+		return true, nil
+	}
+	w.result.entries--
+	w.result.bytes -= old.entryBytes
+	w.deletes = append(w.deletes, logicalStateDelete{Outpoint: touch.Outpoint, EntryBytes: uint32(old.entryBytes)})
+	return false, nil
 }
 
 type logicalStateCapResult[M any] struct {

@@ -3,7 +3,6 @@
 package consensus
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"math"
@@ -25,21 +24,14 @@ type initial148RootReadOutcomeV1 struct {
 	derived, hasObservation bool
 }
 
-type initial148RequiredFactV1 struct {
-	outpoint Outpoint
-	original []byte
-	length   uint64
-	present  bool
-}
-
 // Fixed slices contain only actually obtained point facts. No completeness or
 // full-map predicate can be established through this view.
 type initial148RequiredScopeV1 struct {
 	reader         *mdbx.Reader
 	account        *mdbx.OperationAccount
 	request        initial148RequiredRequestV1
-	facts          []initial148RequiredFactV1
-	inputs         []mdbx.TreeOutpointV1
+	keys           []mdbx.TreeOutpointV1
+	lengths        []uint32
 	counters       logicalStateCounters
 	first          error
 	calls          uint64
@@ -47,6 +39,7 @@ type initial148RequiredScopeV1 struct {
 	haveCounters   bool
 }
 
+// withInitial148RequiredStateV1 reserves records and transient row decoding for one callback.
 func withInitial148RequiredStateV1(reader *mdbx.Reader, account *mdbx.OperationAccount, request initial148RequiredRequestV1, use func(logicalStateView, func() initial148RootReadOutcomeV1) error) error {
 	if reader == nil || account == nil || use == nil || !initial148RequiredShapeV1(request) {
 		return localLogicalStateFailure("invalid required state request")
@@ -55,14 +48,14 @@ func withInitial148RequiredStateV1(reader *mdbx.Reader, account *mdbx.OperationA
 		return err
 	}
 	events := uint64(request.Source.coverage.BlockMeta.EventCount)
-	if events > (math.MaxUint64-69656)/196824 || events > uint64(math.MaxInt)/128 {
+	if events > (math.MaxUint64-135192)/48 || events > uint64(math.MaxInt)/36 {
 		return localLogicalStateFailure("required state bound exceeds integer domain")
 	}
 	capacity := int(events)
-	return account.WithReservation(69656+196824*events, func() error {
+	return account.WithReservation(135192+48*events, func() error {
 		scope := initial148RequiredScopeV1{
 			reader: reader, account: account, request: request, active: true,
-			facts: make([]initial148RequiredFactV1, 0, capacity), inputs: make([]mdbx.TreeOutpointV1, 0, capacity),
+			keys: make([]mdbx.TreeOutpointV1, 0, capacity), lengths: make([]uint32, 0, capacity),
 		}
 		defer scope.expireV1()
 		err := use(&scope, scope.deriveV1)
@@ -127,9 +120,10 @@ func initial148RequiredParentV1(height uint64, parent mdbx.TreeEndpointV1) bool 
 	return parent.Kind == mdbx.TreeEndpointAppliedV1 && parent.Height == height-1
 }
 
+// expireV1 releases both record slices and their borrowed Reader/account bindings.
 func (s *initial148RequiredScopeV1) expireV1() {
 	s.active, s.sealed = false, true
-	s.facts, s.inputs = nil, nil
+	s.keys, s.lengths = nil, nil
 	s.reader, s.account = nil, nil
 	s.request = initial148RequiredRequestV1{}
 }
@@ -167,15 +161,22 @@ func initial148RequiredFailureKindV1(err error) logicalStateFailureKind {
 	return kind
 }
 
+// Lookup counts every request and consumes an obtained record before any row read.
 func (s *initial148RequiredScopeV1) Lookup(op Outpoint) logicalStateRowRead {
 	if err := s.availableV1(); err != nil {
 		_, rowKind := logicalMDBXReadKinds(initial148RequiredFailureKindV1(err))
 		return logicalStateRowRead{kind: rowKind, cause: err}
 	}
-	if s.calls >= 2*uint64(cap(s.facts)) {
+	if s.calls >= 2*uint64(cap(s.keys)) {
 		return s.rowFailureV1(localLogicalStateFailure("required state point bound exceeded"))
 	}
 	s.calls++
+	if _, present, ok := s.recordedV1(op); ok {
+		if present {
+			return s.rowFailureV1(localLogicalStateFailure("required state record holds no value"))
+		}
+		return logicalStateRowRead{kind: logicalStateRowAbsent}
+	}
 	var value []byte
 	var present bool
 	if s.request.Primitive.Height != 0 {
@@ -207,23 +208,33 @@ func (s *initial148RequiredScopeV1) acceptRowV1(op Outpoint, value []byte, prese
 	return logicalStateRowRead{kind: logicalStateRowAbsent}
 }
 
+// rememberV1 retains only a decoded row's key and bounded StateEntryBytes length.
 func (s *initial148RequiredScopeV1) rememberV1(op Outpoint, value []byte, present bool) error {
-	for _, fact := range s.facts {
-		if fact.outpoint == op {
-			if fact.present != present || !bytes.Equal(fact.original, value) {
-				return initial148RequiredIntegrityV1("R original bytes differ")
-			}
-			return s.residualV1()
-		}
-	}
-	if len(s.facts) == cap(s.facts) {
+	if len(s.keys) == cap(s.keys) {
 		return localLogicalStateFailure("required state fact bound exceeded")
 	}
-	s.facts = append(s.facts, initial148RequiredFactV1{outpoint: op, original: value, length: 36 + uint64(len(value)), present: present})
+	var length uint32
 	if present {
-		s.inputs = append(s.inputs, mdbx.TreeOutpointV1{Txid: op.Txid, Vout: op.Vout})
+		// DecodeUTXOValue bounds value to 65,560 bytes, so StateEntryBytes is
+		// at most 65,596 bytes and the mask preserves its exact length.
+		length = uint32((36 + uint64(len(value))) & 0xffffffff)
 	}
+	s.keys = append(s.keys, mdbx.TreeOutpointV1{Txid: op.Txid, Vout: op.Vout})
+	s.lengths = append(s.lengths, length)
 	return s.residualV1()
+}
+
+// recordedV1 exposes obtained facts only while their key/length pairing is live.
+func (s *initial148RequiredScopeV1) recordedV1(op Outpoint) (uint32, bool, bool) {
+	if !s.active || s.sealed || s.first != nil {
+		return 0, false, false
+	}
+	for i, key := range s.keys {
+		if Outpoint(key) == op {
+			return s.lengths[i], s.lengths[i] != 0, true
+		}
+	}
+	return 0, false, false
 }
 
 func (s *initial148RequiredScopeV1) Counters() logicalStateCounterRead {
@@ -260,14 +271,15 @@ func (s *initial148RequiredScopeV1) readCountersV1() error {
 	return s.residualV1()
 }
 
+// residualV1 checks the obtained present subset against the captured parent counters.
 func (s *initial148RequiredScopeV1) residualV1() error {
 	if !s.haveCounters {
 		return nil
 	}
 	var total, count uint64
-	for _, fact := range s.facts {
-		if fact.present {
-			total += fact.length
+	for _, length := range s.lengths {
+		if length != 0 {
+			total += uint64(length)
 			count++
 		}
 	}
@@ -280,6 +292,7 @@ func (s *initial148RequiredScopeV1) residualV1() error {
 	return nil
 }
 
+// deriveV1 seals the records before projecting and sorting their present keys in place.
 func (s *initial148RequiredScopeV1) deriveV1() initial148RootReadOutcomeV1 {
 	if !s.active || s.sealed {
 		return initial148RootReadOutcomeV1{cause: localLogicalStateFailure("required root derive is not available")}
@@ -291,10 +304,18 @@ func (s *initial148RequiredScopeV1) deriveV1() initial148RootReadOutcomeV1 {
 	if !initial148RequiredShapeV1(s.request) {
 		return initial148RequiredOutcomeV1(s.failV1(localLogicalStateFailure("invalid required state request")))
 	}
-	sort.Slice(s.inputs, func(i, j int) bool {
-		return logicalOutpointLess(Outpoint(s.inputs[i]), Outpoint(s.inputs[j]))
+	present := 0
+	for i, length := range s.lengths {
+		if length != 0 {
+			s.keys[present] = s.keys[i]
+			present++
+		}
+	}
+	inputs := s.keys[:present]
+	sort.Slice(inputs, func(i, j int) bool {
+		return logicalOutpointLess(Outpoint(inputs[i]), Outpoint(inputs[j]))
 	})
-	root, err := s.reader.DeriveTreeRootV1(s.account, mdbx.TreeRootReadV1{Primitive: s.request.Primitive, Parent: s.request.Parent, Inputs: s.inputs})
+	root, err := s.reader.DeriveTreeRootV1(s.account, mdbx.TreeRootReadV1{Primitive: s.request.Primitive, Parent: s.request.Parent, Inputs: inputs})
 	if err != nil {
 		return initial148RequiredOutcomeV1(s.failV1(err))
 	}
