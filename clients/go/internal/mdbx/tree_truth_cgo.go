@@ -244,16 +244,18 @@ func (a *treeAmendedV1) chooseV1(dbi DBI, at int, nativeKey []byte, native treeI
 
 // treeSectionV1 is the write section of one tree operation: write txn, P_w and its high-water P budget.
 type treeSectionV1 struct {
-	env        *C.MDBX_env
-	handles    [9]C.MDBX_dbi
-	old, write *C.MDBX_txn
-	ledger     treeLedgerV1
-	reached    UpdateStage
-	pw         treeProjectionV1
-	heldP      uint64
-	references []updateReference
-	ended      bool
-	covered    bool
+	env           *C.MDBX_env
+	handles       [9]C.MDBX_dbi
+	old, write    *C.MDBX_txn
+	ledger        treeLedgerV1
+	reached       UpdateStage
+	pw            treeProjectionV1
+	heldP         uint64
+	references    []updateReference
+	ended         bool
+	covered       bool
+	pairOnly      bool
+	pairReadLimit uint64
 }
 
 // beginTreeSectionV1 begins the write txn with updateNativeExecute's begin path. On failure it returns nil and that
@@ -327,6 +329,12 @@ func (t *treeSectionV1) writeTargetV1(target treeTargetV1, prior bool) error {
 // ORIGINAL OLD), including updateNativePairing (N1/N2/O1/O2; refusal canonicalPairingError, OLD/Prewrite/-1,
 // plan consumed). It runs right after beginTreeSectionV1 and before primitive 0 (D12-F).
 func (t *treeSectionV1) pairPreflightV1(pair []ownedMutation, consulted []ownedConsulted) error {
+	if t.pairOnly {
+		if _, err := updateNativeImages(t.old, t.handles, pair); err != nil {
+			return err
+		}
+		return t.pairReadPreflightV1(pair, consulted)
+	}
 	references, err := updateNativePreflight(t.old, t.write, t.handles, pair, consulted)
 	t.references = references
 	return err
@@ -334,9 +342,80 @@ func (t *treeSectionV1) pairPreflightV1(pair []ownedMutation, consulted []ownedC
 
 // pairPreflightContextV1 is pairPreflightV1 with the admitted context window as one more consulted domain (D4 site 1).
 func (t *treeSectionV1) pairPreflightContextV1(pair []ownedMutation, consulted []ownedConsulted, window CanonicalContextWindowV1) error {
+	if t.pairOnly {
+		if _, err := updateNativeImages(t.old, t.handles, pair); err != nil {
+			return err
+		}
+		return t.pairReadPreflightV1(pair, consulted, contextTreeScopeV1(window))
+	}
 	references, err := updateNativePreflight(t.old, t.write, t.handles, pair, consulted, contextTreeScopeV1(window))
 	t.references = references
 	return err
+}
+
+// pairReadPreflightV1 owns the mutable ordinary window; only its scalar seal escapes.
+// Scoped context work returns before sealing and is funded independently.
+func (t *treeSectionV1) pairReadPreflightV1(pair []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) error {
+	budget := treePairReadBudgetV1{credit: t.pairReadLimit, ledger: t.ledger}
+	for _, side := range canonicalSides {
+		if err := canonicalNewPaired(pair, side, &budget); err != nil {
+			return err
+		}
+	}
+	for _, side := range canonicalSides {
+		if err := canonicalOldPaired(t.old, t.handles, pair, side, &budget); err != nil {
+			return err
+		}
+	}
+	if err := t.pairReadTargetsV1(pair, &budget); err != nil {
+		return err
+	}
+	if err := updateNativePairConsultedMatch(t.old, t.write, t.handles, consulted, "OLD/write snapshot mismatch", &budget, 0); err != nil {
+		return err
+	}
+	if err := updateNativeScopedMatch(t.old, t.write, t.handles, pair, nil, "OLD/write snapshot mismatch", scopes...); err != nil {
+		return err
+	}
+	return t.pairReadSealV1(pair, &budget)
+}
+
+// pairReadTargetsV1 keeps target OLD/write comparisons ahead of consulted rows.
+func (t *treeSectionV1) pairReadTargetsV1(pair []ownedMutation, budget *treePairReadBudgetV1) error {
+	for _, m := range pair {
+		equal, err := updateNativePairOldEqual(t.old, t.write, t.handles[m.dbi.Rank], m.key, budget)
+		if err != nil {
+			return err
+		}
+		if !equal {
+			return adapterError(operationUpdate, EngineStateMismatch, codeProblem, "OLD/write snapshot mismatch", nil)
+		}
+	}
+	return nil
+}
+
+// pairReadSealV1 funds future NEW candidates before the first Pair emission.
+func (t *treeSectionV1) pairReadSealV1(pair []ownedMutation, budget *treePairReadBudgetV1) error {
+	for _, m := range pair {
+		if m.after == AfterLiteral {
+			if err := budget.requireV1(uint64(len(m.literal))); err != nil {
+				return err
+			}
+		}
+	}
+	var err error
+	t.pairReadLimit, err = budget.availableV1()
+	return err
+}
+
+// pairReadFinalV1 uses only the sealed ordinary limit and the unchanged scope owner.
+func (t *treeSectionV1) pairReadFinalV1(pair []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) error {
+	if err := updateNativePairVerify(t.write, t.handles, pair, t.pairReadLimit); err != nil {
+		return err
+	}
+	if err := updateNativePairConsultedMatch(t.old, t.write, t.handles, consulted, "final update image mismatch", nil, t.pairReadLimit); err != nil {
+		return err
+	}
+	return updateNativeScopedMatch(t.old, t.write, t.handles, pair, nil, "final update image mismatch", scopes...)
 }
 
 // pairEmitV1 writes the Pair after the last primitive: all deletes, then all puts (legacy order).
@@ -485,6 +564,9 @@ func treeFlushPassV1(e treeEntryV1) uint8 {
 // finalV1 is complete final pair equality (D2-4): P_w identities, Pair targets, references and Consulted rows.
 // It then drops P_w data; the P charge is kept as the P budget (D5-2).
 func (t *treeSectionV1) finalV1(pair []ownedMutation, consulted []ownedConsulted) error {
+	if t.pairOnly {
+		return t.pairReadFinalV1(pair, consulted)
+	}
 	const diagnostic = "final update image mismatch"
 	for _, entry := range t.pw.entries {
 		err := t.finalEntryV1(entry, diagnostic)
@@ -506,6 +588,9 @@ func (t *treeSectionV1) finalV1(pair []ownedMutation, consulted []ownedConsulted
 
 // finalContextV1 is finalV1 with the admitted context window compared after the Consulted rows (D4 site 2).
 func (t *treeSectionV1) finalContextV1(pair []ownedMutation, consulted []ownedConsulted, window CanonicalContextWindowV1) error {
+	if t.pairOnly {
+		return t.pairReadFinalV1(pair, consulted, contextTreeScopeV1(window))
+	}
 	const diagnostic = "final update image mismatch"
 	for _, entry := range t.pw.entries {
 		err := t.finalEntryV1(entry, diagnostic)

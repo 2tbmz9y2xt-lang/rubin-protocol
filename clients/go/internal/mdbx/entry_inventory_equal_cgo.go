@@ -125,15 +125,15 @@ func (c *treeComposeV1) entryMatchV1(diagnostic string) error {
 // entryTruthV1 completes both predicates in the strict snapshot before OLD-first selection.
 func (c *treeComposeV1) entryTruthV1(read *C.MDBX_txn, _ error) (CommitTruth, error) {
 	w, p := c.writer, c.writer.plan
-	old, next, err := updateNativeReadbackTargets(w.old, read, w.s.dbis, p.pair, w.t.references)
+	old, next, err := updateNativePairReadbackTargets(w.old, read, w.s.dbis, p.pair, w.t.pairReadLimit)
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
-	old, next, err = updateNativeReadbackReferences(w.old, read, w.s.dbis, p.pair, w.t.references, old, next)
+	old, next, err = updateNativePairReadbackConsulted(w.old, read, w.s.dbis, p.consulted, old, next, w.t.pairReadLimit)
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
-	old, next, err = updateNativeReadbackScoped(w.old, read, w.s.dbis, p.pair, p.consulted, old, next)
+	old, next, err = updateNativeReadbackScoped(w.old, read, w.s.dbis, p.pair, nil, old, next)
 	if err != nil {
 		return CommitTruthUnknown, err
 	}

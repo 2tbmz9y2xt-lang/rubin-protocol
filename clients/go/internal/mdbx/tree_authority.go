@@ -419,7 +419,13 @@ func (tree TreeAuthorityV1) Encode() ([]byte, error) {
 	if !ok {
 		return nil, errSchema
 	}
-	out := []byte{1, byte(tree.SourceKind)}
+	total := n + 27 + len(tree.Progress.Payload)
+	if tree.SourceIntent != nil {
+		total += 5 + len(tree.SourceIntent.Payload)
+	}
+	// The checked envelope size keeps every append on this one output backing.
+	out := make([]byte, 2, total)
+	out[0], out[1] = 1, byte(tree.SourceKind)
 	appendU64(&out, tree.LagGenerationID)
 	appendU64(&out, tree.TargetLagGenerationID)
 	appendU32(&out, uint32(n))

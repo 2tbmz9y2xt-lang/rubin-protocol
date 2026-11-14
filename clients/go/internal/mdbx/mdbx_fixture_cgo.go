@@ -7,6 +7,9 @@ package mdbx
 #cgo CFLAGS: -DRUBIN_SELECTED_DAMAGE_FIXTURE=1
 #include "../../../../third_party/libmdbx/mdbx.h"
 #include <string.h>
+typedef struct { uint64_t gets, comparisons, aliases, writes; } rubin_pair_counts;
+extern int rubin_pair_arm(MDBX_env *, uintptr_t);
+extern void rubin_pair_disarm(rubin_pair_counts *);
 typedef struct { unsigned mode, calls, gets, commits, aborts, closes, drift; MDBX_env *env; MDBX_txn *old_txn, *write_txn, *read_txn; MDBX_dbi dbi; unsigned char key[65536]; size_t key_len; } rubin_li_state;
 extern int rubin_li_arm(MDBX_env *, MDBX_dbi, unsigned, const void *, size_t);
 extern void rubin_li_disarm(rubin_li_state *);
@@ -136,6 +139,48 @@ import (
 )
 
 type fixtureMode uint32
+
+// PairReadObservation counts native access sites only while the bounded fixture is armed.
+type PairReadObservation struct{ Gets, Comparisons, Aliases, Writes uint64 }
+
+// FixtureReservationLive observes the real aggregate at a reached native site.
+func FixtureReservationLive(owner *OperationReservationOwner) uint64 {
+	owner.shared.mu.Lock()
+	defer owner.shared.mu.Unlock()
+	return owner.shared.live
+}
+
+var pairReadFixtureMu sync.Mutex
+
+// rubinPairReadProbe observes sites1=get,2=payload,3=write,4/5=OLD abort before/after.
+//
+//export rubinPairReadProbe
+func rubinPairReadProbe(handle C.uintptr_t, site C.uint) {
+	if probe := cgo.Handle(handle).Value().(func(uint32)); probe != nil {
+		probe(uint32(site))
+	}
+}
+
+// FixturePairReadObservation keeps its handle alive through native completion and unwind.
+func FixturePairReadObservation(store *Store, probe func(uint32), run func()) (out PairReadObservation, err error) {
+	pairReadFixtureMu.Lock()
+	defer pairReadFixtureMu.Unlock()
+	if store == nil || store.env == nil || run == nil {
+		return out, errors.New("invalid Pair read observation")
+	}
+	handle := cgo.NewHandle(probe)
+	defer handle.Delete()
+	if rc := int(C.rubin_pair_arm(store.env, C.uintptr_t(handle))); rc != codeSuccess {
+		return out, nativeError(operationUpdate, rc)
+	}
+	defer func() {
+		var counts C.rubin_pair_counts
+		C.rubin_pair_disarm(&counts)
+		out = PairReadObservation{uint64(counts.gets), uint64(counts.comparisons), uint64(counts.aliases), uint64(counts.writes)}
+	}()
+	run()
+	return out, nil
+}
 
 const (
 	fixtureUnexpectedDBI fixtureMode = iota + 1

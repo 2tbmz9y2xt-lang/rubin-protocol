@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -607,6 +608,56 @@ func TestReplayTreeFixtureEntryCrossed(t *testing.T) {
 			want := rtEntered(rtStable(), mdbx.StorageProfilePrunedV1, target)
 			logicalMDBXAssert(t, reflect.DeepEqual(rtEnvelope(t, w.btWorld), want) && reflect.DeepEqual(out.Replay, want.Authority.Replay), "H3 new: %+v", out.Replay)
 		}
+	}
+}
+
+// Native completion retains OWN alongside PC; caller release runs after the commit.
+func TestReplayTreeEntryReadCoverageNative(t *testing.T) {
+	w, s, view := rtEntryWorld(t, nil)
+	target := mdbx.RecoveryTargetV1{ChainID: w.g.ChainID, GenesisHash: s.hashes[0], TipHash: s.tip(), TipHeight: 3, CumulativeChainwork: s.work(t, 3)}
+	encoded, err := rtEntered(rtStable(), mdbx.StorageProfilePrunedV1, target).Encode()
+	logicalMDBXAssert(t, err == nil, "expected envelope: %v", err)
+	// Five Mutation records, four Consulted records, five target keys1+4*9,
+	// four consulted keys16 each, envelope, two counters16 and two bindings.
+	binding := rtBinding(t, w.g.ChainID, s.hashes[0])
+	pc := uint64(5*128 + 4*48 + 37 + 64 + len(encoded) + 2*16 + 2*len(binding))
+	var out ReplayEntryOutcomeV1
+	observed, err := mdbx.FixturePairReadObservation(w.s, func(site uint32) {
+		if site == 3 {
+			logicalMDBXAssert(t, mdbx.FixtureReservationLive(w.owner) == 153558511+pc, "OWN and independent PC through native completion")
+		}
+	}, func() { out = NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner) })
+	logicalMDBXAssert(t, err == nil && observed.Writes > 0 && out.Err == nil && out.Truth == mdbx.CommitTruthNew, "funded producer native result %+v %+v %v", out, observed, err)
+	logicalMDBXAssert(t, mdbx.FixtureReservationLive(w.owner) == 0 && view.releases == 1 && reflect.DeepEqual(view.limits, []uint64{80438871}), "replay grant/Protect/inventory last use")
+}
+
+func TestReplayTreeEntryReadCoverageUnwindNative(t *testing.T) {
+	for _,mode:=range []string{"protected-builder-panic","protected-engine-goexit"} {
+		t.Run(mode,func(t *testing.T){
+			w,_,view:=rtEntryWorld(t,nil)
+			marker:=errors.New("protected replay builder")
+			fired,returned:=false,false
+			var recovered any
+			run:=func(){
+				defer func(){recovered=recover()}()
+				_,err:=mdbx.FixturePairReadObservation(w.s,func(site uint32){
+					if site==4||site==5 {logicalMDBXAssert(t,view.releases==0,"Protect release after last native OLD cleanup")}
+					if fired {return}
+					if mode=="protected-builder-panic"&&site==1&&len(view.versions)==1 {fired=true;panic(marker)}
+					if mode=="protected-engine-goexit"&&site==3 {fired=true;runtime.Goexit()}
+				},func(){_ = NewReplayEntryOwnerV1(view,w.g).EnterReplayTargetMDBX(w.s,w.owner)})
+				logicalMDBXAssert(t,err==nil,"native unwind fixture: %v",err)
+				returned=true
+			}
+			if mode=="protected-engine-goexit" {
+				done:=make(chan struct{})
+				go func(){defer close(done);run()}()
+				<-done
+			} else {run()}
+			logicalMDBXAssert(t,fired&&!returned&&view.releases==1&&mdbx.FixtureReservationLive(w.owner)==0,"Protect/OWN unwind: fired%v returned%v releases%d",fired,returned,view.releases)
+			logicalMDBXAssert(t,mode!="protected-builder-panic"||recovered==marker,"protected panic identity %v",recovered)
+			logicalMDBXAssert(t,mode!="protected-engine-goexit"||recovered==nil,"protected Goexit panicked %v",recovered)
+		})
 	}
 }
 
