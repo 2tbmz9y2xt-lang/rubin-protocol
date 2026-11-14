@@ -27,8 +27,12 @@ func irEventsRequestV1(height uint64, salt byte, events int) blockTreeRequestV1 
 	for i := range frames {
 		frames[i] = btFrame(17, 0, []byte{salt})
 	}
-	tx := btTransaction(uint64(salt), 0, nil, frames, nil, []byte{0}, nil)
-	r := btRequest(btBody(148, salt, [32]byte{}, tx), height)
+	var txs []btTx
+	for start := 0; start < events; start += MAX_TX_OUTPUTS {
+		end := min(start+MAX_TX_OUTPUTS, events)
+		txs = append(txs, btTransaction(uint64(salt)+uint64(start), 0, nil, frames[start:end], nil, []byte{0}, nil))
+	}
+	r := btRequest(btBody(148, salt, [32]byte{}, txs...), height)
 	r.Kind, r.Undo = 1, 2
 	return r
 }

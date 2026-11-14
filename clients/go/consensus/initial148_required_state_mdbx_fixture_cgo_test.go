@@ -78,8 +78,11 @@ func irRecordedPlanV1(t *testing.T) {
 	irCounterV1(t, w, 368, 2)
 	touched := []logicalTouchedState{{Outpoint: ops[1]}, {Outpoint: ops[0]}}
 	wantPuts := make([]logicalStatePut, 0, 3)
-	for i, size := range []int{0, 1, 252} {
-		entry := logicalStateTestEntry(size, byte(i+1))
+	for i, entry := range []UtxoEntry{
+		{Value: 1, CovenantType: 1, CovenantData: nil, CreationHeight: 1, CreatedByCoinbase: true},
+		logicalStateTestEntry(1, 2),
+		logicalStateTestEntry(252, 3),
+	} {
 		touched = append(touched, logicalTouchedState{Outpoint: ops[i+2], FinalPresent: true, Final: entry})
 		wantPuts = append(wantPuts, logicalStatePut{Outpoint: ops[i+2], Entry: entry})
 	}
