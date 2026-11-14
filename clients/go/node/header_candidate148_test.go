@@ -130,16 +130,54 @@ func hcBase(t testing.TB, lim HeaderCandidateLimits148V1) (*HeaderCandidateOwner
 	return o, r0, r1
 }
 
+// hcInner is the complete comparable owner state a refusal must leave unchanged.
+type hcInner struct {
+	version, bytes, tips, leases uint64
+	headers                      int
+	established, latched, closed bool
+	source                       [32]byte
+	prepared                     *HeaderCandidatePrepared148V1
+}
+
+func hcInnerOf(o *HeaderCandidateOwner148V1) hcInner {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return hcInner{o.version.Load(), o.bytes, o.tips, o.leases, len(o.recs), o.established, o.latched, o.closed, o.source, o.prepared}
+}
+
 func TestHeaderCandidate148Classification(t *testing.T) {
 	type tc struct {
 		name string
 		want HeaderCandidateOutcome148V1
 		run  func(t *testing.T, o *HeaderCandidateOwner148V1, r0, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func())
 	}
-	prep := func(o *HeaderCandidateOwner148V1, tr HeaderCandidateTransition148V1) HeaderCandidateOutcome148V1 {
+	// Each refused call goes through one of these wrappers: it snapshots the owner right before the call and asserts
+	// that the refusal returned the zero value of its other result and changed no owner state, version included.
+	prep := func(t *testing.T, o *HeaderCandidateOwner148V1, tr HeaderCandidateTransition148V1) HeaderCandidateOutcome148V1 {
+		t.Helper()
+		before := hcInnerOf(o)
 		h, out := o.PrepareV1(tr)
-		if (h == nil) != (out != HeaderCandidateOK148V1) {
-			t.Fatalf("handle/outcome mismatch %d", out)
+		if out != HeaderCandidateOK148V1 && (h != nil || hcInnerOf(o) != before) {
+			t.Fatalf("refused PrepareV1 %d returned a handle or changed state", out)
+		}
+		return out
+	}
+	acq := func(t *testing.T, o *HeaderCandidateOwner148V1, hash [32]byte) HeaderCandidateOutcome148V1 {
+		t.Helper()
+		before := hcInnerOf(o)
+		l, out := o.AcquireDependencyV1(hash)
+		if out != HeaderCandidateOK148V1 && (l != nil || hcInnerOf(o) != before) {
+			t.Fatalf("refused AcquireDependencyV1 %d returned a lease or changed state", out)
+		}
+		return out
+	}
+	est := func(t *testing.T, o *HeaderCandidateOwner148V1, source [32]byte) HeaderCandidateOutcome148V1 {
+		t.Helper()
+		before := hcInnerOf(o)
+		p, out := o.EstablishV1(source, nil)
+		zero := !p.Changed && p.Version == 0 && p.Added == nil && p.Retired == nil
+		if out != HeaderCandidateOK148V1 && (!zero || hcInnerOf(o) != before) {
+			t.Fatalf("refused EstablishV1 %d returned %+v or changed state", out, p)
 		}
 		return out
 	}
@@ -165,189 +203,172 @@ func TestHeaderCandidate148Classification(t *testing.T) {
 	cases := []tc{
 		{"row1 closed", HeaderCandidateClosed148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			o.CloseV1()
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
 		}},
 		{"rows1+2 closed wins over latch", HeaderCandidateClosed148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			latch(t, o)
 			o.CloseV1()
-			_, out := o.AcquireDependencyV1(r1.Hash)
-			return out, nil
+			return acq(t, o, r1.Hash), nil
 		}},
 		{"row2 unknown source", HeaderCandidateUnknownSource148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			latch(t, o)
-			_, out := o.AcquireDependencyV1(r1.Hash)
-			return out, nil
+			return acq(t, o, r1.Hash), nil
 		}},
 		{"rows2+3 latch wins over already established", HeaderCandidateUnknownSource148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			latch(t, o)
-			_, out := o.EstablishV1(hcSrc1, nil)
-			return out, nil
+			return est(t, o, hcSrc1), nil
 		}},
 		{"row3 already established", HeaderCandidateAlreadyEstablished148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			_, out := o.EstablishV1(hcSrc2, nil)
-			return out, nil
+			return est(t, o, hcSrc2), nil
 		}},
 		{"rows3+5 already established wins over invalid", HeaderCandidateAlreadyEstablished148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			_, out := o.EstablishV1([32]byte{}, nil)
-			return out, nil
+			return est(t, o, [32]byte{}), nil
 		}},
 		{"row4 busy", HeaderCandidateBusy148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			h, _ := o.PrepareV1(hcTr(o, nil))
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), func() { h.AbortV1() }
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), func() { h.AbortV1() }
 		}},
 		{"rows4+5 busy wins over invalid", HeaderCandidateBusy148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			h, _ := o.PrepareV1(hcTr(o, nil))
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Work = nil })})), func() { h.AbortV1() }
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Work = nil })})), func() { h.AbortV1() }
 		}},
 		{"row5 bad hash", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Hash[0] ^= 1 })})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Hash[0] ^= 1 })})), nil
 		}},
 		{"row5 parent mismatch", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, r0, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Parent = r0.Hash })})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Parent = r0.Hash })})), nil
 		}},
 		{"row5 nonpositive work", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Work = big.NewInt(0) })})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Work = big.NewInt(0) })})), nil
 		}},
 		{"row5 zero provenance", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Provenance = [32]byte{} })})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Provenance = [32]byte{} })})), nil
 		}},
 		{"row5 duplicate addition", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			c := child(t, r1, 3)
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{c, c})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{c, c})), nil
 		}},
 		{"row5 duplicate retired", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, r0, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, nil, r0.Hash, r0.Hash)), nil
+			return prep(t, o, hcTr(o, nil, r0.Hash, r0.Hash)), nil
 		}},
 		{"row5 hash in both", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, r0, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{r0}, r0.Hash)), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{r0}, r0.Hash)), nil
 		}},
 		{"row5 addition parent after child", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			a := child(t, r1, 3)
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{child(t, a, 4), a})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, a, 4), a})), nil
 		}},
 		{"row5 retired parent after child", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, r0, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, nil, r1.Hash, r0.Hash)), nil
+			return prep(t, o, hcTr(o, nil, r1.Hash, r0.Hash)), nil
 		}},
 		{"row5 too long", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, r0, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			// Eight otherwise valid additions plus one Retired exceed MaxTransitionHeaders 8.
-			return prep(o, hcTr(o, hcChain(t, r1, 8), r0.Hash)), nil
+			return prep(t, o, hcTr(o, hcChain(t, r1, 8), r0.Hash)), nil
 		}},
 		{"row5 establish zero source", HeaderCandidateInvalid148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			_, out := hcNew(t, hcLim()).EstablishV1([32]byte{}, nil)
-			return out, nil
+			return est(t, hcNew(t, hcLim()), [32]byte{}), nil
 		}},
 		{"rows5+6 invalid wins over stale", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			tr := hcTr(o, []HeaderCandidateRecord148V1{bad(t, r1, func(r *HeaderCandidateRecord148V1) { r.Work = nil })})
 			tr.ExpectedVersion++
-			return prep(o, tr), nil
+			return prep(t, o, tr), nil
 		}},
 		{"row6 stale version", HeaderCandidateStale148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			tr := hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})
 			tr.ExpectedVersion++
-			return prep(o, tr), nil
+			return prep(t, o, tr), nil
 		}},
 		{"row6 stale source", HeaderCandidateStale148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			tr := hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})
 			tr.ExpectedSource = hcSrc2
-			return prep(o, tr), nil
+			return prep(t, o, tr), nil
 		}},
 		{"rows6+7 stale wins over conflict", HeaderCandidateStale148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			c := r1
 			c.Work = big.NewInt(999)
 			tr := hcTr(o, []HeaderCandidateRecord148V1{c})
 			tr.ExpectedSource = hcSrc2
-			return prep(o, tr), nil
+			return prep(t, o, tr), nil
 		}},
 		{"row7 same hash different work", HeaderCandidateConflict148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			c := r1
 			c.Work = big.NewInt(999)
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{c})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{c})), nil
 		}},
 		{"row7 same hash different height", HeaderCandidateConflict148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			c := r1
 			c.Height++
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{c})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{c})), nil
 		}},
 		{"row7 parent height", HeaderCandidateConflict148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, r1.Height+2, 200, 3)})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, r1.Height+2, 200, 3)})), nil
 		}},
 		{"row7 height zero under present parent", HeaderCandidateConflict148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 0, 200, 3)})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 0, 200, 3)})), nil
 		}},
 		{"rows7+8 conflict wins over missing parent", HeaderCandidateConflict148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			orphan := hcMk(t, [32]byte{0x55}, 5, 50, 3)
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{orphan, hcMk(t, r1.Hash, r1.Height+2, 200, 4)})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{orphan, hcMk(t, r1.Hash, r1.Height+2, 200, 4)})), nil
 		}},
 		{"row8 missing parent", HeaderCandidateMissingParent148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, [32]byte{0x55}, 5, 50, 3)})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, [32]byte{0x55}, 5, 50, 3)})), nil
 		}},
 		{"row8 parent retired by the same transition", HeaderCandidateMissingParent148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, r0, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r0.Hash, 11, 120, 3)}, r0.Hash)), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r0.Hash, 11, 120, 3)}, r0.Hash)), nil
 		}},
 		{"rows8+9 missing parent wins over no coverage", HeaderCandidateMissingParent148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, [32]byte{0x55}, 5, 50, 3)}, [32]byte{0x66})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, [32]byte{0x55}, 5, 50, 3)}, [32]byte{0x66})), nil
 		}},
 		{"row9 retired absent", HeaderCandidateNoCoverage148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, nil, [32]byte{0x66})), nil
+			return prep(t, o, hcTr(o, nil, [32]byte{0x66})), nil
 		}},
 		{"row9 retired parent still present", HeaderCandidateNoCoverage148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, nil, r1.Hash)), nil
+			return prep(t, o, hcTr(o, nil, r1.Hash)), nil
 		}},
 		{"rows9+10 no coverage wins over protected", HeaderCandidateNoCoverage148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			lease(t, o, r1.Hash)
-			return prep(o, hcTr(o, nil, r1.Hash)), nil
+			return prep(t, o, hcTr(o, nil, r1.Hash)), nil
 		}},
 		{"row10 retired leased ancestor", HeaderCandidateProtected148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, r0, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			lease(t, o, r1.Hash)
-			return prep(o, hcTr(o, nil, r0.Hash)), nil
+			return prep(t, o, hcTr(o, nil, r0.Hash)), nil
 		}},
 		{"row10 retired leased hash", HeaderCandidateProtected148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, r0, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			lease(t, o, r0.Hash)
-			return prep(o, hcTr(o, nil, r0.Hash)), nil
+			return prep(t, o, hcTr(o, nil, r0.Hash)), nil
 		}},
 		{"rows10+11 protected wins over exhausted", HeaderCandidateProtected148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, r0, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			lease(t, o, r1.Hash)
 			o.version.Store(math.MaxUint64)
-			return prep(o, hcTr(o, nil, r0.Hash)), nil
+			return prep(t, o, hcTr(o, nil, r0.Hash)), nil
 		}},
 		{"row11 exhausted", HeaderCandidateVersionExhausted148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			o.version.Store(math.MaxUint64)
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
 		}},
 		{"rows11+12 exhausted wins over capacity", HeaderCandidateVersionExhausted148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			o.version.Store(math.MaxUint64)
 			o.limits.MaxHeaders = 2
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
 		}},
 		{"row12 capacity", HeaderCandidateCapacity148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			o.limits.MaxHeaders = 2
-			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
+			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
 		}},
 		{"row3 not established prepare", HeaderCandidateNotEstablished148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			o := hcNew(t, hcLim())
-			return prep(o, HeaderCandidateTransition148V1{ExpectedVersion: 1}), nil
+			return prep(t, o, HeaderCandidateTransition148V1{ExpectedVersion: 1}), nil
 		}},
 		{"row3 not established lease", HeaderCandidateNotEstablished148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			_, out := hcNew(t, hcLim()).AcquireDependencyV1(r1.Hash)
-			return out, nil
+			return acq(t, hcNew(t, hcLim()), r1.Hash), nil
 		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			o, r0, r1 := hcBase(t, hcLim())
-			before := hcTake(o, r0, r1)
 			got, cleanup := c.run(t, o, r0, r1)
 			if got != c.want {
 				t.Fatalf("outcome %d want %d", got, c.want)
-			}
-			// The refusal leaves membership, charges and tips as established; the version moved only by the
-			// case's own setup (UnknownV1 latch or a forced maximum).
-			after := hcTake(o, r0, r1)
-			if !o.closed && (!slices.Equal(after.present, before.present) || after.bytes != before.bytes || after.tips != before.tips) {
-				t.Fatalf("refusal changed state: %+v -> %+v", before, after)
-			}
-			if v := after.version; v != before.version && v != before.version+1 && v != math.MaxUint64 {
-				t.Fatalf("version %d from %d", v, before.version)
 			}
 			if cleanup != nil {
 				cleanup()
