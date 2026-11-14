@@ -1,8 +1,8 @@
 package node
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"crypto/sha3"
 	"encoding/hex"
 	"errors"
@@ -459,58 +459,89 @@ func TestValidateDevnetGenesisIdentity_WrongHash(t *testing.T) {
 // G1 independently pins the approved artifact and the single spendable entry;
 // these dormant constants do not change the selected live genesis pack.
 func TestInitial148DevnetGenesisApprovedLiterals(t *testing.T) {
-	header:=decodeHexToBytesExact(initial148GenesisHeaderHex,148)
-	tx:=decodeHexToBytesExact(initial148GenesisTxHex,149)
-	block:=decodeHexToBytesExact(initial148GenesisBlockHex,298)
-	if !bytes.Equal(block,append(append(bytes.Clone(header),1),tx...)) { t.Fatal("approved block is not header148 || 01 || tx149") }
-	if initial148GenesisBlockHashHex!="f063746adc88e7f7b63edc754fc76ccc9db96f9e08f3a09697e125b453421f30" || initial148GenesisChainIDHex!="a0843219272b9068c0318fd1ba86c17ce1a119c69dbeb5d9f7d1a88dfeb4c039" { t.Fatal("approved identity literals changed") }
-	hash:=sha3.Sum256(header)
-	if hex.EncodeToString(hash[:])!=initial148GenesisBlockHashHex {t.Fatal("approved header hash is not SHA3(header148)")}
+	header := decodeHexToBytesExact(initial148GenesisHeaderHex, 148)
+	tx := decodeHexToBytesExact(initial148GenesisTxHex, 149)
+	block := decodeHexToBytesExact(initial148GenesisBlockHex, 298)
+	if !bytes.Equal(block, append(append(bytes.Clone(header), 1), tx...)) {
+		t.Fatal("approved block is not header148 || 01 || tx149")
+	}
+	if initial148GenesisBlockHashHex != "f063746adc88e7f7b63edc754fc76ccc9db96f9e08f3a09697e125b453421f30" || initial148GenesisChainIDHex != "a0843219272b9068c0318fd1ba86c17ce1a119c69dbeb5d9f7d1a88dfeb4c039" {
+		t.Fatal("approved identity literals changed")
+	}
+	hash := sha3.Sum256(header)
+	if hex.EncodeToString(hash[:]) != initial148GenesisBlockHashHex {
+		t.Fatal("approved header hash is not SHA3(header148)")
+	}
 	var preimage [314]byte
-	copy(preimage[:16],"RUBIN-GENESIS-v1")
-	copy(preimage[16:],block)
-	chain:=sha3.Sum256(preimage[:])
-	if hex.EncodeToString(chain[:])!=initial148GenesisChainIDHex {t.Fatal("approved chain_id is not SHA3(tag16 || block298)")}
+	copy(preimage[:16], "RUBIN-GENESIS-v1")
+	copy(preimage[16:], block)
+	chain := sha3.Sum256(preimage[:])
+	if hex.EncodeToString(chain[:]) != initial148GenesisChainIDHex {
+		t.Fatal("approved chain_id is not SHA3(tag16 || block298)")
+	}
 	// Output 0 occupies tx[56:100]: value8,type2,len1,data33. The
 	// independently pinned core txid and height/coinbase suffix give 89 bytes.
-	txid:=decodeHexToBytes32("f726016007c9e0c47c2ed35f66dcace4e5a2b6fd39a97bec14e8e1967850854f")
-	if sha3.Sum256(tx[:147])!=txid {t.Fatal("approved transaction core identity changed")}
-	entry:=append(bytes.Clone(txid[:]),make([]byte,4)...)
-	entry=append(entry,tx[56:100]...)
-	entry=append(entry,make([]byte,8)...)
-	entry=append(entry,1)
-	leaf:=sha3.Sum256(append([]byte("RUBIN_UTXO_TREE_V1\x01"),entry...))
-	if len(entry)!=89 || hex.EncodeToString(leaf[:])!="c53b167dd819e13c2442bde23729bfe6c09d899624ebaf7e98e0bb44466c694b" || !bytes.Equal(header[108:140],leaf[:]) {t.Fatal("approved genesis root does not commit output0 height0 coinbase1")}
-	if !bytes.Equal(tx[108:110],[]byte{2,0}) {t.Fatal("second output is not the excluded CORE_ANCHOR")}
-	if len(DevnetGenesisBlockBytes())!=266 || DevnetGenesisChainID()==chain {t.Fatal("dormant artifact changed the live selector")}
+	txid := decodeHexToBytes32("f726016007c9e0c47c2ed35f66dcace4e5a2b6fd39a97bec14e8e1967850854f")
+	if sha3.Sum256(tx[:147]) != txid {
+		t.Fatal("approved transaction core identity changed")
+	}
+	entry := append(bytes.Clone(txid[:]), make([]byte, 4)...)
+	entry = append(entry, tx[56:100]...)
+	entry = append(entry, make([]byte, 8)...)
+	entry = append(entry, 1)
+	leaf := sha3.Sum256(append([]byte("RUBIN_UTXO_TREE_V1\x01"), entry...))
+	if len(entry) != 89 || hex.EncodeToString(leaf[:]) != "c53b167dd819e13c2442bde23729bfe6c09d899624ebaf7e98e0bb44466c694b" || !bytes.Equal(header[108:140], leaf[:]) {
+		t.Fatal("approved genesis root does not commit output0 height0 coinbase1")
+	}
+	if !bytes.Equal(tx[108:110], []byte{2, 0}) {
+		t.Fatal("second output is not the excluded CORE_ANCHOR")
+	}
+	if len(DevnetGenesisBlockBytes()) != 266 || DevnetGenesisChainID() == chain {
+		t.Fatal("dormant artifact changed the live selector")
+	}
 }
 
 // G5/G7 exercise the existing node guard's exact pair and error precedence
 // with approved values. The live delegation still uses its original pair.
 func TestInitial148DevnetGenesisIdentityPair(t *testing.T) {
-	chain:=decodeHexToBytes32(initial148GenesisChainIDHex)
-	hash:=decodeHexToBytes32(initial148GenesisBlockHashHex)
-	wrongChain,wrongHash:=chain,hash
-	wrongChain[0]^=1
-	wrongHash[0]^=1
-	for _,row:=range []struct{name string; chain,hash [32]byte; message string}{
-		{"approved",chain,hash,""},
-		{"chain",wrongChain,hash,"genesis chain_id mismatch"},
-		{"hash",chain,wrongHash,"genesis_hash mismatch"},
-		{"both",wrongChain,wrongHash,"genesis chain_id mismatch"},
-		{"old",DevnetGenesisChainID(),DevnetGenesisBlockHash(),"genesis chain_id mismatch"},
-		{"zero-chain",[32]byte{},hash,"genesis chain_id mismatch"},
-		{"zero-hash",chain,[32]byte{},"genesis_hash mismatch"},
+	chain := decodeHexToBytes32(initial148GenesisChainIDHex)
+	hash := decodeHexToBytes32(initial148GenesisBlockHashHex)
+	wrongChain, wrongHash := chain, hash
+	wrongChain[0] ^= 1
+	wrongHash[0] ^= 1
+	for _, row := range []struct {
+		name        string
+		chain, hash [32]byte
+		message     string
+	}{
+		{"approved", chain, hash, ""},
+		{"chain", wrongChain, hash, "genesis chain_id mismatch"},
+		{"hash", chain, wrongHash, "genesis_hash mismatch"},
+		{"both", wrongChain, wrongHash, "genesis chain_id mismatch"},
+		{"old", DevnetGenesisChainID(), DevnetGenesisBlockHash(), "genesis chain_id mismatch"},
+		{"zero-chain", [32]byte{}, hash, "genesis chain_id mismatch"},
+		{"zero-hash", chain, [32]byte{}, "genesis_hash mismatch"},
 	} {
-		t.Run(row.name,func(t *testing.T){
-			err:=validateGenesisIdentityPair(row.chain,row.hash,chain,hash)
-			if row.message=="" {if err!=nil {t.Fatal(err)};return}
+		t.Run(row.name, func(t *testing.T) {
+			err := validateGenesisIdentityPair(row.chain, row.hash, chain, hash)
+			if row.message == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
 			var tx *consensus.TxError
-			if !errors.As(err,&tx) || tx.Code!=consensus.BLOCK_ERR_LINKAGE_INVALID || tx.Msg!=row.message {t.Fatalf("identity pair: %v, want %s",err,row.message)}
+			if !errors.As(err, &tx) || tx.Code != consensus.BLOCK_ERR_LINKAGE_INVALID || tx.Msg != row.message {
+				t.Fatalf("identity pair: %v, want %s", err, row.message)
+			}
 		})
 	}
-	if err:=ValidateDevnetGenesisIdentity(DevnetGenesisChainID(),DevnetGenesisBlockHash());err!=nil {t.Fatal(err)}
+	if err := ValidateDevnetGenesisIdentity(DevnetGenesisChainID(), DevnetGenesisBlockHash()); err != nil {
+		t.Fatal(err)
+	}
 	var tx *consensus.TxError
-	err:=ValidateDevnetGenesisIdentity(chain,hash)
-	if !errors.As(err,&tx) || tx.Code!=consensus.BLOCK_ERR_LINKAGE_INVALID || tx.Msg!="genesis chain_id mismatch" {t.Fatalf("live guard selected dormant pair: %v",err)}
+	err := ValidateDevnetGenesisIdentity(chain, hash)
+	if !errors.As(err, &tx) || tx.Code != consensus.BLOCK_ERR_LINKAGE_INVALID || tx.Msg != "genesis chain_id mismatch" {
+		t.Fatalf("live guard selected dormant pair: %v", err)
+	}
 }

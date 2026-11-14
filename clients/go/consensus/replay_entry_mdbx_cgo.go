@@ -136,7 +136,7 @@ func replayEntryContext(g PublishedGenesisContextV1) error {
 // replayEntryContext148 checks the explicitly selected initial148 route; length
 // never selects the grammar, and nil Published remains identity-only.
 func replayEntryContext148(g PublishedGenesisContextV1) error {
-	if g.ChainID == ([32]byte{}) || g.GenesisHash == ([32]byte{}) || (g.Published != nil && len(g.Published) != 298) {
+	if !replayEntryContextShape148(g) {
 		return errors.New("invalid published genesis context")
 	}
 	if g.Published == nil {
@@ -151,6 +151,11 @@ func replayEntryContext148(g PublishedGenesisContextV1) error {
 		return errors.New("published genesis context commitment mismatch")
 	}
 	return nil
+}
+
+// replayEntryContextShape148 admits a nonzero identity and an optional complete 148-format publication.
+func replayEntryContextShape148(g PublishedGenesisContextV1) bool {
+	return g.ChainID != ([32]byte{}) && g.GenesisHash != ([32]byte{}) && (g.Published == nil || len(g.Published) == 298)
 }
 
 func replayEntryContextShape(g PublishedGenesisContextV1) bool {

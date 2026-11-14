@@ -2271,19 +2271,23 @@ func TestInitial148CompleteBlockStrictWitness(t *testing.T) {
 // Without a first-genesis demand the existing composer still fits the exact
 // W+required-state+D remainder. Adding the optional demand refuses at D.
 func TestInitial148CompleteBlockNoGenesisDemandNoSpare(t *testing.T) {
-	for _,demand:=range []uint64{0,421677} {
-		w:=btNew(t)
-		in,_:=icbGenesisInputV1(t,-1)
-		in.FirstGenesisDemand=demand
-		tariff,ok:=initial148CompleteTariffV1(in)
-		logicalMDBXAssert(t,ok,"no-spare tariff")
-		icbWithAccountV1(t,w,func(a *mdbx.OperationAccount){
-			err:=a.WithReservation(402653184-tariff-266480-288512,func()error{
-				out,result,_,err:=icbValidateOnceV1(t,w,a,in,false)
-				if demand==0 { logicalMDBXAssert(t,err==nil && result!=nil && out.required.derived,"ordinary composer took an unsolicited E: %v",err) } else { logicalMDBXAssert(t,mdbx.IsOperationReservationCapacity(err) && result==nil && !out.required.derived,"first-genesis E not reserved at D: %v",err) }
+	for _, demand := range []uint64{0, 421677} {
+		w := btNew(t)
+		in, _ := icbGenesisInputV1(t, -1)
+		in.FirstGenesisDemand = demand
+		tariff, ok := initial148CompleteTariffV1(in)
+		logicalMDBXAssert(t, ok, "no-spare tariff")
+		icbWithAccountV1(t, w, func(a *mdbx.OperationAccount) {
+			err := a.WithReservation(402653184-tariff-266480-288512, func() error {
+				out, result, _, err := icbValidateOnceV1(t, w, a, in, false)
+				if demand == 0 {
+					logicalMDBXAssert(t, err == nil && result != nil && out.required.derived, "ordinary composer took an unsolicited E: %v", err)
+				} else {
+					logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(err) && result == nil && !out.required.derived, "first-genesis E not reserved at D: %v", err)
+				}
 				return nil
 			})
-			logicalMDBXAssert(t,err==nil,"no-spare outer hold: %v",err)
+			logicalMDBXAssert(t, err == nil, "no-spare outer hold: %v", err)
 		})
 	}
 }

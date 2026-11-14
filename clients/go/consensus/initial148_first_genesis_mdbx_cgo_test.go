@@ -38,33 +38,55 @@ func TestInitial148FirstGenesisInputOrder(t *testing.T) {
 			store, owner, database, generation := w.s, w.owner, [32]byte{7}, uint64(1)
 			want, message := "TERMINAL_LOCAL_INVARIANT(evidence)", "invalid published genesis context"
 			switch name {
-			case "nil-store": store, message = nil, "nil genesis Store"
-			case "nil-published": published = nil
-			case "short-published": published = published[:297]
-			case "old-width": published = append(bytes.Clone(raw[:108]), raw[140:]...)
-			case "zero-chain": g.ChainID = [32]byte{}
-			case "zero-hash": g.GenesisHash = [32]byte{}
+			case "nil-store":
+				store, message = nil, "nil genesis Store"
+			case "nil-published":
+				published = nil
+			case "short-published":
+				published = published[:297]
+			case "old-width":
+				published = append(bytes.Clone(raw[:108]), raw[140:]...)
+			case "zero-chain":
+				g.ChainID = [32]byte{}
+			case "zero-hash":
+				g.GenesisHash = [32]byte{}
 			case "candidate", "candidate-before-owner":
 				candidate[200] ^= 1
 				want, message = "CONSENSUS_INVALID", "block does not match published genesis"
-				if name == "candidate-before-owner" { owner = nil }
-			case "owner": owner, message = nil, "invalid genesis reservation owner"
-			case "zero-owner": owner, message = &mdbx.OperationReservationOwner{}, "invalid genesis reservation owner"
-			case "hash": g.GenesisHash[0] ^= 1; message = "published genesis context commitment mismatch"
-			case "chain": g.ChainID[0] ^= 1; message = "published genesis context commitment mismatch"
+				if name == "candidate-before-owner" {
+					owner = nil
+				}
+			case "owner":
+				owner, message = nil, "invalid genesis reservation owner"
+			case "zero-owner":
+				owner, message = &mdbx.OperationReservationOwner{}, "invalid genesis reservation owner"
+			case "hash":
+				g.GenesisHash[0] ^= 1
+				message = "published genesis context commitment mismatch"
+			case "chain":
+				g.ChainID[0] ^= 1
+				message = "published genesis context commitment mismatch"
 			case "root", "header", "body", "framing":
-				offset := map[string]int{"root": 108, "header":140, "body": 200, "framing": 148}[name]
-				published[offset] ^= 1; candidate = bytes.Clone(published)
+				offset := map[string]int{"root": 108, "header": 140, "body": 200, "framing": 148}[name]
+				published[offset] ^= 1
+				candidate = bytes.Clone(published)
 				message = "published genesis context commitment mismatch"
 			case "old-identity":
-				g.ChainID,_=parseHex32("88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103")
-				g.GenesisHash,_=parseHex32("8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff")
-				message="published genesis context commitment mismatch"
-			case "zero-database": database, message = [32]byte{}, "invalid first genesis expected context"
-			case "zero-generation": generation, message = 0, "invalid first genesis expected context"
-			case "both-zero": database, generation, message = [32]byte{}, 0, "invalid first genesis expected context"
-			case "owner-before-commitment": owner, message = nil, "invalid genesis reservation owner"; g.GenesisHash[0] ^= 1
-			case "commitment-before-context": database, message = [32]byte{}, "published genesis context commitment mismatch"; g.GenesisHash[0] ^= 1
+				g.ChainID, _ = parseHex32("88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103")
+				g.GenesisHash, _ = parseHex32("8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff")
+				message = "published genesis context commitment mismatch"
+			case "zero-database":
+				database, message = [32]byte{}, "invalid first genesis expected context"
+			case "zero-generation":
+				generation, message = 0, "invalid first genesis expected context"
+			case "both-zero":
+				database, generation, message = [32]byte{}, 0, "invalid first genesis expected context"
+			case "owner-before-commitment":
+				owner, message = nil, "invalid genesis reservation owner"
+				g.GenesisHash[0] ^= 1
+			case "commitment-before-context":
+				database, message = [32]byte{}, "published genesis context commitment mismatch"
+				g.GenesisHash[0] ^= 1
 			}
 			beforeRaw, beforePublished := bytes.Clone(candidate), bytes.Clone(published)
 			out := ConnectPublishedInitial148GenesisMDBX(store, owner, candidate, published, g.ChainID, g.GenesisHash, database, generation)
@@ -88,7 +110,9 @@ func TestInitial148FirstGenesisRecipeGate(t *testing.T) {
 		w := btNew(t)
 		request := irRequestV1(height, 13)
 		parent := mdbx.TreeEndpointV1{}
-		if height != 0 { parent = mdbx.TreeEndpointV1{Kind: 1, Height: height-1, BlockHash: [32]byte{3}, CumulativeChainwork: [40]byte{39: 1}} }
+		if height != 0 {
+			parent = mdbx.TreeEndpointV1{Kind: 1, Height: height - 1, BlockHash: [32]byte{3}, CumulativeChainwork: [40]byte{39: 1}}
+		}
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			logicalMDBXAssert(t, w.s.View(func(reader *mdbx.Reader) error {
 				captured := irPrepareV1(t, reader, account, request, parent)
@@ -99,7 +123,7 @@ func TestInitial148FirstGenesisRecipeGate(t *testing.T) {
 				logicalMDBXAssert(t, !initial148RequiredShapeV1(captured), "first genesis entered validation recipe h%d", height)
 				err := reader.CheckTreeRootReadV1(account, mdbx.TreeRootReadV1{Primitive: captured.Primitive, Parent: parent})
 				var engine *mdbx.EngineError
-				logicalMDBXAssert(t, errors.As(err,&engine) && engine.Class==mdbx.EngineInvalidInput && engine.Operation=="update" && engine.Code==22 && engine.Diagnostic=="invalid tree delta" && !engine.ReopenRequired && before.Kind == 1 && before.Undo == 2, "first genesis entered native root gate h%d: %v", height, err)
+				logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineInvalidInput && engine.Operation == "update" && engine.Code == 22 && engine.Diagnostic == "invalid tree delta" && !engine.ReopenRequired && before.Kind == 1 && before.Undo == 2, "first genesis entered native root gate h%d: %v", height, err)
 				return nil
 			}) == nil, "recipe Reader")
 		})
@@ -112,10 +136,10 @@ func TestInitial148FirstGenesisOutcomeProjection(t *testing.T) {
 	cause := errors.New("native cause")
 	var typedNil *mdbx.EngineError
 	rows := []struct {
-		name, result string
-		truth mdbx.CommitTruth
-		stage mdbx.UpdateStage
-		err error
+		name, result      string
+		truth             mdbx.CommitTruth
+		stage             mdbx.UpdateStage
+		err               error
 		entered, complete bool
 	}{
 		{"accepted", "ACCEPTED", 2, 3, nil, true, true},
@@ -130,10 +154,10 @@ func TestInitial148FirstGenesisOutcomeProjection(t *testing.T) {
 		{"crossed-not-entered", "TERMINAL_LOCAL_INVARIANT(evidence)", 2, 3, cause, false, true},
 		{"crossed-incomplete", "TERMINAL_LOCAL_INVARIANT(evidence)", 2, 3, cause, true, false},
 		{"typed-nil", "TERMINAL_LOCAL_INVARIANT(evidence)", 1, 1, typedNil, true, false},
-		{"wrapped-typed-nil", "TERMINAL_LOCAL_INVARIANT(evidence)",1,1,fmt.Errorf("native: %w",typedNil),true,false},
-		{"validation-then-cleanup", "CONSENSUS_INVALID",1,1,errors.Join(txerr(TX_ERR_PARSE,"framing"),&mdbx.EngineError{Class:mdbx.EngineIO}),true,false},
-		{"cleanup-then-validation", "LOCAL_RESOURCE_UNAVAILABLE(storage_io)",1,1,errors.Join(&mdbx.EngineError{Class:mdbx.EngineIO},txerr(TX_ERR_PARSE,"framing")),true,false},
-		{"validation-then-integrity", "TERMINAL_STORE_INTEGRITY(canonical)",1,1,errors.Join(txerr(TX_ERR_PARSE,"framing"),&mdbx.EngineError{Class:mdbx.EngineIntegrity}),true,false},
+		{"wrapped-typed-nil", "TERMINAL_LOCAL_INVARIANT(evidence)", 1, 1, fmt.Errorf("native: %w", typedNil), true, false},
+		{"validation-then-cleanup", "CONSENSUS_INVALID", 1, 1, errors.Join(txerr(TX_ERR_PARSE, "framing"), &mdbx.EngineError{Class: mdbx.EngineIO}), true, false},
+		{"cleanup-then-validation", "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", 1, 1, errors.Join(&mdbx.EngineError{Class: mdbx.EngineIO}, txerr(TX_ERR_PARSE, "framing")), true, false},
+		{"validation-then-integrity", "TERMINAL_STORE_INTEGRITY(canonical)", 1, 1, errors.Join(txerr(TX_ERR_PARSE, "framing"), &mdbx.EngineError{Class: mdbx.EngineIntegrity}), true, false},
 		{"invalid-truth", "TERMINAL_LOCAL_INVARIANT(evidence)", 0, 1, cause, true, false},
 		{"invalid-stage", "TERMINAL_LOCAL_INVARIANT(evidence)", 1, 0, cause, true, false},
 		{"above-truth", "TERMINAL_LOCAL_INVARIANT(evidence)", 4, 1, cause, true, false},
@@ -143,23 +167,39 @@ func TestInitial148FirstGenesisOutcomeProjection(t *testing.T) {
 		{"validation", "CONSENSUS_INVALID", 1, 1, txerr(BLOCK_ERR_UTXO_ROOT_MISMATCH, "utxo_root mismatch"), true, false},
 		{"wrapped-validation", "CONSENSUS_INVALID", 1, 1, fmt.Errorf("validation: %w", txerr(TX_ERR_PARSE, "framing")), true, false},
 		{"unclassified", "TERMINAL_LOCAL_INVARIANT(evidence)", 1, 1, cause, true, false},
-		{"mismatch-without-plan", "TERMINAL_LOCAL_INVARIANT(evidence)",1,1,&mdbx.EngineError{Class:mdbx.EngineStateMismatch},true,false},
-		{"mismatch-before-integrity", "STALE_LOCAL_PLAN",1,1,errors.Join(&mdbx.EngineError{Class:mdbx.EngineStateMismatch},&mdbx.EngineError{Class:mdbx.EngineIntegrity}),true,true},
-		{"integrity-before-mismatch", "TERMINAL_STORE_INTEGRITY(canonical)",1,1,errors.Join(&mdbx.EngineError{Class:mdbx.EngineIntegrity},&mdbx.EngineError{Class:mdbx.EngineStateMismatch}),true,true},
+		{"mismatch-without-plan", "TERMINAL_LOCAL_INVARIANT(evidence)", 1, 1, &mdbx.EngineError{Class: mdbx.EngineStateMismatch}, true, false},
+		{"mismatch-before-integrity", "STALE_LOCAL_PLAN", 1, 1, errors.Join(&mdbx.EngineError{Class: mdbx.EngineStateMismatch}, &mdbx.EngineError{Class: mdbx.EngineIntegrity}), true, true},
+		{"integrity-before-mismatch", "TERMINAL_STORE_INTEGRITY(canonical)", 1, 1, errors.Join(&mdbx.EngineError{Class: mdbx.EngineIntegrity}, &mdbx.EngineError{Class: mdbx.EngineStateMismatch}), true, true},
 	}
 	for _, class := range []mdbx.EngineClass{mdbx.EngineCapacity, mdbx.EngineConcurrency, mdbx.EngineTransaction, mdbx.EngineIO, mdbx.EngineIntegrity, mdbx.EngineStateMismatch, mdbx.EngineInvalidInput, mdbx.EngineLocalInvariant} {
 		for _, stage := range []mdbx.UpdateStage{1, 2} {
-			result := map[mdbx.EngineClass]string{mdbx.EngineCapacity:"LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", mdbx.EngineConcurrency:"LOCAL_RESOURCE_UNAVAILABLE(storage_concurrency)", mdbx.EngineTransaction:"LOCAL_RESOURCE_UNAVAILABLE(storage_transaction)", mdbx.EngineIO:"LOCAL_RESOURCE_UNAVAILABLE(storage_io)", mdbx.EngineIntegrity:"TERMINAL_STORE_INTEGRITY(canonical)", mdbx.EngineStateMismatch:"STALE_LOCAL_PLAN"}[class]
-			if result == "" { result = "TERMINAL_LOCAL_INVARIANT(evidence)" }
-			if stage == 2 && class != mdbx.EngineIntegrity && class != mdbx.EngineStateMismatch && result != "TERMINAL_LOCAL_INVARIANT(evidence)" { result = "LOCAL_PERSISTENCE_ERROR(precommit)" }
-			err := &mdbx.EngineError{Class: class, Operation:"update", Code:5, Diagnostic:"fixture", ReopenRequired:true, Cause:cause}
-			rows = append(rows, struct { name, result string; truth mdbx.CommitTruth; stage mdbx.UpdateStage; err error; entered, complete bool }{string(class)+fmt.Sprint(stage), result, 1, stage, err, true, true})
-			rows = append(rows, struct { name, result string; truth mdbx.CommitTruth; stage mdbx.UpdateStage; err error; entered, complete bool }{string(class)+fmt.Sprint(stage)+"-wrapped", result, 1, stage, fmt.Errorf("native: %w",err), true, true})
+			result := map[mdbx.EngineClass]string{mdbx.EngineCapacity: "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", mdbx.EngineConcurrency: "LOCAL_RESOURCE_UNAVAILABLE(storage_concurrency)", mdbx.EngineTransaction: "LOCAL_RESOURCE_UNAVAILABLE(storage_transaction)", mdbx.EngineIO: "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", mdbx.EngineIntegrity: "TERMINAL_STORE_INTEGRITY(canonical)", mdbx.EngineStateMismatch: "STALE_LOCAL_PLAN"}[class]
+			if result == "" {
+				result = "TERMINAL_LOCAL_INVARIANT(evidence)"
+			}
+			if stage == 2 && class != mdbx.EngineIntegrity && class != mdbx.EngineStateMismatch && result != "TERMINAL_LOCAL_INVARIANT(evidence)" {
+				result = "LOCAL_PERSISTENCE_ERROR(precommit)"
+			}
+			err := &mdbx.EngineError{Class: class, Operation: "update", Code: 5, Diagnostic: "fixture", ReopenRequired: true, Cause: cause}
+			rows = append(rows, struct {
+				name, result      string
+				truth             mdbx.CommitTruth
+				stage             mdbx.UpdateStage
+				err               error
+				entered, complete bool
+			}{string(class) + fmt.Sprint(stage), result, 1, stage, err, true, true})
+			rows = append(rows, struct {
+				name, result      string
+				truth             mdbx.CommitTruth
+				stage             mdbx.UpdateStage
+				err               error
+				entered, complete bool
+			}{string(class) + fmt.Sprint(stage) + "-wrapped", result, 1, stage, fmt.Errorf("native: %w", err), true, true})
 		}
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			raw := Initial148FirstGenesisOutcomeV1{Truth:row.truth, Stage:row.stage, Err:row.err}
+			raw := Initial148FirstGenesisOutcomeV1{Truth: row.truth, Stage: row.stage, Err: row.err}
 			got := initial148FirstGenesisProjectV1(raw, row.entered, row.complete)
 			logicalMDBXAssert(t, got.Result == row.result && got.Truth == raw.Truth && got.Stage == raw.Stage && any(got.Err) == any(raw.Err), "projection %s: %+v", row.name, got)
 		})

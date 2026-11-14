@@ -248,8 +248,11 @@ func (c *initial148FirstGenesisCallV1) pairV1(reader *mdbx.Reader, a mdbx.TreeAu
 		return mdbx.TreePairV1{}, 0, err
 	}
 	pair := mdbx.TreePairV1{Consulted: []mdbx.ConsultedRow{
-		{DBI: dbis[0], Key: []byte{0}}, {DBI: dbis[0], Key: []byte{1}}, {DBI: dbis[0], Key: []byte{2}},
-		{DBI: dbis[0], Key: lagCounter}, {DBI: dbis[0], Key: binary.BigEndian.AppendUint64([]byte{0x11}, a.LagGenerationID)},
+		{DBI: dbis[0], Key: []byte{0}},
+		{DBI: dbis[0], Key: []byte{1}},
+		{DBI: dbis[0], Key: []byte{2}},
+		{DBI: dbis[0], Key: lagCounter},
+		{DBI: dbis[0], Key: binary.BigEndian.AppendUint64([]byte{0x11}, a.LagGenerationID)},
 	}}
 	if _, err := c.artifactV1(reader, &pair, 3, c.input.Raw[:Initial148HeaderBytes]); err != nil {
 		return pair, 0, err
