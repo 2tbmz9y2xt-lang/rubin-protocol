@@ -89,13 +89,14 @@ func pairReadClosedNativeV1(t *testing.T) {
 
 func pairReadAbsentNativeV1(t *testing.T) {
 	s,path,o:=tsNew(t)
-	key,value:=[]byte{0x10,0,0,0,0,0,0,0,1},[]byte{7}
+	key,value:=[]byte{0x10,0,0,0,0,0,0,0,1},bytes.Repeat([]byte{7},16)
 	op:=TreeOperationV1{Pair:TreePairV1{Mutations:[]Mutation{{DBI:TreeSchemaV1DBIs()[0],Key:key,AfterKind:2,Literal:value}}}}
 	var result tsResult
 	var counts PairReadObservation
 	mustEnvironment(t,o.WithOperation(LaneOperation,func(a *OperationAccount)error {
-		return a.WithReservation(138,func()error {
-			return a.WithReservation(154611183-277,func()error {
+		// Original input and PC each use 128+9+16=153; absent OLD needs only NEW16.
+		return a.WithReservation(153,func()error {
+			return a.WithReservation(154611183-322,func()error {
 				var err error
 				counts,err=FixturePairReadObservation(s,nil,func(){result=tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){return op,nil})})
 				return err
@@ -206,15 +207,16 @@ func TestTreePairReadCrossedV1(t *testing.T) {
 	} {
 		t.Run(row.name,func(t *testing.T) {
 			s,path,o:=tsNew(t)
-			key:=[]byte{0x10,0,0,0,0,0,0,0,1}
+			key:=tdUTXOKey(1,tdTxid(0x31),0)
 			consulted:=[]byte{0x10,0,0,0,0,0,0,0,2}
-			old:=bytes.Repeat([]byte{0x33},32)
-			next:=bytes.Repeat([]byte{0x66},1000)
-			window,pc:=uint64(1000),uint64(1194)
-			if row.name=="both-OLD-first" {next=bytes.Clone(old);window,pc=64,226}
-			treeNativeSeed(t,s,0,key,old)
+			old:=tdFormed(tdFrame(3,0,bytes.Repeat([]byte{0x33},12)),0,0)
+			next:=tdFormed(tdFrame(6,0,bytes.Repeat([]byte{0x66},978)),0,0)
+			// OLD32=10+1+12+9; NEW1000=10+3+978+9. PC=128+48+44+9+L.
+			window,pc:=uint64(1000),uint64(1229)
+			if row.name=="both-OLD-first" {next=bytes.Clone(old);window,pc=64,261}
+			treeNativeSeed(t,s,1,key,old)
 			treeNativeSeed(t,s,0,consulted,bytes.Repeat([]byte{0x44},32))
-			op:=TreeOperationV1{Pair:TreePairV1{Mutations:[]Mutation{{DBI:TreeSchemaV1DBIs()[0],Key:key,BeforePresent:true,AfterKind:2,Literal:next}},Consulted:[]ConsultedRow{{DBI:TreeSchemaV1DBIs()[0],Key:consulted}}}}
+			op:=TreeOperationV1{Pair:TreePairV1{Mutations:[]Mutation{{DBI:TreeSchemaV1DBIs()[1],Key:key,BeforePresent:true,AfterKind:2,Literal:next}},Consulted:[]ConsultedRow{{DBI:TreeSchemaV1DBIs()[0],Key:consulted}}}}
 			var result tsResult
 			filled:=false
 			mustEnvironment(t,o.WithOperation(LaneOperation,func(a *OperationAccount)error {
@@ -230,11 +232,12 @@ func TestTreePairReadCrossedV1(t *testing.T) {
 							run:=func(){result=tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){return op,nil})}
 							if row.mode!=0 {
 								faultKey:=key
-								if row.mode==8 {faultKey=consulted}
-								_,faultErr:=fixtureLargeFault(s,row.mode,0,faultKey,run)
+								faultRank:=uint8(1)
+								if row.mode==8 {faultKey=consulted;faultRank=0}
+								_,faultErr:=fixtureLargeFault(s,row.mode,faultRank,faultKey,run)
 								mustEnvironment(t,faultErr)
 							} else {
-								_,faultErr:=FixtureSelectedDamage(s,o,row.scenario,0,key,run)
+								_,faultErr:=FixtureSelectedDamage(s,o,row.scenario,1,key,run)
 								mustEnvironment(t,faultErr)
 							}
 						})
@@ -266,7 +269,7 @@ func TestTreePairReadCrossedV1(t *testing.T) {
 			want:=next
 			if row.truth==1 {want=old}
 			if row.name=="neither" {want=[]byte{0x7f}}
-			equal,err:=FixtureRawRowEqual(s,0,key,want)
+			equal,err:=FixtureRawRowEqual(s,1,key,want)
 			if err!=nil||!equal {t.Fatal("crossed durable bytes",err)}
 		})
 	}
