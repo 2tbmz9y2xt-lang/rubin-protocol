@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -495,6 +496,7 @@ func TestHeaderCandidate148Classification(t *testing.T) {
 }
 
 func TestHeaderCandidate148Constructor(t *testing.T) {
+	// Sentinel-first Is requires exact identity: this errors.New sentinel has no Is or Unwrap method.
 	fields := []func(*HeaderCandidateLimits148V1) *uint64{
 		func(l *HeaderCandidateLimits148V1) *uint64 { return &l.MaxTips },
 		func(l *HeaderCandidateLimits148V1) *uint64 { return &l.MaxHeaders },
@@ -507,7 +509,7 @@ func TestHeaderCandidate148Constructor(t *testing.T) {
 		for _, v := range []uint64{0, math.MaxUint64} {
 			l := hcLim()
 			*f(&l) = v
-			if o, err := NewHeaderCandidateOwner148V1(l, 1); o != nil || err != ErrHeaderCandidateConfig148V1 {
+			if o, err := NewHeaderCandidateOwner148V1(l, 1); o != nil || !errors.Is(ErrHeaderCandidateConfig148V1, err) {
 				t.Fatalf("field %d value %d accepted", i, v)
 			}
 		}
@@ -517,7 +519,7 @@ func TestHeaderCandidate148Constructor(t *testing.T) {
 			t.Fatalf("field %d max-1 refused", i)
 		}
 	}
-	if o, err := NewHeaderCandidateOwner148V1(hcLim(), 0); o != nil || err != ErrHeaderCandidateConfig148V1 {
+	if o, err := NewHeaderCandidateOwner148V1(hcLim(), 0); o != nil || !errors.Is(ErrHeaderCandidateConfig148V1, err) {
 		t.Fatal("incarnation zero accepted")
 	}
 	o := hcNew(t, hcLim())
