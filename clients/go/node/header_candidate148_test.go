@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/big"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -145,6 +146,7 @@ func hcBase(t testing.TB, lim HeaderCandidateLimits148V1) (*HeaderCandidateOwner
 type hcInner struct {
 	version, bytes, tips, leases uint64
 	headers                      int
+	members                      string
 	established, latched, closed bool
 	source                       [32]byte
 	prepared                     *HeaderCandidatePrepared148V1
@@ -153,7 +155,12 @@ type hcInner struct {
 func hcInnerOf(o *HeaderCandidateOwner148V1) hcInner {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return hcInner{o.version.Load(), o.bytes, o.tips, o.leases, len(o.recs), o.established, o.latched, o.closed, o.source, o.prepared}
+	keys := make([]string, 0, len(o.recs))
+	for h := range o.recs {
+		keys = append(keys, string(h[:]))
+	}
+	slices.Sort(keys)
+	return hcInner{o.version.Load(), o.bytes, o.tips, o.leases, len(o.recs), strings.Join(keys, ""), o.established, o.latched, o.closed, o.source, o.prepared}
 }
 
 func TestHeaderCandidate148Classification(t *testing.T) {
@@ -419,6 +426,7 @@ func TestHeaderCandidate148Constructor(t *testing.T) {
 		t.Fatal("new owner identity")
 	}
 	cur, rel := o.ProtectV1(1)
+	t.Cleanup(rel)
 	if cur || rel == nil {
 		t.Fatal("not-established owner protected current")
 	}
@@ -502,6 +510,7 @@ func TestHeaderCandidate148Receipts(t *testing.T) {
 	o, r0, r1 := hcBase(t, hcLim())
 	v := o.VersionV1()
 	cur, rel := o.ProtectV1(v)
+	t.Cleanup(rel)
 	if !cur {
 		t.Fatal("not current")
 	}
@@ -516,6 +525,7 @@ func TestHeaderCandidate148Receipts(t *testing.T) {
 	hcEqual(t, "prov added", rec.Added, nil)
 	hcEqual(t, "prov retired", rec.Retired, nil)
 	cur, rel = o.ProtectV1(v)
+	t.Cleanup(rel)
 	if cur {
 		t.Fatal("prior version still current")
 	}
@@ -1096,10 +1106,10 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		if p := hcPresent(o, r0, r1, n); !p[0] || !p[1] || p[2] {
 			t.Fatal("unknown applied membership")
 		}
-		if cur, rel := o.ProtectV1(o.VersionV1()); cur || rel == nil {
+		cur, rel := o.ProtectV1(o.VersionV1())
+		t.Cleanup(rel)
+		if cur {
 			t.Fatal("latched protect current")
-		} else {
-			rel()
 		}
 		if _, out := o.PrepareV1(hcTr(o, nil)); out != HeaderCandidateUnknownSource148V1 {
 			t.Fatal("prepare after latch")
