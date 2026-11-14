@@ -1208,9 +1208,9 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		o, r0, r1 := hcBase(t, hcLim())
 		n := hcMk(t, r1.Hash, 12, 120, 9)
 		tr := hcTr(o, []HeaderCandidateRecord148V1{n})
-		before := hcTake(o, r0, r1, n)
+		before, reads := hcTake(o, r0, r1, n), hcReads(o, r0, r1, n)
 		h := hcPrepOK(t, o, tr)
-		if h.AbortV1() != HeaderCandidateOK148V1 || !before.same(hcTake(o, r0, r1, n)) {
+		if h.AbortV1() != HeaderCandidateOK148V1 || !before.same(hcTake(o, r0, r1, n)) || hcReads(o, r0, r1, n) != reads {
 			t.Fatal("abort changed state")
 		}
 		for _, c := range []HeaderCandidateOutcome148V1{h.AbortV1(), h.UnknownV1()} {
