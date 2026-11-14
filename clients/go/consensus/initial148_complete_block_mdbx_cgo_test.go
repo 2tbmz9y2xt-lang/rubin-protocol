@@ -603,7 +603,7 @@ func TestInitial148CompleteBlockEarlierConnectErrorBeforeD(t *testing.T) {
 // TestInitial148CompleteBlockDeriveCapacityNoResult (C10) leaves room on the
 // same account for W, the source scratch and R, but not D: derived=false keeps
 // the raw capacity cause as the validation error, never a root mismatch, and
-// no result is delivered. R=69,656+196,824E and D=288,408+104E use the
+// no result is delivered. R=135,192+48E and D=288,408+104E use the
 // genesis source EventCount E.
 func TestInitial148CompleteBlockDeriveCapacityNoResult(t *testing.T) {
 	// The published genesis source records one event (E=1).
@@ -613,7 +613,7 @@ func TestInitial148CompleteBlockDeriveCapacityNoResult(t *testing.T) {
 		in, _ := icbGenesisInputV1(t, -1)
 		tariff, ok := initial148CompleteTariffV1(in)
 		logicalMDBXAssert(t, ok, "tariff")
-		hold := uint64(402_653_184) - tariff - (69_656 + 196_824*genesisEvents) - (288_408 + 104*genesisEvents)
+		hold := uint64(402_653_184) - tariff - (135_192 + 48*genesisEvents) - (288_408 + 104*genesisEvents)
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			// Control: with exactly D remaining the same input derives and is delivered.
 			logicalMDBXAssert(t, account.WithReservation(hold, func() error {
@@ -1641,7 +1641,7 @@ func TestInitial148CompleteBlockMixedStagesH5(t *testing.T) {
 
 // TestInitial148CompleteBlockDeriveCapacityH5 (C10 capacity, h>0) is the h=5
 // form of TestInitial148CompleteBlockDeriveCapacityNoResult: the same account
-// keeps exactly W, R=69,656+196,824E and D=288,408+104E free (the control is
+// keeps exactly W, R=135,192+48E and D=288,408+104E free (the control is
 // delivered), then one byte less; the refused D keeps its raw capacity cause,
 // derived=false, no observation and no result through every entry. E is the
 // EventCount the control's delivered source coverage records.
@@ -1664,7 +1664,7 @@ func TestInitial148CompleteBlockDeriveCapacityH5(t *testing.T) {
 			})
 			logicalMDBXAssert(t, err == nil && events != 0, "event count control: %v", err)
 		})
-		hold := uint64(402_653_184) - tariff - (69_656 + 196_824*events) - (288_408 + 104*events)
+		hold := uint64(402_653_184) - tariff - (135_192 + 48*events) - (288_408 + 104*events)
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			logicalMDBXAssert(t, account.WithReservation(hold, func() error {
 				out, delivered, err := icbDiscardRunV1(w, account, f.in, workers)
@@ -1758,7 +1758,7 @@ func TestInitial148CompleteBlockTariffOverflow(t *testing.T) {
 
 // TestInitial148CompleteBlockTariffH5 (C12 exact residual) pins the h=5 W
 // from literal counts and, on the same account pre-holding everything but W
-// plus the nested source scratch 4,824, R=69,656+196,824E and D=288,408+104E,
+// plus the nested source scratch 4,824, R=135,192+48E and D=288,408+104E,
 // walks every reserve boundary through each entry: one byte below the source
 // scratch, R and D each refuses with the raw capacity cause at its own charge
 // (only D's refusal is the D cause), the exact sum accepts, and W-1 refuses
@@ -1771,7 +1771,7 @@ func TestInitial148CompleteBlockTariffH5(t *testing.T) {
 		got, ok := initial148CompleteTariffV1(f.in)
 		logicalMDBXAssert(t, ok && got == tariff, "h5 W %d/%v want literal %d", got, ok, tariff)
 		events := icbEventsV1(t, w, f.in)
-		r, d := uint64(69_656+196_824*events), uint64(288_408+104*events)
+		r, d := uint64(135_192+48*events), uint64(288_408+104*events)
 		cases := []struct {
 			name             string
 			free             uint64
@@ -2278,7 +2278,7 @@ func TestInitial148CompleteBlockNoGenesisDemandNoSpare(t *testing.T) {
 		tariff, ok := initial148CompleteTariffV1(in)
 		logicalMDBXAssert(t, ok, "no-spare tariff")
 		icbWithAccountV1(t, w, func(a *mdbx.OperationAccount) {
-			err := a.WithReservation(402653184-tariff-266480-288512, func() error {
+			err := a.WithReservation(402653184-tariff-135240-288512, func() error {
 				out, result, _, err := icbValidateOnceV1(t, w, a, in, false)
 				if demand == 0 {
 					logicalMDBXAssert(t, err == nil && result != nil && out.required.derived, "ordinary composer took an unsolicited E: %v", err)

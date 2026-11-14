@@ -19,6 +19,86 @@ func TestInitial148RequiredFaultV1(t *testing.T) {
 	t.Run("localized-D-copy", irLocalizedV1)
 	t.Run("record-check-before-consumption", irMalformedV1)
 	t.Run("genesis-and-earlier-stop-selectors", irSelectorsV1)
+	t.Run("recorded-absent-repeat-count", irAbsentCountV1)
+	t.Run("recorded-present-sticky-refusal", irPresentRepeatV1)
+	t.Run("plan-from-recorded-facts", irRecordedPlanV1)
+}
+
+func irAbsentCountV1(t *testing.T) {
+	w := btNew(t)
+	op := Outpoint{Txid: [32]byte{91}}
+	var result, first error
+	evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 1, nil, func() {
+		result = irRunV1(t, w, irRequestV1(6, 59), mdbx.TreeEndpointV1{Kind: 1, Height: 5, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
+			scope := view.(*initial148RequiredScopeV1)
+			_, _, known := scope.recordedV1(op)
+			logicalMDBXAssert(t, !known && scope.calls == 0, "unknown record counted or fabricated a fact")
+			for range 2 {
+				row := view.Lookup(op)
+				logicalMDBXAssert(t, row.kind == logicalStateRowAbsent && row.cause == nil && logicalStateEntryZero(row.entry), "recorded absence changed")
+			}
+			length, present, ok := scope.recordedV1(op)
+			logicalMDBXAssert(t, length == 0 && !present && ok && scope.calls == 2, "absent encoding/call count changed")
+			first = view.Lookup(op).cause
+			irFailureV1(t, first, logicalStateFailureLocalInvariant, "required state point bound exceeded")
+			return nil
+		})
+	})
+	logicalMDBXAssert(t, err == nil && any(result) == any(first) && evidence.OldGets[1] == 1 && evidence.OldGets[0] == 0, "absent repeat re-read parent: %+v/%v", evidence, err)
+}
+
+func irPresentRepeatV1(t *testing.T) {
+	w := btNew(t)
+	op := Outpoint{Txid: [32]byte{92}}
+	w.pair(t, btMutation(1, btUTXOKey(1, op), btValue(btFrame(1, 0, []byte{3}), 0, false)))
+	var result, first error
+	evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 1, nil, func() {
+		result = irRunV1(t, w, irRequestV1(6, 60), mdbx.TreeEndpointV1{Kind: 1, Height: 5, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
+			logicalMDBXAssert(t, view.Lookup(op).kind == logicalStateRowPresent, "first present lookup failed")
+			row := view.Lookup(op)
+			first = row.cause
+			irFailureV1(t, first, logicalStateFailureLocalInvariant, "required state record holds no value")
+			logicalMDBXAssert(t, row.kind == logicalStateRowLocalInvariant && logicalStateEntryZero(row.entry), "present repeat returned an entry")
+			logicalMDBXAssert(t, any(view.Counters().cause) == any(first), "repeat failure not sticky through counters")
+			logicalMDBXAssert(t, any(view.Lookup(op).cause) == any(first) && any(view.Lookup(Outpoint{Vout: 7}).cause) == any(first), "repeat failure lost by existing/new point")
+			out := derive()
+			logicalMDBXAssert(t, any(out.cause) == any(first) && !out.derived && out.root == ([32]byte{}), "repeat failure lost by derive")
+			return nil
+		})
+	})
+	logicalMDBXAssert(t, err == nil && any(result) == any(first) && evidence.OldGets[1] == 1 && evidence.OldGets[0] == 0, "present repeat re-read parent: %+v/%v", evidence, err)
+}
+
+func irRecordedPlanV1(t *testing.T) {
+	w := btNew(t)
+	ops := []Outpoint{{Txid: [32]byte{1}}, {Txid: [32]byte{2}}, {Txid: [32]byte{3}}, {Txid: [32]byte{4}}, {Txid: [32]byte{5}}}
+	for i, size := range []int{1, 253} {
+		w.pair(t, btMutation(1, btUTXOKey(1, ops[i]), btValue(btFrame(1, 0, bytes.Repeat([]byte{3}, size)), 0, false)))
+	}
+	irCounterV1(t, w, 368, 2)
+	touched := []logicalTouchedState{{Outpoint: ops[1]}, {Outpoint: ops[0]}}
+	wantPuts := make([]logicalStatePut, 0, 3)
+	for i, size := range []int{0, 1, 252} {
+		entry := logicalStateTestEntry(size, byte(i+1))
+		touched = append(touched, logicalTouchedState{Outpoint: ops[i+2], FinalPresent: true, Final: entry})
+		wantPuts = append(wantPuts, logicalStatePut{Outpoint: ops[i+2], Entry: entry})
+	}
+	var result error
+	evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 1, nil, func() {
+		result = irRunV1(t, w, irEventsRequestV1(6, 61, 5), mdbx.TreeEndpointV1{Kind: 1, Height: 5, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
+			for _, op := range ops[:2] {
+				logicalMDBXAssert(t, view.Lookup(op).kind == logicalStateRowPresent, "input resolution failed")
+			}
+			registry, registryErr := validateLogicalStateCapRegistry(nil)
+			logicalMDBXAssert(t, registryErr == nil, "record plan registry")
+			out, planErr := evaluateLogicalStateCap(nil, registry, [32]byte{}, 6, view, touched, 23)
+			logicalMDBXAssert(t, planErr == nil, "record plan success: %v", planErr)
+			want := logicalStatePlan[int]{Parent: logicalStateCounters{bytes: 368, entries: 2}, Result: logicalStateCounters{bytes: 421, entries: 3}, Metadata: 23, Deletes: []logicalStateDelete{{Outpoint: ops[0], EntryBytes: 57}, {Outpoint: ops[1], EntryBytes: 311}}, Puts: wantPuts}
+			logicalMDBXAssert(t, reflect.DeepEqual(out.plan, want), "record plan exact effects: %+v", out.plan)
+			return planErr
+		})
+	})
+	logicalMDBXAssert(t, result == nil && err == nil && evidence.OldGets[0] == 1 && evidence.OldGets[1] == 5, "record plan parent reads: %+v/%v/%v", evidence, result, err)
 }
 
 func irNativeFaultV1(t *testing.T) {
@@ -40,6 +120,9 @@ func irNativeFaultV1(t *testing.T) {
 					row := view.Lookup(op)
 					first = row.cause
 					logicalMDBXAssert(t, row.kind == logicalStateRowUnavailable && logicalStateEntryZero(row.entry), "native unavailable became absence/integrity")
+					_, _, known := view.(*initial148RequiredScopeV1).recordedV1(op)
+					_, failure := readLogicalStatePlanRow(6, view, op)
+					logicalMDBXAssert(t, !known && failure != nil && any(failure.cause) == any(first), "failed record fallback lost native cause")
 					observation = root()
 					logicalMDBXAssert(t, any(observation.cause) == any(first) && !observation.derived && observation.root == ([32]byte{}) && !observation.hasObservation && observation.observation == (mdbx.TreeObservationV1{}), "unavailable fabricated root/observation")
 					switch delivery {
