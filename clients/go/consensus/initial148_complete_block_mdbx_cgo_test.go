@@ -2110,29 +2110,34 @@ func icbHugeLenV1(n int) []SimplicityDeploymentDescriptor {
 }
 
 // TestInitial148CompleteBlockTariffOverflow (C12 overflow) drives the checked
-// uint64 recipe on icbInputV1 (fixed part 21,105,737, d the only varied
-// count) across multiplication overflow (16,384*2^50 = 2^64), addition carry
+// uint64 recipe on icbInputV1 (fixed part 21,105,737 for descriptor rows)
+// across multiplication overflow (16,384*2^50 = 2^64), addition carry
 // (16,384*(2^50-2^10) = 2^64-2^24, plus 2^24), the int64 domain bound and its
-// largest admitted value. The refusals return the local invariant failure
-// before W and never invoke run.
+// largest admitted value, and minimum-witness overflow. The refusals return
+// the local invariant failure before W and never invoke run.
 func TestInitial148CompleteBlockTariffOverflow(t *testing.T) {
 	const fixed = 21_105_737
 	const largest = (1<<63 - 1 - fixed) / 16_384
 	cases := []struct {
-		name string
-		d    int
-		ok   bool
-		w    uint64
+		name     string
+		d        int
+		ok       bool
+		w        uint64
+		registry *SuiteRegistry
 	}{
-		{"multiplication-overflow", 1 << 50, false, 0},
-		{"addition-carry", 1<<50 - 1<<10, false, 0},
-		{"above-int64", 1 << 49, false, 0},
-		{"largest-admitted", largest, true, fixed + 16_384*largest},
-		{"one-above-largest", largest + 1, false, 0},
+		{"multiplication-overflow", 1 << 50, false, 0, nil},
+		{"addition-carry", 1<<50 - 1<<10, false, 0, nil},
+		{"above-int64", 1 << 49, false, 0, nil},
+		{"largest-admitted", largest, true, fixed + 16_384*largest, nil},
+		{"one-above-largest", largest + 1, false, 0, nil},
+		{"minimum-witness-overflow", 0, false, 0, NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: SUITE_ID_ML_DSA_87, PubkeyLen: int(^uint(0) >> 1), SigLen: int(^uint(0) >> 1)}})},
 	}
 	w := btNew(t)
 	for _, c := range cases {
 		in := icbInputV1()
+		if c.registry != nil {
+			in.Registry = c.registry
+		}
 		in.Rotation = &boundSpendSurfaceWithDeployment{boundSpendSurface: icbFrozenV1(1), descriptors: icbHugeLenV1(c.d), have: true}
 		got, ok := initial148CompleteTariffV1(in)
 		logicalMDBXAssert(t, ok == c.ok && (!c.ok || got == c.w), "%s: W=%d ok=%v want %d/%v", c.name, got, ok, c.w, c.ok)
