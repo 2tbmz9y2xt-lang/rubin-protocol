@@ -513,7 +513,14 @@ func (o *HeaderCandidateOwner148V1) remove(h [32]byte) {
 }
 
 // hcCharge is 148 raw + 32 hash + 32 parent + 8 height + 32 provenance + the minimal big-endian Work length.
-func hcCharge(w *big.Int) uint64 { return 252 + uint64((w.BitLen()+7)/8) }
+// It reads BitLen, so charging allocates nothing.
+func hcCharge(w *big.Int) uint64 {
+	n := w.BitLen()
+	if n <= 0 {
+		return 252
+	}
+	return 252 + (uint64(n)+7)/8
+}
 
 func hcAddSat(a, b uint64) uint64 {
 	s, c := bits.Add64(a, b, 0)

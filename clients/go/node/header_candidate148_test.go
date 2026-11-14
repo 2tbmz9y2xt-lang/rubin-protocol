@@ -1084,6 +1084,19 @@ func TestHeaderCandidate148Aliasing(t *testing.T) {
 	}); a != 0 {
 		t.Fatalf("Retired allocs %v", a)
 	}
+	// Charge is 252 plus the minimal big-endian Work length (zero for zero), computed without allocating.
+	wide := new(big.Int).Lsh(big.NewInt(1), 300)
+	for _, c := range []struct {
+		w    *big.Int
+		want uint64
+	}{{big.NewInt(0), 252}, {big.NewInt(255), 253}, {big.NewInt(256), 254}, {wide, 252 + 38}} {
+		if got := hcCharge(c.w); got != c.want {
+			t.Fatalf("charge %s: %d want %d", c.w, got, c.want)
+		}
+	}
+	if a := testing.AllocsPerRun(50, func() { _ = hcCharge(wide) }); a != 0 {
+		t.Fatalf("charge allocs %v", a)
+	}
 }
 
 // hcChain returns n valid records, each the child of the previous one, starting under parent.
