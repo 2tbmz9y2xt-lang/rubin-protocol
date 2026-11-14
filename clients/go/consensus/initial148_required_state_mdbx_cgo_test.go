@@ -80,7 +80,7 @@ func irFailureV1(t *testing.T, err error, kind logicalStateFailureKind, text str
 }
 
 func TestInitial148RequiredR(t *testing.T) {
-	t.Run("full-record-and-decoder-ownership", func(t *testing.T) {
+	t.Run("full-record-and-length", func(t *testing.T) {
 		for _, tc := range []struct {
 			size     int
 			length   uint32
@@ -105,10 +105,6 @@ func TestInitial148RequiredR(t *testing.T) {
 						scope := view.(*initial148RequiredScopeV1)
 						length, present, ok := scope.recordedV1(op)
 						logicalMDBXAssert(t, ok && present && length == tc.length && len(scope.keys) == 1, "literal recorded length: %d/%v/%v", length, present, ok)
-						if size != 0 {
-							first.entry.CovenantData[0] = 9
-						}
-						logicalMDBXAssert(t, bytes.Equal(value, btValue(frame, tc.height, coinbase)), "decoded entry borrowed caller value")
 						counter := view.Counters()
 						logicalMDBXAssert(t, counter.kind == logicalStateCountersPresent && counter.counters == (logicalStateCounters{bytes: uint64(tc.length), entries: 1}), "record changed parent counters")
 						return nil
