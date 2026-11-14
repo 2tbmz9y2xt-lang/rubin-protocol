@@ -631,6 +631,56 @@ func TestHeaderCandidate148Capacity(t *testing.T) {
 	})
 }
 
+// TestHeaderCandidate148Reorg covers X3: a source replacement over shared ancestors with pending-body (A) and target
+// (K) dependencies meets unavailable, stale and capacity refusals that preserve membership, leases, source and version;
+// the next valid sibling operation is then legal.
+func TestHeaderCandidate148Reorg(t *testing.T) {
+	lim := hcLim()
+	lim.MaxHeaders = 7
+	o, r := hcCapFixture(t, lim)
+	for _, k := range []string{"A", "K"} {
+		if _, out := o.AcquireDependencyV1(r[k].Hash); out != HeaderCandidateOK148V1 {
+			t.Fatalf("lease %s: %d", k, out)
+		}
+	}
+	all := []HeaderCandidateRecord148V1{r["R0"], r["S"], r["A"], r["B"], r["I"], r["A2"], r["K"]}
+	unchanged := func(what string, want HeaderCandidateOutcome148V1, tr HeaderCandidateTransition148V1) {
+		t.Helper()
+		before := hcTake(o, all...)
+		if h, out := o.PrepareV1(tr); out != want || h != nil {
+			t.Fatalf("%s: %d want %d", what, out, want)
+		}
+		if !before.same(hcTake(o, all...)) || o.source != hcSrc1 || o.leases != 2 || o.prepared != nil {
+			t.Fatalf("%s changed ownership", what)
+		}
+	}
+	strong := hcMk(t, r["K"].Hash, 12, 60, 8)
+	valid := hcTr(o, []HeaderCandidateRecord148V1{strong})
+	valid.NewSource = hcSrc2
+	// Unavailable: the reorg would retire the shared ancestor R0 below both leased paths.
+	gone := hcTr(o, []HeaderCandidateRecord148V1{strong}, r["R0"].Hash)
+	gone.NewSource = hcSrc2
+	unchanged("retire shared leased ancestor", HeaderCandidateProtected148V1, gone)
+	// Stale: the otherwise valid replacement names another source.
+	stale := valid
+	stale.ExpectedSource = hcSrc2
+	unchanged("stale source", HeaderCandidateStale148V1, stale)
+	// Capacity: a weak replacement tip outranks no unprotected candidate.
+	weak := hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r["K"].Hash, 12, 1, 9)})
+	weak.NewSource = hcSrc2
+	unchanged("weak replacement", HeaderCandidateCapacity148V1, weak)
+	// The next valid sibling operation is legal and keeps both dependencies.
+	v := o.VersionV1()
+	rec, out := hcPublish(t, o, valid)
+	if out != HeaderCandidateOK148V1 || rec.Version != v+1 || o.source != hcSrc2 || o.leases != 2 {
+		t.Fatalf("valid replacement: %d %+v", out, rec)
+	}
+	hcEqual(t, "retired", rec.Retired, hcHashes(r["A2"], r["I"]))
+	if p := hcPresent(o, r["R0"], r["S"], r["A"], r["K"], strong); slices.Contains(p, false) {
+		t.Fatal("dependency path lost")
+	}
+}
+
 // TestHeaderCandidate148Order covers X4: equal-work opposite hash order, work wider than 256 bits and identical
 // victim order across 64 fresh owners.
 func TestHeaderCandidate148Order(t *testing.T) {
@@ -893,6 +943,8 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 			t.Fatal("publish")
 		}
 		cur, rel := o.ProtectV1(v)
+		// A failing assertion must not leave blocked goroutines behind: release the guard and wake every waiter.
+		t.Cleanup(func() { rel(); o.CloseV1() })
 		if cur {
 			t.Fatal("stale guard current")
 		}
@@ -913,14 +965,15 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 			r2()
 		})
 		rel()
-		rel()
 		hcWithin(t, "publish after release", func() { <-done })
-		// The second release was a no-op: a later state-changing publication still proceeds.
-		hcWithin(t, "publish after double release", func() {
-			if _, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 122, 11)})); out != HeaderCandidateOK148V1 {
-				t.Errorf("later publish: %d", out)
-			}
-		})
+		// X1: the second call of the same release is a no-op, so a later state-changing publication still proceeds.
+		rel()
+		later, _ := o.PrepareV1(hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 122, 11)}))
+		var out HeaderCandidateOutcome148V1
+		hcWithin(t, "publish after double release", func() { _, out = later.PublishV1() })
+		if out != HeaderCandidateOK148V1 {
+			t.Fatalf("later publish: %d", out)
+		}
 	})
 	t.Run("unknown latch", func(t *testing.T) {
 		o, r0, r1 := hcBase(t, hcLim())
