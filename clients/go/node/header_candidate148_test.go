@@ -1088,13 +1088,17 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		l, _ := o.AcquireDependencyV1(r1.Hash)
 		h, _ := o.PrepareV1(hcTr(o, nil))
 		_, rel := o.ProtectV1(o.VersionV1())
+		t.Cleanup(rel)
 		v := o.VersionV1()
 		o.CloseV1()
-		if cur, rel2 := o.ProtectV1(v); cur || rel2 == nil {
+		// ProtectV1 never waits, also with a guard and a prepared handle outstanding at close.
+		var cur bool
+		var rel2 func()
+		hcWithin(t, "protect after close", func() { cur, rel2 = o.ProtectV1(v) })
+		if cur || rel2 == nil {
 			t.Fatal("closed protect current")
-		} else {
-			rel2()
 		}
+		rel2()
 		rel()
 		l.ReleaseV1()
 		if h.AbortV1() != HeaderCandidateClosed148V1 || h.AbortV1() != HeaderCandidateConsumed148V1 {
