@@ -75,10 +75,11 @@ func hcTr(o *HeaderCandidateOwner148V1, adds []HeaderCandidateRecord148V1, ret .
 
 func hcPublish(t testing.TB, o *HeaderCandidateOwner148V1, tr HeaderCandidateTransition148V1) (HeaderCandidatePublication148V1, HeaderCandidateOutcome148V1) {
 	t.Helper()
+	before := hcInnerOf(o)
 	h, out := o.PrepareV1(tr)
 	if out != HeaderCandidateOK148V1 {
-		if h != nil {
-			t.Fatal("non-OK prepare returned a handle")
+		if h != nil || hcInnerOf(o) != before {
+			t.Fatal("non-OK prepare returned a handle or changed state")
 		}
 		return HeaderCandidatePublication148V1{}, out
 	}
@@ -163,41 +164,48 @@ func hcInnerOf(o *HeaderCandidateOwner148V1) hcInner {
 	return hcInner{o.version.Load(), o.bytes, o.tips, o.leases, len(o.recs), strings.Join(keys, ""), o.established, o.latched, o.closed, o.source, o.prepared}
 }
 
+// Each refused call goes through one of these wrappers: it snapshots the owner right before the call and asserts
+// that the refusal returned the zero value of its other result and changed no owner state, version included.
+func hcPrep(t *testing.T, o *HeaderCandidateOwner148V1, tr HeaderCandidateTransition148V1) HeaderCandidateOutcome148V1 {
+	t.Helper()
+	before := hcInnerOf(o)
+	h, out := o.PrepareV1(tr)
+	if out != HeaderCandidateOK148V1 && (h != nil || hcInnerOf(o) != before) {
+		t.Fatalf("refused PrepareV1 %d returned a handle or changed state", out)
+	}
+	return out
+}
+
+func hcAcq(t *testing.T, o *HeaderCandidateOwner148V1, hash [32]byte) HeaderCandidateOutcome148V1 {
+	t.Helper()
+	before := hcInnerOf(o)
+	l, out := o.AcquireDependencyV1(hash)
+	if out != HeaderCandidateOK148V1 && (l != nil || hcInnerOf(o) != before) {
+		t.Fatalf("refused AcquireDependencyV1 %d returned a lease or changed state", out)
+	}
+	return out
+}
+
+func hcEst(t *testing.T, o *HeaderCandidateOwner148V1, source [32]byte, recs []HeaderCandidateRecord148V1) HeaderCandidateOutcome148V1 {
+	t.Helper()
+	before := hcInnerOf(o)
+	p, out := o.EstablishV1(source, recs)
+	zero := !p.Changed && p.Version == 0 && p.Added == nil && p.Retired == nil
+	if out != HeaderCandidateOK148V1 && (!zero || hcInnerOf(o) != before) {
+		t.Fatalf("refused EstablishV1 %d returned %+v or changed state", out, p)
+	}
+	return out
+}
+
 func TestHeaderCandidate148Classification(t *testing.T) {
 	type tc struct {
 		name string
 		want HeaderCandidateOutcome148V1
 		run  func(t *testing.T, o *HeaderCandidateOwner148V1, r0, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func())
 	}
-	// Each refused call goes through one of these wrappers: it snapshots the owner right before the call and asserts
-	// that the refusal returned the zero value of its other result and changed no owner state, version included.
-	prep := func(t *testing.T, o *HeaderCandidateOwner148V1, tr HeaderCandidateTransition148V1) HeaderCandidateOutcome148V1 {
-		t.Helper()
-		before := hcInnerOf(o)
-		h, out := o.PrepareV1(tr)
-		if out != HeaderCandidateOK148V1 && (h != nil || hcInnerOf(o) != before) {
-			t.Fatalf("refused PrepareV1 %d returned a handle or changed state", out)
-		}
-		return out
-	}
-	acq := func(t *testing.T, o *HeaderCandidateOwner148V1, hash [32]byte) HeaderCandidateOutcome148V1 {
-		t.Helper()
-		before := hcInnerOf(o)
-		l, out := o.AcquireDependencyV1(hash)
-		if out != HeaderCandidateOK148V1 && (l != nil || hcInnerOf(o) != before) {
-			t.Fatalf("refused AcquireDependencyV1 %d returned a lease or changed state", out)
-		}
-		return out
-	}
+	prep, acq := hcPrep, hcAcq
 	est := func(t *testing.T, o *HeaderCandidateOwner148V1, source [32]byte) HeaderCandidateOutcome148V1 {
-		t.Helper()
-		before := hcInnerOf(o)
-		p, out := o.EstablishV1(source, nil)
-		zero := !p.Changed && p.Version == 0 && p.Added == nil && p.Retired == nil
-		if out != HeaderCandidateOK148V1 && (!zero || hcInnerOf(o) != before) {
-			t.Fatalf("refused EstablishV1 %d returned %+v or changed state", out, p)
-		}
-		return out
+		return hcEst(t, o, source, nil)
 	}
 	latch := func(t *testing.T, o *HeaderCandidateOwner148V1) {
 		h, _ := o.PrepareV1(hcTr(o, nil))
@@ -364,13 +372,13 @@ func TestHeaderCandidate148Classification(t *testing.T) {
 			o.version.Store(math.MaxUint64)
 			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
 		}},
-		{"rows11+12 exhausted wins over capacity", HeaderCandidateVersionExhausted148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			o, _, r1 = hcBase(t, hcHeaders(2))
+		{"rows11+12 exhausted wins over capacity", HeaderCandidateVersionExhausted148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
+			o, _, r1 := hcBase(t, hcHeaders(2))
 			o.version.Store(math.MaxUint64)
 			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
 		}},
-		{"row12 capacity", HeaderCandidateCapacity148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			o, _, r1 = hcBase(t, hcHeaders(2))
+		{"row12 capacity", HeaderCandidateCapacity148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
+			o, _, r1 := hcBase(t, hcHeaders(2))
 			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
 		}},
 		{"row3 not established prepare", HeaderCandidateNotEstablished148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
@@ -475,7 +483,7 @@ func TestHeaderCandidate148Limits(t *testing.T) {
 	a := hcMk(t, r1.Hash, 12, 120, 31)
 	b := hcMk(t, a.Hash, 13, 130, 32)
 	c := hcMk(t, b.Hash, 14, 140, 33)
-	if _, out := o.PrepareV1(hcTr(o, []HeaderCandidateRecord148V1{a, b, c})); out != HeaderCandidateInvalid148V1 {
+	if out := hcPrep(t, o, hcTr(o, []HeaderCandidateRecord148V1{a, b, c})); out != HeaderCandidateInvalid148V1 {
 		t.Fatalf("over transition: %d", out)
 	}
 	h, out := o.PrepareV1(hcTr(o, []HeaderCandidateRecord148V1{a, b}))
@@ -490,7 +498,7 @@ func TestHeaderCandidate148Limits(t *testing.T) {
 	e := hcNew(t, l)
 	r0 := hcExt(hcMk(t, hcRoot, 10, 100, 1))
 	e1 := hcMk(t, r0.Hash, 11, 110, 2)
-	if _, out := e.EstablishV1(hcSrc1, []HeaderCandidateRecord148V1{r0, e1, hcMk(t, e1.Hash, 12, 120, 3)}); out != HeaderCandidateInvalid148V1 || e.established || e.VersionV1() != 1 {
+	if out := hcEst(t, e, hcSrc1, []HeaderCandidateRecord148V1{r0, e1, hcMk(t, e1.Hash, 12, 120, 3)}); out != HeaderCandidateInvalid148V1 || e.established || e.VersionV1() != 1 {
 		t.Fatalf("over establish: %d", out)
 	}
 	if _, out := e.EstablishV1(hcSrc1, []HeaderCandidateRecord148V1{r0, e1}); out != HeaderCandidateOK148V1 || e.VersionV1() != 2 {
@@ -501,7 +509,7 @@ func TestHeaderCandidate148Limits(t *testing.T) {
 			t.Fatalf("lease %d: %d", i, out)
 		}
 	}
-	if l, out := o.AcquireDependencyV1(r1.Hash); out != HeaderCandidateCapacity148V1 || l != nil {
+	if out := hcAcq(t, o, r1.Hash); out != HeaderCandidateCapacity148V1 {
 		t.Fatalf("lease over: %d", out)
 	}
 }
@@ -620,6 +628,9 @@ func TestHeaderCandidate148Capacity(t *testing.T) {
 		}
 		hcEqual(t, "added", rec.Added, hcHashes(n...))
 		hcEqual(t, "retired", rec.Retired, hcHashes(r["A"], r["B"], r["S"]))
+		if p := hcPresent(o, r["A"], r["B"], r["S"]); p[0] || p[1] || p[2] {
+			t.Fatal("victim still present")
+		}
 	})
 	t.Run("stops at first fit", func(t *testing.T) {
 		l := lim
@@ -877,7 +888,7 @@ func TestHeaderCandidate148Leases(t *testing.T) {
 		t.Fatalf("prepare: %d", out)
 	}
 	for _, x := range [][32]byte{r0.Hash, r1.Hash} {
-		if l, out := o.AcquireDependencyV1(x); out != HeaderCandidateProtected148V1 || l != nil {
+		if out := hcAcq(t, o, x); out != HeaderCandidateProtected148V1 {
 			t.Fatalf("lease on planned removal: %d", out)
 		}
 	}
@@ -902,7 +913,7 @@ func TestHeaderCandidate148Leases(t *testing.T) {
 		t.Fatal("release changed state")
 	}
 	h, _ = o.PrepareV1(hcTr(o, nil, r0.Hash))
-	if _, out := o.AcquireDependencyV1(r1.Hash); out != HeaderCandidateProtected148V1 {
+	if out := hcAcq(t, o, r1.Hash); out != HeaderCandidateProtected148V1 {
 		t.Fatal("surviving tip over planned Retired")
 	}
 	if _, out := h.PublishV1(); out != HeaderCandidateOK148V1 {
@@ -925,7 +936,7 @@ func TestHeaderCandidate148Leases(t *testing.T) {
 		t.Fatalf("replacement prepare: %d", out)
 	}
 	for _, k := range []string{"A2", "I"} {
-		if l, out := c.AcquireDependencyV1(r[k].Hash); out != HeaderCandidateProtected148V1 || l != nil {
+		if out := hcAcq(t, c, r[k].Hash); out != HeaderCandidateProtected148V1 {
 			t.Fatalf("lease on capacity victim %s: %d", k, out)
 		}
 	}
@@ -970,6 +981,9 @@ func TestHeaderCandidate148Aliasing(t *testing.T) {
 	// parent-after-child order so a set check placed before the length check would allocate.
 	c := hcMk(t, r1.Hash, 12, 120, 9)
 	long := hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, c.Hash, 13, 130, 10), c, c, c, c, c, c, c, c})
+	if out := hcPrep(t, o, long); out != HeaderCandidateInvalid148V1 {
+		t.Fatal("over-length accepted")
+	}
 	if a := testing.AllocsPerRun(50, func() {
 		if h, out := o.PrepareV1(long); out != HeaderCandidateInvalid148V1 || h != nil {
 			t.Fatal("over-length accepted")
@@ -979,6 +993,9 @@ func TestHeaderCandidate148Aliasing(t *testing.T) {
 	}
 	// R3 Retired term: Additions within the limit, Additions plus Retired over it.
 	overRetired := hcTr(o, hcChain(t, r1, 4), [32]byte{0x61}, [32]byte{0x62}, [32]byte{0x63}, [32]byte{0x64}, [32]byte{0x65})
+	if out := hcPrep(t, o, overRetired); out != HeaderCandidateInvalid148V1 {
+		t.Fatalf("over-length Retired: %d", out)
+	}
 	if a := testing.AllocsPerRun(50, func() {
 		if h, out := o.PrepareV1(overRetired); out != HeaderCandidateInvalid148V1 || h != nil {
 			t.Fatalf("over-length Retired: %d", out)
@@ -1107,17 +1124,20 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 			t.Fatal("unknown applied membership")
 		}
 		cur, rel := o.ProtectV1(o.VersionV1())
+		if rel == nil {
+			t.Fatal("latched protect returned a nil release")
+		}
 		t.Cleanup(rel)
 		if cur {
 			t.Fatal("latched protect current")
 		}
-		if _, out := o.PrepareV1(hcTr(o, nil)); out != HeaderCandidateUnknownSource148V1 {
+		if out := hcPrep(t, o, hcTr(o, nil)); out != HeaderCandidateUnknownSource148V1 {
 			t.Fatal("prepare after latch")
 		}
-		if _, out := o.EstablishV1(hcSrc1, nil); out != HeaderCandidateUnknownSource148V1 {
+		if out := hcEst(t, o, hcSrc1, nil); out != HeaderCandidateUnknownSource148V1 {
 			t.Fatal("establish after latch")
 		}
-		if _, out := o.AcquireDependencyV1(r1.Hash); out != HeaderCandidateUnknownSource148V1 {
+		if out := hcAcq(t, o, r1.Hash); out != HeaderCandidateUnknownSource148V1 {
 			t.Fatal("lease after latch")
 		}
 		if h.UnknownV1() != HeaderCandidateConsumed148V1 {
