@@ -1075,7 +1075,9 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		rel()
 		a, b := <-res, <-res
-		if !((a == HeaderCandidateOK148V1 && b == HeaderCandidateAlreadyEstablished148V1) || (b == HeaderCandidateOK148V1 && a == HeaderCandidateAlreadyEstablished148V1)) || o.VersionV1() != 2 {
+		okFirst := a == HeaderCandidateOK148V1 && b == HeaderCandidateAlreadyEstablished148V1
+		okSecond := b == HeaderCandidateOK148V1 && a == HeaderCandidateAlreadyEstablished148V1
+		if (!okFirst && !okSecond) || o.VersionV1() != 2 {
 			t.Fatalf("concurrent establish %d %d", a, b)
 		}
 	})

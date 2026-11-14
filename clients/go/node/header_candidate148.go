@@ -247,7 +247,7 @@ func (o *HeaderCandidateOwner148V1) EstablishV1(source [32]byte, records []Heade
 	if out := o.gate(false); out != HeaderCandidateOK148V1 {
 		return HeaderCandidatePublication148V1{}, out
 	}
-	if hcTooLong(o.limits.MaxTransitionHeaders, len(records), 0) || source == ([32]byte{}) {
+	if hcTooLong(o.limits.MaxTransitionHeaders, uint64(len(records)), 0) || source == ([32]byte{}) {
 		return HeaderCandidatePublication148V1{}, HeaderCandidateInvalid148V1
 	}
 	t := HeaderCandidateTransition148V1{NewSource: source, Additions: records}
@@ -275,7 +275,7 @@ func (o *HeaderCandidateOwner148V1) PrepareV1(t HeaderCandidateTransition148V1) 
 	if o.prepared != nil {
 		return nil, HeaderCandidateBusy148V1
 	}
-	if hcTooLong(o.limits.MaxTransitionHeaders, len(t.Additions), len(t.Retired)) {
+	if hcTooLong(o.limits.MaxTransitionHeaders, uint64(len(t.Additions)), uint64(len(t.Retired))) {
 		return nil, HeaderCandidateInvalid148V1
 	}
 	plan, out := o.plan(t, false)
@@ -288,9 +288,8 @@ func (o *HeaderCandidateOwner148V1) PrepareV1(t HeaderCandidateTransition148V1) 
 }
 
 // hcTooLong is the row 5 length check, before any proportional allocation.
-func hcTooLong(limit uint64, a, r int) bool {
-	ua, ur := uint64(a), uint64(r)
-	return ua > limit || ur > limit-ua
+func hcTooLong(limit, a, r uint64) bool {
+	return a > limit || r > limit-a
 }
 
 // waitGuards waits, with mu held on entry and exit, until no guard is held or the owner is closed.
@@ -482,7 +481,7 @@ func (o *HeaderCandidateOwner148V1) remove(h [32]byte) {
 }
 
 // hcCharge is 148 raw + 32 hash + 32 parent + 8 height + 32 provenance + the minimal big-endian Work length.
-func hcCharge(w *big.Int) uint64 { return 252 + uint64((w.BitLen()+7)/8) }
+func hcCharge(w *big.Int) uint64 { return 252 + uint64(len(w.Bytes())) }
 
 func hcAddSat(a, b uint64) uint64 {
 	s, c := bits.Add64(a, b, 0)
