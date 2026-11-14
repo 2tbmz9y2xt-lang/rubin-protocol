@@ -497,21 +497,23 @@ func trOriginFaultV1(t *testing.T) {
 			treeNativeSeed(t, s, 1, key, damaged)
 			var failed *Reader
 			var raw, outer error
+			var assertInner func()
 			evidence, fixtureErr := FixtureSelectedDamage(s, o, scenario, 1, key, func() {
 				outer = trReadV1(t, s, o, request, func(reader *Reader, account *OperationAccount, root [32]byte, err error) {
 					raw, failed = err, reader
-					trSemanticV1(t, request, reader, account, root, err)
+					assertInner = trSemanticAssertionV1(t, request, reader, account, root, err)
 				})
 			})
 			if scenario == SelectedDamageProbeOnly {
 				mustEnvironment(t, fixtureErr)
 			} else if fixtureErr == nil || fixtureErr.Error() != "selected damage fixture site was not reached exactly as armed" {
-				t.Fatalf("origin-before-get nonreach diagnostic %v", fixtureErr)
+				t.Errorf("origin-before-get nonreach diagnostic %v", fixtureErr)
 			}
 			if evidence.OldGets != ([8]uint64{}) || evidence.NodeGets != 0 || evidence.Faults != 0 || any(outer) != any(raw) {
-				t.Fatalf("missing SPEND origin made a later request: %+v outer%v raw%v", evidence, outer, raw)
+				t.Errorf("missing SPEND origin made a later request: %+v outer%v raw%v", evidence, outer, raw)
 			}
 			trNoWritesV1(t, evidence, o)
+			assertInner()
 			trBindingConsumedV1(t, s, failed, raw)
 			s = tsReopen(t, s, path)
 			equal, err := FixtureRawRowEqual(s, 1, key, damaged)
@@ -538,16 +540,20 @@ func trObtainedOrderV1(t *testing.T) {
 			}
 			var raw, outer error
 			var failed *Reader
+			var assertInner func()
 			evidence, fixtureErr := FixtureSelectedDamage(s, o, SelectedDamageGetEIO, 8, armed, func() {
 				outer = trReadV1(t, s, o, request, func(reader *Reader, account *OperationAccount, root [32]byte, err error) {
 					raw, failed = err, reader
 					if late {
-						trSemanticV1(t, request, reader, account, root, err)
+						assertInner = trSemanticAssertionV1(t, request, reader, account, root, err)
 						return
 					}
-					treeNativeError(t, err, "update", "IO", 5, "error 5", nil)
-					if root != ([32]byte{}) || err.(*EngineError).TreeObservation != nil || reader.usable() || any(reader.failure) != any(err) {
-						t.Fatal("earlier branch EIO lost its raw no-result state")
+					usable, failure := reader.usable(), reader.failure
+					assertInner = func() {
+						treeNativeError(t, err, "update", "IO", 5, "error 5", nil)
+						if root != ([32]byte{}) || err.(*EngineError).TreeObservation != nil || usable || any(failure) != any(err) {
+							t.Fatal("earlier branch EIO lost its raw no-result state")
+						}
 					}
 				})
 			})
@@ -555,15 +561,16 @@ func trObtainedOrderV1(t *testing.T) {
 			if late {
 				faults = 0
 				if fixtureErr == nil || fixtureErr.Error() != "selected damage fixture site was not reached exactly as armed" {
-					t.Fatalf("obtained-before-leaf nonreach diagnostic %v", fixtureErr)
+					t.Errorf("obtained-before-leaf nonreach diagnostic %v", fixtureErr)
 				}
 			} else {
 				mustEnvironment(t, fixtureErr)
 			}
 			if evidence.OldGets != ([8]uint64{1, 0}) || evidence.NodeGets != 1 || evidence.Faults != faults || any(outer) != any(raw) {
-				t.Fatalf("obtained-order point requests %+v faults%d outer%v raw%v", evidence, faults, outer, raw)
+				t.Errorf("obtained-order point requests %+v faults%d outer%v raw%v", evidence, faults, outer, raw)
 			}
 			trNoWritesV1(t, evidence, o)
+			assertInner()
 			trBindingConsumedV1(t, s, failed, raw)
 			s = tsReopen(t, s, path)
 			trPreservedNodesV1(t, s, request, entries)

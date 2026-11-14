@@ -377,15 +377,26 @@ func trSeedNodesV1(t *testing.T, s *Store, o *OperationReservationOwner, request
 
 func trSemanticV1(t *testing.T, request TreeRootReadV1, reader *Reader, account *OperationAccount, root [32]byte, err error) {
 	t.Helper()
-	treeNativeError(t, err, "update", "Integrity", -30796, "invalid tree native representation", nil)
-	engine, direct := err.(*EngineError)
-	if !direct || engine.TreeObservation != nil || root != ([32]byte{}) || reader.usable() || any(reader.failure) != any(err) {
-		t.Fatalf("semantic integrity/no-result root%x error%v active%v", root, err, reader.usable())
-	}
+	trSemanticAssertionV1(t, request, reader, account, root, err)()
+}
+
+// Defer tuple assertions when native counters must also diagnose a mutant.
+func trSemanticAssertionV1(t *testing.T, request TreeRootReadV1, reader *Reader, account *OperationAccount, root [32]byte, err error) func() {
+	t.Helper()
+	usable, failure := reader.usable(), reader.failure
 	nextRoot, next := reader.DeriveTreeRootV1(account, request)
-	treeNativeError(t, next, "get", "InvalidInput", 22, "Reader is not active", nil)
-	if nextRoot != ([32]byte{}) || any(reader.failure) != any(err) {
-		t.Fatal("semantic refusal lost the first cause or allowed a sibling")
+	first := reader.failure
+	return func() {
+		t.Helper()
+		treeNativeError(t, err, "update", "Integrity", -30796, "invalid tree native representation", nil)
+		engine := err.(*EngineError)
+		if engine.TreeObservation != nil || root != ([32]byte{}) || usable || any(failure) != any(err) {
+			t.Fatalf("semantic integrity/no-result root%x error%v active%v", root, err, usable)
+		}
+		treeNativeError(t, next, "get", "InvalidInput", 22, "Reader is not active", nil)
+		if nextRoot != ([32]byte{}) || any(first) != any(err) {
+			t.Fatal("semantic refusal lost the first cause or allowed a sibling")
+		}
 	}
 }
 
