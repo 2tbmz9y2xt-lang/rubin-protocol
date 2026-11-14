@@ -215,7 +215,9 @@ func (s *initial148RequiredScopeV1) rememberV1(op Outpoint, value []byte, presen
 	}
 	var length uint32
 	if present {
-		length = 36 + uint32(len(value))
+		// DecodeUTXOValue bounds value to 65,560 bytes, so StateEntryBytes is
+		// at most 65,596 bytes and the mask preserves its exact length.
+		length = uint32((36 + uint64(len(value))) & 0xffffffff)
 	}
 	s.keys = append(s.keys, mdbx.TreeOutpointV1{Txid: op.Txid, Vout: op.Vout})
 	s.lengths = append(s.lengths, length)
