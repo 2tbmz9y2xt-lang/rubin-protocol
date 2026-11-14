@@ -25,6 +25,13 @@ func hcLim() HeaderCandidateLimits148V1 {
 	return HeaderCandidateLimits148V1{MaxTips: 8, MaxHeaders: 16, MaxRetainedBytes: 1 << 20, MaxTransitionHeaders: 8, MaxSnapshotBytes: 1 << 20, MaxLeases: 8}
 }
 
+// hcHeaders is hcLim with MaxHeaders n, fixed at construction as production fixes it.
+func hcHeaders(n uint64) HeaderCandidateLimits148V1 {
+	l := hcLim()
+	l.MaxHeaders = n
+	return l
+}
+
 // hcMk builds a literal qualified record; the hash is derived only to construct the input.
 func hcMk(t testing.TB, parent [32]byte, height uint64, work int64, nonce uint64) HeaderCandidateRecord148V1 {
 	return hcMkW(t, parent, height, big.NewInt(work), nonce)
@@ -351,12 +358,12 @@ func TestHeaderCandidate148Classification(t *testing.T) {
 			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
 		}},
 		{"rows11+12 exhausted wins over capacity", HeaderCandidateVersionExhausted148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
+			o, _, r1 = hcBase(t, hcHeaders(2))
 			o.version.Store(math.MaxUint64)
-			o.limits.MaxHeaders = 2
 			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
 		}},
 		{"row12 capacity", HeaderCandidateCapacity148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			o.limits.MaxHeaders = 2
+			o, _, r1 = hcBase(t, hcHeaders(2))
 			return prep(t, o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), nil
 		}},
 		{"row3 not established prepare", HeaderCandidateNotEstablished148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
@@ -431,12 +438,13 @@ func TestHeaderCandidate148Limits(t *testing.T) {
 		{"bytes", func(l *HeaderCandidateLimits148V1, v uint64) { l.MaxRetainedBytes = v }, 3*252 + 1 + 1 + 3},
 	} {
 		for _, short := range []bool{false, true} {
-			o, r0, r1 := hcBase(t, hcLim())
 			v := c.fit
 			if short {
 				v--
 			}
-			c.set(&o.limits, v)
+			l := hcLim()
+			c.set(&l, v)
+			o, r0, r1 := hcBase(t, l)
 			// The lease leaves no lawful replacement victim, so one unit short is a plain capacity refusal.
 			if _, out := o.AcquireDependencyV1(r1.Hash); out != HeaderCandidateOK148V1 {
 				t.Fatal("lease")
@@ -452,8 +460,10 @@ func TestHeaderCandidate148Limits(t *testing.T) {
 			}
 		}
 	}
-	o, _, r1 := hcBase(t, hcLim())
-	o.limits.MaxTransitionHeaders = 2
+	ol := hcLim()
+	ol.MaxTransitionHeaders = 2
+	ol.MaxLeases = 2
+	o, _, r1 := hcBase(t, ol)
 	a := hcMk(t, r1.Hash, 12, 120, 31)
 	b := hcMk(t, a.Hash, 13, 130, 32)
 	c := hcMk(t, b.Hash, 14, 140, 33)
@@ -478,7 +488,6 @@ func TestHeaderCandidate148Limits(t *testing.T) {
 	if _, out := e.EstablishV1(hcSrc1, []HeaderCandidateRecord148V1{r0, e1}); out != HeaderCandidateOK148V1 || e.VersionV1() != 2 {
 		t.Fatalf("exact establish: %d", out)
 	}
-	o.limits.MaxLeases = 2
 	for i := 0; i < 2; i++ {
 		if _, out := o.AcquireDependencyV1(r1.Hash); out != HeaderCandidateOK148V1 {
 			t.Fatalf("lease %d: %d", i, out)
@@ -543,7 +552,7 @@ func TestHeaderCandidate148Receipts(t *testing.T) {
 
 // hcCapFixture: R0 <- S <- {A(5), B(6)}, R0 <- I <- A2(4), R0 <- K(50).
 func hcCapFixture(t testing.TB, lim HeaderCandidateLimits148V1) (*HeaderCandidateOwner148V1, map[string]HeaderCandidateRecord148V1) {
-	o := hcNew(t, hcLim())
+	o := hcNew(t, lim)
 	r := map[string]HeaderCandidateRecord148V1{}
 	r["R0"] = hcExt(hcMk(t, hcRoot, 10, 10, 1))
 	r["S"] = hcMk(t, r["R0"].Hash, 11, 11, 2)
@@ -553,7 +562,6 @@ func hcCapFixture(t testing.TB, lim HeaderCandidateLimits148V1) (*HeaderCandidat
 	r["A2"] = hcMk(t, r["I"].Hash, 12, 4, 6)
 	r["K"] = hcMk(t, r["R0"].Hash, 11, 50, 7)
 	hcEstablish(t, o, r["R0"], r["S"], r["A"], r["B"], r["I"], r["A2"], r["K"])
-	o.limits = lim
 	return o, r
 }
 
@@ -590,13 +598,18 @@ func TestHeaderCandidate148Capacity(t *testing.T) {
 		ext(t, o, r, r["A"].Hash)
 	})
 	t.Run("leased tip skipped then two victims share an ancestor", func(t *testing.T) {
-		l := lim
-		l.MaxHeaders = 5
-		o, r := hcCapFixture(t, l)
+		o, r := hcCapFixture(t, lim)
 		if _, out := o.AcquireDependencyV1(r["A2"].Hash); out != HeaderCandidateOK148V1 {
 			t.Fatal("lease")
 		}
-		ext(t, o, r, r["A"].Hash, r["B"].Hash, r["S"].Hash)
+		// Three additions over a full owner need three removals: A, then B, which leaves S an exclusive tip.
+		n := hcChain(t, r["K"], 3)
+		rec, out := hcPublish(t, o, hcTr(o, n))
+		if out != HeaderCandidateOK148V1 {
+			t.Fatalf("%d", out)
+		}
+		hcEqual(t, "added", rec.Added, hcHashes(n...))
+		hcEqual(t, "retired", rec.Retired, hcHashes(r["A"], r["B"], r["S"]))
 	})
 	t.Run("stops at first fit", func(t *testing.T) {
 		l := lim
@@ -638,11 +651,10 @@ func TestHeaderCandidate148Capacity(t *testing.T) {
 		}
 	})
 	t.Run("no new qualified tip refuses", func(t *testing.T) {
-		o := hcNew(t, hcLim())
+		o := hcNew(t, hcHeaders(1))
 		p := hcExt(hcMk(t, [32]byte{0x44}, 9, 9, 98))
 		c := hcExt(hcMk(t, p.Hash, 10, 10, 97))
 		hcEstablish(t, o, c)
-		o.limits.MaxHeaders = 1
 		if _, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{p})); out != HeaderCandidateCapacity148V1 {
 			t.Fatalf("%d", out)
 		}
@@ -834,10 +846,8 @@ func TestHeaderCandidate148WorkingSets(t *testing.T) {
 	if _, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{p})); out != HeaderCandidateOK148V1 {
 		t.Fatalf("V7 re-add: %d", out)
 	}
-	o.limits.MaxHeaders = 2
-	o2 := hcNew(t, hcLim())
+	o2 := hcNew(t, hcHeaders(1))
 	hcEstablish(t, o2, hcExt(h))
-	o2.limits.MaxHeaders = 1
 	if _, out := hcPublish(t, o2, hcTr(o2, []HeaderCandidateRecord148V1{p})); out != HeaderCandidateCapacity148V1 {
 		t.Fatalf("V7 capacity: %d", out)
 	}

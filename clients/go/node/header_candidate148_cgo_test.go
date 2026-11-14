@@ -46,9 +46,15 @@ func TestHeaderCandidate148Inventory(t *testing.T) {
 		t.Fatal("missing tip or header")
 	}
 	hcRefused(t, "one short", o.Inventory148V1(507), consensus.HeaderCandidateCapacityRefusedV1, 2)
-	o.limits.MaxSnapshotBytes = 507
-	hcRefused(t, "snapshot ceiling", o.Inventory148V1(1<<20), consensus.HeaderCandidateCapacityRefusedV1, 2)
-	o.limits.MaxSnapshotBytes = 508
+	ceiling := func(n uint64) *HeaderCandidateOwner148V1 {
+		l := hcLim()
+		l.MaxSnapshotBytes = n
+		s := hcNew(t, l)
+		hcEstablish(t, s, a, b, c)
+		return s
+	}
+	hcRefused(t, "snapshot ceiling", ceiling(507).Inventory148V1(1<<20), consensus.HeaderCandidateCapacityRefusedV1, 2)
+	o = ceiling(508)
 	inv = o.Inventory148V1(1 << 20)
 	if inv.Status != consensus.HeaderCandidateCompleteV1 {
 		t.Fatal("snapshot exact fit")
