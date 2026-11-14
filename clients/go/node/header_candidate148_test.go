@@ -1052,11 +1052,21 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 	})
 	t.Run("unknown latch", func(t *testing.T) {
 		o, r0, r1 := hcBase(t, hcLim())
+		lease, _ := o.AcquireDependencyV1(r1.Hash)
 		n := hcMk(t, r1.Hash, 12, 120, 9)
-		h, _ := o.PrepareV1(hcTr(o, []HeaderCandidateRecord148V1{n}, r0.Hash))
+		h, _ := o.PrepareV1(hcTr(o, []HeaderCandidateRecord148V1{n}))
 		v := o.VersionV1()
 		if h.UnknownV1() != HeaderCandidateOK148V1 || o.VersionV1() != v+1 {
 			t.Fatal("unknown")
+		}
+		// X5 reads after the latch answer the unchanged membership; a lease still releases normally.
+		var dst [148]byte
+		if !o.Header148V1(r0.Hash, &dst) || dst != r0.Raw || o.Header148V1(n.Hash, &dst) || o.IncarnationV1() != 7 {
+			t.Fatal("reads after latch")
+		}
+		lease.ReleaseV1()
+		if o.leases != 0 {
+			t.Fatal("lease release after latch")
 		}
 		if p := hcPresent(o, r0, r1, n); !p[0] || !p[1] || p[2] {
 			t.Fatal("unknown applied membership")
@@ -1091,6 +1101,7 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 			}
 			v := o.VersionV1()
 			cur, rel := o.ProtectV1(v)
+			t.Cleanup(func() { rel(); o.CloseV1() })
 			if !cur {
 				t.Fatal("guard not current")
 			}
@@ -1101,7 +1112,9 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 				t.Fatal("unknown applied under guard")
 			}
 			rel()
-			if <-done != HeaderCandidateOK148V1 || !o.latched {
+			var got HeaderCandidateOutcome148V1
+			hcWithin(t, "unknown after release", func() { got = <-done })
+			if got != HeaderCandidateOK148V1 || !o.latched {
 				t.Fatal("unknown after release")
 			}
 			want := v + 1
@@ -1124,6 +1137,7 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 			}
 			v := o.VersionV1()
 			_, rel := o.ProtectV1(v)
+			t.Cleanup(rel)
 			done := make(chan HeaderCandidateOutcome148V1, 1)
 			go func() {
 				switch kind {
@@ -1183,8 +1197,8 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		if o.Header148V1(r0.Hash, &dst) || o.VersionV1() != v {
 			t.Fatal("closed reads")
 		}
-		if got, ok := o.LookupV1(r0.Hash); ok || got.Work != nil {
-			t.Fatal("closed lookup")
+		if got, ok := o.LookupV1(r0.Hash); ok || got.Work != nil || o.IncarnationV1() != 7 {
+			t.Fatal("closed lookup or incarnation")
 		}
 		for _, out := range []HeaderCandidateOutcome148V1{
 			func() HeaderCandidateOutcome148V1 { _, o2 := o.PrepareV1(hcTr(o, nil)); return o2 }(),
@@ -1200,13 +1214,15 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		o := hcNew(t, hcLim())
 		r0 := hcExt(hcMk(t, hcRoot, 10, 100, 1))
 		_, rel := o.ProtectV1(1)
+		t.Cleanup(func() { rel(); o.CloseV1() })
 		res := make(chan HeaderCandidateOutcome148V1, 2)
 		for i := 0; i < 2; i++ {
 			go func() { _, out := o.EstablishV1(hcSrc1, []HeaderCandidateRecord148V1{r0}); res <- out }()
 		}
 		time.Sleep(50 * time.Millisecond)
 		rel()
-		a, b := <-res, <-res
+		var a, b HeaderCandidateOutcome148V1
+		hcWithin(t, "concurrent establish", func() { a, b = <-res, <-res })
 		okFirst := a == HeaderCandidateOK148V1 && b == HeaderCandidateAlreadyEstablished148V1
 		okSecond := b == HeaderCandidateOK148V1 && a == HeaderCandidateAlreadyEstablished148V1
 		if (!okFirst && !okSecond) || o.VersionV1() != 2 {
