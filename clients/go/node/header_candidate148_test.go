@@ -88,6 +88,30 @@ func hcPublish(t testing.TB, o *HeaderCandidateOwner148V1, tr HeaderCandidateTra
 	return h.PublishV1()
 }
 
+// hcReads renders VersionV1 and, for each record, every LookupV1 field and the Header148V1 result, so a V3 trigger can
+// be compared before and after on the same owner.
+func hcReads(o *HeaderCandidateOwner148V1, rs ...HeaderCandidateRecord148V1) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "v%d", o.VersionV1())
+	for _, r := range rs {
+		got, ok := o.LookupV1(r.Hash)
+		var dst [148]byte
+		hok := o.Header148V1(r.Hash, &dst)
+		fmt.Fprintf(&b, "|%v %x %x %x %d %s %x %v %v %x", ok, got.Raw, got.Hash, got.Parent, got.Height, got.Work, got.Provenance, got.External, hok, dst)
+	}
+	return b.String()
+}
+
+// hcGuard takes a guard and fails before any cleanup registration when the release is nil.
+func hcGuard(t testing.TB, o *HeaderCandidateOwner148V1, v uint64) (bool, func()) {
+	t.Helper()
+	cur, rel := o.ProtectV1(v)
+	if rel == nil {
+		t.Fatal("ProtectV1 returned a nil release")
+	}
+	return cur, rel
+}
+
 func hcHashes(rs ...HeaderCandidateRecord148V1) [][32]byte {
 	out := make([][32]byte, 0, len(rs))
 	for _, r := range rs {
@@ -127,13 +151,29 @@ type hcSnap struct {
 
 func hcTake(o *HeaderCandidateOwner148V1, rs ...HeaderCandidateRecord148V1) hcSnap {
 	o.mu.Lock()
-	b, tp, l := o.bytes, o.tips, o.leases
+	b, tp, l := hcRecsBytes(o.recs), o.tips, o.leases
 	o.mu.Unlock()
 	return hcSnap{o.VersionV1(), hcPresent(o, rs...), b, tp, l}
 }
 
 func (s hcSnap) same(u hcSnap) bool {
 	return s.version == u.version && slices.Equal(s.present, u.present) && s.bytes == u.bytes && s.tips == u.tips && s.leases == u.leases
+}
+
+// hcRecsBytes is the retained charge of a membership from the contract formula, 252 plus the minimal big-endian Work
+// length per record, derived independently of the provider's own charge.
+func hcRecsBytes(m map[[32]byte]*hcEntry) uint64 {
+	var n uint64
+	for _, e := range m {
+		n += 252 + uint64((e.rec.Work.BitLen()+7)/8)
+	}
+	return n
+}
+
+func hcHeldBytes(o *HeaderCandidateOwner148V1) uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return hcRecsBytes(o.recs)
 }
 
 // hcBase is R0 (External, height 10) <- R1 (height 11), established under hcSrc1.
@@ -148,12 +188,12 @@ func hcBase(t testing.TB, lim HeaderCandidateLimits148V1) (*HeaderCandidateOwner
 // hcInner is the complete comparable owner state a refusal must leave unchanged: scalars and counters, every stored
 // record field with its charge, child counts, per-hash lease counts, guards and the prepared slot.
 type hcInner struct {
-	version, bytes, tips, leases, guards uint64
-	headers                              int
-	members, kids, leased                string
-	established, latched, closed         bool
-	source                               [32]byte
-	prepared                             *HeaderCandidatePrepared148V1
+	version, tips, leases, guards uint64
+	headers                       int
+	members, kids, leased         string
+	established, latched, closed  bool
+	source                        [32]byte
+	prepared                      *HeaderCandidatePrepared148V1
 }
 
 func hcInnerOf(o *HeaderCandidateOwner148V1) hcInner {
@@ -165,7 +205,7 @@ func hcInnerOf(o *HeaderCandidateOwner148V1) hcInner {
 		recs = append(recs, fmt.Sprintf("%x|%x|%x|%d|%s|%x|%v|%d", h, r.Raw, r.Parent, r.Height, r.Work, r.Provenance, r.External, e.charge))
 	}
 	slices.Sort(recs)
-	return hcInner{o.version.Load(), o.bytes, o.tips, o.leases, o.guards, len(o.recs), strings.Join(recs, ","), hcCounts(o.kids), hcCounts(o.leased), o.established, o.latched, o.closed, o.source, o.prepared}
+	return hcInner{o.version.Load(), o.tips, o.leases, o.guards, len(o.recs), strings.Join(recs, ","), hcCounts(o.kids), hcCounts(o.leased), o.established, o.latched, o.closed, o.source, o.prepared}
 }
 
 func hcCounts(m map[[32]byte]uint64) string {
@@ -475,9 +515,9 @@ func TestHeaderCandidate148Constructor(t *testing.T) {
 	if o.IncarnationV1() != 7 || o.VersionV1() != 1 {
 		t.Fatal("new owner identity")
 	}
-	cur, rel := o.ProtectV1(1)
+	cur, rel := hcGuard(t, o, 1)
 	t.Cleanup(rel)
-	if cur || rel == nil {
+	if cur {
 		t.Fatal("not-established owner protected current")
 	}
 	rel()
@@ -559,7 +599,7 @@ func TestHeaderCandidate148Limits(t *testing.T) {
 func TestHeaderCandidate148Receipts(t *testing.T) {
 	o, r0, r1 := hcBase(t, hcLim())
 	v := o.VersionV1()
-	cur, rel := o.ProtectV1(v)
+	cur, rel := hcGuard(t, o, v)
 	t.Cleanup(rel)
 	if !cur {
 		t.Fatal("not current")
@@ -574,7 +614,7 @@ func TestHeaderCandidate148Receipts(t *testing.T) {
 	}
 	hcEqual(t, "prov added", rec.Added, nil)
 	hcEqual(t, "prov retired", rec.Retired, nil)
-	cur, rel = o.ProtectV1(v)
+	cur, rel = hcGuard(t, o, v)
 	t.Cleanup(rel)
 	if cur {
 		t.Fatal("prior version still current")
@@ -823,9 +863,25 @@ func TestHeaderCandidate148Order(t *testing.T) {
 		if _, ok := o.LookupV1(smaller.Hash); !ok {
 			t.Fatal("smaller-hash tip retired")
 		}
-		if o.bytes != 253+2*290 {
-			t.Fatalf("bytes %d", o.bytes)
+		if b := hcHeldBytes(o); b != 253+2*290 {
+			t.Fatalf("bytes %d", b)
 		}
+	}
+	// Multi-victim order: with A2 leased, three additions over a full owner retire exactly [A, B, S] on every one of
+	// 64 fresh owners.
+	_, r := hcCapFixture(t, hcHeaders(7))
+	n := hcChain(t, r["K"], 3)
+	want := hcHashes(r["A"], r["B"], r["S"])
+	for i := 0; i < 64; i++ {
+		o, _ := hcCapFixture(t, hcHeaders(7))
+		if _, out := o.AcquireDependencyV1(r["A2"].Hash); out != HeaderCandidateOK148V1 {
+			t.Fatalf("owner %d lease: %d", i, out)
+		}
+		rec, out := hcPublish(t, o, hcTr(o, n))
+		if out != HeaderCandidateOK148V1 {
+			t.Fatalf("owner %d: %d", i, out)
+		}
+		hcEqual(t, "multi-victim retired", rec.Retired, want)
 	}
 }
 
@@ -953,9 +1009,13 @@ func TestHeaderCandidate148Leases(t *testing.T) {
 	if h.AbortV1() != HeaderCandidateOK148V1 {
 		t.Fatal("abort")
 	}
+	pre := hcReads(o, r0, r1)
 	l, out := o.AcquireDependencyV1(r1.Hash)
 	if out != HeaderCandidateOK148V1 {
 		t.Fatalf("lease after abort: %d", out)
+	}
+	if hcReads(o, r0, r1) != pre {
+		t.Fatal("V3 lease acquire changed VersionV1, LookupV1 or Header148V1")
 	}
 	v := o.VersionV1()
 	var dst [148]byte
@@ -967,8 +1027,8 @@ func TestHeaderCandidate148Leases(t *testing.T) {
 	}
 	l.ReleaseV1()
 	l.ReleaseV1()
-	if o.leases != 0 || o.VersionV1() != v {
-		t.Fatal("release changed state")
+	if o.leases != 0 || hcReads(o, r0, r1) != pre {
+		t.Fatal("V3 lease release changed state, VersionV1, LookupV1 or Header148V1")
 	}
 	h = hcPrepOK(t, o, hcTr(o, nil, r0.Hash))
 	if out := hcAcq(t, o, r1.Hash); out != HeaderCandidateProtected148V1 {
@@ -1084,6 +1144,19 @@ func TestHeaderCandidate148Aliasing(t *testing.T) {
 	}); a != 0 {
 		t.Fatalf("Retired allocs %v", a)
 	}
+	// R3/M24 on EstablishV1: records longer than MaxTransitionHeaders are Invalid at row 5 on a fresh owner with no
+	// allocation, no establishment and an unchanged version.
+	fresh := hcNew(t, hcLim())
+	if a := testing.AllocsPerRun(50, func() {
+		if p, out := fresh.EstablishV1(hcSrc1, long.Additions); out != HeaderCandidateInvalid148V1 || p.Changed || p.Version != 0 || p.Added != nil || p.Retired != nil {
+			t.Fatalf("over-length establish: %d", out)
+		}
+	}); a != 0 {
+		t.Fatalf("establish allocs %v", a)
+	}
+	if fresh.established || fresh.VersionV1() != 1 {
+		t.Fatal("over-length establish changed state")
+	}
 	// Charge is 252 plus the minimal big-endian Work length (zero for zero), computed without allocating.
 	wide := new(big.Int).Lsh(big.NewInt(1), 300)
 	for _, c := range []struct {
@@ -1163,15 +1236,19 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		if _, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 120, 9)})); out != HeaderCandidateOK148V1 {
 			t.Fatal("publish")
 		}
-		cur, rel := o.ProtectV1(v)
+		cur, rel := hcGuard(t, o, v)
 		// A failing assertion must not leave blocked goroutines behind: release the guard and wake every waiter.
 		t.Cleanup(func() { rel(); o.CloseV1() })
 		if cur {
 			t.Fatal("stale guard current")
 		}
-		h := hcPrepOK(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 121, 10)}))
+		guarded := hcMk(t, r1.Hash, 12, 121, 10)
+		h := hcPrepOK(t, o, hcTr(o, []HeaderCandidateRecord148V1{guarded}))
+		vPrep := o.VersionV1()
+		var gpub HeaderCandidatePublication148V1
+		var gout HeaderCandidateOutcome148V1
 		done := make(chan struct{})
-		go func() { h.PublishV1(); close(done) }()
+		go func() { gpub, gout = h.PublishV1(); close(done) }()
 		hcBlocked(t, done)
 		// R5: shared reads and guards return while the publication waits, and answer the unchanged state.
 		var c2, hdrOK, lookOK bool
@@ -1194,6 +1271,11 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		}
 		rel()
 		hcWithin(t, "publish after release", func() { <-done })
+		if gout != HeaderCandidateOK148V1 || !gpub.Changed || gpub.Version != vPrep+1 || o.VersionV1() != vPrep+1 {
+			t.Fatalf("guarded publish: %d %+v", gout, gpub)
+		}
+		hcEqual(t, "guarded added", gpub.Added, hcHashes(guarded))
+		hcEqual(t, "guarded retired", gpub.Retired, nil)
 		// X1: the second call of the same release is a no-op, so a later state-changing publication still proceeds.
 		rel()
 		later := hcPrepOK(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 122, 11)}))
@@ -1256,7 +1338,7 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 				t.Fatalf("prepare changed-false: %d", out)
 			}
 			v := o.VersionV1()
-			cur, rel := o.ProtectV1(v)
+			cur, rel := hcGuard(t, o, v)
 			t.Cleanup(func() { rel(); o.CloseV1() })
 			if !cur {
 				t.Fatal("guard not current")
@@ -1292,7 +1374,7 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 				h = hcPrepOK(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 120, 9)}))
 			}
 			v := o.VersionV1()
-			_, rel := o.ProtectV1(v)
+			_, rel := hcGuard(t, o, v)
 			t.Cleanup(rel)
 			type res struct {
 				pub HeaderCandidatePublication148V1
@@ -1341,7 +1423,7 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		o, r0, r1 := hcBase(t, hcLim())
 		l := hcLeaseOK(t, o, r1.Hash)
 		h := hcPrepOK(t, o, hcTr(o, nil))
-		_, rel := o.ProtectV1(o.VersionV1())
+		_, rel := hcGuard(t, o, o.VersionV1())
 		t.Cleanup(rel)
 		v := o.VersionV1()
 		o.CloseV1()
@@ -1378,7 +1460,7 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 	t.Run("concurrent establish", func(t *testing.T) {
 		o := hcNew(t, hcLim())
 		r0 := hcExt(hcMk(t, hcRoot, 10, 100, 1))
-		_, rel := o.ProtectV1(1)
+		_, rel := hcGuard(t, o, 1)
 		t.Cleanup(func() { rel(); o.CloseV1() })
 		type res struct {
 			pub HeaderCandidatePublication148V1
@@ -1423,22 +1505,7 @@ func TestHeaderCandidate148Race(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 200; j++ {
-				_, rel := o.ProtectV1(o.VersionV1())
-				var dst [148]byte
-				o.Header148V1(z.Hash, &dst)
-				rel()
-				h := chain[j%len(chain)].Hash
-				if l, out := o.AcquireDependencyV1(h); out == HeaderCandidateOK148V1 {
-					if _, ok := o.LookupV1(h); !ok {
-						dangling.Add(1)
-					}
-					l.ReleaseV1()
-				}
-			}
-		}()
+		go hcRaceRead(&wg, o, z.Hash, hcHashes(chain...), &dangling)
 	}
 	var oks [2]int
 	publish := func(id int, tr func(k int) HeaderCandidateTransition148V1) {
@@ -1470,5 +1537,75 @@ func TestHeaderCandidate148Race(t *testing.T) {
 		if _, ok := o.LookupV1(r.Hash); ok != (i >= target) {
 			t.Fatalf("chain[%d] present %v", i, ok)
 		}
+	}
+	hcRaceCapacity(t, target)
+}
+
+// hcRaceRead takes guards and point reads and leases every pool hash in turn; a successful lease whose hash is then
+// absent counts as dangling.
+func hcRaceRead(wg *sync.WaitGroup, o *HeaderCandidateOwner148V1, probe [32]byte, pool [][32]byte, dangling *atomic.Int64) {
+	defer wg.Done()
+	for j := 0; j < 200; j++ {
+		_, rel := o.ProtectV1(o.VersionV1())
+		var dst [148]byte
+		o.Header148V1(probe, &dst)
+		rel()
+		h := pool[j%len(pool)]
+		if l, out := o.AcquireDependencyV1(h); out == HeaderCandidateOK148V1 {
+			if _, ok := o.LookupV1(h); !ok {
+				dangling.Add(1)
+			}
+			l.ReleaseV1()
+		}
+	}
+}
+
+// hcRaceCapacity covers X2 and E6 for capacity replacement: on a full owner (MaxHeaders 7) a publisher adds ever
+// stronger tips, so the publications retire weaker unprotected tips with their exclusive ancestry (at least one header
+// per addition in total, since the owner starts full), while readers lease the candidate tips and the interior headers. No successful lease may dangle.
+func hcRaceCapacity(t *testing.T, target int) {
+	c, r := hcCapFixture(t, hcHeaders(7))
+	t.Cleanup(c.CloseV1)
+	strong := make([]HeaderCandidateRecord148V1, target)
+	for i := range strong {
+		strong[i] = hcMk(t, r["R0"].Hash, 11, int64(100+i), uint64(100+i))
+	}
+	pool := hcHashes(strong...)
+	for _, k := range []string{"R0", "S", "A", "B", "I", "A2", "K"} {
+		pool = append(pool, r[k].Hash)
+	}
+	var dangling atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go hcRaceRead(&wg, c, r["R0"].Hash, pool, &dangling)
+	}
+	replaced, retired := 0, 0
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for n := 0; replaced < target && n < 100000; n++ {
+			h, out := c.PrepareV1(hcTr(c, []HeaderCandidateRecord148V1{strong[replaced]}))
+			if out == HeaderCandidateCapacity148V1 {
+				continue
+			}
+			if out != HeaderCandidateOK148V1 {
+				t.Errorf("capacity publisher: %d", out)
+				return
+			}
+			p, out := h.PublishV1()
+			if out != HeaderCandidateOK148V1 {
+				t.Errorf("replacement publish: %d", out)
+				return
+			}
+			replaced, retired = replaced+1, retired+len(p.Retired)
+		}
+	}()
+	hcWithin(t, "capacity replacement with readers", wg.Wait)
+	if replaced != target || retired < target || dangling.Load() != 0 || c.leases != 0 || hcInnerOf(c).headers > 7 {
+		t.Fatalf("replaced %d retired %d dangling %d leases %d", replaced, retired, dangling.Load(), c.leases)
+	}
+	if _, ok := c.LookupV1(strong[target-1].Hash); !ok {
+		t.Fatal("strongest tip absent")
 	}
 }

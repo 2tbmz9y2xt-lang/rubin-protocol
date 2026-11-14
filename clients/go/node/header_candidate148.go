@@ -85,7 +85,9 @@ const (
 // HeaderCandidatePublication148V1 is the receipt of an applied publication (RUB-1550 D7). Added and Retired are
 // independent of owner state. Added lists the hashes of the Additions not received before the operation, in input
 // order. Retired lists the transition's Retired in its order, then each chosen capacity reclaim in choice order: the
-// victim tip first, then its exclusive ancestry downward. A Changed-false receipt keeps the version and has both empty.
+// victim tip first, then its exclusive ancestry downward. A candidate whose reclaim holds a leased hash, a received
+// ancestor of a leased hash, or a hash of this transition's Additions is skipped whole and never listed. A
+// Changed-false receipt keeps the version and has both empty.
 type HeaderCandidatePublication148V1 struct {
 	Changed bool
 	Version uint64
@@ -122,7 +124,6 @@ type HeaderCandidateOwner148V1 struct {
 	recs        map[[32]byte]*hcEntry
 	kids        map[[32]byte]uint64
 	tips        uint64
-	bytes       uint64
 	guards      uint64
 	prepared    *HeaderCandidatePrepared148V1
 	leased      map[[32]byte]uint64
@@ -288,8 +289,9 @@ func (o *HeaderCandidateOwner148V1) EstablishV1(source [32]byte, records []Heade
 // guards. It returns the first true row of the RUB-1550 first_refusal_order: Closed, UnknownSource, NotEstablished,
 // Busy, Invalid, Stale, Conflict, MissingParent, NoCoverage, Protected, VersionExhausted, Capacity. Before Capacity it
 // runs the D5 replacement walk: when a new qualified tip exists, unprotected tips strictly outranked by the weakest new
-// tip are chosen weakest first with their exclusive ancestry until every row 12 ceiling fits. At most one prepared
-// transition exists per owner. Every non-OK return carries a nil handle.
+// tip are chosen weakest first with their exclusive ancestry until every row 12 ceiling fits; a candidate whose reclaim
+// holds a leased hash, a received ancestor of a leased hash, or a hash of this transition's Additions is skipped whole.
+// At most one prepared transition exists per owner. Every non-OK return carries a nil handle.
 func (o *HeaderCandidateOwner148V1) PrepareV1(t HeaderCandidateTransition148V1) (*HeaderCandidatePrepared148V1, HeaderCandidateOutcome148V1) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -491,9 +493,7 @@ func (o *HeaderCandidateOwner148V1) insert(r HeaderCandidateRecord148V1) {
 		o.tips--
 	}
 	o.kids[r.Parent]++
-	charge := hcCharge(r.Work)
-	o.recs[r.Hash] = &hcEntry{rec: r, charge: charge}
-	o.bytes += charge
+	o.recs[r.Hash] = &hcEntry{rec: r, charge: hcCharge(r.Work)}
 }
 
 func (o *HeaderCandidateOwner148V1) remove(h [32]byte) {
@@ -509,7 +509,6 @@ func (o *HeaderCandidateOwner148V1) remove(h [32]byte) {
 		}
 	}
 	delete(o.recs, h)
-	o.bytes -= e.charge
 }
 
 // hcCharge is 148 raw + 32 hash + 32 parent + 8 height + 32 provenance + the minimal big-endian Work length.

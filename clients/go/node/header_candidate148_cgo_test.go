@@ -45,7 +45,11 @@ func TestHeaderCandidate148Inventory(t *testing.T) {
 	if len(wantTips)+len(wantRaw) != 0 {
 		t.Fatal("missing tip or header")
 	}
+	pre := hcReads(o, a, b, c)
 	hcRefused(t, "one short", o.Inventory148V1(507), consensus.HeaderCandidateCapacityRefusedV1, 2)
+	if hcReads(o, a, b, c) != pre {
+		t.Fatal("V3 CapacityRefused inventory changed VersionV1, LookupV1 or Header148V1")
+	}
 	ceiling := func(n uint64) *HeaderCandidateOwner148V1 {
 		l := hcLim()
 		l.MaxSnapshotBytes = n
@@ -53,7 +57,12 @@ func TestHeaderCandidate148Inventory(t *testing.T) {
 		hcEstablish(t, s, a, b, c)
 		return s
 	}
-	hcRefused(t, "snapshot ceiling", ceiling(507).Inventory148V1(1<<20), consensus.HeaderCandidateCapacityRefusedV1, 2)
+	short := ceiling(507)
+	pre = hcReads(short, a, b, c)
+	hcRefused(t, "snapshot ceiling", short.Inventory148V1(1<<20), consensus.HeaderCandidateCapacityRefusedV1, 2)
+	if hcReads(short, a, b, c) != pre {
+		t.Fatal("V3 snapshot-ceiling refusal changed VersionV1, LookupV1 or Header148V1")
+	}
 	o = ceiling(508)
 	inv = o.Inventory148V1(1 << 20)
 	if inv.Status != consensus.HeaderCandidateCompleteV1 {
@@ -95,7 +104,7 @@ func TestHeaderCandidate148InventoryUnderBlockedUnknown(t *testing.T) {
 	o, _, _ := hcBase(t, hcLim())
 	h := hcPrepOK(t, o, hcTr(o, nil))
 	v := o.VersionV1()
-	cur, rel := o.ProtectV1(v)
+	cur, rel := hcGuard(t, o, v)
 	t.Cleanup(func() { rel(); o.CloseV1() })
 	if !cur {
 		t.Fatal("guard not current")
