@@ -305,7 +305,7 @@ func icbMaximumInputV1(t *testing.T, w *btWorld) initial148CompleteBlockInputV1 
 	w.pair(t, rows...)
 	spend := icbSignedRawV1(t, tx)
 	commit := initial148BlockWitnessCommit(t, spend)
-	cb := coinbaseTxWithOutputs(5, []testOutput{{covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}, {covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}})
+	cb := coinbaseTxWithOutputs(5, []testOutput{{value: 1, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}, {covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}})
 	in := icbInputV1()
 	in.Raw = initial148BlockFrame(t, [][]byte{cb, spend}, func(h *initial148BlockHead) { h.parent = seed.Block })
 	in.Height, in.ParentHash, in.ExpectedTarget = 5, seed.Block, POW_LIMIT
