@@ -685,7 +685,7 @@ func (x *hcTx) protected() HeaderCandidateOutcome148V1 {
 // build classifies each addition as new, provenance update or identical duplicate and fixes the receipt order (D7).
 func (x *hcTx) build() hcPlan {
 	o := x.o
-	p := hcPlan{source: o.source, retired: slices.Clone(x.t.Retired), added: [][32]byte{}}
+	p := hcPlan{source: o.source, retired: append([][32]byte{}, x.t.Retired...), added: [][32]byte{}}
 	for i := range x.t.Additions {
 		a := x.t.Additions[i]
 		e := o.recs[a.Hash]
@@ -703,9 +703,6 @@ func (x *hcTx) build() hcPlan {
 		p.source = x.t.NewSource
 	}
 	p.changed = x.est || sourceChange || len(p.adds)+len(p.prov)+len(p.retired) > 0
-	if p.retired == nil {
-		p.retired = [][32]byte{}
-	}
 	return p
 }
 
@@ -731,6 +728,12 @@ func (x *hcTx) post() *hcPost {
 			s.nodes[a.Hash] = &hcEntry{rec: *a, charge: hcCharge(a.Work)}
 		}
 	}
+	s.count()
+	return s
+}
+
+// count derives children, tips, headers and saturating bytes of the post-transition set.
+func (s *hcPost) count() {
 	for _, e := range s.nodes {
 		s.kids[e.rec.Parent]++
 		s.bytes = hcAddSat(s.bytes, e.charge)
@@ -741,7 +744,6 @@ func (x *hcTx) post() *hcPost {
 		}
 	}
 	s.headers = uint64(len(s.nodes))
-	return s
 }
 
 func (o *HeaderCandidateOwner148V1) fits(s *hcPost) bool {
