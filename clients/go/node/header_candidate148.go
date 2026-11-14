@@ -199,7 +199,7 @@ func (o *HeaderCandidateOwner148V1) ProtectV1(version uint64) (bool, func()) {
 	}
 }
 
-// Header148V1 writes the admitted raw bytes of hash into dst and returns true. On an absent hash, after CloseV1, it
+// Header148V1 writes the admitted raw bytes of hash into dst and returns true. On an absent hash or after CloseV1 it
 // returns false and dst is unspecified. dst is never retained or written after return. It is callable under a held guard.
 func (o *HeaderCandidateOwner148V1) Header148V1(hash [32]byte, dst *[148]byte) bool {
 	o.mu.Lock()
