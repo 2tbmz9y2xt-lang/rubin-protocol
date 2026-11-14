@@ -764,7 +764,7 @@ func TestHeaderCandidate148Reorg(t *testing.T) {
 	unchanged := func(what string, want HeaderCandidateOutcome148V1, tr HeaderCandidateTransition148V1) {
 		t.Helper()
 		before := hcTake(o, all...)
-		if h, out := o.PrepareV1(tr); out != want || h != nil {
+		if out := hcPrep(t, o, tr); out != want {
 			t.Fatalf("%s: %d want %d", what, out, want)
 		}
 		if !before.same(hcTake(o, all...)) || o.source != hcSrc1 || o.leases != 2 || o.prepared != nil {
@@ -970,7 +970,7 @@ func TestHeaderCandidate148Leases(t *testing.T) {
 	if o.leases != 0 || o.VersionV1() != v {
 		t.Fatal("release changed state")
 	}
-	h, _ = o.PrepareV1(hcTr(o, nil, r0.Hash))
+	h = hcPrepOK(t, o, hcTr(o, nil, r0.Hash))
 	if out := hcAcq(t, o, r1.Hash); out != HeaderCandidateProtected148V1 {
 		t.Fatal("surviving tip over planned Retired")
 	}
@@ -1380,18 +1380,24 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		r0 := hcExt(hcMk(t, hcRoot, 10, 100, 1))
 		_, rel := o.ProtectV1(1)
 		t.Cleanup(func() { rel(); o.CloseV1() })
-		res := make(chan HeaderCandidateOutcome148V1, 2)
+		type res struct {
+			pub HeaderCandidatePublication148V1
+			out HeaderCandidateOutcome148V1
+		}
+		ch := make(chan res, 2)
 		for i := 0; i < 2; i++ {
-			go func() { _, out := o.EstablishV1(hcSrc1, []HeaderCandidateRecord148V1{r0}); res <- out }()
+			go func() { p, out := o.EstablishV1(hcSrc1, []HeaderCandidateRecord148V1{r0}); ch <- res{p, out} }()
 		}
 		time.Sleep(50 * time.Millisecond)
 		rel()
-		var a, b HeaderCandidateOutcome148V1
-		hcWithin(t, "concurrent establish", func() { a, b = <-res, <-res })
-		okFirst := a == HeaderCandidateOK148V1 && b == HeaderCandidateAlreadyEstablished148V1
-		okSecond := b == HeaderCandidateOK148V1 && a == HeaderCandidateAlreadyEstablished148V1
-		if (!okFirst && !okSecond) || o.VersionV1() != 2 {
-			t.Fatalf("concurrent establish %d %d", a, b)
+		var a, b res
+		hcWithin(t, "concurrent establish", func() { a, b = <-ch, <-ch })
+		if b.out == HeaderCandidateOK148V1 {
+			a, b = b, a
+		}
+		refusedZero := !b.pub.Changed && b.pub.Version == 0 && b.pub.Added == nil && b.pub.Retired == nil
+		if a.out != HeaderCandidateOK148V1 || a.pub.Version != 2 || b.out != HeaderCandidateAlreadyEstablished148V1 || !refusedZero || o.VersionV1() != 2 {
+			t.Fatalf("concurrent establish %d %+v / %d %+v", a.out, a.pub, b.out, b.pub)
 		}
 	})
 }
