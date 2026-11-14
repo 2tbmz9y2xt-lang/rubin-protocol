@@ -994,20 +994,41 @@ func TestHeaderCandidate148WorkingSets(t *testing.T) {
 	if got, _ := o.LookupV1(h.Hash); got.External || got.Provenance != hcProvB {
 		t.Fatalf("provenance update stored External=%v provenance=%v", got.External, got.Provenance == hcProvB)
 	}
+	// D9: Additions [H exactly as stored, K a new child of H] has the outcome and effect of Additions [K], compared
+	// with a second owner brought to the same pre-state on the full inner state and the receipt.
+	hStored := h
+	hStored.Provenance = hcProvB
+	o2 := hcNew(t, hcLim())
+	hcEstablish(t, o2, p, h)
+	for _, tr := range []HeaderCandidateTransition148V1{hcTr(o2, nil, p.Hash), {Additions: []HeaderCandidateRecord148V1{hStored}}} {
+		tr.ExpectedVersion, tr.ExpectedSource = o2.VersionV1(), hcSrc1
+		if _, out := hcPublish(t, o2, tr); out != HeaderCandidateOK148V1 {
+			t.Fatalf("D9 second owner pre-state: %d", out)
+		}
+	}
+	if hcInnerOf(o) != hcInnerOf(o2) {
+		t.Fatal("D9 pre-states differ")
+	}
 	v = o.VersionV1()
 	k := hcMk(t, h.Hash, 11, 11, 5)
-	rec, out = hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{h, k}))
-	if out != HeaderCandidateOK148V1 || !rec.Changed || rec.Version != v+1 {
-		t.Fatalf("D9 with child: %d", out)
+	rec, out = hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{hStored, k}))
+	rec2, out2 := hcPublish(t, o2, hcTr(o2, []HeaderCandidateRecord148V1{k}))
+	if out != HeaderCandidateOK148V1 || out2 != out || !rec.Changed || rec2.Changed != rec.Changed || rec.Version != v+1 || rec2.Version != rec.Version {
+		t.Fatalf("D9 with child: %d %+v, alone: %d %+v", out, rec, out2, rec2)
 	}
-	hcEqual(t, "D9 added", rec.Added, hcHashes(k))
+	hcEqual(t, "D9 added", rec.Added, rec2.Added)
+	hcEqual(t, "D9 retired", rec.Retired, rec2.Retired)
+	hcEqual(t, "D9 added literal", rec.Added, hcHashes(k))
+	if hcInnerOf(o) != hcInnerOf(o2) {
+		t.Fatal("D9 effect differs from Additions [K]")
+	}
 	// V7: before anchor loss the producer re-adds the required suffix in one transition, or gets Capacity first.
 	o = hcNew(t, hcLim())
 	hcEstablish(t, o, hcExt(h))
 	if _, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{p})); out != HeaderCandidateOK148V1 {
 		t.Fatalf("V7 re-add: %d", out)
 	}
-	o2 := hcNew(t, hcHeaders(1))
+	o2 = hcNew(t, hcHeaders(1))
 	hcEstablish(t, o2, hcExt(h))
 	if _, out := hcPublish(t, o2, hcTr(o2, []HeaderCandidateRecord148V1{p})); out != HeaderCandidateCapacity148V1 {
 		t.Fatalf("V7 capacity: %d", out)
@@ -1234,9 +1255,9 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		o, r0, r1 := hcBase(t, hcLim())
 		n := hcMk(t, r1.Hash, 12, 120, 9)
 		tr := hcTr(o, []HeaderCandidateRecord148V1{n})
-		before, reads := hcTake(o, r0, r1, n), hcReads(o, r0, r1, n)
+		before, reads, inner := hcTake(o, r0, r1, n), hcReads(o, r0, r1, n), hcInnerOf(o)
 		h := hcPrepOK(t, o, tr)
-		if h.AbortV1() != HeaderCandidateOK148V1 || !before.same(hcTake(o, r0, r1, n)) || hcReads(o, r0, r1, n) != reads {
+		if h.AbortV1() != HeaderCandidateOK148V1 || !before.same(hcTake(o, r0, r1, n)) || hcReads(o, r0, r1, n) != reads || hcInnerOf(o) != inner {
 			t.Fatal("abort changed state")
 		}
 		for _, c := range []HeaderCandidateOutcome148V1{h.AbortV1(), h.UnknownV1()} {
@@ -1410,13 +1431,13 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 			done := make(chan HeaderCandidateOutcome148V1, 1)
 			go func() { done <- h.UnknownV1() }()
 			time.Sleep(50 * time.Millisecond)
-			if o.VersionV1() != v || o.latched {
+			if o.VersionV1() != v || hcInnerOf(o).latched {
 				t.Fatal("unknown applied under guard")
 			}
 			rel()
 			var got HeaderCandidateOutcome148V1
 			hcWithin(t, "unknown after release", func() { got = <-done })
-			if got != HeaderCandidateOK148V1 || !o.latched {
+			if got != HeaderCandidateOK148V1 || !hcInnerOf(o).latched {
 				t.Fatal("unknown after release")
 			}
 			want := v + 1
@@ -1480,7 +1501,7 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 				}
 			}
 			rel()
-			if o.VersionV1() != v || o.latched || (kind == "establish" && o.established) {
+			if in := hcInnerOf(o); o.VersionV1() != v || in.latched || (kind == "establish" && in.established) {
 				t.Fatalf("%s applied after close", kind)
 			}
 		}

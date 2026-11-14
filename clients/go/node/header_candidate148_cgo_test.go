@@ -100,17 +100,24 @@ func TestHeaderCandidate148Inventory(t *testing.T) {
 }
 
 // TestHeaderCandidate148InventoryUnderBlockedUnknown covers X5: while UnknownV1 waits on a current guard the
-// inventory stays the complete pre-latch view, also at the maximum version; after the release it is Incomplete. Below
-// the maximum the prepared transition adds N and retires R0, and neither is applied by the latch.
+// inventory stays the complete pre-latch view, for a Changed-true transition (adds N, retires R0, neither applied by the
+// latch) and a Changed-false one below the maximum version, and at the maximum version; after the release it is
+// Incomplete.
 func TestHeaderCandidate148InventoryUnderBlockedUnknown(t *testing.T) {
-	for _, max := range []bool{false, true} {
+	for _, c := range []struct{ max, changed bool }{{false, true}, {false, false}, {true, false}} {
+		max := c.max
 		o, r0, r1 := hcBase(t, hcLim())
-		tr := hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 120, 9)}, r0.Hash)
 		if max {
 			o.version.Store(math.MaxUint64)
-			tr = hcTr(o, nil)
+		}
+		tr := hcTr(o, nil)
+		if c.changed {
+			tr = hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 120, 9)}, r0.Hash)
 		}
 		h := hcPrepOK(t, o, tr)
+		if h.plan.changed != c.changed {
+			t.Fatalf("prepared Changed %v, case %+v", h.plan.changed, c)
+		}
 		v := o.VersionV1()
 		cur, rel := hcGuard(t, o, v)
 		t.Cleanup(func() { rel(); o.CloseV1() })
@@ -122,8 +129,8 @@ func TestHeaderCandidate148InventoryUnderBlockedUnknown(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		// Tips {R1}, headers {R0, R1}: 32 + 2*148.
 		inv := o.Inventory148V1(1 << 20)
-		if inv.Version != v {
-			t.Fatalf("inventory under blocked UnknownV1 max=%v: %+v", max, inv)
+		if inv.Version != v || o.VersionV1() != v {
+			t.Fatalf("inventory under blocked UnknownV1 %+v: %+v", c, inv)
 		}
 		hcInvExact(t, "inventory under blocked UnknownV1", inv, []HeaderCandidateRecord148V1{r1}, []HeaderCandidateRecord148V1{r0, r1}, 328)
 		rel()
@@ -138,6 +145,40 @@ func TestHeaderCandidate148InventoryUnderBlockedUnknown(t *testing.T) {
 		}
 		hcRefused(t, "after latch", o.Inventory148V1(1<<20), consensus.HeaderCandidateIncompleteV1, want)
 	}
+}
+
+// TestHeaderCandidate148InventoryUnderWaitingPublish covers the guard-sharing rule for Inventory148V1: with a guard held
+// and PublishV1 waiting, Inventory148V1 returns the exact pre-publication view; after the release the publication
+// completes and the inventory shows it.
+func TestHeaderCandidate148InventoryUnderWaitingPublish(t *testing.T) {
+	o, r0, r1 := hcBase(t, hcLim())
+	n := hcMk(t, r1.Hash, 12, 120, 9)
+	h := hcPrepOK(t, o, hcTr(o, []HeaderCandidateRecord148V1{n}, r0.Hash))
+	v := o.VersionV1()
+	cur, rel := hcGuard(t, o, v)
+	t.Cleanup(func() { rel(); o.CloseV1() })
+	if !cur {
+		t.Fatal("guard not current")
+	}
+	var pub HeaderCandidatePublication148V1
+	var out HeaderCandidateOutcome148V1
+	done := make(chan struct{})
+	go func() { pub, out = h.PublishV1(); close(done) }()
+	hcBlocked(t, done)
+	var inv consensus.HeaderCandidateInventory148V1
+	hcWithin(t, "inventory under waiting publish", func() { inv = o.Inventory148V1(1 << 20) })
+	if inv.Version != v {
+		t.Fatalf("inventory under waiting publish: %+v", inv)
+	}
+	// Tips {R1}, headers {R0, R1}: 32 + 2*148.
+	hcInvExact(t, "inventory under waiting publish", inv, []HeaderCandidateRecord148V1{r1}, []HeaderCandidateRecord148V1{r0, r1}, 328)
+	rel()
+	hcWithin(t, "publish after release", func() { <-done })
+	if out != HeaderCandidateOK148V1 || !pub.Changed || pub.Version != v+1 {
+		t.Fatalf("publish after release: %d %+v", out, pub)
+	}
+	// Tips {N}, headers {R1, N}: 32 + 2*148.
+	hcInvExact(t, "after publication", o.Inventory148V1(1<<20), []HeaderCandidateRecord148V1{n}, []HeaderCandidateRecord148V1{r1, n}, 328)
 }
 
 // TestHeaderCandidate148InventoryThenPublish covers X1 through the inventory read path: a publication between
