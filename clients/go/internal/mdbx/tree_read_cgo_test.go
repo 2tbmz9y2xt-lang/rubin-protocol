@@ -389,7 +389,7 @@ func trSemanticAssertionV1(t *testing.T, request TreeRootReadV1, reader *Reader,
 	return func() {
 		t.Helper()
 		treeNativeError(t, err, "update", "Integrity", -30796, "invalid tree native representation", nil)
-		engine := err.(*EngineError)
+		engine, _ := directTestEngineError(err)
 		if engine.TreeObservation != nil || root != ([32]byte{}) || usable || any(failure) != any(err) {
 			t.Fatalf("semantic integrity/no-result root%x error%v active%v", root, err, usable)
 		}
@@ -468,7 +468,9 @@ func trChildPremisesV1(t *testing.T) {
 				entries = []testTreeEntry{trPremiseV1(child), trPremiseV1(dirty)}
 				events = append(events, TreeEventV1{Kind: 2, Outpoint: TreeOutpointV1{Txid: [32]byte{0: 0xe0}}})
 			}
-			sort.Slice(inputs, func(i, j int) bool { return bytes.Compare(tdUTXOKey(1, inputs[i].Txid, inputs[i].Vout), tdUTXOKey(1, inputs[j].Txid, inputs[j].Vout)) < 0 })
+			sort.Slice(inputs, func(i, j int) bool {
+				return bytes.Compare(tdUTXOKey(1, inputs[i].Txid, inputs[i].Vout), tdUTXOKey(1, inputs[j].Txid, inputs[j].Vout)) < 0
+			})
 			request := trEventsV1(t, events...)
 			request.Inputs = inputs
 			trSeedNodesV1(t, s, o, request, entries...)

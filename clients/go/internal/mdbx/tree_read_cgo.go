@@ -224,13 +224,13 @@ func (o *treeRootOldV1) bindingV1(key []byte, image treeImageV1) error {
 		return nil // The shared walker owns absent/malformed binding detection.
 	}
 	binding, err := DecodeRootBindingV1(image.value)
-	if err != nil {
-		return nil
+	if err == nil {
+		if binding.Endpoint != o.request.Parent || binding.DatabaseID != o.reader.databaseID {
+			return treeObserveV1(treeIntegrity(operationUpdate, nil), o.observation, 0, key, TreeObservationIdentityMismatchV1, image, true)
+		}
+		return o.topV1(binding)
 	}
-	if binding.Endpoint != o.request.Parent || binding.DatabaseID != o.reader.databaseID {
-		return treeObserveV1(treeIntegrity(operationUpdate, nil), o.observation, 0, key, TreeObservationIdentityMismatchV1, image, true)
-	}
-	return o.topV1(binding)
+	return nil
 }
 
 // topV1 checks a decoded, selected-parent binding before its walker consumption.
@@ -251,7 +251,8 @@ func (o *treeRootOldV1) topV1(binding RootBindingV1) error {
 func (o *treeRootOldV1) nodeV1(key []byte, image treeImageV1) error {
 	_, id, err := DecodeTreeNodeKey(key)
 	node := treeRefOfID(id, [32]byte{})
-	if !image.present || err != nil || !treeRecordOKV1(node, image.value) || node.depth == 288 {
+	decodedBranch := image.present && err == nil && treeRecordOKV1(node, image.value) && node.depth != 288
+	if !decodedBranch {
 		return nil // The walker owns absent, malformed, identity and digest errors.
 	}
 	for side := range 2 {

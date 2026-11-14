@@ -383,7 +383,7 @@ func trRowsV1() []trRowV1 {
 	rows := []trRowV1{{"equal", good, false}, {"absent", nil, false}, {"short", good[:19], true}, {"oversized-before-copy", make([]byte, 65561), true}, {"nonminimal-length", badCompact, true}, {"truncated-data", good[:len(good)-1], true}, {"coinbase-tag", badCoinbase, true}}
 	for i, name := range []string{"value", "type", "data", "height", "coinbase"} {
 		value := bytes.Clone(good)
-		value[[]int{0, 8, 11, len(value)-9, len(value)-1}[i]]++
+		value[[]int{0, 8, 11, len(value) - 9, len(value) - 1}[i]]++
 		rows = append(rows, trRowV1{name, value, false})
 	}
 	return rows
