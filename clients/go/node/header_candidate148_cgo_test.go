@@ -59,7 +59,7 @@ func TestHeaderCandidate148Inventory(t *testing.T) {
 		t.Fatal("caller mutation reached provider")
 	}
 	again := o.Inventory148V1(1 << 20)
-	if again.Tips[0] == inv.Tips[0] && again.Headers[0] == inv.Headers[0] {
+	if again.Tips[0] == inv.Tips[0] || again.Headers[0] == inv.Headers[0] {
 		t.Fatal("arrays alias")
 	}
 	if o.VersionV1() != 2 {

@@ -187,6 +187,10 @@ func TestHeaderCandidate148Classification(t *testing.T) {
 			_, out := o.EstablishV1(hcSrc2, nil)
 			return out, nil
 		}},
+		{"rows3+5 already established wins over invalid", HeaderCandidateAlreadyEstablished148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
+			_, out := o.EstablishV1([32]byte{}, nil)
+			return out, nil
+		}},
 		{"row4 busy", HeaderCandidateBusy148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, _, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			h, _ := o.PrepareV1(hcTr(o, nil))
 			return prep(o, hcTr(o, []HeaderCandidateRecord148V1{child(t, r1, 3)})), func() { h.AbortV1() }
@@ -911,6 +915,12 @@ func TestHeaderCandidate148Faults(t *testing.T) {
 		rel()
 		rel()
 		hcWithin(t, "publish after release", func() { <-done })
+		// The second release was a no-op: a later state-changing publication still proceeds.
+		hcWithin(t, "publish after double release", func() {
+			if _, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{hcMk(t, r1.Hash, 12, 122, 11)})); out != HeaderCandidateOK148V1 {
+				t.Errorf("later publish: %d", out)
+			}
+		})
 	})
 	t.Run("unknown latch", func(t *testing.T) {
 		o, r0, r1 := hcBase(t, hcLim())
