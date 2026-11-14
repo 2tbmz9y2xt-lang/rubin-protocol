@@ -284,13 +284,18 @@ func validateMainnetGenesisGuard(cfg SyncConfig) error {
 // hash in an embedded caller. The boot-time call site in
 // cmd/rubin-node/main.go is the only place that has both inputs.
 func ValidateDevnetGenesisIdentity(chainID, genesisHash [32]byte) error {
-	if chainID != devnetGenesisChainID {
+	return validateGenesisIdentityPair(chainID, genesisHash, devnetGenesisChainID, devnetGenesisBlockHash)
+}
+
+// validateGenesisIdentityPair preserves chain identity before hash precedence.
+func validateGenesisIdentityPair(chainID, genesisHash, expectedChainID, expectedHash [32]byte) error {
+	if chainID != expectedChainID {
 		return &consensus.TxError{
 			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
 			Msg:  "genesis chain_id mismatch",
 		}
 	}
-	if genesisHash != devnetGenesisBlockHash {
+	if genesisHash != expectedHash {
 		return &consensus.TxError{
 			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
 			Msg:  "genesis_hash mismatch",

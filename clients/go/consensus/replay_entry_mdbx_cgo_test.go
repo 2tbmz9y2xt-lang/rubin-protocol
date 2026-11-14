@@ -5,6 +5,7 @@ package consensus
 import (
 	"bytes"
 	"cmp"
+	"crypto/sha3"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -2014,6 +2015,59 @@ func BenchmarkReplayEntryWalk(b *testing.B) {
 	for b.Loop() {
 		if out := owner.EnterReplayTargetMDBX(w.store, w.owner); out.Result != replayEntryRecovery {
 			b.Fatalf("walk: %+v", out)
+		}
+	}
+}
+
+// G2/G8 pin facets and both route widths independently: Published length never
+// chooses a grammar, and an identity-only context never gains complete bytes.
+func TestReplayEntryGenesisContextExplicitWidth(t *testing.T) {
+	wideRaw:=initial148BlockGenesis(t)
+	wide:=fgContext(t,wideRaw)
+	legacyRaw:=append(bytes.Clone(wideRaw[:108]),wideRaw[140:]...)
+	legacyHash,err:=BlockHash(legacyRaw[:116])
+	logicalMDBXAssert(t,err==nil,"legacy fixture hash: %v",err)
+	legacy:=PublishedGenesisContextV1{Published:legacyRaw,GenesisHash:legacyHash,ChainID:sha3.Sum256(append([]byte("RUBIN-GENESIS-v1"),legacyRaw...))}
+	for _,row:=range []struct{name string; context PublishedGenesisContextV1; wide bool; message string}{
+		{"148-complete",wide,true,""},{"116-complete",legacy,false,""},
+		{"148-on-116",wide,false,"invalid published genesis context"},{"116-on-148",legacy,true,"invalid published genesis context"},
+		{"148-nil",PublishedGenesisContextV1{ChainID:wide.ChainID,GenesisHash:wide.GenesisHash},true,""},
+		{"116-nil",PublishedGenesisContextV1{ChainID:legacy.ChainID,GenesisHash:legacy.GenesisHash},false,""},
+	} {
+		t.Run(row.name,func(t *testing.T){
+			row.context.Published=bytes.Clone(row.context.Published)
+			owner:=NewReplayEntryOwnerV1(nil,row.context)
+			before:=bytes.Clone(row.context.Published)
+			check:=replayEntryContext
+			if row.wide {check=replayEntryContext148}
+			err:=check(owner.genesis)
+			logicalMDBXAssert(t,(err==nil)==(row.message==""),"context width: %v",err)
+			if err!=nil {logicalMDBXAssert(t,err.Error()==row.message,"context refusal %v",err)}
+			logicalMDBXAssert(t,(owner.genesis.Published==nil)==(row.context.Published==nil) && bytes.Equal(owner.genesis.Published,before),"context invented or mutated Published")
+			if row.context.Published!=nil {row.context.Published[0]^=1;logicalMDBXAssert(t,bytes.Equal(owner.genesis.Published,before),"context copy aliases caller")}
+		})
+	}
+	for _,size:=range []int{0,1,265,267,297,299} {
+		bad:=wide;bad.Published=make([]byte,size)
+		logicalMDBXAssert(t,replayEntryContext148(bad).Error()=="invalid published genesis context","148 accepted length %d",size)
+		logicalMDBXAssert(t,replayEntryContext(bad).Error()=="invalid published genesis context","116 accepted length %d",size)
+	}
+	for _,field:=range []string{"chain","hash","body","root"} {
+		bad:=wide;bad.Published=bytes.Clone(wideRaw)
+		switch field {case "chain":bad.ChainID[0]^=1;case "hash":bad.GenesisHash[0]^=1;case "body":bad.Published[200]^=1;case "root":bad.Published[108]^=1}
+		logicalMDBXAssert(t,replayEntryContext148(bad).Error()=="published genesis context commitment mismatch","148 context commitment %s",field)
+	}
+}
+
+// A nil Published facet still requires both identity components.
+func TestReplayEntryGenesisContext148ZeroIdentity(t *testing.T) {
+	for _,complete:=range []bool{false,true} {
+		for _,field:=range []string{"chain","hash"} {
+			g:=fgContext(t,initial148BlockGenesis(t))
+			if !complete {g.Published=nil}
+			if field=="chain" {g.ChainID=[32]byte{}} else {g.GenesisHash=[32]byte{}}
+			err:=replayEntryContext148(g)
+			logicalMDBXAssert(t,err!=nil && err.Error()=="invalid published genesis context","148 zero %s complete=%v: %v",field,complete,err)
 		}
 	}
 }

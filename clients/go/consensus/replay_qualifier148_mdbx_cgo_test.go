@@ -1016,6 +1016,7 @@ func TestReplayQualifier148WidthCensus(t *testing.T) {
 		"replay_entry_mdbx_cgo.go pow Initial148PowCheck 148",
 		"replay_entry_mdbx_cgo.go pow PowCheck 116",
 		"replay_entry_mdbx_cgo.go replayEntryContext BlockHash context",
+		"replay_entry_mdbx_cgo.go replayEntryContext148 Initial148BlockHash 148",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("X1 census:\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -1043,7 +1044,7 @@ func q148WidthCensus(name string, file *ast.File) []string {
 }
 
 // q148WidthPath is "function primitive path" for a call on stack: path is "148" inside the body of an `if q.wide`
-// of a *replayQualifier method, "116" elsewhere in such a method, "context" in the function replayEntryContext, and
+// of a *replayQualifier method, "116" elsewhere in such a method, "context" in replayEntryContext, "148" in replayEntryContext148, and
 // "none" otherwise (including outside any function, named "-").
 func q148WidthPath(stack []ast.Node, primitive string) string {
 	fn, wide := (*ast.FuncDecl)(nil), false
@@ -1062,6 +1063,8 @@ func q148WidthPath(stack []ast.Node, primitive string) string {
 		return fn.Name.Name + " " + primitive + " 148"
 	case q148QualifierMethod(fn):
 		return fn.Name.Name + " " + primitive + " 116"
+	case fn.Recv == nil && fn.Name.Name == "replayEntryContext148":
+		return fn.Name.Name + " " + primitive + " 148"
 	case fn.Recv == nil && fn.Name.Name == "replayEntryContext":
 		return fn.Name.Name + " " + primitive + " context"
 	}
