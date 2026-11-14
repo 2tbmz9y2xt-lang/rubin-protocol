@@ -165,8 +165,10 @@ func (o *HeaderCandidateOwner148V1) IncarnationV1() uint64 { return o.incarnatio
 // VersionV1 is a race-safe scalar read; it never waits.
 func (o *HeaderCandidateOwner148V1) VersionV1() uint64 { return o.version.Load() }
 
-// CloseV1 destroys the owner without waiting for guards and wakes every waiting EstablishV1, PublishV1 and UnknownV1,
-// which then return Closed and apply nothing.
+// CloseV1 destroys the owner without waiting for guards (RUB-1550 api_contract CloseV1). Afterwards Inventory148V1 is
+// Incomplete, ProtectV1 returns current false with a non-nil release, mutators return Closed, Header148V1 returns false,
+// LookupV1 returns the zero record and false, and VersionV1 keeps the version current at close. A waiting EstablishV1,
+// PublishV1 or UnknownV1 is woken and returns Closed with no effect and no receipt; a later guard release applies nothing.
 func (o *HeaderCandidateOwner148V1) CloseV1() {
 	o.mu.Lock()
 	o.closed = true
@@ -174,8 +176,10 @@ func (o *HeaderCandidateOwner148V1) CloseV1() {
 	o.mu.Unlock()
 }
 
-// ProtectV1 takes a shared guard that holds back every state-changing publication until its release runs. current is
-// true exactly when the owner is established, not latched, not closed and version is current. It never waits.
+// ProtectV1 takes a shared guard and never waits, also while a publication waits for guards. current is true exactly
+// when the owner is established, not latched, not closed and version is current. The release is non-nil on every return
+// and a second call of one release is a no-op. Every guard, whatever its current value, holds back PublishV1,
+// EstablishV1 and UnknownV1 until its release runs.
 func (o *HeaderCandidateOwner148V1) ProtectV1(version uint64) (bool, func()) {
 	o.mu.Lock()
 	o.guards++
@@ -195,7 +199,8 @@ func (o *HeaderCandidateOwner148V1) ProtectV1(version uint64) (bool, func()) {
 	}
 }
 
-// Header148V1 writes the admitted raw bytes of hash into dst and returns true; dst is never retained.
+// Header148V1 writes the admitted raw bytes of hash into dst and returns true. On an absent hash, after CloseV1, it
+// returns false and dst is unspecified. dst is never retained or written after return. It is callable under a held guard.
 func (o *HeaderCandidateOwner148V1) Header148V1(hash [32]byte, dst *[148]byte) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -242,7 +247,10 @@ func (o *HeaderCandidateOwner148V1) gate(wantEstablished bool) HeaderCandidateOu
 	return HeaderCandidateOK148V1
 }
 
-// EstablishV1 is the once-per-owner complete startup source join; it performs no replacement.
+// EstablishV1 is the once-per-owner complete startup source join; it performs no replacement. It evaluates rows 1-3, 5,
+// 7, 8, 11 and 12 of the first-refusal order with records read as Additions, waits for guards under the PublishV1 rule,
+// and on OK advances the version by exactly one with Changed true. Every non-OK return carries the zero publication and
+// leaves the owner not established with an unchanged version.
 func (o *HeaderCandidateOwner148V1) EstablishV1(source [32]byte, records []HeaderCandidateRecord148V1) (HeaderCandidatePublication148V1, HeaderCandidateOutcome148V1) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -268,7 +276,8 @@ func (o *HeaderCandidateOwner148V1) EstablishV1(source [32]byte, records []Heade
 	return o.apply(&plan), HeaderCandidateOK148V1
 }
 
-// PrepareV1 validates and reserves the whole transition without changing membership or version. It never waits.
+// PrepareV1 validates and reserves the whole transition without changing membership or version, and never waits. At
+// most one prepared transition exists per owner. Every non-OK return carries a nil handle.
 func (o *HeaderCandidateOwner148V1) PrepareV1(t HeaderCandidateTransition148V1) (*HeaderCandidatePrepared148V1, HeaderCandidateOutcome148V1) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -306,8 +315,10 @@ func (o *HeaderCandidateOwner148V1) waitGuards() HeaderCandidateOutcome148V1 {
 	return HeaderCandidateOK148V1
 }
 
-// PublishV1 applies the prepared transition atomically with one version increment. A state-changing transition waits
-// until no guard is held; Changed false does not wait.
+// PublishV1 applies additions, retirements, charges and source atomically. A state-changing transition waits until no
+// guard is held and advances the version by one; a Changed-false transition does not wait and keeps the version. A
+// second call of any handle method returns Consumed; otherwise a destroyed owner returns Closed (also when CloseV1 wakes
+// the wait). Every non-OK return carries the zero publication and applies nothing.
 func (h *HeaderCandidatePrepared148V1) PublishV1() (HeaderCandidatePublication148V1, HeaderCandidateOutcome148V1) {
 	o := h.owner
 	o.mu.Lock()
@@ -324,7 +335,8 @@ func (h *HeaderCandidatePrepared148V1) PublishV1() (HeaderCandidatePublication14
 	return o.apply(&h.plan), HeaderCandidateOK148V1
 }
 
-// AbortV1 is a known abort: the reservation is released and nothing else changes.
+// AbortV1 is a known abort: the reservation is released and membership, charges and version are unchanged. It returns
+// OK on a first call to an open owner, Consumed on a later handle call, otherwise Closed.
 func (h *HeaderCandidatePrepared148V1) AbortV1() HeaderCandidateOutcome148V1 {
 	o := h.owner
 	o.mu.Lock()
@@ -336,8 +348,11 @@ func (h *HeaderCandidatePrepared148V1) AbortV1() HeaderCandidateOutcome148V1 {
 	return HeaderCandidateOK148V1
 }
 
-// UnknownV1 is an unknown native outcome: it waits until no guard is held, applies no membership change, keeps the
-// slot occupied, advances the version when representable and latches the owner until a new incarnation.
+// UnknownV1 is an unknown native outcome. It always waits until no guard is held, applies no addition or retirement,
+// keeps the slot occupied, advances the version when representable and latches the owner: later Inventory148V1 is
+// Incomplete, ProtectV1 returns current false with a non-nil release, and EstablishV1, PrepareV1 and
+// AcquireDependencyV1 return UnknownSource until a new incarnation. Reads answer the unchanged membership. It returns OK
+// on a first call to an open owner, Consumed on a later handle call, otherwise Closed (also when CloseV1 wakes the wait).
 func (h *HeaderCandidatePrepared148V1) UnknownV1() HeaderCandidateOutcome148V1 {
 	o := h.owner
 	o.mu.Lock()
@@ -367,7 +382,9 @@ func (h *HeaderCandidatePrepared148V1) consume() HeaderCandidateOutcome148V1 {
 	return HeaderCandidateOK148V1
 }
 
-// AcquireDependencyV1 pins hash and its received ancestry. Rows 1-3, then Missing, Protected, Capacity.
+// AcquireDependencyV1 pins hash and every received ancestor against every retirement; a version advance does not revoke
+// the lease. It evaluates rows 1-3, then Missing (hash absent), Protected (hash or an ancestor in the outstanding planned
+// removal, capacity victims included) and Capacity (MaxLeases reached). Every non-OK return carries a nil lease.
 func (o *HeaderCandidateOwner148V1) AcquireDependencyV1(hash [32]byte) (*HeaderCandidateLease148V1, HeaderCandidateOutcome148V1) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
