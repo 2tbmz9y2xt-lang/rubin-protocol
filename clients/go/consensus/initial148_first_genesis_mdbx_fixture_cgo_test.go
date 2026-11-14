@@ -615,15 +615,17 @@ func TestInitial148FirstGenesisCrossedTruth(t *testing.T) {
 			logicalMDBXAssert(t, err == nil && evidence.Faults == row.faults && evidence.Commits == 1 && evidence.BeginRead == readbacks, "crossed fixture: %+v / %v", evidence, err)
 			fgTuple(t, out, row.result, row.truth, 3)
 			var crossed *mdbx.CommitError
+			logicalMDBXAssert(t, errors.As(out.Err, &crossed) && reflect.TypeOf(out.Err) == reflect.TypeFor[*mdbx.CommitError]() && crossed.Truth == row.truth && crossed.Cause != nil, "raw crossed tuple: %v", out.Err)
 			if row.name == "abort" {
-				_ = btfEngine(t, out.Err, "abort", mdbx.EngineIO, 5, "error 5")
+				abort := btfEngine(t, crossed.Cause, "abort", mdbx.EngineIO, 5, "error 5")
+				logicalMDBXAssert(t, errors.Unwrap(out.Err) == abort && crossed.ReadbackCause == nil, "raw abort cause identity changed: %v", out.Err)
 			} else {
-				logicalMDBXAssert(t, errors.As(out.Err, &crossed) && crossed.Truth == row.truth && crossed.Cause != nil, "raw crossed tuple: %v", out.Err)
+				_ = btfEngine(t, crossed.Cause, "update", mdbx.EngineCapacity, 28, "error 28")
 			}
 			cached := w.call()
 			cachedResult := ""
 			if row.truth == 1 {
-				cachedResult = "LOCAL_RESOURCE_UNAVAILABLE(storage_io)"
+				cachedResult = "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)"
 			}
 			logicalMDBXAssert(t, cached.Result == cachedResult && cached.Stage == 1 && cached.Truth == out.Truth && any(cached.Err) == any(out.Err), "cached tuple changed: %+v", cached)
 			btReservationsReleased(t, w.owner)
@@ -772,7 +774,7 @@ func TestInitial148FirstGenesisFullValidationAndRelease(t *testing.T) {
 				raw[108] ^= 1
 			case "nonminimal-count":
 				raw[148] = 0xfd
-				code, message = TX_ERR_PARSE, "non-minimal CompactSize (0xfd)"
+				code, message = BLOCK_ERR_PARSE, "invalid tx_count"
 			case "coinbase-before-E":
 				binary.LittleEndian.PutUint16(raw[213:215], COV_TYPE_VAULT)
 				id := sha3.Sum256(raw[149:296])
