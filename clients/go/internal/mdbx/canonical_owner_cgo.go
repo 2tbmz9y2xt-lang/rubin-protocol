@@ -57,7 +57,8 @@ func updateNativePairedImages(old *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan []ownedM
 // allocates nothing; a partner read allocates one 40- or 16-byte key. Borrowed OLD bytes are read only while old is live.
 func updateNativePairing(old *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan []ownedMutation) error {
 	for _, side := range canonicalSides {
-		if err := canonicalNewPaired(plan, side, nil); err != nil {
+		err := canonicalNewPaired(plan, side, nil)
+		if err != nil {
 			return err
 		}
 	}
@@ -77,7 +78,8 @@ func canonicalNewPaired(plan []ownedMutation, side canonicalSide, budget *treePa
 		if m.dbi.Rank != side.rank || m.after != AfterLiteral {
 			continue
 		}
-		if err := budget.coverV1(40, ^uint64(0)); err != nil {
+		err := budget.coverV1(40, ^uint64(0))
+		if err != nil {
 			return err
 		}
 		j := canonicalTargetIndex(plan, side.partner, canonicalPartnerKey(&partner, m.key, m.literal[:side.field]))
@@ -106,7 +108,8 @@ func canonicalOldPaired(old *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan []ownedMutatio
 		if canonicalPartnerTargetV1(plan, side.partner, m.key, field[:side.field]) {
 			continue
 		}
-		if err = canonicalOldPartnerV1(old, dbis[side.partner], m.key, field[:side.field], side, &partner, budget); err != nil {
+		err = canonicalOldPartnerV1(old, dbis[side.partner], m.key, field[:side.field], side, &partner, budget)
+		if err != nil {
 			return err
 		}
 	}
@@ -115,7 +118,8 @@ func canonicalOldPaired(old *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan []ownedMutatio
 
 // canonicalOldPartnerV1 retires the target payload before the cloned-key/partner window.
 func canonicalOldPartnerV1(old *C.MDBX_txn, dbi C.MDBX_dbi, target, field []byte, side canonicalSide, partner *[40]byte, budget *treePairReadBudgetV1) error {
-	if err := budget.coverV1(uint64(80+side.field), ^uint64(0)); err != nil {
+	err := budget.coverV1(uint64(80+side.field), ^uint64(0))
+	if err != nil {
 		return err
 	}
 	key := canonicalPartnerKey(partner, target, field)
@@ -130,7 +134,8 @@ func canonicalOldPartnerV1(old *C.MDBX_txn, dbi C.MDBX_dbi, target, field []byte
 	if err != nil {
 		return err
 	}
-	if err = budget.coverV1(need, ^uint64(0)); err != nil {
+	err = budget.coverV1(need, ^uint64(0))
+	if err != nil {
 		return err
 	}
 	if canonicalImageNames(image, side.partnerWidth, target) {
@@ -152,7 +157,8 @@ func canonicalOldTargetField(old *C.MDBX_txn, dbi C.MDBX_dbi, m ownedMutation, s
 	if err != nil {
 		return false, err
 	}
-	if err = budget.coverV1(need, ^uint64(0)); err != nil {
+	err = budget.coverV1(need, ^uint64(0))
+	if err != nil {
 		return false, err
 	}
 	borrowed, obligated := canonicalOldField(m, image, side)

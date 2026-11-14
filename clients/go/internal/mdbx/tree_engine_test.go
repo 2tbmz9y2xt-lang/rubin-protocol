@@ -164,10 +164,15 @@ func TestTreePairReadBudgetV1(t *testing.T) {
 		want       uint64
 		refused    bool
 	}{
-		{0, 0, true, 0, false}, {32, 0, true, 64, false}, {70000, 0, true, 140000, false},
-		{104, 72, false, 176, false}, {8, 72, false, 80, false}, {104, 88, false, 192, false},
+		{0, 0, true, 0, false},
+		{32, 0, true, 64, false},
+		{70000, 0, true, 140000, false},
+		{104, 72, false, 176, false},
+		{8, 72, false, 80, false},
+		{104, 88, false, 192, false},
 		{9223372036854775807, 0, true, 18446744073709551614, false},
-		{9223372036854775808, 0, true, 0, true}, {18446744073709551615, 0, true, 0, true},
+		{9223372036854775808, 0, true, 0, true},
+		{18446744073709551615, 0, true, 0, true},
 		{18446744073709551615, 1, false, 0, true},
 	} {
 		got, err := treePairReadSizeV1(row.n, row.scratch, row.old)

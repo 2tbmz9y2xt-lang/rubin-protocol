@@ -632,31 +632,43 @@ func TestReplayTreeEntryReadCoverageNative(t *testing.T) {
 }
 
 func TestReplayTreeEntryReadCoverageUnwindNative(t *testing.T) {
-	for _,mode:=range []string{"protected-builder-panic","protected-engine-goexit"} {
-		t.Run(mode,func(t *testing.T){
-			w,_,view:=rtEntryWorld(t,nil)
-			marker:=errors.New("protected replay builder")
-			fired,returned:=false,false
+	for _, mode := range []string{"protected-builder-panic", "protected-engine-goexit"} {
+		t.Run(mode, func(t *testing.T) {
+			w, _, view := rtEntryWorld(t, nil)
+			marker := errors.New("protected replay builder")
+			fired, returned := false, false
 			var recovered any
-			run:=func(){
-				defer func(){recovered=recover()}()
-				_,err:=mdbx.FixturePairReadObservation(w.s,func(site uint32){
-					if site==4||site==5 {logicalMDBXAssert(t,view.releases==0,"Protect release after last native OLD cleanup")}
-					if fired {return}
-					if mode=="protected-builder-panic"&&site==1&&len(view.versions)==1 {fired=true;panic(marker)}
-					if mode=="protected-engine-goexit"&&site==3 {fired=true;runtime.Goexit()}
-				},func(){_ = NewReplayEntryOwnerV1(view,w.g).EnterReplayTargetMDBX(w.s,w.owner)})
-				logicalMDBXAssert(t,err==nil,"native unwind fixture: %v",err)
-				returned=true
+			run := func() {
+				defer func() { recovered = recover() }()
+				_, err := mdbx.FixturePairReadObservation(w.s, func(site uint32) {
+					if site == 4 || site == 5 {
+						logicalMDBXAssert(t, view.releases == 0, "Protect release after last native OLD cleanup")
+					}
+					if fired {
+						return
+					}
+					if mode == "protected-builder-panic" && site == 1 && len(view.versions) == 1 {
+						fired = true
+						panic(marker)
+					}
+					if mode == "protected-engine-goexit" && site == 3 {
+						fired = true
+						runtime.Goexit()
+					}
+				}, func() { _ = NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner) })
+				logicalMDBXAssert(t, err == nil, "native unwind fixture: %v", err)
+				returned = true
 			}
-			if mode=="protected-engine-goexit" {
-				done:=make(chan struct{})
-				go func(){defer close(done);run()}()
+			if mode == "protected-engine-goexit" {
+				done := make(chan struct{})
+				go func() { defer close(done); run() }()
 				<-done
-			} else {run()}
-			logicalMDBXAssert(t,fired&&!returned&&view.releases==1&&mdbx.FixtureReservationLive(w.owner)==0,"Protect/OWN unwind: fired%v returned%v releases%d",fired,returned,view.releases)
-			logicalMDBXAssert(t,mode!="protected-builder-panic"||recovered==marker,"protected panic identity %v",recovered)
-			logicalMDBXAssert(t,mode!="protected-engine-goexit"||recovered==nil,"protected Goexit panicked %v",recovered)
+			} else {
+				run()
+			}
+			logicalMDBXAssert(t, fired && !returned && view.releases == 1 && mdbx.FixtureReservationLive(w.owner) == 0, "Protect/OWN unwind: fired%v returned%v releases%d", fired, returned, view.releases)
+			logicalMDBXAssert(t, mode != "protected-builder-panic" || recovered == marker, "protected panic identity %v", recovered)
+			logicalMDBXAssert(t, mode != "protected-engine-goexit" || recovered == nil, "protected Goexit panicked %v", recovered)
 		})
 	}
 }

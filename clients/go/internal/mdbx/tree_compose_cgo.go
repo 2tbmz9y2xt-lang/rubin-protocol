@@ -560,7 +560,8 @@ func (c *treeComposeV1) truthV1(read *C.MDBX_txn, primary error) (CommitTruth, e
 // pairTruthV1 keeps the ordinary seal through complete strict readback, with no grow.
 func (c *treeComposeV1) pairTruthV1(read *C.MDBX_txn, _ error) (CommitTruth, error) {
 	w := c.writer
-	if _, err := updateNativeImages(w.old, w.s.dbis, w.plan.pair); err != nil {
+	_, err := updateNativeImages(w.old, w.s.dbis, w.plan.pair)
+	if err != nil {
 		return CommitTruthUnknown, err
 	}
 	old, next, err := updateNativePairReadbackTargets(w.old, read, w.s.dbis, w.plan.pair, w.t.pairReadLimit)

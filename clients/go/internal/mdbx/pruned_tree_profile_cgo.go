@@ -278,10 +278,11 @@ func prunedTreeReplacement(reader *Reader, input *operationHold, a *TreeAuthorit
 // prunedTreeEncode funds the original literal after promise/legality and codec size.
 func prunedTreeEncode(input *operationHold, a *TreeAuthorityV1) ([]byte, error) {
 	n, fits := authoritySize(a.Authority)
-	if !fits || n > MaxMetadataBytes-27 {
+	if !fits || n < 0 || n > MaxMetadataBytes-27 {
 		return nil, updateBoundError()
 	}
-	if err := input.grow(uint64(n) + 27); err != nil {
+	err := input.grow(uint64(n) + 27)
+	if err != nil {
 		return nil, err
 	}
 	encoded, err := a.Encode()

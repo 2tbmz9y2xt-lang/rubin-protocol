@@ -330,7 +330,8 @@ func (t *treeSectionV1) writeTargetV1(target treeTargetV1, prior bool) error {
 // plan consumed). It runs right after beginTreeSectionV1 and before primitive 0 (D12-F).
 func (t *treeSectionV1) pairPreflightV1(pair []ownedMutation, consulted []ownedConsulted) error {
 	if t.pairOnly {
-		if _, err := updateNativeImages(t.old, t.handles, pair); err != nil {
+		_, err := updateNativeImages(t.old, t.handles, pair)
+		if err != nil {
 			return err
 		}
 		return t.pairReadPreflightV1(pair, consulted)
@@ -343,7 +344,8 @@ func (t *treeSectionV1) pairPreflightV1(pair []ownedMutation, consulted []ownedC
 // pairPreflightContextV1 is pairPreflightV1 with the admitted context window as one more consulted domain (D4 site 1).
 func (t *treeSectionV1) pairPreflightContextV1(pair []ownedMutation, consulted []ownedConsulted, window CanonicalContextWindowV1) error {
 	if t.pairOnly {
-		if _, err := updateNativeImages(t.old, t.handles, pair); err != nil {
+		_, err := updateNativeImages(t.old, t.handles, pair)
+		if err != nil {
 			return err
 		}
 		return t.pairReadPreflightV1(pair, consulted, contextTreeScopeV1(window))
@@ -357,23 +359,29 @@ func (t *treeSectionV1) pairPreflightContextV1(pair []ownedMutation, consulted [
 // Scoped context work returns before sealing and is funded independently.
 func (t *treeSectionV1) pairReadPreflightV1(pair []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) error {
 	budget := treePairReadBudgetV1{credit: t.pairReadLimit, ledger: t.ledger}
+	var err error
 	for _, side := range canonicalSides {
-		if err := canonicalNewPaired(pair, side, &budget); err != nil {
+		err = canonicalNewPaired(pair, side, &budget)
+		if err != nil {
 			return err
 		}
 	}
 	for _, side := range canonicalSides {
-		if err := canonicalOldPaired(t.old, t.handles, pair, side, &budget); err != nil {
+		err = canonicalOldPaired(t.old, t.handles, pair, side, &budget)
+		if err != nil {
 			return err
 		}
 	}
-	if err := t.pairReadTargetsV1(pair, &budget); err != nil {
+	err = t.pairReadTargetsV1(pair, &budget)
+	if err != nil {
 		return err
 	}
-	if err := updateNativePairConsultedMatch(t.old, t.write, t.handles, consulted, "OLD/write snapshot mismatch", &budget, 0); err != nil {
+	err = updateNativePairConsultedMatch(t.old, t.write, t.handles, consulted, "OLD/write snapshot mismatch", &budget, 0)
+	if err != nil {
 		return err
 	}
-	if err := updateNativeScopedMatch(t.old, t.write, t.handles, pair, nil, "OLD/write snapshot mismatch", scopes...); err != nil {
+	err = updateNativeScopedMatch(t.old, t.write, t.handles, pair, nil, "OLD/write snapshot mismatch", scopes...)
+	if err != nil {
 		return err
 	}
 	return t.pairReadSealV1(pair, &budget)
@@ -395,24 +403,27 @@ func (t *treeSectionV1) pairReadTargetsV1(pair []ownedMutation, budget *treePair
 
 // pairReadSealV1 funds future NEW candidates before the first Pair emission.
 func (t *treeSectionV1) pairReadSealV1(pair []ownedMutation, budget *treePairReadBudgetV1) error {
+	var err error
 	for _, m := range pair {
 		if m.after == AfterLiteral {
-			if err := budget.requireV1(uint64(len(m.literal))); err != nil {
+			err = budget.requireV1(uint64(len(m.literal)))
+			if err != nil {
 				return err
 			}
 		}
 	}
-	var err error
 	t.pairReadLimit, err = budget.availableV1()
 	return err
 }
 
 // pairReadFinalV1 uses only the sealed ordinary limit and the unchanged scope owner.
 func (t *treeSectionV1) pairReadFinalV1(pair []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) error {
-	if err := updateNativePairVerify(t.write, t.handles, pair, t.pairReadLimit); err != nil {
+	err := updateNativePairVerify(t.write, t.handles, pair, t.pairReadLimit)
+	if err != nil {
 		return err
 	}
-	if err := updateNativePairConsultedMatch(t.old, t.write, t.handles, consulted, "final update image mismatch", nil, t.pairReadLimit); err != nil {
+	err = updateNativePairConsultedMatch(t.old, t.write, t.handles, consulted, "final update image mismatch", nil, t.pairReadLimit)
+	if err != nil {
 		return err
 	}
 	return updateNativeScopedMatch(t.old, t.write, t.handles, pair, nil, "final update image mismatch", scopes...)

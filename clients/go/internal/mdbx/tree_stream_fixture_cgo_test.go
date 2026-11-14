@@ -18,20 +18,22 @@ import (
 
 // The raw native owner distinguishes metadata-only mismatches from payload use.
 func TestTreePairReadNativeV1(t *testing.T) {
-	t.Run("absent-OLD",pairReadAbsentNativeV1)
-	t.Run("metadata-error-priority",pairReadMetadataNativeV1)
-	t.Run("funded-engine-Goexit",pairReadGoexitV1)
-	t.Run("closed-account-before-read-grow",pairReadClosedNativeV1)
+	t.Run("absent-OLD", pairReadAbsentNativeV1)
+	t.Run("metadata-error-priority", pairReadMetadataNativeV1)
+	t.Run("funded-engine-Goexit", pairReadGoexitV1)
+	t.Run("closed-account-before-read-grow", pairReadClosedNativeV1)
 	for _, width := range []int{0, 1, 32, 70000} {
 		for _, short := range []uint64{0, 1} {
-			if width == 0 && short == 1 { continue }
+			if width == 0 && short == 1 {
+				continue
+			}
 			t.Run(fmt.Sprintf("raw%d/short%d", width, short), func(t *testing.T) {
 				s, path, o := tsNew(t)
 				key := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}
 				value := bytes.Repeat([]byte{0x56}, width)
 				treeNativeSeed(t, s, 0, key, value)
 				op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 1}}}}
-				window := uint64(width)*2
+				window := uint64(width) * 2
 				var result tsResult
 				var observed PairReadObservation
 				mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
@@ -39,272 +41,380 @@ func TestTreePairReadNativeV1(t *testing.T) {
 						return a.WithReservation(154611183-274-window+short, func() error {
 							var err error
 							observed, err = FixturePairReadObservation(s, func(site uint32) {
-								if site == 2 && reservationLive(o) != 154611183 { t.Error("ordinary read held full admitted window") }
+								if site == 2 && reservationLive(o) != 154611183 {
+									t.Error("ordinary read held full admitted window")
+								}
 							}, func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
 							mustEnvironment(t, err)
-							if reservationLive(o) != 154611183-137-window+short { t.Fatal("engine released caller reservation") }
+							if reservationLive(o) != 154611183-137-window+short {
+								t.Fatal("engine released caller reservation")
+							}
 							return nil
 						})
 					})
 				}))
 				if short == 1 {
 					result.tuple(t, 1, 1, -1)
-					if !treeSameErrorV1(result.err, errOperationReservationCapacity) || observed.Comparisons != 0 || observed.Gets != 3 || observed.Writes != 0 || s.state != storeCLOSED { t.Fatalf("payload comparisons before refused coverage=0: %+v/%+v", result, observed) }
+					if !treeSameErrorV1(result.err, errOperationReservationCapacity) || observed.Comparisons != 0 || observed.Gets != 3 || observed.Writes != 0 || s.state != storeCLOSED {
+						t.Fatalf("payload comparisons before refused coverage=0: %+v/%+v", result, observed)
+					}
 				} else {
 					result.tuple(t, 2, 3, -1)
 					mustEnvironment(t, result.err)
 					wantPayload := uint64(1)
-					if width == 0 { wantPayload = 0 }
-					if observed.Gets != 4 || observed.Comparisons != wantPayload || observed.Aliases != wantPayload || observed.Writes != 1 { t.Fatalf("one get per reached comparison position/identical backing: %+v", observed) }
+					if width == 0 {
+						wantPayload = 0
+					}
+					if observed.Gets != 4 || observed.Comparisons != wantPayload || observed.Aliases != wantPayload || observed.Writes != 1 {
+						t.Fatalf("one get per reached comparison position/identical backing: %+v", observed)
+					}
 				}
 				s = tsReopen(t, s, path)
 				var want []byte
-				if short == 1 { want = value }
+				if short == 1 {
+					want = value
+				}
 				equal, err := FixtureRawRowEqual(s, 0, key, want)
-				if err != nil || !equal { t.Fatal("durable raw OLD/NEW", err) }
+				if err != nil || !equal {
+					t.Fatal("durable raw OLD/NEW", err)
+				}
 			})
 		}
 	}
 }
 
 func pairReadClosedNativeV1(t *testing.T) {
-	s,_,o:=tsNew(t)
-	key:=[]byte{0x10,0,0,0,0,0,0,0,1}
-	treeNativeSeed(t,s,0,key,bytes.Repeat([]byte{0x44},32))
-	ready,closeNow,closed:=make(chan *OperationAccount),make(chan struct{}),make(chan struct{})
-	go func(){defer close(closed);_ = o.WithOperation(LaneOperation,func(a *OperationAccount)error {ready<-a;<-closeNow;return nil})}()
-	a:=<-ready
-	fired:=false
-	op:=TreeOperationV1{Pair:TreePairV1{Mutations:[]Mutation{{DBI:TreeSchemaV1DBIs()[0],Key:key,BeforePresent:true,AfterKind:1}}}}
-	mustEnvironment(t,a.WithReservation(137,func()error {
+	s, _, o := tsNew(t)
+	key := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}
+	treeNativeSeed(t, s, 0, key, bytes.Repeat([]byte{0x44}, 32))
+	ready, closeNow, closed := make(chan *OperationAccount), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(closed)
+		_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error { ready <- a; <-closeNow; return nil })
+	}()
+	a := <-ready
+	fired := false
+	op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 1}}}}
+	mustEnvironment(t, a.WithReservation(137, func() error {
 		var result tsResult
-		_,err:=FixturePairReadObservation(s,func(site uint32){if site==1&&!fired {fired=true;close(closeNow);<-closed}},func(){result=tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){return op,nil})})
-		mustEnvironment(t,err)
-		result.tuple(t,1,1,-1)
-		if !treeSameErrorV1(result.err,errOperationReservationInput)||!fired||s.state!=storeCLOSED||reservationLive(o)!=137 {t.Fatal("closed account grow retains input/caller hold",result)}
+		_, err := FixturePairReadObservation(s, func(site uint32) {
+			if site == 1 && !fired {
+				fired = true
+				close(closeNow)
+				<-closed
+			}
+		}, func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
+		mustEnvironment(t, err)
+		result.tuple(t, 1, 1, -1)
+		if !treeSameErrorV1(result.err, errOperationReservationInput) || !fired || s.state != storeCLOSED || reservationLive(o) != 137 {
+			t.Fatal("closed account grow retains input/caller hold", result)
+		}
 		return nil
 	}))
-	if reservationLive(o)!=0 {t.Fatal("closed account retained charge after caller exit")}
+	if reservationLive(o) != 0 {
+		t.Fatal("closed account retained charge after caller exit")
+	}
 }
 
 func pairReadAbsentNativeV1(t *testing.T) {
-	s,path,o:=tsNew(t)
-	key,value:=[]byte{0x10,0,0,0,0,0,0,0,1},bytes.Repeat([]byte{7},16)
-	op:=TreeOperationV1{Pair:TreePairV1{Mutations:[]Mutation{{DBI:TreeSchemaV1DBIs()[0],Key:key,AfterKind:2,Literal:value}}}}
+	s, path, o := tsNew(t)
+	key, value := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}, bytes.Repeat([]byte{7}, 16)
+	op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, AfterKind: 2, Literal: value}}}}
 	var result tsResult
 	var counts PairReadObservation
-	mustEnvironment(t,o.WithOperation(LaneOperation,func(a *OperationAccount)error {
+	mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 		// Original input and PC each use 128+9+16=153; absent OLD needs only NEW16.
-		return a.WithReservation(153,func()error {
-			return a.WithReservation(154611183-322,func()error {
+		return a.WithReservation(153, func() error {
+			return a.WithReservation(154611183-322, func() error {
 				var err error
-				counts,err=FixturePairReadObservation(s,nil,func(){result=tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){return op,nil})})
+				counts, err = FixturePairReadObservation(s, nil, func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
 				return err
 			})
 		})
 	}))
-	result.tuple(t,2,3,-1)
-	mustEnvironment(t,result.err)
-	if counts.Gets!=4||counts.Comparisons!=1||counts.Aliases!=0||counts.Writes!=1 {t.Fatal("absent OLD metadata/NEW native span",counts)}
-	s=tsReopen(t,s,path)
-	equal,err:=FixtureRawRowEqual(s,0,key,value)
-	if err!=nil||!equal {t.Fatal("absent OLD durable NEW",err)}
+	result.tuple(t, 2, 3, -1)
+	mustEnvironment(t, result.err)
+	if counts.Gets != 4 || counts.Comparisons != 1 || counts.Aliases != 0 || counts.Writes != 1 {
+		t.Fatal("absent OLD metadata/NEW native span", counts)
+	}
+	s = tsReopen(t, s, path)
+	equal, err := FixtureRawRowEqual(s, 0, key, value)
+	if err != nil || !equal {
+		t.Fatal("absent OLD durable NEW", err)
+	}
 }
 
 func pairReadGoexitV1(t *testing.T) {
-	s,_,o:=tsNew(t)
-	key:=[]byte{0x10,0,0,0,0,0,0,0,1}
-	old:=bytes.Repeat([]byte{0x77},32)
-	treeNativeSeed(t,s,0,key,old)
-	op:=TreeOperationV1{Pair:TreePairV1{PrepaidReadBytes:17,Mutations:[]Mutation{{DBI:TreeSchemaV1DBIs()[0],Key:key,BeforePresent:true,AfterKind:1}}}}
-	fired,returned:=false,false
-	mustEnvironment(t,o.WithReservation(19,func()error {
-		done:=make(chan struct{})
-		go func(){
+	s, _, o := tsNew(t)
+	key := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}
+	old := bytes.Repeat([]byte{0x77}, 32)
+	treeNativeSeed(t, s, 0, key, old)
+	op := TreeOperationV1{Pair: TreePairV1{PrepaidReadBytes: 17, Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 1}}}}
+	fired, returned := false, false
+	mustEnvironment(t, o.WithReservation(19, func() error {
+		done := make(chan struct{})
+		go func() {
 			defer close(done)
-			_ = o.WithOperation(LaneOperation,func(a *OperationAccount)error {
-				return a.WithReservation(154,func()error {
-					defer func(){if reservationLive(o)!=173 {t.Error("caller credit remains until caller frame leaves")}}()
-					_,err:=FixturePairReadObservation(s,func(site uint32){
-						if site==3 {fired=true;if reservationLive(o)!=357 {t.Error("prepaid17 extra47 before use")};runtime.Goexit()}
-					},func(){_ = tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){return op,nil})})
-					returned=true
+			_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+				return a.WithReservation(154, func() error {
+					defer func() {
+						if reservationLive(o) != 173 {
+							t.Error("caller credit remains until caller frame leaves")
+						}
+					}()
+					_, err := FixturePairReadObservation(s, func(site uint32) {
+						if site == 3 {
+							fired = true
+							if reservationLive(o) != 357 {
+								t.Error("prepaid17 extra47 before use")
+							}
+							runtime.Goexit()
+						}
+					}, func() { _ = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
+					returned = true
 					return err
 				})
 			})
 		}()
-		eiAwait(t,done)
-		if !fired||returned||reservationLive(o)!=19||s.state!=storeOPEN {t.Fatal("engine Goexit owner/disposition",fired,returned,reservationLive(o),s.state)}
+		eiAwait(t, done)
+		if !fired || returned || reservationLive(o) != 19 || s.state != storeOPEN {
+			t.Fatal("engine Goexit owner/disposition", fired, returned, reservationLive(o), s.state)
+		}
 		return nil
 	}))
-	if reservationLive(o)!=0 {t.Fatal("other operation release")}
-	equal,err:=FixtureRawRowEqual(s,0,key,old)
-	if err!=nil||!equal {t.Fatal("Goexit durable OLD",err)}
-	tsFollowing(t,s,o)
+	if reservationLive(o) != 0 {
+		t.Fatal("other operation release")
+	}
+	equal, err := FixtureRawRowEqual(s, 0, key, old)
+	if err != nil || !equal {
+		t.Fatal("Goexit durable OLD", err)
+	}
+	tsFollowing(t, s, o)
 }
 
 func pairReadMetadataNativeV1(t *testing.T) {
-	for _, mode := range []uint32{31,32,33,34,35,36,37} {
-		t.Run(fmt.Sprintf("native%d",mode),func(t *testing.T) {
-			s,path,o := tsNew(t)
-			key,value := []byte{0x10,0,0,0,0,0,0,0,1},bytes.Repeat([]byte{0x55},32)
-			treeNativeSeed(t,s,0,key,value)
-			op := TreeOperationV1{Pair:TreePairV1{Mutations:[]Mutation{{DBI:TreeSchemaV1DBIs()[0],Key:key,BeforePresent:true,AfterKind:1}}}}
+	for _, mode := range []uint32{31, 32, 33, 34, 35, 36, 37} {
+		t.Run(fmt.Sprintf("native%d", mode), func(t *testing.T) {
+			s, path, o := tsNew(t)
+			key, value := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}, bytes.Repeat([]byte{0x55}, 32)
+			treeNativeSeed(t, s, 0, key, value)
+			op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 1}}}}
 			window := uint64(0)
-			if mode == 37 {window=64}
+			if mode == 37 {
+				window = 64
+			}
 			var result tsResult
 			var observed PairReadObservation
-			mustEnvironment(t,o.WithOperation(LaneOperation,func(a *OperationAccount)error {
-				return a.WithReservation(154611183-137-window,func()error {
+			mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+				return a.WithReservation(154611183-137-window, func() error {
 					var err error
-					observed,err=FixturePairReadObservation(s,func(site uint32){
-						if mode==35&&site==2 {t.Error("payload comparisons before refused coverage=0")}
-					},func(){
-						_,faultErr:=fixtureLargeFault(s,mode,0,key,func(){result=tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){return op,nil})})
-						mustEnvironment(t,faultErr)
+					observed, err = FixturePairReadObservation(s, func(site uint32) {
+						if mode == 35 && site == 2 {
+							t.Error("payload comparisons before refused coverage=0")
+						}
+					}, func() {
+						_, faultErr := fixtureLargeFault(s, mode, 0, key, func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
+						mustEnvironment(t, faultErr)
 					})
 					return err
 				})
 			}))
 			if mode == 37 {
-				result.tuple(t,2,3,-1)
-				mustEnvironment(t,result.err)
-				if observed.Comparisons!=1||observed.Aliases!=0||observed.Gets!=4 {t.Fatalf("distinct equal-content spans %+v",observed)}
+				result.tuple(t, 2, 3, -1)
+				mustEnvironment(t, result.err)
+				if observed.Comparisons != 1 || observed.Aliases != 0 || observed.Gets != 4 {
+					t.Fatalf("distinct equal-content spans %+v", observed)
+				}
 				return
 			}
-			result.tuple(t,1,1,-1)
+			result.tuple(t, 1, 1, -1)
 			switch mode {
-			case 31,32,36:
-				treeNativeError(t,result.err,"update","StateMismatch",-30779,"OLD/write snapshot mismatch",nil)
+			case 31, 32, 36:
+				treeNativeError(t, result.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
 			case 33:
-				treeNativeError(t,result.err,"update","LocalInvariant",-30779,"mdbx_get returned invalid result shape",nil)
+				treeNativeError(t, result.err, "update", "LocalInvariant", -30779, "mdbx_get returned invalid result shape", nil)
 			case 34:
-				treeNativeError(t,result.err,"update","IO",5,"Input/output error",nil)
+				treeNativeError(t, result.err, "update", "IO", 5, "Input/output error", nil)
 			case 35:
-				if !treeSameErrorV1(result.err,errOperationReservationCapacity){t.Fatal("native full2B overflow",result.err)}
+				if !treeSameErrorV1(result.err, errOperationReservationCapacity) {
+					t.Fatal("native full2B overflow", result.err)
+				}
 			}
-			if observed.Comparisons!=0||observed.Gets!=3||observed.Writes!=0||s.state!=storeCLOSED {t.Fatalf("metadata before payload/native prefix %+v",observed)}
-			s=tsReopen(t,s,path)
-			equal,err:=FixtureRawRowEqual(s,0,key,value)
-			if err!=nil||!equal{t.Fatal("metadata refusal changed durable OLD",err)}
+			if observed.Comparisons != 0 || observed.Gets != 3 || observed.Writes != 0 || s.state != storeCLOSED {
+				t.Fatalf("metadata before payload/native prefix %+v", observed)
+			}
+			s = tsReopen(t, s, path)
+			equal, err := FixtureRawRowEqual(s, 0, key, value)
+			if err != nil || !equal {
+				t.Fatal("metadata refusal changed durable OLD", err)
+			}
 		})
 	}
 }
 
 // Strict readback consumes only the seal, even when other accounts fill actual R.
 func TestTreePairReadCrossedV1(t *testing.T) {
-	for _, row:=range []struct{name string; scenario SelectedDamageScenario; mode uint32; truth CommitTruth; readError bool}{
-		{"OLD",SelectedDamageCommitOld,0,1,false},
-		{"NEW",SelectedDamageCommitNew,0,2,false},
-		{"unreadable",SelectedDamageCommitUnreadable,0,3,true},
-		{"neither",0,3,3,false},
-		{"later-consulted-fault",0,8,3,true},
-		{"both-OLD-first",SelectedDamageCommitNew,0,1,false},
-		{"readback-begin",0,23,3,true},
-		{"readback-abort-consumed",0,16,2,true},
-		{"readback-abort-retained-NEW",0,15,2,true},
-		{"readback-abort-retained-OLD",0,19,1,true},
+	for _, row := range []struct {
+		name      string
+		scenario  SelectedDamageScenario
+		mode      uint32
+		truth     CommitTruth
+		readError bool
+	}{
+		{"OLD", SelectedDamageCommitOld, 0, 1, false},
+		{"NEW", SelectedDamageCommitNew, 0, 2, false},
+		{"unreadable", SelectedDamageCommitUnreadable, 0, 3, true},
+		{"neither", 0, 3, 3, false},
+		{"later-consulted-fault", 0, 8, 3, true},
+		{"both-OLD-first", SelectedDamageCommitNew, 0, 1, false},
+		{"readback-begin", 0, 23, 3, true},
+		{"readback-abort-consumed", 0, 16, 2, true},
+		{"readback-abort-retained-NEW", 0, 15, 2, true},
+		{"readback-abort-retained-OLD", 0, 19, 1, true},
 	} {
-		t.Run(row.name,func(t *testing.T) {
-			s,path,o:=tsNew(t)
-			key:=tdUTXOKey(1,tdTxid(0x31),0)
-			consulted:=[]byte{0x10,0,0,0,0,0,0,0,2}
-			old:=tdFormed(tdFrame(3,0,bytes.Repeat([]byte{0x33},12)),0,0)
-			next:=tdFormed(tdFrame(6,0,bytes.Repeat([]byte{0x66},978)),0,0)
+		t.Run(row.name, func(t *testing.T) {
+			s, path, o := tsNew(t)
+			key := tdUTXOKey(1, tdTxid(0x31), 0)
+			consulted := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 2}
+			old := tdFormed(tdFrame(3, 0, bytes.Repeat([]byte{0x33}, 12)), 0, 0)
+			next := tdFormed(tdFrame(6, 0, bytes.Repeat([]byte{0x66}, 978)), 0, 0)
 			// OLD32=10+1+12+9; NEW1000=10+3+978+9. PC=128+48+44+9+L.
-			window,pc:=uint64(1000),uint64(1229)
-			if row.name=="both-OLD-first" {next=bytes.Clone(old);window,pc=64,261}
-			treeNativeSeed(t,s,1,key,old)
-			treeNativeSeed(t,s,0,consulted,bytes.Repeat([]byte{0x44},32))
-			op:=TreeOperationV1{Pair:TreePairV1{Mutations:[]Mutation{{DBI:TreeSchemaV1DBIs()[1],Key:key,BeforePresent:true,AfterKind:2,Literal:next}},Consulted:[]ConsultedRow{{DBI:TreeSchemaV1DBIs()[0],Key:consulted}}}}
+			window, pc := uint64(1000), uint64(1229)
+			if row.name == "both-OLD-first" {
+				next = bytes.Clone(old)
+				window, pc = 64, 261
+			}
+			treeNativeSeed(t, s, 1, key, old)
+			treeNativeSeed(t, s, 0, consulted, bytes.Repeat([]byte{0x44}, 32))
+			op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[1], Key: key, BeforePresent: true, AfterKind: 2, Literal: next}}, Consulted: []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: consulted}}}}
 			var result tsResult
-			filled:=false
-			mustEnvironment(t,o.WithOperation(LaneOperation,func(a *OperationAccount)error {
-				return a.WithReservation(pc,func()error {
-					return a.WithReservation(154611183-2*pc-window,func()error {
-						_,err:=FixturePairReadObservation(s,func(site uint32){
-							if site==3 {
-								if reservationLive(o)!=805306368 && reservationLive(o)!=154611183 {t.Error("complete read window before first write")}
-								if !filled {reservationFill(t,o,650695185);filled=true}
+			filled := false
+			mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+				return a.WithReservation(pc, func() error {
+					return a.WithReservation(154611183-2*pc-window, func() error {
+						_, err := FixturePairReadObservation(s, func(site uint32) {
+							if site == 3 {
+								if reservationLive(o) != 805306368 && reservationLive(o) != 154611183 {
+									t.Error("complete read window before first write")
+								}
+								if !filled {
+									reservationFill(t, o, 650695185)
+									filled = true
+								}
 							}
-							if filled&&reservationLive(o)!=805306368 {t.Error("after-crossing window grew/released")}
-						},func(){
-							run:=func(){result=tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){return op,nil})}
-							if row.mode!=0 {
-								faultKey:=key
-								faultRank:=uint8(1)
-								if row.mode==8 {faultKey=consulted;faultRank=0}
-								_,faultErr:=fixtureLargeFault(s,row.mode,faultRank,faultKey,run)
-								mustEnvironment(t,faultErr)
+							if filled && reservationLive(o) != 805306368 {
+								t.Error("after-crossing window grew/released")
+							}
+						}, func() {
+							run := func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) }
+							if row.mode != 0 {
+								faultKey := key
+								faultRank := uint8(1)
+								if row.mode == 8 {
+									faultKey = consulted
+									faultRank = 0
+								}
+								_, faultErr := fixtureLargeFault(s, row.mode, faultRank, faultKey, run)
+								mustEnvironment(t, faultErr)
 							} else {
-								_,faultErr:=FixtureSelectedDamage(s,o,row.scenario,1,key,run)
-								mustEnvironment(t,faultErr)
+								_, faultErr := FixtureSelectedDamage(s, o, row.scenario, 1, key, run)
+								mustEnvironment(t, faultErr)
 							}
 						})
-						mustEnvironment(t,err)
-						if reservationLive(o)!=805306368-pc-window {t.Fatal("crossed engine remainder/caller holds")}
+						mustEnvironment(t, err)
+						if reservationLive(o) != 805306368-pc-window {
+							t.Fatal("crossed engine remainder/caller holds")
+						}
 						return nil
 					})
 				})
 			}))
-			result.tuple(t,row.truth,3,-1)
-			ce,ok:=result.err.(*CommitError)
-			state:=storeCLOSED
-			if row.mode==15||row.mode==19 {state=storePOISONEDTHREAD}
-			if !ok||ce.Truth!=row.truth||s.state!=state {t.Fatalf("complete crossed tuple %+v/state%s",result,s.state)}
-			treeNativeError(t,ce.Cause,"update","Capacity",28,"No space left on device",nil)
-			if row.mode==15||row.mode==19 {
-				treeNativeError(t,ce.ReadbackCause,"abort","Concurrency",-30416,"MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread",nil)
-				calls:=0
-				_ = o.WithOperation(LaneOperation,func(a *OperationAccount)error {
-					next:=tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){calls++;return op,nil})
-					if next.truth!=row.truth||next.stage!=1||calls!=0||any(next.err)!=any(s.terminal){t.Fatal("retained read owner next operation",next)}
+			result.tuple(t, row.truth, 3, -1)
+			ce, ok := result.err.(*CommitError)
+			state := storeCLOSED
+			if row.mode == 15 || row.mode == 19 {
+				state = storePOISONEDTHREAD
+			}
+			if !ok || ce.Truth != row.truth || s.state != state {
+				t.Fatalf("complete crossed tuple %+v/state%s", result, s.state)
+			}
+			treeNativeError(t, ce.Cause, "update", "Capacity", 28, "No space left on device", nil)
+			if row.mode == 15 || row.mode == 19 {
+				treeNativeError(t, ce.ReadbackCause, "abort", "Concurrency", -30416, "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread", nil)
+				calls := 0
+				_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+					next := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { calls++; return op, nil })
+					if next.truth != row.truth || next.stage != 1 || calls != 0 || any(next.err) != any(s.terminal) {
+						t.Fatal("retained read owner next operation", next)
+					}
 					return nil
 				})
-				mustEnvironment(t,fixtureLargeRelease(s))
-			} else if row.mode==16 {
-				treeNativeError(t,ce.ReadbackCause,"abort","IO",5,"Input/output error",nil)
-			} else if row.readError {treeNativeError(t,ce.ReadbackCause,"update","IO",5,"Input/output error",nil)} else if ce.ReadbackCause!=nil {t.Fatal("unexpected readback cause",ce.ReadbackCause)}
-			s=tsReopen(t,s,path)
-			want:=next
-			if row.truth==1 {want=old}
-			if row.name=="neither" {want=[]byte{0x7f}}
-			equal,err:=FixtureRawRowEqual(s,1,key,want)
-			if err!=nil||!equal {t.Fatal("crossed durable bytes",err)}
+				mustEnvironment(t, fixtureLargeRelease(s))
+			} else if row.mode == 16 {
+				treeNativeError(t, ce.ReadbackCause, "abort", "IO", 5, "Input/output error", nil)
+			} else if row.readError {
+				treeNativeError(t, ce.ReadbackCause, "update", "IO", 5, "Input/output error", nil)
+			} else if ce.ReadbackCause != nil {
+				t.Fatal("unexpected readback cause", ce.ReadbackCause)
+			}
+			s = tsReopen(t, s, path)
+			want := next
+			if row.truth == 1 {
+				want = old
+			}
+			if row.name == "neither" {
+				want = []byte{0x7f}
+			}
+			equal, err := FixtureRawRowEqual(s, 1, key, want)
+			if err != nil || !equal {
+				t.Fatal("crossed durable bytes", err)
+			}
 		})
 	}
 }
 
 func TestTreePairReadCompatibilityNativeV1(t *testing.T) {
-	t.Run("ENTRY-ordinary-seal",pairReadEntryNativeV1)
-	for _, context:=range []bool{false,true} {
-		for _, credit:=range []uint64{0,17} {
-			for _, short:=range []uint64{0,1} {
-				t.Run(fmt.Sprintf("context%v/C%d/short%d",context,credit,short),func(t *testing.T) {
-					s,o,w:=ctxTreePairScene(t)
-					if !context {w=nil}
-					op:=ctxTreeOp(8001,w)
-					op.Pair.PrepaidReadBytes=credit
-					extraContext:=uint64(0)
-					if context {extraContext=344}
+	t.Run("ENTRY-ordinary-seal", pairReadEntryNativeV1)
+	for _, context := range []bool{false, true} {
+		for _, credit := range []uint64{0, 17} {
+			for _, short := range []uint64{0, 1} {
+				t.Run(fmt.Sprintf("context%v/C%d/short%d", context, credit, short), func(t *testing.T) {
+					s, o, w := ctxTreePairScene(t)
+					if !context {
+						w = nil
+					}
+					op := ctxTreeOp(8001, w)
+					op.Pair.PrepaidReadBytes = credit
+					extraContext := uint64(0)
+					if context {
+						extraContext = 344
+					}
 					var result tsResult
-					mustEnvironment(t,o.WithOperation(LaneOperation,func(a *OperationAccount)error {
-						return a.WithReservation(248+credit,func()error {
-							return a.WithReservation(154611183-496-104-extraContext+short,func()error {
-								before:=reservationLive(o)
-								_,err:=FixturePairReadObservation(s,func(site uint32){if site==3&&reservationLive(o)!=154611183 {t.Error("context344/ordinary104 attribution")}},func(){result=tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){return op,nil})})
-								mustEnvironment(t,err)
-								if reservationLive(o)!=before {t.Fatal("context/ordinary caller grant changed")}
+					mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+						return a.WithReservation(248+credit, func() error {
+							return a.WithReservation(154611183-496-104-extraContext+short, func() error {
+								before := reservationLive(o)
+								_, err := FixturePairReadObservation(s, func(site uint32) {
+									if site == 3 && reservationLive(o) != 154611183 {
+										t.Error("context344/ordinary104 attribution")
+									}
+								}, func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
+								mustEnvironment(t, err)
+								if reservationLive(o) != before {
+									t.Fatal("context/ordinary caller grant changed")
+								}
 								return nil
 							})
 						})
 					}))
-					if short==0 {
-						result.tuple(t,2,3,-1)
-						mustEnvironment(t,result.err)
+					if short == 0 {
+						result.tuple(t, 2, 3, -1)
+						mustEnvironment(t, result.err)
 					} else {
-						result.tuple(t,1,1,-1)
-						if !treeSameErrorV1(result.err,errOperationReservationCapacity)||s.state!=storeCLOSED {t.Fatal("independent ordinary shortage after context",result,s.state)}
+						result.tuple(t, 1, 1, -1)
+						if !treeSameErrorV1(result.err, errOperationReservationCapacity) || s.state != storeCLOSED {
+							t.Fatal("independent ordinary shortage after context", result, s.state)
+						}
 					}
 				})
 			}
@@ -313,45 +423,57 @@ func TestTreePairReadCompatibilityNativeV1(t *testing.T) {
 }
 
 func pairReadEntryNativeV1(t *testing.T) {
-	for _,credit:=range []uint64{0,17} {
-		t.Run(fmt.Sprint(credit),func(t *testing.T){pairReadEntryCreditNativeV1(t,credit)})
+	for _, credit := range []uint64{0, 17} {
+		t.Run(fmt.Sprint(credit), func(t *testing.T) { pairReadEntryCreditNativeV1(t, credit) })
 	}
 }
 
-func pairReadEntryCreditNativeV1(t *testing.T,credit uint64) {
-	f:=eisNew(t,3,1,nil)
-	pair:=eisCapture(t,f,1,1,false,false)
-	pair.PrepaidReadBytes=credit
-	pc:=ctxTreePC(TreeOperationV1{Pair:pair})
-	if pc>4096 {t.Fatal("original ENTRY Pair exceeds independently assigned input")}
-	window:=uint64(len(eiEncoded(t,f.old))*2)
-	for _,m:=range pair.Mutations {window=max(window,uint64(len(m.Literal)))}
-	e:=uint64(8192+6*limitsForPage(f.s.config.PageSize).maxKey)
+func pairReadEntryCreditNativeV1(t *testing.T, credit uint64) {
+	f := eisNew(t, 3, 1, nil)
+	pair := eisCapture(t, f, 1, 1, false, false)
+	pair.PrepaidReadBytes = credit
+	pc := ctxTreePC(TreeOperationV1{Pair: pair})
+	if pc > 4096 {
+		t.Fatal("original ENTRY Pair exceeds independently assigned input")
+	}
+	window := uint64(len(eiEncoded(t, f.old)) * 2)
+	for _, m := range pair.Mutations {
+		window = max(window, uint64(len(m.Literal)))
+	}
+	e := uint64(8192 + 6*limitsForPage(f.s.config.PageSize).maxKey)
 	var result tsResult
-	_,err:=FixtureSelectedDamage(f.s,f.o,SelectedDamageCommitNew,0,[]byte{2},func(){
-		mustEnvironment(t,f.o.WithOperation(TreeOperation,func(a *OperationAccount)error {
-			return a.WithReservation(4096+credit,func()error {
-				_,observeErr:=FixturePairReadObservation(f.s,func(site uint32){
-					if site==3&&reservationLive(f.o)!=4096+pc+window+e {t.Error("ENTRY ordinary/source/PC/read attribution")}
-				},func(){
-					result=tsInvoke(f.s,a,func(r *Reader)(TreeOperationV1,error){
-						token:=eiPrepare(t,r,a,pair)
-						failure,visitErr:=r.VisitEntryInventoryV1(token,func(EntryInventoryRowV1)error{return nil})
-						if failure!=nil||visitErr!=nil {t.Fatal("ENTRY source qualification",failure,visitErr)}
-						pair.EntryInventory=&token
-						return TreeOperationV1{Pair:pair},nil
+	_, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, []byte{2}, func() {
+		mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+			return a.WithReservation(4096+credit, func() error {
+				_, observeErr := FixturePairReadObservation(f.s, func(site uint32) {
+					if site == 3 && reservationLive(f.o) != 4096+pc+window+e {
+						t.Error("ENTRY ordinary/source/PC/read attribution")
+					}
+				}, func() {
+					result = tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
+						token := eiPrepare(t, r, a, pair)
+						failure, visitErr := r.VisitEntryInventoryV1(token, func(EntryInventoryRowV1) error { return nil })
+						if failure != nil || visitErr != nil {
+							t.Fatal("ENTRY source qualification", failure, visitErr)
+						}
+						pair.EntryInventory = &token
+						return TreeOperationV1{Pair: pair}, nil
 					})
 				})
-				if reservationLive(f.o)!=4096+credit {t.Fatal("ENTRY ordinary extra leaked/borrowed source")}
+				if reservationLive(f.o) != 4096+credit {
+					t.Fatal("ENTRY ordinary extra leaked/borrowed source")
+				}
 				return observeErr
 			})
 		}))
 	})
-	mustEnvironment(t,err)
-	result.tuple(t,2,3,-1)
-	ce,ok:=result.err.(*CommitError)
-	if !ok||ce.Truth!=2||ce.ReadbackCause!=nil||reservationLive(f.o)!=0 {t.Fatal("ENTRY ordinary sealed truth projection",result)}
-	treeNativeError(t,ce.Cause,"update","Capacity",28,"No space left on device",nil)
+	mustEnvironment(t, err)
+	result.tuple(t, 2, 3, -1)
+	ce, ok := result.err.(*CommitError)
+	if !ok || ce.Truth != 2 || ce.ReadbackCause != nil || reservationLive(f.o) != 0 {
+		t.Fatal("ENTRY ordinary sealed truth projection", result)
+	}
+	treeNativeError(t, ce.Cause, "update", "Capacity", 28, "No space left on device", nil)
 }
 
 // The native fixture primary selector invokes this reached-owner check. It

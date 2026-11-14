@@ -13,8 +13,8 @@ import (
 // Scratch boundaries are observed at native owner prefixes, including false obligations.
 func TestCanonicalOwnerPairReadAccountingNativeV1(t *testing.T) {
 	t.Run("O2-pre-key", canonicalPairReadPrekeyV1)
-	t.Run("disposable-and-targeted",canonicalPairReadDisposableV1)
-	t.Run("target-native-before-scratch",canonicalPairReadTargetErrorV1)
+	t.Run("disposable-and-targeted", canonicalPairReadDisposableV1)
+	t.Run("target-native-before-scratch", canonicalPairReadTargetErrorV1)
 	hash, work := [32]byte{0x41}, [40]byte{39: 1}
 	forward, owner := canonicalForwardLiteral(1, 5, hash, work), canonicalOwnerLiteral(1, 5, hash)
 	for _, row := range []struct {
@@ -83,52 +83,68 @@ func TestCanonicalOwnerPairReadAccountingNativeV1(t *testing.T) {
 }
 
 func canonicalPairReadDisposableV1(t *testing.T) {
-	hash:=[32]byte{0x41}
-	forward,owner:=canonicalForwardLiteral(1,5,hash,[40]byte{39:1}),canonicalOwnerLiteral(1,5,hash)
-	badOwner,badForward:=owner,forward
-	badOwner.Literal=append(bytes.Clone(owner.Literal),0)
-	badForward.Literal=bytes.Clone(forward.Literal[:103])
-	for _,row:=range []struct{name string;pair,seed []Mutation;pc,window uint64;gets [8]uint64}{
-		{"wrong-target-width",[]Mutation{canonicalDelete(owner)},[]Mutation{badOwner},168,18,[8]uint64{7:3}},
-		{"wrong-partner-width",[]Mutation{canonicalDelete(owner)},[]Mutation{badForward,owner},168,88,[8]uint64{2:1,7:3}},
-		{"both-targeted",[]Mutation{canonicalDelete(forward),canonicalDelete(owner)},[]Mutation{forward,owner},312,208,[8]uint64{2:3,7:3}},
+	hash := [32]byte{0x41}
+	forward, owner := canonicalForwardLiteral(1, 5, hash, [40]byte{39: 1}), canonicalOwnerLiteral(1, 5, hash)
+	badOwner, badForward := owner, forward
+	badOwner.Literal = append(bytes.Clone(owner.Literal), 0)
+	badForward.Literal = bytes.Clone(forward.Literal[:103])
+	for _, row := range []struct {
+		name       string
+		pair, seed []Mutation
+		pc, window uint64
+		gets       [8]uint64
+	}{
+		{"wrong-target-width", []Mutation{canonicalDelete(owner)}, []Mutation{badOwner}, 168, 18, [8]uint64{7: 3}},
+		{"wrong-partner-width", []Mutation{canonicalDelete(owner)}, []Mutation{badForward, owner}, 168, 88, [8]uint64{2: 1, 7: 3}},
+		{"both-targeted", []Mutation{canonicalDelete(forward), canonicalDelete(owner)}, []Mutation{forward, owner}, 312, 208, [8]uint64{2: 3, 7: 3}},
 	} {
-		t.Run(row.name,func(t *testing.T){
-			s,path,o:=tsNew(t)
-			for _,m:=range row.seed {treeNativeSeed(t,s,m.DBI.Rank,m.Key,m.Literal)}
-			op:=TreeOperationV1{Pair:TreePairV1{Mutations:row.pair}}
+		t.Run(row.name, func(t *testing.T) {
+			s, path, o := tsNew(t)
+			for _, m := range row.seed {
+				treeNativeSeed(t, s, m.DBI.Rank, m.Key, m.Literal)
+			}
+			op := TreeOperationV1{Pair: TreePairV1{Mutations: row.pair}}
 			var result tsResult
 			var evidence SelectedDamageEvidence
-			mustEnvironment(t,o.WithOperation(LaneOperation,func(a *OperationAccount)error {
-				return a.WithReservation(154611183-row.pc-row.window,func()error {
+			mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+				return a.WithReservation(154611183-row.pc-row.window, func() error {
 					var err error
-					evidence,err=FixtureSelectedDamage(s,o,SelectedDamageProbeOnly,0,nil,func(){result=tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){return op,nil})})
+					evidence, err = FixtureSelectedDamage(s, o, SelectedDamageProbeOnly, 0, nil, func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
 					return err
 				})
 			}))
-			result.tuple(t,2,3,-1)
-			mustEnvironment(t,result.err)
-			if evidence.OldGets!=row.gets {t.Fatal("metadata/target shortcut native gets",evidence)}
-			s=tsReopen(t,s,path)
-			for _,m:=range row.pair {equal,err:=FixtureRawRowEqual(s,m.DBI.Rank,m.Key,nil);if err!=nil||!equal {t.Fatal("disposable durable absence",err)}}
+			result.tuple(t, 2, 3, -1)
+			mustEnvironment(t, result.err)
+			if evidence.OldGets != row.gets {
+				t.Fatal("metadata/target shortcut native gets", evidence)
+			}
+			s = tsReopen(t, s, path)
+			for _, m := range row.pair {
+				equal, err := FixtureRawRowEqual(s, m.DBI.Rank, m.Key, nil)
+				if err != nil || !equal {
+					t.Fatal("disposable durable absence", err)
+				}
+			}
 		})
 	}
 }
 
 func canonicalPairReadTargetErrorV1(t *testing.T) {
-	s,_,o:=tsNew(t)
-	forward:=canonicalForwardLiteral(1,5,[32]byte{0x41},[40]byte{39:1})
-	op:=TreeOperationV1{Pair:TreePairV1{Mutations:[]Mutation{forward}}}
+	s, _, o := tsNew(t)
+	forward := canonicalForwardLiteral(1, 5, [32]byte{0x41}, [40]byte{39: 1})
+	op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{forward}}}
 	var result tsResult
-	mustEnvironment(t,o.WithOperation(LaneOperation,func(a *OperationAccount)error {
-		return a.WithReservation(154611183-248-39,func()error {
-			evidence,err:=FixtureSelectedDamage(s,o,SelectedDamageGetEIO,2,forward.Key,func(){result=tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){return op,nil})})
-			if evidence.OldGets!=([8]uint64{2:1})||evidence.Deletes!=0||evidence.Commits!=0 {t.Error("complete target qualification precedes scratch",evidence)}
+	mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+		return a.WithReservation(154611183-248-39, func() error {
+			evidence, err := FixtureSelectedDamage(s, o, SelectedDamageGetEIO, 2, forward.Key, func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
+			if evidence.OldGets != ([8]uint64{2: 1}) || evidence.Deletes != 0 || evidence.Commits != 0 {
+				t.Error("complete target qualification precedes scratch", evidence)
+			}
 			return err
 		})
 	}))
-	result.tuple(t,1,1,-1)
-	treeNativeError(t,result.err,"update","IO",5,"Input/output error",nil)
+	result.tuple(t, 1, 1, -1)
+	treeNativeError(t, result.err, "update", "IO", 5, "Input/output error", nil)
 }
 
 func canonicalPairReadPrekeyV1(t *testing.T) {

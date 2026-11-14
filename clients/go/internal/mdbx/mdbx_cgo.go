@@ -1704,7 +1704,8 @@ func updateNativePairEqual(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected
 	if err != nil {
 		return false, err
 	}
-	if err = budget.coverV1(need, limit); err != nil {
+	err = budget.coverV1(need, limit)
+	if err != nil {
 		return false, err
 	}
 	return C.rubin_mdbx_pair_equal(actual.bytes, expected.bytes, actual.length) != 0, nil
