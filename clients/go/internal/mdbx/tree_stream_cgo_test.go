@@ -1327,12 +1327,18 @@ func pairReadAccountCaseV1(t *testing.T, kind OperationKind, credit uint64, aggr
 					if !treeSameErrorV1(r.err, errOperationReservationCapacity) || s.state != storeCLOSED {
 						t.Fatal("ordinary read one-byte-short tuple/lifecycle", r, s.state)
 					}
+					original := r.err
+					if !treeSameErrorV1(s.terminal, original) {
+						t.Fatal("capacity terminal identity", s.terminal)
+					}
 					next := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
 						t.Fatal("closed callback")
 						return op, nil
 					})
 					next.tuple(t, 1, 1, -1)
-					treeNativeError(t, next.err, "update", "InvalidInput", 22, "Store is closed", nil)
+					if !treeSameErrorV1(next.err, original) {
+						t.Fatal("closed operation retains original terminal identity", next.err)
+					}
 				}
 				if reservationLive(o) != before {
 					t.Fatal("caller held bytes preserved/engine remainder zero")

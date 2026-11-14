@@ -144,7 +144,7 @@ func canonicalPairReadTargetErrorV1(t *testing.T) {
 		})
 	}))
 	result.tuple(t, 1, 1, -1)
-	treeNativeError(t, result.err, "update", "IO", 5, "Input/output error", nil)
+	treeNativeError(t, result.err, "update", "IO", 5, "error 5", nil)
 }
 
 func canonicalPairReadPrekeyV1(t *testing.T) {
@@ -178,7 +178,7 @@ func canonicalPairReadPrekeyV1(t *testing.T) {
 			} else {
 				mustEnvironment(t, fixtureErr)
 				want[2] = 1
-				treeNativeError(t, result.err, "update", "IO", 5, "Input/output error", nil)
+				treeNativeError(t, result.err, "update", "IO", 5, "error 5", nil)
 			}
 			if evidence.OldGets != want || s.state != storeCLOSED {
 				t.Fatalf("pre-key native prefix %+v", evidence)

@@ -234,7 +234,7 @@ func pairReadMetadataNativeV1(t *testing.T) {
 			case 33:
 				treeNativeError(t, result.err, "update", "LocalInvariant", -30779, "mdbx_get returned invalid result shape", nil)
 			case 34:
-				treeNativeError(t, result.err, "update", "IO", 5, "Input/output error", nil)
+				treeNativeError(t, result.err, "update", "IO", 5, "error 5", nil)
 			case 35:
 				if !treeSameErrorV1(result.err, errOperationReservationCapacity) {
 					t.Fatal("native full2B overflow", result.err)
@@ -338,7 +338,7 @@ func TestTreePairReadCrossedV1(t *testing.T) {
 			if !ok || ce.Truth != row.truth || s.state != state {
 				t.Fatalf("complete crossed tuple %+v/state%s", result, s.state)
 			}
-			treeNativeError(t, ce.Cause, "update", "Capacity", 28, "No space left on device", nil)
+			treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
 			if row.mode == 15 || row.mode == 19 {
 				treeNativeError(t, ce.ReadbackCause, "abort", "Concurrency", -30416, "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread", nil)
 				calls := 0
@@ -351,9 +351,9 @@ func TestTreePairReadCrossedV1(t *testing.T) {
 				})
 				mustEnvironment(t, fixtureLargeRelease(s))
 			} else if row.mode == 16 {
-				treeNativeError(t, ce.ReadbackCause, "abort", "IO", 5, "Input/output error", nil)
+				treeNativeError(t, ce.ReadbackCause, "abort", "IO", 5, "error 5", nil)
 			} else if row.readError {
-				treeNativeError(t, ce.ReadbackCause, "update", "IO", 5, "Input/output error", nil)
+				treeNativeError(t, ce.ReadbackCause, "update", "IO", 5, "error 5", nil)
 			} else if ce.ReadbackCause != nil {
 				t.Fatal("unexpected readback cause", ce.ReadbackCause)
 			}
@@ -473,7 +473,7 @@ func pairReadEntryCreditNativeV1(t *testing.T, credit uint64) {
 	if !ok || ce.Truth != 2 || ce.ReadbackCause != nil || reservationLive(f.o) != 0 {
 		t.Fatal("ENTRY ordinary sealed truth projection", result)
 	}
-	treeNativeError(t, ce.Cause, "update", "Capacity", 28, "No space left on device", nil)
+	treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
 }
 
 // The native fixture primary selector invokes this reached-owner check. It

@@ -617,10 +617,11 @@ func TestReplayTreeEntryReadCoverageNative(t *testing.T) {
 	target := mdbx.RecoveryTargetV1{ChainID: w.g.ChainID, GenesisHash: s.hashes[0], TipHash: s.tip(), TipHeight: 3, CumulativeChainwork: s.work(t, 3)}
 	encoded, err := rtEntered(rtStable(), mdbx.StorageProfilePrunedV1, target).Encode()
 	logicalMDBXAssert(t, err == nil, "expected envelope: %v", err)
-	// Five Mutation records, four Consulted records, five target keys1+4*9,
-	// four consulted keys16 each, envelope, two counters16 and two bindings.
+	// Empty CURRENT walks to height0, independently of selected target height3:
+	// five Mutation records, two Consulted records, keys1+4*9+2*16,
+	// envelope, two counters16 and two bindings.
 	binding := rtBinding(t, w.g.ChainID, s.hashes[0])
-	pc := uint64(5*128 + 4*48 + 37 + 64 + len(encoded) + 2*16 + 2*len(binding))
+	pc := uint64(5*128 + 2*48 + 37 + 32 + len(encoded) + 2*16 + 2*len(binding))
 	var out ReplayEntryOutcomeV1
 	observed, err := mdbx.FixturePairReadObservation(w.s, func(site uint32) {
 		if site == 3 {
