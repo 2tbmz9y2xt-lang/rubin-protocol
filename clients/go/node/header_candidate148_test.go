@@ -634,7 +634,7 @@ func TestHeaderCandidate148Receipts(t *testing.T) {
 	}
 	hcEqual(t, "establish added", pub.Added, [][32]byte{e2.Hash, e0.Hash, e1.Hash})
 	// V2/R4 Retired-only publication: Changed true, Version v+1, Retired exactly [R0], R0 gone, prior version stale.
-	o, r0, r1 := hcBase(t, hcLim())
+	o, r0, _ := hcBase(t, hcLim())
 	v := o.VersionV1()
 	pub, out = hcPublish(t, o, hcTr(o, nil, r0.Hash))
 	if out != HeaderCandidateOK148V1 || !pub.Changed || pub.Version != v+1 || o.VersionV1() != v+1 || len(pub.Added) != 0 {
@@ -649,7 +649,7 @@ func TestHeaderCandidate148Receipts(t *testing.T) {
 	if cur {
 		t.Fatal("retired-only: prior version still current")
 	}
-	o, r0, r1 = hcBase(t, hcLim())
+	o, r0, r1 := hcBase(t, hcLim())
 	v = o.VersionV1()
 	cur, rel = hcGuard(t, o, v)
 	t.Cleanup(rel)
