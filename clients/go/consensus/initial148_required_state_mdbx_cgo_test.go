@@ -349,7 +349,7 @@ func TestInitial148RequiredScope(t *testing.T) {
 	t.Run("callback-delivery", irDeliveryV1)
 	t.Run("concurrent-independent-scopes", irConcurrentV1)
 	t.Run("clean-Reader-reuse", irReusableV1)
-	logicalMDBXAssert(t, unsafe.Sizeof(initial148RequiredFactV1{}) <= 128 && unsafe.Sizeof(mdbx.TreeResolvedInputV1{}) <= 64 && unsafe.Sizeof(initial148RequiredScopeV1{}) < 4096, "captured fixed controls exceed their allowance")
+	logicalMDBXAssert(t, unsafe.Sizeof(initial148RequiredFactV1{}) <= 128 && unsafe.Sizeof(mdbx.TreeOutpointV1{}) <= 64 && unsafe.Sizeof(initial148RequiredScopeV1{}) < 4096, "captured fixed controls exceed their allowance")
 }
 
 func irAdmissionAttemptV1(t *testing.T, reader *mdbx.Reader, account, funding *mdbx.OperationAccount, request initial148RequiredRequestV1, operation, diagnostic string) {
@@ -436,16 +436,26 @@ func irInputOrderV1(t *testing.T) {
 	want := canonicalUTXORoot(entries)
 	err := irRunV1(t, w, request, seed.Endpoint, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
 		logicalMDBXAssert(t, view.Counters().kind == logicalStateCountersPresent, "ordered R counters")
-		missing := Outpoint{Txid: [32]byte{99}}
+		missing := Outpoint{Txid: coinbase.id}
 		for _, op := range []Outpoint{ops[1], missing, ops[0], ops[1], missing, ops[0]} {
 			row := view.Lookup(op)
 			logicalMDBXAssert(t, row.cause == nil && (row.kind == logicalStateRowPresent) == (op != missing), "interleaved R lookup %v", row.cause)
 		}
 		scope := view.(*initial148RequiredScopeV1)
 		first := scope.facts[0].original
+		facts := append([]initial148RequiredFactV1(nil), scope.facts...)
+		originals := make([][]byte, len(facts))
+		for i, fact := range facts {
+			originals[i] = bytes.Clone(fact.original)
+		}
 		out := derive()
 		logicalMDBXAssert(t, out.derived && out.cause == nil && out.root == want, "owned input sort root%x want%x cause%v", out.root, want, out.cause)
+		logicalMDBXAssert(t, reflect.DeepEqual(scope.inputs, []mdbx.TreeOutpointV1{{Txid: seedTx.id, Vout: 255}, {Txid: seedTx.id, Vout: 256}}), "present key projection: %+v", scope.inputs)
 		logicalMDBXAssert(t, len(scope.facts) == 3 && scope.facts[0].outpoint == ops[1] && bytes.Equal(first, btValue(frames[256], 3, true)) && &scope.facts[0].original[0] == &first[0], "sort reordered facts or replaced first suffix")
+		logicalMDBXAssert(t, reflect.DeepEqual(scope.facts, facts), "key projection changed retained facts")
+		for i, fact := range facts {
+			logicalMDBXAssert(t, bytes.Equal(scope.facts[i].original, originals[i]) && (len(fact.original) == 0 || &scope.facts[i].original[0] == &fact.original[0]), "key projection changed original bytes/backing at %d", i)
+		}
 		return out.cause
 	})
 	logicalMDBXAssert(t, err == nil, "ordered R derivation: %v", err)

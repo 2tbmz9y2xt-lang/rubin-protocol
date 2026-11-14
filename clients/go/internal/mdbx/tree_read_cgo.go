@@ -11,26 +11,23 @@ import (
 	"sort"
 )
 
-// TreeResolvedInputV1 borrows one exact original present R suffix. The caller
-// retains its immutable backing under the same account through DeriveTreeRootV1.
-type TreeResolvedInputV1 struct {
-	Outpoint TreeOutpointV1
-	Value    []byte
-}
-
 // TreeRootReadV1 binds one fresh noncommitting derivation to its selected parent.
 // Primitive is forward, DirectApply, UndoTransient and covered by a complete
-// current initial148 body. Inputs are strictly ordered by raw Txid then numeric
-// Vout, with no duplicate key, caller-computed root or node hash.
+// current initial148 body. Inputs borrows immutable present-parent keys for this
+// synchronous call, strictly ordered by raw Txid then unsigned Vout, without
+// duplicates, values, caller-computed roots or node hashes. All keys assert a
+// parent premise, including keys without an event group; nil and empty agree.
 type TreeRootReadV1 struct {
 	Primitive TreePrimitiveV1
 	Parent    TreeEndpointV1
-	Inputs    []TreeResolvedInputV1
+	Inputs    []TreeOutpointV1
 }
 
 // DeriveTreeRootV1 borrows this live tree Reader and account synchronously. It
 // opens no transaction, emits no mutation and returns no digest on failure.
 // Parent rows are point-only; at height zero the parent is definitionally empty.
+// SPEND-first groups use Inputs presence without reading parent row values.
+// Incompatible obtained parent identities refuse before later reads or digests.
 func (r *Reader) DeriveTreeRootV1(account *OperationAccount, request TreeRootReadV1) (root [32]byte, err error) {
 	if err := r.CheckTreeRootReadV1(account, request); err != nil {
 		return root, err
@@ -104,12 +101,9 @@ func treeRootReadParentV1(height uint64, parent TreeEndpointV1) bool {
 	return parent.Kind == TreeEndpointAppliedV1 && parent.Height == height-1
 }
 
-func treeRootReadInputsV1(inputs []TreeResolvedInputV1) error {
+func treeRootReadInputsV1(inputs []TreeOutpointV1) error {
 	for i, input := range inputs {
-		if !treeUTXOValueOKV1(input.Value) {
-			return treeDeltaInvalidV1()
-		}
-		if i != 0 && treeRootOutpointCompareV1(inputs[i-1].Outpoint, input.Outpoint) >= 0 {
+		if i != 0 && treeRootOutpointCompareV1(inputs[i-1], input) >= 0 {
 			return treeDeltaInvalidV1()
 		}
 	}
@@ -187,6 +181,11 @@ func (o *treeRootOldV1) getV1(dbi DBI, key []byte) (treeImageV1, error) {
 		return treeImageV1{}, err
 	}
 	o.remaining--
+	if dbi.Rank == 1 {
+		if spend, err := o.spendV1(key); spend {
+			return treeImageV1{present: err == nil}, o.reader.treeRecord(err)
+		}
+	}
 	image, err := treeReadPointV1(o.reader.txn, o.reader.dbis[dbi.Rank], key)
 	if err == nil {
 		err = o.checkV1(dbi, key, image)
@@ -208,6 +207,9 @@ func (o *treeRootOldV1) checkV1(dbi DBI, key []byte, image treeImageV1) error {
 	if dbi.Rank == 0 {
 		return o.bindingV1(key, image)
 	}
+	if dbi.Rank == 8 {
+		return o.nodeV1(key, image)
+	}
 	if dbi.Rank != 1 {
 		return nil
 	}
@@ -222,32 +224,131 @@ func (o *treeRootOldV1) bindingV1(key []byte, image treeImageV1) error {
 		return nil // The shared walker owns absent/malformed binding detection.
 	}
 	binding, err := DecodeRootBindingV1(image.value)
-	if err == nil && (binding.Endpoint != o.request.Parent || binding.DatabaseID != o.reader.databaseID) {
-		return treeObserveV1(treeIntegrity(operationUpdate, nil), o.observation, 0, key, TreeObservationIdentityMismatchV1, image, true)
+	if err == nil {
+		if binding.Endpoint != o.request.Parent || binding.DatabaseID != o.reader.databaseID {
+			return treeObserveV1(treeIntegrity(operationUpdate, nil), o.observation, 0, key, TreeObservationIdentityMismatchV1, image, true)
+		}
+		return o.topV1(binding)
 	}
 	return nil
 }
 
-func (o *treeRootOldV1) originalV1(key []byte, image treeImageV1) error {
-	var op TreeOutpointV1
-	copy(op.Txid[:], key[8:40])
-	op.Vout = binary.BigEndian.Uint32(key[40:])
-	inputs := o.request.Inputs
-	i := sort.Search(len(inputs), func(i int) bool { return treeRootOutpointCompareV1(inputs[i].Outpoint, op) >= 0 })
-	if i < len(inputs) && inputs[i].Outpoint == op {
-		if !image.present || !bytes.Equal(image.value, inputs[i].Value) {
+// topV1 checks a decoded, selected-parent binding before its walker consumption.
+func (o *treeRootOldV1) topV1(binding RootBindingV1) error {
+	if len(o.request.Inputs) != 0 && binding.RootDigest == treeEmptyDigestV1() {
+		return treeIntegrity(operationUpdate, nil)
+	}
+	if binding.Top.Kind == TreeTopEmptyV1 {
+		if len(o.request.Inputs) != 0 {
 			return treeIntegrity(operationUpdate, nil)
 		}
 		return nil
 	}
-	want := treeDescV1{txid: op.Txid, vout: op.Vout}
-	// finishV1 sorts by identity then sequence. Zero is the minimum sequence;
-	// >= also keeps an exact sequence-zero match despite the comparator's +1.
-	i = sort.Search(len(o.rec.descs), func(i int) bool { return treeCompareDescV1(o.rec.descs[i], want) >= 0 })
-	if i < len(o.rec.descs) && treeSameKeyV1(&want, &o.rec.descs[i]) && o.rec.descs[i].flags&treeDescOldV1 != 0 {
+	return o.identityV1(treeRefOfID(*binding.Top.Node, binding.RootDigest), o.request.Inputs)
+}
+
+// nodeV1 checks both identities only after the existing record decoder accepts.
+func (o *treeRootOldV1) nodeV1(key []byte, image treeImageV1) error {
+	_, id, err := DecodeTreeNodeKey(key)
+	node := treeRefOfID(id, [32]byte{})
+	decodedBranch := image.present && err == nil && treeRecordOKV1(node, image.value) && node.depth != 288
+	if !decodedBranch {
+		return nil // The walker owns absent, malformed, identity and digest errors.
+	}
+	for side := range 2 {
+		offset := side * 70
+		child, _ := decodeTreeSuffix(image.value[offset : offset+38])
+		interval := treeNodeRefV1{key: node.key, depth: node.depth + 1}
+		interval.key[node.depth/8] |= byte(side) << (7 - node.depth%8)
+		if err := o.identityV1(treeRefOfID(child, [32]byte{}), o.intervalV1(interval)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// identityV1 checks an obtained identity against C and both sorted P extrema.
+func (o *treeRootOldV1) identityV1(node treeNodeRefV1, inputs []TreeOutpointV1) error {
+	if node.depth == 288 && o.createdV1(treeRootOutpointV1(node.key)) {
+		return treeIntegrity(operationUpdate, nil)
+	}
+	if len(inputs) == 0 {
+		return nil
+	}
+	if !treeContainsV1(node, treeRootRoutingV1(inputs[0])) || !treeContainsV1(node, treeRootRoutingV1(inputs[len(inputs)-1])) {
 		return treeIntegrity(operationUpdate, nil)
 	}
 	return nil
+}
+
+// intervalV1 borrows exactly P's parent-prefix/side interval without scanning.
+func (o *treeRootOldV1) intervalV1(node treeNodeRefV1) []TreeOutpointV1 {
+	inputs := o.request.Inputs
+	lower, upper := treeRootOutpointV1(node.key), treeRootOutpointV1(treeUpperV1(node))
+	first := sort.Search(len(inputs), func(i int) bool { return treeRootOutpointCompareV1(inputs[i], lower) >= 0 })
+	last := sort.Search(len(inputs), func(i int) bool { return treeRootOutpointCompareV1(inputs[i], upper) > 0 })
+	return inputs[first:last]
+}
+
+// spendV1 supplies only a captured present-key premise, before native row I/O.
+func (o *treeRootOldV1) spendV1(key []byte) (bool, error) {
+	op := treeRootOutpointV1([36]byte(key[8:44]))
+	group := o.groupV1(op)
+	if group == nil || group.kind != treeSpendV1 {
+		return false, nil
+	}
+	if !o.inputV1(op) {
+		return true, treeIntegrity(operationUpdate, nil)
+	}
+	return true, nil
+}
+
+// originalV1 preserves CREATE-first's captured-premise/absent-row refusal.
+func (o *treeRootOldV1) originalV1(key []byte, image treeImageV1) error {
+	if !image.present && o.inputV1(treeRootOutpointV1([36]byte(key[8:44]))) {
+		return treeIntegrity(operationUpdate, nil)
+	}
+	return nil
+}
+
+// inputV1 searches all captured P keys, independently of event membership.
+func (o *treeRootOldV1) inputV1(op TreeOutpointV1) bool {
+	inputs := o.request.Inputs
+	i := sort.Search(len(inputs), func(i int) bool { return treeRootOutpointCompareV1(inputs[i], op) >= 0 })
+	return i < len(inputs) && inputs[i] == op
+}
+
+// createdV1 includes every CREATE in a complete alternating group, minus P.
+func (o *treeRootOldV1) createdV1(op TreeOutpointV1) bool {
+	group := o.groupV1(op)
+	if group == nil || o.inputV1(op) {
+		return false
+	}
+	return group.kind == treeCreateV1 || group.last > group.group
+}
+
+// groupV1 finds the first complete descriptor for this identity and sequence.
+func (o *treeRootOldV1) groupV1(op TreeOutpointV1) *treeDescV1 {
+	want := treeDescV1{txid: op.Txid, vout: op.Vout}
+	// finishV1 sorts by identity then sequence. Zero is the minimum sequence;
+	// >= also keeps an exact sequence-zero match despite the comparator's +1.
+	i := sort.Search(len(o.rec.descs), func(i int) bool { return treeCompareDescV1(o.rec.descs[i], want) >= 0 })
+	if i < len(o.rec.descs) && treeSameKeyV1(&want, &o.rec.descs[i]) {
+		return &o.rec.descs[i]
+	}
+	return nil
+}
+
+// treeRootOutpointV1 decodes raw Txid/u32be routing bytes without retaining them.
+func treeRootOutpointV1(key [36]byte) TreeOutpointV1 {
+	return TreeOutpointV1{Txid: [32]byte(key[:32]), Vout: binary.BigEndian.Uint32(key[32:])}
+}
+
+// treeRootRoutingV1 forms CSM routing bytes in fixed local storage.
+func treeRootRoutingV1(op TreeOutpointV1) (key [36]byte) {
+	copy(key[:32], op.Txid[:])
+	binary.BigEndian.PutUint32(key[32:], op.Vout)
+	return key
 }
 
 func (o *treeRootOldV1) nextV1(DBI, []byte) ([]byte, treeImageV1, bool, error) {

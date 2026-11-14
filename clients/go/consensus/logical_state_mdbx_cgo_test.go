@@ -1095,7 +1095,7 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 	for _, name := range []string{"TreePrimitiveV1", "TreeSourceCoverageV1", "TreeEventV1", "TreeOutpointV1", "BeginV1", "EventV1", "WindowV1", "WithReservation", "VisitLargeImageV1", "ReadAt", "Present", "Length", "HeightKey", "CanonicalOwnerKey", "ChainValue", "CanonicalOwnerValue", "TreeSchemaV1DBIs", "BlockMeta", "CurrentBody", "Generated", "FrameOffset", "FrameLength"} {
 		logicalMDBXAssert(t, nativeUses[name] != 0, "block source resolved no native uses: %s", name)
 	}
-	for _, name := range []string{"TreeRootReadV1", "TreeResolvedInputV1", "CheckTreeRootReadV1", "DeriveTreeRootV1"} {
+	for _, name := range []string{"TreeRootReadV1", "CheckTreeRootReadV1", "DeriveTreeRootV1"} {
 		logicalMDBXAssert(t, nativeUses[name] != 0, "required state resolved no native uses: %s", name)
 	}
 	for _, file := range files {
@@ -1177,8 +1177,7 @@ func (*TreeDeltaSinkV1) BeginV1(TreeBlockV1)error{return nil}
 func (*TreeDeltaSinkV1) EventV1(TreeEventV1)error{return nil}
 func (*TreeDeltaSinkV1) WindowV1()[]byte{return nil}
 type TreeOutpointV1 struct{Txid [32]byte; Vout uint32}
-type TreeResolvedInputV1 struct{Outpoint TreeOutpointV1; Value []byte}
-type TreeRootReadV1 struct{Primitive TreePrimitiveV1; Parent TreeEndpointV1; Inputs []TreeResolvedInputV1}
+type TreeRootReadV1 struct{Primitive TreePrimitiveV1; Parent TreeEndpointV1; Inputs []TreeOutpointV1}
 func (*Reader) CheckTreeRootReadV1(*OperationAccount,TreeRootReadV1)error{return nil}
 func (*Reader) DeriveTreeRootV1(*OperationAccount,TreeRootReadV1)([32]byte,error){return [32]byte{},nil}
 type TreeObservationKindV1 uint8
