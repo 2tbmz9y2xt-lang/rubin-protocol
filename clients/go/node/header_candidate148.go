@@ -52,7 +52,9 @@ type HeaderCandidateTransition148V1 struct {
 	Retired         [][32]byte
 }
 
-// HeaderCandidateOutcome148V1 is the owner result; values are evaluated in the first-refusal order.
+// HeaderCandidateOutcome148V1 is the owner result. The numeric order is the contract's declaration order, not the
+// evaluation order: EstablishV1, PrepareV1 and AcquireDependencyV1 follow the first-refusal table, Missing and
+// AlreadyEstablished are evaluated where that table places them, and Consumed precedes Closed on a handle call.
 type HeaderCandidateOutcome148V1 uint8
 
 // Owner outcomes.
@@ -258,8 +260,9 @@ func (o *HeaderCandidateOwner148V1) EstablishV1(source [32]byte, records []Heade
 	if out := o.waitGuards(); out != HeaderCandidateOK148V1 {
 		return HeaderCandidatePublication148V1{}, out
 	}
-	if o.established {
-		return HeaderCandidatePublication148V1{}, HeaderCandidateAlreadyEstablished148V1
+	// Rows 1-3 again: the owner may have been closed, latched or established while this call waited.
+	if out := o.gate(false); out != HeaderCandidateOK148V1 {
+		return HeaderCandidatePublication148V1{}, out
 	}
 	o.established = true
 	return o.apply(&plan), HeaderCandidateOK148V1
@@ -800,6 +803,9 @@ func (x *hcTx) splitTips(s *hcPost) (fresh, old []*hcEntry) {
 }
 
 func hcWeakFirst(a, b *hcEntry) int {
+	if a.rec.Hash == b.rec.Hash {
+		return 0
+	}
 	if hcOutranks(b.rec.Work, b.rec.Hash, a.rec.Work, a.rec.Hash) {
 		return -1
 	}
@@ -830,10 +836,13 @@ func (x *hcTx) blocked(reclaim [][32]byte, protected map[[32]byte]struct{}) bool
 	return false
 }
 
-// drop removes one chosen reclaim; only its lowest header's parent loses a child, which keeps another child.
+// drop removes one chosen reclaim. Only its lowest header's parent can lose a child; when that parent is in the set it
+// keeps another child. A saturated byte sum stays saturated, so it never decrements into a false fit.
 func (s *hcPost) drop(reclaim [][32]byte) {
 	for _, h := range reclaim {
-		s.bytes -= s.nodes[h].charge
+		if s.bytes != math.MaxUint64 {
+			s.bytes -= s.nodes[h].charge
+		}
 	}
 	s.kids[s.nodes[reclaim[len(reclaim)-1]].rec.Parent]--
 	for _, h := range reclaim {
