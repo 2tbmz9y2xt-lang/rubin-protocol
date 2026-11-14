@@ -56,7 +56,7 @@ func TestHeaderCandidate148Inventory(t *testing.T) {
 	inv.Tips[0][0] ^= 1
 	inv.Headers[0][0] ^= 1
 	var dst [148]byte
-	if !o.Header148V1(a.Hash, &dst) || dst != a.Raw || !o.Header148V1(b.Hash, &dst) || dst != b.Raw {
+	if !o.Header148V1(a.Hash, &dst) || dst != a.Raw || !o.Header148V1(b.Hash, &dst) || dst != b.Raw || !o.Header148V1(c.Hash, &dst) || dst != c.Raw {
 		t.Fatal("caller mutation reached provider")
 	}
 	again := o.Inventory148V1(1 << 20)

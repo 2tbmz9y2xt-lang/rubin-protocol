@@ -745,7 +745,12 @@ func TestHeaderCandidate148Canonical(t *testing.T) {
 	o := hcNew(t, lim)
 	prev := hcExt(hcMk(t, hcRoot, 10, 10, 1))
 	tip := hcMk(t, prev.Hash, 11, 11, 2)
-	hcEstablish(t, o, prev, tip)
+	// Z is a dependency on another attached branch; its lease is held through every promotion.
+	z := hcExt(hcMk(t, [32]byte{0x5A}, 10, 10, 3))
+	hcEstablish(t, o, prev, tip, z)
+	if _, out := o.AcquireDependencyV1(z.Hash); out != HeaderCandidateOK148V1 {
+		t.Fatalf("lease Z: %d", out)
+	}
 	for i := uint64(0); i < 3*lim.MaxHeaders; i++ {
 		next := hcMk(t, tip.Hash, tip.Height+1, tip.Work.Int64()+1, 100+i)
 		rec, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{next}, prev.Hash))
@@ -754,8 +759,14 @@ func TestHeaderCandidate148Canonical(t *testing.T) {
 		}
 		hcEqual(t, "retired", rec.Retired, hcHashes(prev))
 		prev, tip = tip, next
-		if p := hcPresent(o, prev, tip); slices.Contains(p, false) || o.tips != 1 || len(o.recs) != 2 {
-			t.Fatalf("step %d lost the surviving path", i)
+		var dst [148]byte
+		for _, r := range []HeaderCandidateRecord148V1{prev, tip, z} {
+			if !o.Header148V1(r.Hash, &dst) || dst != r.Raw {
+				t.Fatalf("step %d lost an admitted header", i)
+			}
+		}
+		if o.tips != 2 || len(o.recs) != 3 || o.leases != 1 {
+			t.Fatalf("step %d: tips %d headers %d leases %d", i, o.tips, len(o.recs), o.leases)
 		}
 	}
 }
