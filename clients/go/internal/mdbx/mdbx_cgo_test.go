@@ -3580,18 +3580,22 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	preambleStart, preambleEnd := strings.Index(production, "/*"), strings.Index(production, "*/")
 	require(preambleStart >= 0 && preambleEnd > preambleStart, "cgo preamble framing drifted")
 	// The ordinary cursor wrappers are pinned together with the existing preamble.
-	// The one contiguous fixture block still preprocesses away in ordinary builds.
+	// Both exact fixture blocks preprocess away in ordinary builds.
 	preamble := production[preambleStart : preambleEnd+2]
 	const fixtureOpen, fixtureClose = "#ifdef RUBIN_SELECTED_DAMAGE_FIXTURE\n", "#endif // RUBIN_SELECTED_DAMAGE_FIXTURE\n"
+	const pairFixtureBlock = fixtureOpen + "\trubin_pair_note(2, left == right);\n\tif (rubin_li.mode == 35 && length == SIZE_MAX) return 0;\n#endif\n"
 	fixtureStart, fixtureEnd := strings.Index(preamble, fixtureOpen), strings.Index(preamble, fixtureClose)
-	require(strings.Count(production, "RUBIN_SELECTED_DAMAGE_FIXTURE") == 2 && fixtureStart > 0 && fixtureEnd > fixtureStart, "fixture-only preamble block framing drifted")
+	require(strings.Count(production, "RUBIN_SELECTED_DAMAGE_FIXTURE") == 3 && fixtureStart > 0 && fixtureEnd > fixtureStart && strings.Count(preamble, fixtureClose) == 1, "fixture-only preamble block framing drifted")
+	require(strings.Count(preamble, pairFixtureBlock) == 1 && strings.Contains(preamble, "static int rubin_mdbx_pair_equal(const void *left, const void *right, size_t length) {\n"+pairFixtureBlock), "fixture-only pair comparator block drifted")
 	fixtureBlock := preamble[fixtureStart : fixtureEnd+len(fixtureClose)]
 	require(strings.Count(fixtureBlock, "#define ") == 11 && strings.Count(fixtureBlock, "#if") == 1 && !strings.Contains(fixtureBlock, "#include") && strings.Count(production, "rubinSelectedDamageProbe(") == 5, "fixture-only preamble block content drifted")
 	for _, alias := range []string{"#define mdbx_txn_begin rubin_sd_txn_begin\n", "#define mdbx_get rubin_sd_get\n", "#define mdbx_del rubin_sd_del\n", "#define mdbx_txn_commit rubin_sd_txn_commit\n", "#define mdbx_txn_abort rubin_sd_txn_abort\n", "#define mdbx_put rubin_sd_put\n", "#define mdbx_env_close_ex rubin_li_env_close\n", "#define mdbx_get_equal_or_great rubin_sd_prefix\n", "#define mdbx_cursor_open rubin_tip_open\n", "#define mdbx_cursor_get rubin_tip_get\n", "#define mdbx_cursor_close rubin_tip_close\n"} {
 		require(strings.Count(fixtureBlock, alias) == 1 && strings.Index(fixtureBlock, alias) > strings.LastIndex(fixtureBlock, "static int rubin_sd_"), "fixture-only alias %q drifted", alias)
 	}
-	preambleDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(preamble[:fixtureStart]+preamble[fixtureEnd+len(fixtureClose):])))
-	require(preambleDigest == "eea0cf9602e561fb177673db1088139f3f043d9bfd75dd46a6b35733f1413b43", "cgo preamble digest=%s", preambleDigest)
+	ordinaryPreamble := preamble[:fixtureStart] + preamble[fixtureEnd+len(fixtureClose):]
+	ordinaryPreamble = strings.Replace(ordinaryPreamble, pairFixtureBlock, "", 1)
+	preambleDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(ordinaryPreamble)))
+	require(preambleDigest == "3835444005e53135f97c5ea9d4223a6e6be4f6fc887396c9e33c524c58cfd2d4", "cgo preamble digest=%s", preambleDigest)
 	require(strings.Count(ordinarySource.String(), "mdbx_setup_debug") == 2 && strings.Count(ordinarySource.String(), "sync.OnceValue(") == 1 && strings.Count(ordinarySource.String(), "C.rubin_mdbx_normalize_debug()") == 1 && strings.Count(ordinarySource.String(), "normalizeMDBXModule()") == 3, "single-owner debug normalization drifted")
 	require(strings.Count(ordinarySource.String(), "C.mdbx_preopen_snapinfo(") == 1 && strings.Count(body("validatePreopenSnapshot"), "cfg.PageSize") == 0, "preopen snapshot ownership drifted")
 	require(strings.Count(body("Create"), "&Store{") == 1 && strings.Count(body("Create"), "store := &Store{}\n\tstore.self = store") == 1 && strings.Count(body("Create"), "store.writer = writer") == 1 && strings.Count(body("Create"), "return store.consumeFailure(err)") == 4, "Create Store ownership or cleanup drifted")

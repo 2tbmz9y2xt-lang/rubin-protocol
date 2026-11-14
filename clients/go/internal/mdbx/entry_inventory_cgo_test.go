@@ -1932,20 +1932,28 @@ func eicLifetime(t *testing.T) {
 			f := eisNew(t, 3, 1, nil)
 			pair := eisCapture(t, f, 1, 1, false, false)
 			pc := uint64(128 * len(pair.Mutations))
+			// Only control has an OLD target; headers, block and sidechain are fresh.
+			// No rank-2/7 target needs canonical scratch. Fund the full ordinary
+			// OLD/readback or NEW window independently of ENTRY and PC.
+			c := 2 * uint64(len(eiEncoded(t, f.old)))
 			for _, m := range pair.Mutations {
 				pc += uint64(len(m.Key) + len(m.Literal))
+				c = max(c, uint64(len(m.Literal)))
 			}
+			pair.PrepaidReadBytes = c
 			e := uint64(8192) + 6*uint64(limitsForPage(f.s.config.PageSize).maxKey)
-			filler := uint64(402653184) - e - pc + short
+			filler := uint64(402653184) - e - pc - c + short
 			var result tsResult
 			var token EntryInventoryV1
 			var kept EntryInventoryRowV1
 			mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
-				return a.WithReservation(filler, func() error {
+				// The same-account caller hold assigns c exclusively to ordinary
+				// reads from Prepare through UpdateTreeV1 completion.
+				return a.WithReservation(filler+c, func() error {
 					result = tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
 						token = eiPrepare(t, r, a, pair)
 						failure, err := r.VisitEntryInventoryV1(token, func(row EntryInventoryRowV1) error {
-							if reservationLive(f.o) != filler+e {
+							if reservationLive(f.o) != filler+c+e {
 								t.Fatal("PC was charged before full ordinary admission")
 							}
 							kept = row
@@ -1957,7 +1965,7 @@ func eicLifetime(t *testing.T) {
 						pair.EntryInventory = &token
 						return TreeOperationV1{Pair: pair}, nil
 					})
-					if reservationLive(f.o) != filler {
+					if reservationLive(f.o) != filler+c {
 						t.Fatal("one hold did not release E and PC exactly once")
 					}
 					return nil
