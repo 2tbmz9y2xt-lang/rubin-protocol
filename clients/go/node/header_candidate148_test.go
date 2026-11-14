@@ -868,6 +868,27 @@ func TestHeaderCandidate148Leases(t *testing.T) {
 	if _, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{n})); out != HeaderCandidateOK148V1 || o.leases != 1 {
 		t.Fatal("lease lost on version advance")
 	}
+	// D6 over capacity victims: the outstanding replacement plans to retire tip A2 and its exclusive ancestor I.
+	lim := hcLim()
+	lim.MaxHeaders = 7
+	c, r := hcCapFixture(t, lim)
+	h, out = c.PrepareV1(hcTr(c, []HeaderCandidateRecord148V1{hcMk(t, r["K"].Hash, 12, 60, 8)}))
+	if out != HeaderCandidateOK148V1 {
+		t.Fatalf("replacement prepare: %d", out)
+	}
+	for _, k := range []string{"A2", "I"} {
+		if l, out := c.AcquireDependencyV1(r[k].Hash); out != HeaderCandidateProtected148V1 || l != nil {
+			t.Fatalf("lease on capacity victim %s: %d", k, out)
+		}
+	}
+	if h.AbortV1() != HeaderCandidateOK148V1 {
+		t.Fatal("abort")
+	}
+	for _, k := range []string{"A2", "I"} {
+		if _, out := c.AcquireDependencyV1(r[k].Hash); out != HeaderCandidateOK148V1 {
+			t.Fatalf("lease after abort %s: %d", k, out)
+		}
+	}
 }
 
 // TestHeaderCandidate148Aliasing covers R2 for points and LookupV1 and R3 zero allocation on over-length input.
