@@ -95,9 +95,9 @@ func initial148FirstGenesisExpectedV1(database [32]byte, generation uint64) bool
 // This package-private configuration is created once, then borrowed read-only.
 // Both rotation caches are populated before publication; no call can mutate it.
 var initial148FirstGenesisDefaultsV1 = func() initial148CompleteBlockInputV1 {
-	rotation := bindSpendSurface(nil, 0)
-	_ = rotation.NativeCreateSuites(0)
-	_ = rotation.NativeSpendSuites(0)
+	// Concrete calls expose the default suite set's package-initialization dependency.
+	inner := DefaultRotationProvider{}
+	rotation := &boundSpendSurface{inner: inner, height: 0, haveCreate: true, haveSpend: true, create: inner.NativeCreateSuites(0), spend: inner.NativeSpendSuites(0)}
 	capRegistry, _ := validateLogicalStateCapRegistry(nil) // No fallible row in the empty normative registry.
 	return initial148CompleteBlockInputV1{CapRegistry: &capRegistry, Registry: DefaultSuiteRegistry(), Rotation: rotation}
 }()
@@ -282,7 +282,7 @@ func (c *initial148FirstGenesisCallV1) indicesAbsentV1(reader *mdbx.Reader, gene
 
 // artifactV1 distinguishes absent, identical and differing hash-global data before use.
 func (c *initial148FirstGenesisCallV1) artifactV1(reader *mdbx.Reader, pair *mdbx.TreePairV1, rank int, expected []byte) (bool, error) {
-	dbi, key := mdbx.TreeSchemaV1DBIs()[rank], c.input.Endpoint.BlockHash[:]
+	dbi, key := mdbx.TreeSchemaV1DBIs()[rank], bytes.Clone(c.input.Endpoint.BlockHash[:])
 	value, present, err := reader.Get(dbi, key)
 	if err != nil {
 		return false, err

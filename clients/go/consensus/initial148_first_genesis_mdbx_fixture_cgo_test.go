@@ -46,6 +46,7 @@ func fgNew(t *testing.T, database [32]byte, current, lag uint64) *fgWorld {
 
 func (w *fgWorld) seed(t *testing.T, rank uint8, key, value []byte) {
 	t.Helper()
+	key, value = bytes.Clone(key), bytes.Clone(value)
 	var err error
 	if value == nil {
 		err = mdbx.FixtureStartupDeleteRow(w.s, rank, key)
@@ -144,7 +145,7 @@ func (w *fgWorld) image(t *testing.T) []mdbx.PrefixRow {
 }
 
 func fgImageRow(r *mdbx.Reader, rows *[]mdbx.PrefixRow, rank int, key []byte) error {
-	value, present, err := r.Get(mdbx.TreeSchemaV1DBIs()[rank], key)
+	value, present, err := r.Get(mdbx.TreeSchemaV1DBIs()[rank], bytes.Clone(key))
 	if err == nil && present {
 		*rows = append(*rows, mdbx.PrefixRow{Key: append([]byte{byte(rank)}, key...), Value: bytes.Clone(value)})
 	}
@@ -166,8 +167,8 @@ func (w *fgWorld) applied(t *testing.T, before []mdbx.PrefixRow) {
 	for _, dbi := range inspection.DBIs {
 		logicalMDBXAssert(t, dbi.Entries == counts[dbi.DBI.Rank], "readback rank%d entries %d", dbi.DBI.Rank, dbi.Entries)
 	}
-	w.read(t, 3, w.genesis.GenesisHash[:], w.raw[:148])
-	w.read(t, 4, w.genesis.GenesisHash[:], w.raw)
+	w.read(t, 3, bytes.Clone(w.genesis.GenesisHash[:]), w.raw[:148])
+	w.read(t, 4, bytes.Clone(w.genesis.GenesisHash[:]), w.raw)
 	canonical, _ := mdbx.HeightKey(w.current, 0)
 	owner, _ := mdbx.CanonicalOwnerKey(w.current, w.genesis.GenesisHash)
 	w.read(t, 2, canonical, mdbx.ChainValue(w.genesis.GenesisHash, [32]byte{}, [40]byte{39: 1}))
@@ -359,7 +360,7 @@ func TestInitial148FirstGenesisPrestateOrder(t *testing.T) {
 			}
 			if skipBody {
 				e := w.s.View(func(r *mdbx.Reader) error {
-					_, _, e := r.Get(mdbx.TreeSchemaV1DBIs()[4], w.genesis.GenesisHash[:])
+					_, _, e := r.Get(mdbx.TreeSchemaV1DBIs()[4], bytes.Clone(w.genesis.GenesisHash[:]))
 					return e
 				})
 				var engine *mdbx.EngineError
@@ -703,7 +704,7 @@ func TestInitial148FirstGenesisWriteSnapshotDrift(t *testing.T) {
 	btReservationsReleased(t, w.owner)
 	w.reopen(t)
 	w.read(t, 2, binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, w.current), 0), nil)
-	w.read(t, 4, w.genesis.GenesisHash[:], nil)
+	w.read(t, 4, bytes.Clone(w.genesis.GenesisHash[:]), nil)
 	for _, row := range before {
 		if row.Key[0] == 0 && !bytes.Equal(row.Key[1:], btMeta(0x11, w.lag)) {
 			w.read(t, 0, row.Key[1:], row.Value)
@@ -718,7 +719,7 @@ func TestInitial148FirstGenesisWriteSnapshotDrift(t *testing.T) {
 	}
 	logicalMDBXAssert(t, inspectErr == nil && bytes.Equal(before[0].Value, counts), "write-snapshot refusal changed DBI cardinality: %v", inspectErr)
 	w.read(t, 1, btUTXOKey(w.current, w.outpoint(t)), nil)
-	w.read(t, 3, w.genesis.GenesisHash[:], nil)
+	w.read(t, 3, bytes.Clone(w.genesis.GenesisHash[:]), nil)
 	w.read(t, 5, mdbx.UndoManifestKey(w.genesis.GenesisHash), nil)
 	owner, _ := mdbx.CanonicalOwnerKey(w.current, w.genesis.GenesisHash)
 	w.read(t, 7, owner, nil)
