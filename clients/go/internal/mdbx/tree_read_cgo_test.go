@@ -5,6 +5,7 @@ package mdbx
 import (
 	"bytes"
 	"crypto/sha3"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -354,13 +355,50 @@ func trPremiseV1(op TreeOutpointV1) testTreeEntry {
 	return trEntryV1(tdUTXOKey(1, op.Txid, op.Vout), tdFormed(tdFrame(7, 0, nil), 5, 0))
 }
 
-// trSeedNodesV1 seeds independently built binding/nodes, without implying a row.
+// trNodeSourceV1 recreates the supplied formed values through admitted CREATEs.
+func trNodeSourceV1(t *testing.T, entries []testTreeEntry) TreeRootReadV1 {
+	t.Helper()
+	height := binary.LittleEndian.Uint64(entries[0].v[len(entries[0].v)-9:])
+	var frames []byte
+	var events []TreeEventV1
+	for i, entry := range entries {
+		n := len(entry.v) - 9
+		if binary.LittleEndian.Uint64(entry.v[n:]) != height || entry.v[n+8] > 1 {
+			t.Fatal("node fixture requires one height and canonical coinbase tags")
+		}
+		txIndex := uint32(i + 1)
+		if entry.v[n+8] == 1 {
+			txIndex = 0
+		}
+		op := TreeOutpointV1{Txid: [32]byte(entry.k[:32]), Vout: binary.BigEndian.Uint32(entry.k[32:])}
+		events = append(events, TreeEventV1{Kind: 2, Outpoint: op, TxIndex: txIndex, FrameOffset: uint64(148 + len(frames)), FrameLength: uint32(n)})
+		frames = append(frames, entry.v[:n]...)
+	}
+	meta := TreeBlockV1{TxCount: uint32(len(entries) + 1), EventCount: uint32(len(entries))}
+	op := tsCoveredDelta(t, height, 0x47, meta, events, frames)
+	return TreeRootReadV1{Primitive: op.Primitives[0]}
+}
+
+// trSeedNodesV1 uses the writer for nodes, then removes its logical rows.
 func trSeedNodesV1(t *testing.T, s *Store, o *OperationReservationOwner, request TreeRootReadV1, entries ...testTreeEntry) testTreeNode {
 	t.Helper()
 	entries = append([]testTreeEntry(nil), entries...)
 	sort.Slice(entries, func(i, j int) bool { return bytes.Compare(entries[i].k[:], entries[j].k[:]) < 0 })
 	rows := map[string][]byte{}
 	top := testTreeBuild(1, entries, rows)
+	trPopulateV1(t, s, o, trNodeSourceV1(t, entries))
+	var mutations []Mutation
+	for _, entry := range entries {
+		key := append(binary.BigEndian.AppendUint64(nil, 1), entry.k[:]...)
+		tsRead(t, s, TreeSchemaV1DBIs()[1], key, entry.v)
+		mutations = append(mutations, Mutation{DBI: TreeSchemaV1DBIs()[1], Key: key, BeforePresent: true, AfterKind: 1})
+	}
+	result := tsRun(t, s, o, TreeOperation, TreeOperationV1{Pair: TreePairV1{Mutations: mutations}})
+	result.tuple(t, 2, 3, -1)
+	mustEnvironment(t, result.err)
+	for _, mutation := range mutations {
+		tsRead(t, s, mutation.DBI, mutation.Key, nil)
+	}
 	trSeedV1(t, s, o, 0, tsRootKey(1), trBindingV1(t, 1, request.Parent, entries...))
 	keys := make([]string, 0, len(rows))
 	for key := range rows {
@@ -370,7 +408,7 @@ func trSeedNodesV1(t *testing.T, s *Store, o *OperationReservationOwner, request
 	for _, key := range keys {
 		raw, err := hex.DecodeString(key[2:])
 		mustEnvironment(t, err)
-		trSeedV1(t, s, o, 8, raw, rows[key])
+		tsRead(t, s, TreeSchemaV1DBIs()[8], raw, rows[key])
 	}
 	return top
 }
