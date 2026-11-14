@@ -115,7 +115,10 @@ func prunedTreeReadPrioritiesV1(t *testing.T) {
 				t.Fatal("illegal replacement consumed reusable Store")
 			}
 		} else {
-			treeNativeError(t, out.Err, "get", "Integrity", -30793, "pruned tree profile promises disagree with tip", nil)
+			engine := requireEnvironmentError(t, out.Err, "Integrity", "get", -30793, "pruned tree profile promises disagree with tip")
+			if engine.Cause != nil || !engine.ReopenRequired {
+				t.Fatal("promise error cause/reopen", engine)
+			}
 			if out.Truth != 1 || out.Stage != 1 || out.Authority != nil || sc.s.state != storeCLOSED {
 				t.Fatal("promise before refused literal", out, sc.s.state)
 			}

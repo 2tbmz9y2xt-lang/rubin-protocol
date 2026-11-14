@@ -340,7 +340,10 @@ func TestTreePairReadCrossedV1(t *testing.T) {
 			}
 			treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
 			if row.mode == 15 || row.mode == 19 {
-				treeNativeError(t, ce.ReadbackCause, "abort", "Concurrency", -30416, "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread", nil)
+				engine := requireEnvironmentError(t, ce.ReadbackCause, "LocalInvariant", "abort", -30416, "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread")
+				if engine.Cause != nil || !engine.ReopenRequired {
+					t.Fatal("retained readback error cause/reopen", engine)
+				}
 				calls := 0
 				_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 					next := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { calls++; return op, nil })
