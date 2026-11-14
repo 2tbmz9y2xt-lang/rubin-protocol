@@ -85,20 +85,36 @@ func TestInitial148CompleteBlockTariffCensus(t *testing.T) {
 		name      string
 		got, want uintptr
 	}{
-		{"Outpoint", unsafe.Sizeof(Outpoint{}), 36}, {"UtxoEntry", unsafe.Sizeof(UtxoEntry{}), 48},
-		{"logicalStateDelete", unsafe.Sizeof(logicalStateDelete{}), 40}, {"logicalStatePut", unsafe.Sizeof(logicalStatePut{}), 88},
-		{"logicalTouchedState", unsafe.Sizeof(logicalTouchedState{}), 88}, {"sigCheckTask", unsafe.Sizeof(sigCheckTask{}), 152},
-		{"TxError", unsafe.Sizeof(TxError{}), 40}, {"Tx", unsafe.Sizeof(Tx{}), 136},
-		{"TxInput", unsafe.Sizeof(TxInput{}), 64}, {"TxOutput", unsafe.Sizeof(TxOutput{}), 40}, {"WitnessItem", unsafe.Sizeof(WitnessItem{}), 56},
-		{"nonCoinbaseApplyContext", unsafe.Sizeof(nonCoinbaseApplyContext{}), 424}, {"nonCoinbaseResolvedInput", unsafe.Sizeof(nonCoinbaseResolvedInput{}), 112},
-		{"SighashV1PrehashCache", unsafe.Sizeof(SighashV1PrehashCache{}), 144}, {"VaultCovenant", unsafe.Sizeof(VaultCovenant{}), 88},
-		{"MultisigCovenant", unsafe.Sizeof(MultisigCovenant{}), 32}, {"SimplicityTxContext", unsafe.Sizeof(SimplicityTxContext{}), 480},
-		{"SimplicityTxContextIOView", unsafe.Sizeof(SimplicityTxContextIOView{}), 16}, {"descriptor source", unsafe.Sizeof(simplicityTxContextDescriptorSource{}), 32},
-		{"self source", unsafe.Sizeof(simplicityTxContextSelfSource{}), 72}, {"group entry", unsafe.Sizeof(SimplicityTxContextGroupEntry{}), 32},
-		{"self view", unsafe.Sizeof(SimplicityTxContextSelfView{}), 104}, {"same-CMR view", unsafe.Sizeof(SimplicityTxContextSameCMRView{}), 80},
-		{"frame", unsafe.Sizeof(initial148CompleteBlockFrameV1{}), 872}, {"result", unsafe.Sizeof(initial148CompleteBlockResultV1{}), 624},
-		{"connect work", unsafe.Sizeof(blockInputViewConnectWork{}), 192}, {"connect result", unsafe.Sizeof(connectBlockInputViewResult{}), 64},
-		{"spent source", unsafe.Sizeof(blockSpentInputSource{}), 80}, {"queue", unsafe.Sizeof(SigCheckQueue{}), 56}, {"view state", unsafe.Sizeof(blockInputViewState{}), 40},
+		{"Outpoint", unsafe.Sizeof(Outpoint{}), 36},
+		{"UtxoEntry", unsafe.Sizeof(UtxoEntry{}), 48},
+		{"logicalStateDelete", unsafe.Sizeof(logicalStateDelete{}), 40},
+		{"logicalStatePut", unsafe.Sizeof(logicalStatePut{}), 88},
+		{"logicalTouchedState", unsafe.Sizeof(logicalTouchedState{}), 88},
+		{"sigCheckTask", unsafe.Sizeof(sigCheckTask{}), 152},
+		{"TxError", unsafe.Sizeof(TxError{}), 40},
+		{"Tx", unsafe.Sizeof(Tx{}), 136},
+		{"TxInput", unsafe.Sizeof(TxInput{}), 64},
+		{"TxOutput", unsafe.Sizeof(TxOutput{}), 40},
+		{"WitnessItem", unsafe.Sizeof(WitnessItem{}), 56},
+		{"nonCoinbaseApplyContext", unsafe.Sizeof(nonCoinbaseApplyContext{}), 424},
+		{"nonCoinbaseResolvedInput", unsafe.Sizeof(nonCoinbaseResolvedInput{}), 112},
+		{"SighashV1PrehashCache", unsafe.Sizeof(SighashV1PrehashCache{}), 144},
+		{"VaultCovenant", unsafe.Sizeof(VaultCovenant{}), 88},
+		{"MultisigCovenant", unsafe.Sizeof(MultisigCovenant{}), 32},
+		{"SimplicityTxContext", unsafe.Sizeof(SimplicityTxContext{}), 480},
+		{"SimplicityTxContextIOView", unsafe.Sizeof(SimplicityTxContextIOView{}), 16},
+		{"descriptor source", unsafe.Sizeof(simplicityTxContextDescriptorSource{}), 32},
+		{"self source", unsafe.Sizeof(simplicityTxContextSelfSource{}), 72},
+		{"group entry", unsafe.Sizeof(SimplicityTxContextGroupEntry{}), 32},
+		{"self view", unsafe.Sizeof(SimplicityTxContextSelfView{}), 104},
+		{"same-CMR view", unsafe.Sizeof(SimplicityTxContextSameCMRView{}), 80},
+		{"frame", unsafe.Sizeof(initial148CompleteBlockFrameV1{}), 872},
+		{"result", unsafe.Sizeof(initial148CompleteBlockResultV1{}), 624},
+		{"connect work", unsafe.Sizeof(blockInputViewConnectWork{}), 192},
+		{"connect result", unsafe.Sizeof(connectBlockInputViewResult{}), 64},
+		{"spent source", unsafe.Sizeof(blockSpentInputSource{}), 80},
+		{"queue", unsafe.Sizeof(SigCheckQueue{}), 56},
+		{"view state", unsafe.Sizeof(blockInputViewState{}), 40},
 	}
 	for _, row := range rows {
 		logicalMDBXAssert(t, row.got == row.want, "census %s size=%d want=%d", row.name, row.got, row.want)
@@ -143,12 +159,15 @@ func TestInitial148CompleteBlockTariffMargins(t *testing.T) {
 		name  string
 		holds bool
 	}{
-		{"created cap", 16*44 >= 690}, {"spent cap", 16*41 >= 362},
-		{"created connect", 6*44 >= 200+33+24}, {"spent connect", 6*41 >= 96+24},
+		{"created cap", 16*44 >= 690},
+		{"spent cap", 16*41 >= 362},
+		{"created connect", 6*44 >= 200+33+24},
+		{"spent connect", 6*41 >= 96+24},
 		{"task", 4*512 >= 9*152+4*(40+31+8)},
 		{"cap crossover", 14*84958 >= 44*27032},
 		{"cap below crossover", 690*84958/44+27032 < 4194304},
-		{"steps metadata", 2*164176+2*2064 < 4194304}, {"DA records", 56 < 60},
+		{"steps metadata", 2*164176+2*2064 < 4194304},
+		{"DA records", 56 < 60},
 		{"default witness", 1+3+2592+3+4627+1 == 7227},
 		{"fixed owners", 872+624+192+64+80+56+40+168 == 2096 && 2096 <= 2456},
 		{"cap constant", 192*(40+88)+2456 == 27032},
@@ -160,11 +179,17 @@ func TestInitial148CompleteBlockTariffMargins(t *testing.T) {
 
 func TestInitial148CompleteBlockBodyTariffLiteral(t *testing.T) {
 	rows := [][3]uint64{
-		{0, 7227, 20971520}, {149, 7227, 20971669}, {150, 7227, 20971677},
-		{1000, 7227, 23599917}, {42133, 7227, 155527829},
-		{17000157, 7227, 305777373}, {30000000, 7227, 293314725},
-		{68000157, 7227, 161789093}, {1000, 36, 23611693},
-		{1000, 0, 23599917}, {42133, 0, 155525269},
+		{0, 7227, 20971520},
+		{149, 7227, 20971669},
+		{150, 7227, 20971677},
+		{1000, 7227, 23599917},
+		{42133, 7227, 155527829},
+		{17000157, 7227, 305777373},
+		{30000000, 7227, 293314725},
+		{68000157, 7227, 161789093},
+		{1000, 36, 23611693},
+		{1000, 0, 23599917},
+		{42133, 0, 155525269},
 	}
 	for _, row := range rows {
 		t.Run(fmt.Sprintf("n_%d_m_%d", row[0], row[1]), func(t *testing.T) {
@@ -202,7 +227,8 @@ func TestInitial148CompleteBlockMinimumWitness(t *testing.T) {
 		registry *SuiteRegistry
 		want     uint64
 	}{
-		{"eligible/default", DefaultSuiteRegistry(), 7227}, {"eligible/test", icbRegistryV1(), 36},
+		{"eligible/default", DefaultSuiteRegistry(), 7227},
+		{"eligible/test", icbRegistryV1(), 36},
 		{"eligible/zero", NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: 3}}), 4},
 		{"eligible/mixedZero", NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: 1, PubkeyLen: 2592, SigLen: 4627}, {SuiteID: 3}}), 4},
 	} {
@@ -221,8 +247,10 @@ func TestInitial148CompleteBlockMinimumWitnessIneligible(t *testing.T) {
 		name   string
 		params []SuiteParams
 	}{
-		{"empty", nil}, {"negativePubkey", []SuiteParams{{SuiteID: 3, PubkeyLen: -1}}},
-		{"negativeSig", []SuiteParams{{SuiteID: 3, SigLen: -1}}}, {"bothnegative", []SuiteParams{{SuiteID: 3, PubkeyLen: -1, SigLen: -1}}},
+		{"empty", nil},
+		{"negativePubkey", []SuiteParams{{SuiteID: 3, PubkeyLen: -1}}},
+		{"negativeSig", []SuiteParams{{SuiteID: 3, SigLen: -1}}},
+		{"bothnegative", []SuiteParams{{SuiteID: 3, PubkeyLen: -1, SigLen: -1}}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			got, ok := initial148MinimumWitnessV1(NewSuiteRegistryFromParams(row.params))
@@ -442,8 +470,9 @@ func icbRetainedLeafV1(t *testing.T, typ reflect.Type, path string, got *[]strin
 	case reflect.Interface, reflect.Func, reflect.Chan:
 		*got = append(*got, path+":"+typ.String())
 		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // icbRetainedPathsV1 uses a recursion-stack guard, never a global visited set:
@@ -471,6 +500,8 @@ func icbRetainedPathsV1(t *testing.T, typ reflect.Type, path string, stack map[r
 			field := typ.Field(i)
 			icbRetainedPathsV1(t, field.Type, strings.TrimPrefix(path+"."+field.Name, "."), stack, got)
 		}
+	default:
+		return
 	}
 }
 
