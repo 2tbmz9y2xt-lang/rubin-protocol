@@ -74,7 +74,7 @@ type HeaderCandidateViewV1 interface {
 }
 
 // PublishedGenesisContextV1 is the node's chain-instance genesis: Published holds the complete 266-byte published
-// genesis block when configured and is nil for an identity-only context.
+// genesis block on the 116 route (298 bytes on the explicit 148 route) and is nil for an identity-only context.
 type PublishedGenesisContextV1 struct {
 	ChainID, GenesisHash [32]byte
 	Published            []byte
@@ -131,6 +131,31 @@ func replayEntryContext(g PublishedGenesisContextV1) error {
 		return errors.New("published genesis context commitment mismatch")
 	}
 	return nil
+}
+
+// replayEntryContext148 checks the explicitly selected initial148 route; length
+// never selects the grammar, and nil Published remains identity-only.
+func replayEntryContext148(g PublishedGenesisContextV1) error {
+	if !replayEntryContextShape148(g) {
+		return errors.New("invalid published genesis context")
+	}
+	if g.Published == nil {
+		return nil
+	}
+	hash, err := Initial148BlockHash(g.Published[:Initial148HeaderBytes])
+	var preimage [314]byte
+	copy(preimage[:16], "RUBIN-GENESIS-v1")
+	copy(preimage[16:], g.Published)
+	chainID := sha3.Sum256(preimage[:])
+	if err != nil || hash != g.GenesisHash || chainID != g.ChainID {
+		return errors.New("published genesis context commitment mismatch")
+	}
+	return nil
+}
+
+// replayEntryContextShape148 admits a nonzero identity and an optional complete 148-format publication.
+func replayEntryContextShape148(g PublishedGenesisContextV1) bool {
+	return g.ChainID != ([32]byte{}) && g.GenesisHash != ([32]byte{}) && (g.Published == nil || len(g.Published) == 298)
 }
 
 func replayEntryContextShape(g PublishedGenesisContextV1) bool {

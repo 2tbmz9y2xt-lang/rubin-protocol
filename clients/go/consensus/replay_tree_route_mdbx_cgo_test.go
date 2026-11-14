@@ -11,6 +11,7 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -939,6 +940,13 @@ func rtPendingIntent(p []byte) mdbx.TreeAuthorityV1 {
 	return e
 }
 
+// rtPendingBare is the pending NONE/RECOVERY_REQUIRED envelope (pending ARCHIVE) with intent none.
+func rtPendingBare() mdbx.TreeAuthorityV1 {
+	e := rtPendingIntent(nil)
+	e.SourceIntent = nil
+	return e
+}
+
 // rtIntentKept asserts e carries intent kind IMAGE with payload p byte-identical.
 func rtIntentKept(t *testing.T, e mdbx.TreeAuthorityV1, p []byte, label string) {
 	t.Helper()
@@ -992,6 +1000,69 @@ func TestReplayTreeIntentConversion(t *testing.T) {
 	t.Run("C2 reopened", func(t *testing.T) {
 		rtReopened(t, w, want, p, "C2")
 	})
+}
+
+// rtSameBatch reports whether a and b are equal in every Batch field; the obsolete-row fields (whose element types
+// carry errors) must be empty in both, as for every pair-only conversion Batch.
+func rtSameBatch(a, b mdbx.Batch) bool {
+	return reflect.DeepEqual(a.Mutations, b.Mutations) && a.Reverse == b.Reverse && reflect.DeepEqual(a.Consulted, b.Consulted) &&
+		reflect.DeepEqual(a.ContextConsulted, b.ContextConsulted) && reflect.DeepEqual(a.LargeConsulted, b.LargeConsulted) &&
+		len(a.ObsoleteDeletes)+len(b.ObsoleteDeletes)+len(a.ObsoleteConsulted)+len(b.ObsoleteConsulted) == 0
+}
+
+// C7 (RUB-1755) support: the PLAN_CHANGE adapter replayTreeConversion's plan, in exactly three rows (ascending target
+// IDs without a slot, reversed target IDs without a slot, ascending target IDs with an existing InvalidBranchV1 slot;
+// no row runs reversed target IDs with a slot), is one meta key 2 mutation whose literal decodes to the
+// independent rtConverted envelope (slot and retained intent unchanged) with the independent rtConsulted rows, and the
+// caller's envelope is not mutated. Those oracle comparisons are what this test can fail on; its adapter-versus-
+// replayTreeWholeTarget equality is not evidence, because the adapter is a one-line delegation to that transform.
+// Every expected slot is a separately allocated pointee, so an in-place write to the caller's slot cannot reach the
+// oracle. The C7 format-3 byte-identity evidence is the pre-branch PLAN_CHANGE tests in this file, which pass unedited:
+// TestReplayTreeConversion, TestReplayTreeConversionNoCursor and TestReplayTreeIntentConversion. The unedited
+// TestReplayRecomputePlanChangeConversion and TestReplayRecomputeConversionRefusals in replay_recovery_mdbx_cgo_test.go
+// run through Store.Update, which refuses a format-3 store, so they pin only the format-2 branch and are no C7 evidence.
+func TestReplayTreeWholeTargetAdapter(t *testing.T) {
+	slot := func() *mdbx.InvalidBranchV1 {
+		return &mdbx.InvalidBranchV1{FirstInvalidHeight: 12, FirstInvalidBlockHash: [32]byte{0x12}, ExactConsensusError: []byte("BLOCK_ERR_WEIGHT_EXCEEDED")}
+	}
+	none := func() *mdbx.InvalidBranchV1 { return nil }
+	cases := []struct {
+		label       string
+		target, lag uint64
+		slot        func() *mdbx.InvalidBranchV1
+		lo, hi      uint64
+	}{
+		{"ascending", 3, 4, none, 3, 4},
+		{"reversed", 4, 3, none, 3, 4},
+		{"slot kept", 3, 4, slot, 3, 4},
+	}
+	for _, c := range cases {
+		t.Run(c.label, func(t *testing.T) {
+			p := rtIntentPayload()
+			before := rtImageReplay(p)
+			before.Authority.Replay.TargetGenerationID, before.TargetLagGenerationID = c.target, c.lag
+			before.Authority.ExcludedInvalidBranch = c.slot()
+			_, err := before.Encode()
+			logicalMDBXAssert(t, err == nil, "%s: fixture envelope illegal: %v", c.label, err)
+			snapshot := rtImageReplay(p)
+			snapshot.Authority.Replay.TargetGenerationID, snapshot.TargetLagGenerationID = c.target, c.lag
+			snapshot.Authority.ExcludedInvalidBranch = c.slot()
+			adapter, aerr := replayTreeConversion(ReplayRecomputationV1{Report: ReplayRecomputationPlanChangeV1, envelope: before, activeTip: 2})
+			common, cerr := replayTreeWholeTarget(before, 2)
+			logicalMDBXAssert(t, aerr == nil && cerr == nil && rtSameBatch(adapter, common), "%s: adapter %+v %v, common %+v %v", c.label, adapter, aerr, common, cerr)
+			logicalMDBXAssert(t, len(adapter.Mutations) == 1, "%s: mutations %+v", c.label, adapter.Mutations)
+			m := adapter.Mutations[0]
+			logicalMDBXAssert(t, m.DBI == mdbx.TreeSchemaV1DBIs()[0] && bytes.Equal(m.Key, []byte{0x02}) && m.AfterKind == mdbx.AfterLiteral && m.BeforePresent, "%s: mutation %+v", c.label, m)
+			logicalMDBXAssert(t, reflect.DeepEqual(adapter.Consulted, rtConsulted(t)), "%s: consulted %+v", c.label, adapter.Consulted)
+			decoded, err := mdbx.DecodeTreeAuthorityV1(adapter.Mutations[0].Literal)
+			logicalMDBXAssert(t, err == nil, "%s: decode %v", c.label, err)
+			want := rtConverted(snapshot, c.lo, c.hi)
+			logicalMDBXAssert(t, reflect.DeepEqual(decoded, want), "%s: planned %+v want %+v", c.label, decoded, want)
+			logicalMDBXAssert(t, reflect.DeepEqual(decoded.Authority.ExcludedInvalidBranch, c.slot()), "%s: slot %+v", c.label, decoded.Authority.ExcludedInvalidBranch)
+			rtIntentKept(t, decoded, p, c.label)
+			logicalMDBXAssert(t, reflect.DeepEqual(before, snapshot), "%s: caller envelope mutated: %+v", c.label, before)
+		})
+	}
 }
 
 // C3: the post-drain representation (the C2 envelope with one GENERATION span left) and the pending
@@ -1057,4 +1128,592 @@ func TestReplayTreeIntentPrunedProfile(t *testing.T) {
 		logicalMDBXAssert(t, out.Decision == "RECOVERY_REQUIRED" && out.Err == nil && out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite && out.Authority == nil, "%s: %+v", label, out)
 		rtReopened(t, w, e, p, label)
 	}
+}
+
+// rtWholeTarget is the fixed target tuple of the whole-target conversion cases.
+var rtWholeTarget = mdbx.RecoveryTargetV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}, TipHash: [32]byte{0xc3}, TipHeight: 37, CumulativeChainwork: [40]byte{39: 1}}
+
+// rtWhole is the C1 pre-state: REPLAY/RECOVERY_REQUIRED GENESIS_REPLAY with active CURRENT/LAG 3/4, target
+// CURRENT/LAG 5/6, next 7, active profile PRUNED with B=10/U=13690, target profile ARCHIVE, APPLIED cursor 36, slot none.
+func rtWhole() mdbx.TreeAuthorityV1 {
+	return mdbx.TreeAuthorityV1{Authority: mdbx.StorageAuthorityV1{
+		Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, ActiveGenerationID: 3, NextGenerationID: 7, B: 10, U: 13_690,
+		Phase: mdbx.StoragePhaseReplayV1, Lifecycle: mdbx.StorageLifecycleRecoveryRequiredV1,
+		Replay: &mdbx.ReplayV1{TargetProfile: mdbx.StorageProfileArchiveV1, TargetGenerationID: 5, Target: rtWholeTarget, Cursor: mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorAppliedV1, Height: 36, BlockHash: [32]byte{0x36}}},
+	}, LagGenerationID: 4, TargetLagGenerationID: 6, SourceKind: mdbx.TreeSourceGenesisReplayV1}
+}
+
+// rtWholeDone is the C1 result as an independent literal: PRUNE_GC/RECOVERY_REQUIRED, pending ARCHIVE, Replay none,
+// CleanupV1 GENERATION(lo), GENERATION(hi), target lag, source kind and progress none, active 3/4, next 7, PRUNED,
+// B=10/U=13690 and the given slot.
+func rtWholeDone(lo, hi uint64, slot *mdbx.InvalidBranchV1) mdbx.TreeAuthorityV1 {
+	archive := mdbx.StorageProfileArchiveV1
+	return mdbx.TreeAuthorityV1{Authority: mdbx.StorageAuthorityV1{
+		Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, ActiveGenerationID: 3, NextGenerationID: 7, B: 10, U: 13_690,
+		Phase: mdbx.StoragePhasePruneGCV1, Lifecycle: mdbx.StorageLifecycleRecoveryRequiredV1, PendingTargetProfile: &archive,
+		Cleanup:               &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: lo}, {Kind: mdbx.CleanupSpanGenerationV1, GenerationID: hi}}},
+		ExcludedInvalidBranch: slot,
+	}, LagGenerationID: 4}
+}
+
+// rtTuple is a fresh InvalidBranchV1 (height, hash byte 0 = h, error).
+func rtTuple(height uint64, h byte, err string) *mdbx.InvalidBranchV1 {
+	return &mdbx.InvalidBranchV1{FirstInvalidHeight: height, FirstInvalidBlockHash: [32]byte{h}, ExactConsensusError: []byte(err)}
+}
+
+// rtWholeConsulted is the active-generation index rows of generation g at the given heights.
+func rtWholeConsulted(t *testing.T, g uint64, heights ...uint64) []mdbx.ConsultedRow {
+	t.Helper()
+	rows := []mdbx.ConsultedRow{}
+	for _, h := range heights {
+		key, err := mdbx.HeightKey(g, h)
+		logicalMDBXAssert(t, err == nil, "height key: %v", err)
+		rows = append(rows, mdbx.ConsultedRow{DBI: mdbx.TreeSchemaV1DBIs()[2], Key: key})
+	}
+	return rows
+}
+
+// rtWholeRun is one conversion attempt: the planner's Batch and error and the raw UpdateTreeV1 tuple.
+type rtWholeRun struct {
+	batch   mdbx.Batch
+	planErr error
+	truth   mdbx.CommitTruth
+	stage   mdbx.UpdateStage
+	index   int
+	err     error
+}
+
+// rtWholePlan runs one conversion attempt: build supplies the reader parameter and the input from the callback Reader;
+// the planner runs inside UpdateTreeV1's callback; after, when non-nil, runs once the planner has returned and before
+// the Batch is handed to replayTreeOperation.
+func rtWholePlan(t *testing.T, w *btWorld, build func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1), after func()) rtWholeRun {
+	t.Helper()
+	var c rtWholeRun
+	err := w.owner.WithOperation(mdbx.LaneOperation, func(a *mdbx.OperationAccount) error {
+		c.truth, c.stage, c.index, c.err = w.s.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+			reader, input := build(r)
+			c.batch, c.planErr = PlanReplayWholeTargetConversionMDBX(reader, input)
+			if after != nil {
+				after()
+			}
+			if c.planErr != nil {
+				return mdbx.TreeOperationV1{}, c.planErr
+			}
+			return replayTreeOperation(c.batch)
+		})
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "conversion account: %v", err)
+	return c
+}
+
+// rtWholeInput is the qualified input on the callback Reader for envelope.
+func rtWholeInput(envelope mdbx.TreeAuthorityV1, cause ReplayTargetConversionCauseV1, invalidity *mdbx.InvalidBranchV1) func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1) {
+	return func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1) {
+		return r, ReplayTargetConversionInputV1{Reader: r, Envelope: envelope, Cause: cause, Invalidity: invalidity}
+	}
+}
+
+// rtWholeConverted asserts a NEW commit of exactly one meta key 2 mutation whose literal and read-back envelope are
+// want, with the given Consulted rows; every other imaged row and every family's entry count is unchanged (C9).
+func rtWholeConverted(t *testing.T, w *btWorld, image [][]byte, c rtWholeRun, want mdbx.TreeAuthorityV1, consulted []mdbx.ConsultedRow, label string) {
+	t.Helper()
+	logicalMDBXAssert(t, c.planErr == nil && c.err == nil && c.truth == mdbx.CommitTruthNew && c.index == -1, "%s commit: %d/%d/%d %v %v", label, c.truth, c.stage, c.index, c.planErr, c.err)
+	logicalMDBXAssert(t, len(c.batch.Mutations) == 1 && reflect.DeepEqual(c.batch.Consulted, consulted), "%s plan: %+v", label, c.batch)
+	m := c.batch.Mutations[0]
+	logicalMDBXAssert(t, m.DBI == mdbx.TreeSchemaV1DBIs()[0] && bytes.Equal(m.Key, []byte{2}) && m.AfterKind == mdbx.AfterLiteral && m.BeforePresent, "%s mutation: %+v", label, m)
+	decoded, err := mdbx.DecodeTreeAuthorityV1(m.Literal)
+	logicalMDBXAssert(t, err == nil && reflect.DeepEqual(decoded, want), "%s planned: %+v %v want %+v", label, decoded, err, want)
+	got := rtEnvelope(t, w)
+	logicalMDBXAssert(t, reflect.DeepEqual(got, want), "%s readback: %+v want %+v", label, got, want)
+	after := rtImage(t, w)
+	logicalMDBXAssert(t, len(after) == len(image), "%s image shape", label)
+	for i := range image {
+		logicalMDBXAssert(t, i == 3 || bytes.Equal(image[i], after[i]), "%s: row %d other than the envelope changed", label, i)
+	}
+}
+
+// rtWholeRefused asserts the planner's error has class, no Batch exists, UpdateTreeV1 refused it at OLD/PREWRITE and
+// the image is unchanged.
+func rtWholeRefused(t *testing.T, w *btWorld, image [][]byte, c rtWholeRun, class, label string) {
+	t.Helper()
+	logicalMDBXAssert(t, c.planErr != nil && errors.Is(c.err, c.planErr) && reflect.ValueOf(c.batch).IsZero() && recoveryClass(c.planErr, "") == class,
+		"%s: batch %+v err %v want %s", label, c.batch, c.planErr, class)
+	logicalMDBXAssert(t, c.truth == mdbx.CommitTruthOld && c.stage == mdbx.UpdateStagePrewrite && c.index == -1, "%s: %d/%d/%d", label, c.truth, c.stage, c.index)
+	logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)), "%s: image changed", label)
+}
+
+// C1, C2, C9, C11, R3 (GENESIS_REPLAY creates no intent): TARGET_LOCAL and RECOVERY_CORE convert the fixed target pair
+// into ascending GENERATION spans with pending = the target profile and nothing else changed; reversed target IDs give
+// the same ascending order (run under TARGET_LOCAL only). Only meta key 2 changes; next_generation_id and every counter
+// and binding stay.
+func TestReplayWholeTargetConversion(t *testing.T) {
+	reversed := rtWhole()
+	reversed.Authority.NextGenerationID, reversed.Authority.Replay.TargetGenerationID, reversed.TargetLagGenerationID = 10, 9, 8
+	reversedDone := rtWholeDone(8, 9, nil)
+	reversedDone.Authority.NextGenerationID = 10
+	for _, c := range []struct {
+		label  string
+		before mdbx.TreeAuthorityV1
+		cause  ReplayTargetConversionCauseV1
+		want   mdbx.TreeAuthorityV1
+	}{
+		{"C1 target-local", rtWhole(), ReplayTargetConversionTargetLocalV1, rtWholeDone(5, 6, nil)},
+		{"C11 recovery-core", rtWhole(), ReplayTargetConversionRecoveryCoreV1, rtWholeDone(5, 6, nil)},
+		{"C2 reversed", reversed, ReplayTargetConversionTargetLocalV1, reversedDone},
+	} {
+		w := rtNew(t, c.before)
+		image := rtImage(t, w)
+		run := rtWholePlan(t, w, rtWholeInput(rtEnvelope(t, w), c.cause, nil), nil)
+		rtWholeConverted(t, w, image, run, c.want, rtWholeConsulted(t, 3, 0, 1), c.label)
+		got := rtEnvelope(t, w)
+		logicalMDBXAssert(t, got.Authority.NextGenerationID == c.before.Authority.NextGenerationID && got.SourceIntent == nil, "%s C9/R3: %+v", c.label, got)
+	}
+}
+
+// C3-C6, C12: the first-wins slot effect for every cause and slot state. REPLAY_INVALIDITY writes its tuple only into
+// an empty slot; an identical, a different (in height, hash, error or all three) or any slot under TARGET_LOCAL or
+// RECOVERY_CORE stays byte-identical; the conversion is planned and committed in every case.
+func TestReplayWholeTargetSlot(t *testing.T) {
+	cause37 := func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED") }
+	slots := map[string]func() *mdbx.InvalidBranchV1{
+		"none":        func() *mdbx.InvalidBranchV1 { return nil },
+		"identical":   cause37,
+		"different":   func() *mdbx.InvalidBranchV1 { return rtTuple(12, 0x12, "BLOCK_ERR_WEIGHT_EXCEEDED") },
+		"height only": func() *mdbx.InvalidBranchV1 { return rtTuple(12, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED") },
+		"hash only":   func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x12, "BLOCK_ERR_SUBSIDY_EXCEEDED") },
+		"error only":  func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x37, "BLOCK_ERR_WEIGHT_EXCEEDED") },
+	}
+	causes := map[string]ReplayTargetConversionCauseV1{"TARGET_LOCAL": ReplayTargetConversionTargetLocalV1, "REPLAY_INVALIDITY": ReplayTargetConversionInvalidityV1, "RECOVERY_CORE": ReplayTargetConversionRecoveryCoreV1}
+	for causeLabel, cause := range causes {
+		for slotLabel, slot := range slots {
+			label := causeLabel + " slot " + slotLabel
+			before := rtWhole()
+			before.Authority.ExcludedInvalidBranch = slot()
+			want := rtWholeDone(5, 6, slot())
+			var invalidity *mdbx.InvalidBranchV1
+			if cause == ReplayTargetConversionInvalidityV1 {
+				invalidity = cause37()
+				if slotLabel == "none" {
+					want.Authority.ExcludedInvalidBranch = cause37()
+				}
+			}
+			w := rtNew(t, before)
+			image := rtImage(t, w)
+			run := rtWholePlan(t, w, rtWholeInput(rtEnvelope(t, w), cause, invalidity), nil)
+			rtWholeConverted(t, w, image, run, want, rtWholeConsulted(t, 3, 0, 1), label)
+		}
+	}
+}
+
+// R3, C12 IMAGE: an IMAGE-sourced target converts like any other; ReplayV1 with its progress is cleared, a retained
+// first-install intent stays byte-identical after commit and reopen, and intent none stays none.
+func TestReplayWholeTargetIntent(t *testing.T) {
+	p := rtIntentPayload()
+	for _, c := range []struct {
+		label  string
+		intent bool
+		cause  ReplayTargetConversionCauseV1
+	}{{"R3 target-local intent", true, ReplayTargetConversionTargetLocalV1}, {"C12 recovery-core intent", true, ReplayTargetConversionRecoveryCoreV1}, {"R3 intent none", false, ReplayTargetConversionTargetLocalV1}} {
+		before := rtImageReplay(p)
+		if !c.intent {
+			before.SourceIntent = nil
+		}
+		w := rtNew(t, before)
+		image := rtImage(t, w)
+		run := rtWholePlan(t, w, rtWholeInput(rtEnvelope(t, w), c.cause, nil), nil)
+		want := rtConverted(before, 3, 4)
+		rtWholeConverted(t, w, image, run, want, rtWholeConsulted(t, 1, 0, 1), c.label)
+		if !c.intent {
+			w.reopen(t)
+			got := rtEnvelope(t, w)
+			logicalMDBXAssert(t, got.SourceIntent == nil && reflect.DeepEqual(got, want), "%s reopen: %+v", c.label, got)
+			continue
+		}
+		rtReopened(t, w, want, p, c.label)
+	}
+}
+
+// C10: outside the closed cause/payload/ActiveTip domain the planner returns its own TERMINAL_LOCAL_INVARIANT(evidence)
+// refusal (a *selectedSideFailure, never a Reader EngineError) with no Batch and nothing written, with the slot empty or
+// already set; a nil reader parameter is refused the same way before any read; ActiveTip 4294967296 is refused under
+// each cause, REPLAY_INVALIDITY with an otherwise valid tuple included; the bounds 0 and 4294967295 of ActiveTip and of
+// the first-invalid height are admitted.
+func TestReplayWholeTargetInputDomain(t *testing.T) {
+	tl, inv, rc := ReplayTargetConversionTargetLocalV1, ReplayTargetConversionInvalidityV1, ReplayTargetConversionRecoveryCoreV1
+	tuple := func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED") }
+	high := tuple()
+	high.FirstInvalidHeight = 1 << 32
+	empty, nilError := tuple(), tuple()
+	empty.ExactConsensusError, nilError.ExactConsensusError = []byte{}, nil
+	for label, edit := range map[string]func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader{
+		"nil reader": func(*mdbx.Reader, *ReplayTargetConversionInputV1) *mdbx.Reader { return nil },
+		"cause 0":    func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader { in.Cause = 0; return r },
+		"cause 4":    func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader { in.Cause = 4; return r },
+		"cause 255":  func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader { in.Cause = 255; return r },
+		"TARGET_LOCAL zero tuple": func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader {
+			in.Invalidity = &mdbx.InvalidBranchV1{}
+			return r
+		},
+		"TARGET_LOCAL tuple": func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader {
+			in.Invalidity = tuple()
+			return r
+		},
+		"RECOVERY_CORE zero tuple": func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader {
+			in.Cause, in.Invalidity = rc, &mdbx.InvalidBranchV1{}
+			return r
+		},
+		"RECOVERY_CORE tuple": func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader {
+			in.Cause, in.Invalidity = rc, tuple()
+			return r
+		},
+		"REPLAY_INVALIDITY nil": func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader { in.Cause = inv; return r },
+		"REPLAY_INVALIDITY empty": func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader {
+			in.Cause, in.Invalidity = inv, empty
+			return r
+		},
+		"REPLAY_INVALIDITY nil error": func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader {
+			in.Cause, in.Invalidity = inv, nilError
+			return r
+		},
+		"ActiveTip 4294967296": func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader { in.ActiveTip = 1 << 32; return r },
+		"first-invalid 4294967296": func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader {
+			in.Cause, in.Invalidity = inv, high
+			return r
+		},
+		"RECOVERY_CORE ActiveTip 2^32": func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader {
+			in.Cause, in.ActiveTip = rc, 1<<32
+			return r
+		},
+		"REPLAY_INVALIDITY ActiveTip 2^32": func(r *mdbx.Reader, in *ReplayTargetConversionInputV1) *mdbx.Reader {
+			in.Cause, in.Invalidity, in.ActiveTip = inv, tuple(), 1<<32
+			return r
+		},
+	} {
+		for _, slot := range []*mdbx.InvalidBranchV1{nil, rtTuple(12, 0x12, "BLOCK_ERR_WEIGHT_EXCEEDED")} {
+			stored := rtWhole()
+			stored.Authority.ExcludedInvalidBranch = slot
+			w := rtNew(t, stored)
+			image := rtImage(t, w)
+			envelope := rtEnvelope(t, w)
+			run := rtWholePlan(t, w, func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1) {
+				in := ReplayTargetConversionInputV1{Reader: r, Envelope: envelope, Cause: tl}
+				reader := edit(r, &in)
+				return reader, in
+			}, nil)
+			var own *selectedSideFailure
+			logicalMDBXAssert(t, reflect.TypeOf(run.planErr) == reflect.TypeOf(own), "C10 %s slot %v: not the planner's own refusal: %T %v", label, slot != nil, run.planErr, run.planErr)
+			rtWholeRefused(t, w, image, run, "TERMINAL_LOCAL_INVARIANT(evidence)", "C10 "+label)
+		}
+	}
+	bound, zero := tuple(), tuple()
+	bound.FirstInvalidHeight, zero.FirstInvalidHeight = math.MaxUint32, 0
+	for _, c := range []struct {
+		label      string
+		tip        uint64
+		invalidity *mdbx.InvalidBranchV1
+		consulted  []uint64
+	}{{"ActiveTip 4294967295", math.MaxUint32, nil, []uint64{0, 1, math.MaxUint32, 1 << 32}}, {"first-invalid 4294967295", 0, bound, []uint64{0, 1}}, {"first-invalid 0", 0, zero, []uint64{0, 1}}} {
+		w := rtNew(t, rtWhole())
+		image := rtImage(t, w)
+		envelope := rtEnvelope(t, w)
+		cause := tl
+		want := rtWholeDone(5, 6, nil)
+		if c.invalidity != nil {
+			cause, want.Authority.ExcludedInvalidBranch = inv, rtTuple(map[string]uint64{"first-invalid 4294967295": 4294967295, "first-invalid 0": 0}[c.label], 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED")
+		}
+		run := rtWholePlan(t, w, func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1) {
+			return r, ReplayTargetConversionInputV1{Reader: r, Envelope: envelope, ActiveTip: c.tip, Cause: cause, Invalidity: c.invalidity}
+		}, nil)
+		rtWholeConverted(t, w, image, run, want, rtWholeConsulted(t, 3, c.consulted...), "C10 admitted "+c.label)
+	}
+}
+
+// R2, R4 absence, R6, R9: an envelope outside the fixed REPLAY target (NONE/STABLE, PRUNE_GC/STABLE,
+// ORDINARY_APPLY/RECOVERY_REQUIRED, a pending NONE/RECOVERY_REQUIRED image with and without a retained intent, an
+// already converted envelope), proved exact-empty absence, an input Reader other than the callback Reader, and any field of
+// the complete qualified envelope differing from the reread one (active profile with its B/U included), or an input
+// envelope Encode refuses, are STALE_LOCAL_PLAN with no Batch and nothing written; the domain miss, the absence, the
+// envelope mismatch and the Reader mismatch each win over a malformed cause. Value-equal inputs (fresh pointees, a nil
+// versus an empty progress payload) are the same envelope and convert.
+func TestReplayWholeTargetContext(t *testing.T) {
+	tl := ReplayTargetConversionTargetLocalV1
+	// ORDINARY_APPLY/RECOVERY_REQUIRED over rtStable: a DISCONNECT stage of one old and one new point at height 5 with
+	// the captured side in generation 3 (the recoveryOrdinaryApply precedent); rtNew seeds it through Encode.
+	ordinary := func() mdbx.TreeAuthorityV1 {
+		e := rtStable()
+		oldPoint, newPoint := mdbx.AuthorityPointV1{Height: 5, BlockHash: [32]byte{0x51}}, mdbx.AuthorityPointV1{Height: 5, BlockHash: [32]byte{0x52}}
+		e.Authority.Phase, e.Authority.Lifecycle = mdbx.StoragePhaseOrdinaryApplyV1, mdbx.StorageLifecycleRecoveryRequiredV1
+		e.Authority.Ordinary = &mdbx.OrdinaryApplyV1{
+			Stage: mdbx.OrdinaryStageDisconnectV1, Target: newPoint, OldSuffix: []mdbx.AuthorityPointV1{oldPoint}, NewSuffix: []mdbx.AuthorityPointV1{newPoint},
+			CapturedSelectedSide: &mdbx.SelectedSideV1{GenerationID: 3, F: 4, TipHeight: 5, TipHash: newPoint.BlockHash, CumulativeChainwork: sideWorldWork(1), RowCount: 1, LogicalBytes: 1},
+		}
+		return e
+	}
+	for label, c := range map[string]struct {
+		stored, input mdbx.TreeAuthorityV1
+		cause         ReplayTargetConversionCauseV1
+	}{
+		"R2 NONE/STABLE":                      {rtStable(), rtStable(), tl},
+		"R2 PRUNE_GC":                         {rtPrune(), rtPrune(), tl},
+		"R2 ORDINARY_APPLY":                   {ordinary(), ordinary(), tl},
+		"R2 NONE/RECOVERY_REQUIRED":           {rtPendingIntent([]byte{0xa1}), rtPendingIntent([]byte{0xa1}), tl},
+		"R2 NONE/RECOVERY_REQUIRED no intent": {rtPendingBare(), rtPendingBare(), tl},
+		"R9 converted":                        {rtWholeDone(5, 6, nil), rtWholeDone(5, 6, nil), ReplayTargetConversionRecoveryCoreV1},
+		"R4 exact-empty":                      {mdbx.TreeAuthorityV1{}, rtWhole(), tl},
+		"R6 before cause":                     {rtWhole(), rtWholeDone(5, 6, nil), 0},
+		"R2 before domain":                    {rtStable(), rtStable(), 255},
+		"R4 before cause":                     {mdbx.TreeAuthorityV1{}, rtWhole(), 0},
+	} {
+		w := rtNew(t, c.stored)
+		image := rtImage(t, w)
+		run := rtWholePlan(t, w, rtWholeInput(c.input, c.cause, nil), nil)
+		rtWholeRefused(t, w, image, run, "STALE_LOCAL_PLAN", label)
+	}
+	image := rtImageReplay([]byte{0xa1})
+	slotted := rtWhole()
+	slotted.Authority.ExcludedInvalidBranch = rtTuple(12, 0x12, "BLOCK_ERR_WEIGHT_EXCEEDED")
+	// A GENESIS_REPLAY cursor of one kind at height 0 has exactly one legal hash (tree_authority.go:326,
+	// authority_descriptors.go:64-70), so the cursor kind row also changes the hash: PRE_GENESIS versus APPLIED at the
+	// genesis hash.
+	preGenesis := rtWhole()
+	preGenesis.Authority.Replay.Cursor = mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorPreGenesisV1}
+	for label, c := range map[string]struct {
+		stored mdbx.TreeAuthorityV1
+		edit   func(e *mdbx.TreeAuthorityV1)
+	}{
+		"target current ID": {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.TargetGenerationID = 2 }},
+		"target lag ID":     {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.TargetLagGenerationID = 1 }},
+		"active ID":         {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.ActiveGenerationID = 1 }},
+		"active lag ID":     {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.LagGenerationID = 2 }},
+		"source kind": {rtWhole(), func(e *mdbx.TreeAuthorityV1) {
+			e.SourceKind, e.Authority.Replay.Cursor, e.Progress = mdbx.TreeSourceImageV1, mdbx.ReplayCursorV1{}, image.Progress
+		}},
+		"target tuple": {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Target.TipHash[1] = 1 }},
+		"cursor":       {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Cursor.Height = 35 }},
+		"slot": {rtWhole(), func(e *mdbx.TreeAuthorityV1) {
+			e.Authority.ExcludedInvalidBranch = rtTuple(12, 0x12, "BLOCK_ERR_WEIGHT_EXCEEDED")
+		}},
+		"target profile": {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.TargetProfile = mdbx.StorageProfilePrunedV1 }},
+		"sequence":       {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.NextGenerationID = 8 }},
+		"active profile": {rtWhole(), func(e *mdbx.TreeAuthorityV1) {
+			e.Authority.ActiveProfile, e.Authority.B, e.Authority.U = mdbx.StorageProfileArchiveV1, 0, 0
+		}},
+		"B/U":            {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.B, e.Authority.U = 11, 13_691 }},
+		"progress":       {image, func(e *mdbx.TreeAuthorityV1) { e.Progress.Payload = []byte{0xa1, 0xa3} }},
+		"intent payload": {image, func(e *mdbx.TreeAuthorityV1) { e.SourceIntent.Payload = []byte{0xa2} }},
+		"intent absent":  {image, func(e *mdbx.TreeAuthorityV1) { e.SourceIntent = nil }},
+		"encode refused": {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Version = 0 }},
+		"slot height":    {slotted, func(e *mdbx.TreeAuthorityV1) { e.Authority.ExcludedInvalidBranch.FirstInvalidHeight = 13 }},
+		"slot hash":      {slotted, func(e *mdbx.TreeAuthorityV1) { e.Authority.ExcludedInvalidBranch.FirstInvalidBlockHash[0] = 0x13 }},
+		"slot error bytes": {slotted, func(e *mdbx.TreeAuthorityV1) {
+			e.Authority.ExcludedInvalidBranch.ExactConsensusError = []byte("BLOCK_ERR_WEIGHT_EXCEEDEE")
+		}},
+		"target chain ID":     {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Target.ChainID[0] = 0xd1 }},
+		"target genesis hash": {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Target.GenesisHash[0] = 0xd2 }},
+		"target tip height":   {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Target.TipHeight = 38 }},
+		"target chainwork":    {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Target.CumulativeChainwork[39] = 2 }},
+		"cursor hash":         {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Cursor.BlockHash[0] = 0x35 }},
+		"cursor kind": {preGenesis, func(e *mdbx.TreeAuthorityV1) {
+			e.Authority.Replay.Cursor = mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorAppliedV1, BlockHash: rtWholeTarget.GenesisHash}
+		}},
+		"progress kind": {image, func(e *mdbx.TreeAuthorityV1) { e.Progress.Kind = mdbx.TreeProgressCompleteV1 }},
+	} {
+		w := rtNew(t, c.stored)
+		before := rtImage(t, w)
+		input := rtEnvelope(t, w)
+		c.edit(&input)
+		_, eerr := input.Encode()
+		logicalMDBXAssert(t, (eerr != nil) == (label == "encode refused"), "R6 %s premise: encode %v", label, eerr)
+		run := rtWholePlan(t, w, rtWholeInput(input, tl, nil), nil)
+		rtWholeRefused(t, w, before, run, "STALE_LOCAL_PLAN", "R6 "+label)
+	}
+	t.Run("R6 Reader", func(t *testing.T) {
+		w := rtNew(t, rtWhole())
+		var other *mdbx.Reader
+		logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error { other = r; return nil }) == nil, "other Reader view")
+		for label, reader := range map[string]func(r *mdbx.Reader) *mdbx.Reader{"nil": func(*mdbx.Reader) *mdbx.Reader { return nil }, "other": func(*mdbx.Reader) *mdbx.Reader { return other }} {
+			for _, cause := range []ReplayTargetConversionCauseV1{tl, 0} {
+				image := rtImage(t, w)
+				envelope := rtEnvelope(t, w)
+				run := rtWholePlan(t, w, func(r *mdbx.Reader) (*mdbx.Reader, ReplayTargetConversionInputV1) {
+					return r, ReplayTargetConversionInputV1{Reader: reader(r), Envelope: envelope, Cause: cause}
+				}, nil)
+				rtWholeRefused(t, w, image, run, "STALE_LOCAL_PLAN", fmt.Sprintf("R6 Reader %s cause %d", label, cause))
+			}
+		}
+	})
+	p := []byte{0xa1, 0xa2}
+	for label, input := range map[string]func() mdbx.TreeAuthorityV1{
+		"fresh GENESIS_REPLAY": func() mdbx.TreeAuthorityV1 {
+			e := rtWhole()
+			e.Progress.Payload = []byte{}
+			return e
+		},
+		"fresh IMAGE": func() mdbx.TreeAuthorityV1 { return rtImageReplay(p) },
+	} {
+		stored := rtWhole()
+		want := rtWholeDone(5, 6, nil)
+		consulted := rtWholeConsulted(t, 3, 0, 1)
+		if label == "fresh IMAGE" {
+			stored, want, consulted = rtImageReplay(p), rtConverted(rtImageReplay(p), 3, 4), rtWholeConsulted(t, 1, 0, 1)
+		}
+		w := rtNew(t, stored)
+		image := rtImage(t, w)
+		run := rtWholePlan(t, w, rtWholeInput(input(), tl, nil), nil)
+		rtWholeConverted(t, w, image, run, want, consulted, "R6 value-equal "+label)
+	}
+}
+
+// H3: the caller's tuple bytes, hash and height mutated after the planner returned (before the Batch is committed)
+// change neither the planned literal nor the stored slot. The planner encodes the envelope before it returns, so the
+// Batch carries only that encoded copy; this row fails if the returned literal shares the caller's bytes.
+func TestReplayWholeTargetTupleIsolation(t *testing.T) {
+	w := rtNew(t, rtWhole())
+	image := rtImage(t, w)
+	invalidity := rtTuple(37, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED")
+	run := rtWholePlan(t, w, rtWholeInput(rtEnvelope(t, w), ReplayTargetConversionInvalidityV1, invalidity), func() {
+		invalidity.ExactConsensusError[0], invalidity.FirstInvalidBlockHash[0], invalidity.FirstInvalidHeight = 'X', 0x99, 99
+	})
+	rtWholeConverted(t, w, image, run, rtWholeDone(5, 6, rtTuple(37, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED")), rtWholeConsulted(t, 3, 0, 1), "H3")
+	logicalMDBXAssert(t, string(invalidity.ExactConsensusError) == "XLOCK_ERR_SUBSIDY_EXCEEDED", "H3 premise: the caller tuple was not mutated")
+}
+
+// rtWholeOutcome asserts a projected CLEANUP outcome: the raw tuple kept exactly, the given Result and CanonicalTruth,
+// and no Decision or Replay.
+func rtWholeOutcome(t *testing.T, out ReplayEntryOutcomeV1, truth mdbx.CommitTruth, stage mdbx.UpdateStage, err error, result, canon, label string) {
+	t.Helper()
+	logicalMDBXAssert(t, out.Truth == truth && out.Stage == stage && reflect.ValueOf(out.Err).Equal(reflect.ValueOf(err)) && out.Result == result && out.CanonicalTruth == canon &&
+		out.Decision == "" && out.Replay == nil, "%s: %+v want %s/%s", label, out, result, canon)
+}
+
+// C8, C13, R5, R11: the CLEANUP projection of each stage and each truth, by raw tuple (not every stage-truth pair:
+// WRITE_STARTED_DEFINITELY_PRECOMMIT runs with truth OLD only). Normal NEW and OLD keep an empty
+// Result; crossed outcomes map their raw truth; precommit keeps an integrity or invariant cause; the owner's exact
+// step-5 capacity refusal at PREWRITE is storage_capacity (wrapped, it is no such refusal); PREWRITE otherwise
+// classifies each direct cause by native storage class; only the write snapshot mismatch is STALE_LOCAL_PLAN, any
+// other direct StateMismatch (the format-2 typed-operation refusal) is TERMINAL_LOCAL_INVARIANT, also when joined with
+// the snapshot mismatch, while one wrapped inside another cause is not inspected. The walk classifies only direct
+// causes, so an fmt.Errorf-wrapped EngineError or selectedSideFailure is an unclassified cause:
+// TERMINAL_LOCAL_INVARIANT(evidence), not its inner class. Each row is its own subtest.
+func TestReplayWholeTargetProjection(t *testing.T) {
+	engine := func(class mdbx.EngineClass, diagnostic string) error {
+		return &mdbx.EngineError{Class: class, Operation: "update", Code: -30779, Diagnostic: diagnostic}
+	}
+	snapshot := engine(mdbx.EngineStateMismatch, "OLD/write snapshot mismatch")
+	format2 := engine(mdbx.EngineStateMismatch, "typed tree operation requires tree store")
+	io, integrity := engine(mdbx.EngineIO, "io"), engine(mdbx.EngineIntegrity, "integrity")
+	crossed := func(truth mdbx.CommitTruth) error {
+		return &mdbx.CommitError{Truth: truth, Cause: engine(mdbx.EngineCapacity, "full")}
+	}
+	full, _ := mdbx.NewOperationReservationOwner(mdbx.MinReservationLimit - 1)
+	step5 := full.WithReservation(1, func() error { return nil })
+	logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(step5), "step-5 capacity premise: %v", step5)
+	old, nw, unknown := mdbx.CommitTruthOld, mdbx.CommitTruthNew, mdbx.CommitTruthUnknown
+	// A bare CommitError with a NEW or UNKNOWN raw Truth at PREWRITE (a constructed input shape, not the joined terminal
+	// error a latched Store retains): the raw Truth is kept, CanonicalTruth is OLD and the Result is the cause walk's.
+	prewriteNew := &mdbx.CommitError{Truth: nw, Cause: engine(mdbx.EngineCapacity, "full")}
+	prewriteUnknown := &mdbx.CommitError{Truth: unknown, Cause: engine(mdbx.EngineCapacity, "full"), ReadbackCause: integrity}
+	pre, started, may := mdbx.UpdateStagePrewrite, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, mdbx.UpdateStageCommitMayHaveCrossed
+	for _, c := range []struct {
+		label         string
+		truth         mdbx.CommitTruth
+		stage         mdbx.UpdateStage
+		err           error
+		result, canon string
+	}{
+		{"C8 normal NEW", nw, may, nil, "", "NEW"},
+		{"C8 normal OLD", old, pre, nil, "", "OLD"},
+		{"C8 crossed old", old, may, crossed(old), "TERMINAL_PERSISTENCE(old)", "OLD"},
+		{"C8 crossed new", nw, may, crossed(nw), "TERMINAL_PERSISTENCE(new)", "NEW"},
+		{"C8 crossed unknown", unknown, may, crossed(unknown), "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN"},
+		{"R5 capacity", old, pre, engine(mdbx.EngineCapacity, "full"), "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD"},
+		{"R5 planner capacity", old, pre, &selectedSideFailure{result: "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", cause: io}, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD"},
+		{"R4 io", old, pre, io, "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", "OLD"},
+		{"R1 integrity", old, pre, integrity, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD"},
+		{"R5 precommit io", old, started, io, "LOCAL_PERSISTENCE_ERROR(precommit)", "OLD"},
+		{"R5 precommit integrity", old, started, errors.Join(io, integrity), "TERMINAL_STORE_INTEGRITY(canonical)", "OLD"},
+		{"R5 precommit invariant", old, started, engine(mdbx.EngineLocalInvariant, "x"), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
+		{"R11 snapshot", old, pre, snapshot, "STALE_LOCAL_PLAN", "OLD"},
+		{"R11 format-2 refusal", old, pre, format2, "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
+		{"R11 joined", old, pre, errors.Join(snapshot, format2), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
+		{"R11 snapshot with a wrapped refusal", old, pre, errors.Join(snapshot, &selectedSideFailure{result: "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", cause: format2}), "STALE_LOCAL_PLAN", "OLD"},
+		{"R5 step-5 capacity", old, pre, step5, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD"},
+		{"R5 wrapped step-5 capacity", old, pre, fmt.Errorf("charge: %w", step5), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
+		{"R2 stale planner", old, pre, &selectedSideFailure{result: "STALE_LOCAL_PLAN", cause: io}, "STALE_LOCAL_PLAN", "OLD"},
+		{"PREWRITE CommitError NEW", nw, pre, prewriteNew, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD"},
+		{"PREWRITE CommitError UNKNOWN", unknown, pre, prewriteUnknown, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD"},
+		{"wrapped EngineError", old, pre, fmt.Errorf("read: %w", io), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
+		{"wrapped selectedSideFailure", old, pre, fmt.Errorf("plan: %w", &selectedSideFailure{result: "STALE_LOCAL_PLAN", cause: io}), "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD"},
+	} {
+		t.Run(c.label, func(t *testing.T) {
+			rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(c.truth, c.stage, c.err), c.truth, c.stage, c.err, c.result, c.canon, c.label)
+		})
+	}
+}
+
+// C8, C13, R5, R11 through the planner and UpdateTreeV1: a normal commit of each cause is NEW with an empty Result; the
+// engine's step-5 Pair charge refused by the full owner aggregate after the planner returned its Batch is
+// LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)/OLD with the raw refusal kept and nothing written; the plan callback on
+// a format-2 store never runs and the typed-operation refusal is TERMINAL_LOCAL_INVARIANT, never STALE.
+func TestReplayWholeTargetProjectedCommit(t *testing.T) {
+	tuple := func() *mdbx.InvalidBranchV1 { return rtTuple(37, 0x37, "BLOCK_ERR_SUBSIDY_EXCEEDED") }
+	for _, c := range []struct {
+		label      string
+		cause      ReplayTargetConversionCauseV1
+		invalidity *mdbx.InvalidBranchV1
+	}{{"C8 target-local", ReplayTargetConversionTargetLocalV1, nil}, {"C8 invalidity", ReplayTargetConversionInvalidityV1, tuple()}, {"C13 recovery-core", ReplayTargetConversionRecoveryCoreV1, nil}} {
+		w := rtNew(t, rtWhole())
+		image := rtImage(t, w)
+		run := rtWholePlan(t, w, rtWholeInput(rtEnvelope(t, w), c.cause, c.invalidity), nil)
+		var slot *mdbx.InvalidBranchV1
+		if c.invalidity != nil {
+			slot = tuple()
+		}
+		rtWholeConverted(t, w, image, run, rtWholeDone(5, 6, slot), rtWholeConsulted(t, 3, 0, 1), c.label)
+		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, nil, "", "NEW", c.label)
+	}
+	for _, cause := range []ReplayTargetConversionCauseV1{ReplayTargetConversionTargetLocalV1, ReplayTargetConversionRecoveryCoreV1} {
+		label := fmt.Sprintf("R5 step-5 capacity cause %d", cause)
+		w := rtNew(t, rtWhole())
+		image := rtImage(t, w)
+		envelope := rtEnvelope(t, w)
+		var run rtWholeRun
+		rtCharges(t, w.owner, mdbx.MinReservationLimit, func() {
+			run = rtWholePlan(t, w, rtWholeInput(envelope, cause, nil), nil)
+		})
+		logicalMDBXAssert(t, run.planErr == nil && len(run.batch.Mutations) == 1 && mdbx.IsOperationReservationCapacity(run.err) && run.index == -1, "%s premise: %+v %v %v %d", label, run.batch, run.planErr, run.err, run.index)
+		rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(run.truth, run.stage, run.err), mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, run.err, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD", label)
+		logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)), "%s: image changed", label)
+	}
+	legacy := newReplayWorld(t, 4)
+	called := false
+	var truth mdbx.CommitTruth
+	var stage mdbx.UpdateStage
+	var err error
+	logicalMDBXAssert(t, legacy.owner.WithOperation(mdbx.LaneOperation, func(a *mdbx.OperationAccount) error {
+		truth, stage, _, err = legacy.store.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+			called = true
+			return mdbx.TreeOperationV1{}, nil
+		})
+		return nil
+	}) == nil, "format-2 account")
+	var e *mdbx.EngineError
+	logicalMDBXAssert(t, !called && errors.As(err, &e) && e.Class == mdbx.EngineStateMismatch && e.Diagnostic == "typed tree operation requires tree store", "R11 format-2 premise: %v", err)
+	rtWholeOutcome(t, ProjectReplayWholeTargetConversionMDBX(truth, stage, err), mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, err, "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD", "R11 format-2 refusal")
+}
+
+// interface_contract: the cause constants, the input fields and the planner and projector signatures are exactly the
+// contract's (pinned as independent literals).
+func TestReplayWholeTargetExportedSignatures(t *testing.T) {
+	logicalMDBXAssert(t, reflect.TypeFor[ReplayTargetConversionCauseV1]().Kind() == reflect.Uint8 &&
+		ReplayTargetConversionTargetLocalV1 == 1 && ReplayTargetConversionInvalidityV1 == 2 && ReplayTargetConversionRecoveryCoreV1 == 3, "cause type and constants")
+	input := reflect.TypeFor[ReplayTargetConversionInputV1]()
+	fields := make([]string, input.NumField())
+	for i := range fields {
+		fields[i] = input.Field(i).Name + " " + input.Field(i).Type.String()
+	}
+	logicalMDBXAssert(t, slices.Equal(fields, []string{"Reader *mdbx.Reader", "Envelope mdbx.TreeAuthorityV1", "ActiveTip uint64", "Cause consensus.ReplayTargetConversionCauseV1", "Invalidity *mdbx.InvalidBranchV1"}), "input fields: %v", fields)
+	logicalMDBXAssert(t, reflect.TypeOf(PlanReplayWholeTargetConversionMDBX).String() == "func(*mdbx.Reader, consensus.ReplayTargetConversionInputV1) (mdbx.Batch, error)" &&
+		reflect.TypeOf(ProjectReplayWholeTargetConversionMDBX).String() == "func(mdbx.CommitTruth, mdbx.UpdateStage, error) consensus.ReplayEntryOutcomeV1", "planner and projector signatures")
 }

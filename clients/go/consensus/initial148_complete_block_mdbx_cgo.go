@@ -34,6 +34,7 @@ type initial148CompleteBlockInputV1 struct {
 	Registry               *SuiteRegistry
 	Rotation               RotationProvider
 	PublishedGenesis       []byte
+	FirstGenesisDemand     uint64
 }
 
 // initial148CompleteBlockResultV1 is delivered by validate only after the fresh
@@ -399,7 +400,7 @@ func (f *initial148CompleteBlockFrameV1) candidateV1(view logicalStateView, deri
 	if err := f.capV1(view, transition); err != nil {
 		return err
 	}
-	if err := f.compareRootV1(derive(), headerRoot); err != nil {
+	if err := f.deriveRootV1(derive, headerRoot); err != nil {
 		return err
 	}
 	handedOff = true
@@ -452,4 +453,14 @@ func (f *initial148CompleteBlockFrameV1) compareRootV1(required initial148RootRe
 		return txerr(BLOCK_ERR_UTXO_ROOT_MISMATCH, "utxo_root mismatch")
 	}
 	return nil
+}
+
+// deriveRootV1 holds the optional first-genesis engine demand only during D.
+func (f *initial148CompleteBlockFrameV1) deriveRootV1(derive func() initial148RootReadOutcomeV1, headerRoot [32]byte) error {
+	if f.input.FirstGenesisDemand == 0 {
+		return f.compareRootV1(derive(), headerRoot)
+	}
+	return f.account.WithReservation(f.input.FirstGenesisDemand, func() error {
+		return f.compareRootV1(derive(), headerRoot)
+	})
 }
