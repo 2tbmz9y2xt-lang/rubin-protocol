@@ -266,8 +266,8 @@ func applyNonCoinbaseTxBasicWorkQ(
 }
 
 // applyNonCoinbaseTxWorkInputQ is the single queued transaction interval for
-// both the nil-view in-memory path and the input-view block path. It never
-// mutates input.utxoSet; a nil input.inputView keeps the map-only stage lookup.
+// both the nil-view in-memory path and the input-view block path. A non-nil
+// view uses the block owner's private map in place; a nil view keeps a copy.
 func applyNonCoinbaseTxWorkInputQ(
 	input nonCoinbaseApplyWorkInput,
 	sigQueue *SigCheckQueue,
@@ -296,10 +296,12 @@ func applyNonCoinbaseTxWorkInputQ(
 		panic(laterPanic) //nolint:forbidigo // RUB-721: preserve the later raw panic after the earlier interval succeeds.
 	}()
 
-	// Private work map so the delta never aliases the caller's map.
-	work := make(map[Outpoint]UtxoEntry, len(input.utxoSet))
-	for k, v := range input.utxoSet {
-		work[k] = v
+	work := input.utxoSet
+	if input.inputView == nil {
+		work = make(map[Outpoint]UtxoEntry, len(input.utxoSet))
+		for k, v := range input.utxoSet {
+			work[k] = v
+		}
 	}
 	result, resultFee, err = (&nonCoinbaseApplyContext{
 		tx:        input.tx,
