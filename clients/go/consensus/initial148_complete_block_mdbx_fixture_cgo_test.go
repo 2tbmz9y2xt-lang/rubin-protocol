@@ -217,13 +217,13 @@ func TestInitial148CompleteBlockDeriveFailureH5(t *testing.T) {
 		kind   mdbx.TreeObservationKindV1
 		rank   uint8
 	}{
+		{"binding-top-outside-inputs", 0, 0},
 		{"binding-eio", 0, 0},
 		{"node-eio", 0, 8},
 		{"binding-absent", mdbx.TreeObservationAbsentV1, 0},
 		{"binding-malformed", mdbx.TreeObservationMalformedV1, 0},
 		{"binding-endpoint", mdbx.TreeObservationIdentityMismatchV1, 0},
 		{"node-malformed", mdbx.TreeObservationMalformedV1, 8},
-		{"binding-top-outside-inputs", 0, 0},
 	}
 	for _, c := range cases {
 		for _, workers := range []int{-1, 1, 4} {
