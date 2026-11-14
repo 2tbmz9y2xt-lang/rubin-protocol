@@ -20,6 +20,9 @@ func TestTreeRootReadFaultV1(t *testing.T) {
 	t.Run("Source-first-failure", trSourceFailureV1)
 	t.Run("trusted-spent-leaf", trTrustedSpendV1)
 	t.Run("binding-malformed", trBindingMalformedV1)
+	t.Run("origin-before-get", trOriginFaultV1)
+	t.Run("obtained-before-later-get", trObtainedOrderV1)
+	t.Run("structural-semantic-digest-order", trMixedV1)
 }
 
 func trBindingMalformedV1(t *testing.T) {
@@ -93,63 +96,50 @@ func trBindingConsumedV1(t *testing.T, s *Store, reader *Reader, cause error) {
 }
 
 func trTrustedSpendV1(t *testing.T) {
-	s, _, o := tsNew(t)
-	seed, _, frame := trRequestV1(t, 5)
-	trPopulateV1(t, s, o, seed)
-	op := TreeOutpointV1{Txid: tdTxid(37)}
-	key := tdUTXOKey(1, op.Txid, 0)
-	value := tdFormed(frame, 5, 1)
-	binding := trBindingV1(t, 1, seed.Primitive.Endpoint, trEntryV1(key, value))
-	leaf := sha3.Sum256(append(append([]byte("RUBIN_UTXO_TREE_V1\x01"), key[8:]...), value...))
-	value[0]++ // A valid same-length field change; binding and leaf stay canonical.
-	treeNativeSeed(t, s, 1, key, value)
-	request, _, _ := trRequestV1(t, 6)
-	request.Parent = seed.Primitive.Endpoint
-	request.Inputs = []TreeResolvedInputV1{{Outpoint: op, Value: bytes.Clone(value)}}
-	meta := TreeBlockV1{TxCount: 2, EventCount: 1}
-	request.Primitive.Coverage.BlockMeta = meta
-	request.Primitive.Source = tsSource(func(pos TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
-		if pos != 1 {
-			return fmt.Errorf("unexpected SPEND source position %d", pos)
-		}
-		if err := sink.BeginV1(meta); err != nil {
-			return err
-		}
-		return sink.EventV1(TreeEventV1{Kind: 1, Outpoint: op, TxIndex: 1})
-	})
-	for range 2 {
-		evidence, err := FixtureSelectedDamage(s, o, SelectedDamageProbeOnly, 0, nil, func() {
-			trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
+	for _, row := range trRowsV1() {
+		t.Run(row.name, func(t *testing.T) {
+			s, path, o := tsNew(t)
+			op := TreeOutpointV1{Txid: tdTxid(37)}
+			key := tdUTXOKey(1, op.Txid, 0)
+			request := trEventsV1(t, TreeEventV1{Kind: 1, Outpoint: op})
+			request.Inputs = []TreeOutpointV1{op}
+			entry := trEntryV1(key, tdFormed(tdFrame(7, 0, []byte{3}), 1, 0))
+			top := trSeedNodesV1(t, s, o, request, entry)
+			if row.value != nil {
+				treeNativeSeed(t, s, 1, key, row.value)
+			}
+			for range 2 {
+				evidence, err := FixtureSelectedDamage(s, o, SelectedDamageProbeOnly, 0, nil, func() {
+					trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
+						mustEnvironment(t, err)
+						if root != sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")) || !reader.usable() || reader.failure != nil {
+							t.Fatalf("trusted last SPEND root %x active%v", root, reader.usable())
+						}
+					})
+				})
 				mustEnvironment(t, err)
-				if root != sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")) {
-					t.Fatalf("trusted last SPEND root %x", root)
+				if evidence.OldGets != ([8]uint64{1, 0}) || evidence.NodeGets != 1 || evidence.Faults != 0 {
+					t.Fatalf("SPEND point requests %+v", evidence)
 				}
-				if !reader.usable() || reader.failure != nil {
-					t.Fatal("permitted local-trust SPEND disarmed Reader")
+				trNoWritesV1(t, evidence, o)
+			}
+			s = tsReopen(t, s, path)
+			for _, stored := range []struct {
+				rank       uint8
+				key, value []byte
+			}{{0, tsRootKey(1), trBindingV1(t, 1, request.Parent, entry)}, {8, testTreeNodeKey(1, 288, entry.k), top.digest[:]}} {
+				equal, err := FixtureRawRowEqual(s, stored.rank, stored.key, stored.value)
+				mustEnvironment(t, err)
+				if !equal {
+					t.Fatalf("trusted SPEND changed canonical rank %d row", stored.rank)
 				}
-			})
+			}
+			equal, err := FixtureRawRowEqual(s, 1, key, row.value)
+			mustEnvironment(t, err)
+			if !equal {
+				t.Fatal("ignored SPEND row changed")
+			}
 		})
-		mustEnvironment(t, err)
-		if evidence.OldGets != ([8]uint64{1, 1}) || evidence.NodeGets != 1 {
-			t.Fatalf("SPEND point requests %+v", evidence)
-		}
-		if [6]uint64{evidence.BeginWrite, evidence.Commits, evidence.Deletes, evidence.NodePulls, evidence.Faults, reservationLive(o)} != ([6]uint64{}) || evidence.OldPulls != ([8]uint64{}) {
-			t.Fatalf("SPEND range/write/resource effects %+v", evidence)
-		}
-	}
-	for _, row := range []struct {
-		rank       uint8
-		key, value []byte
-	}{
-		{0, tsRootKey(1), binding},
-		{1, key, value},
-		{8, testTreeNodeKey(1, 288, [36]byte(key[8:])), leaf[:]},
-	} {
-		equal, err := FixtureRawRowEqual(s, row.rank, row.key, row.value)
-		mustEnvironment(t, err)
-		if !equal {
-			t.Fatalf("trusted SPEND changed canonical rank %d row", row.rank)
-		}
 	}
 }
 
@@ -238,7 +228,7 @@ func trNodeV1(t *testing.T) {
 				treeNativeSeed(t, s, 8, nodeKey, branch)
 				kind = TreeObservationIdentityMismatchV1
 			}
-			request.Inputs = []TreeResolvedInputV1{{Outpoint: op, Value: value}}
+			request.Inputs = []TreeOutpointV1{op}
 			meta := TreeBlockV1{TxCount: 2, EventCount: 1}
 			request.Primitive.Coverage.BlockMeta = meta
 			request.Primitive.Source = tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
@@ -263,20 +253,22 @@ func trNodeV1(t *testing.T) {
 }
 
 func trSelectorsV1(t *testing.T) {
-	for _, variant := range []string{"descending", "duplicate-equal", "duplicate-different", "malformed"} {
+	for _, variant := range []string{"descending", "duplicate", "count", "genesis"} {
 		t.Run("sorted-invalid-"+variant, func(t *testing.T) {
 			s, _, o := tsNew(t)
 			request, _, inputs := trGroupedRequestV1(t, 6, false)
 			switch variant {
 			case "descending":
 				inputs[0], inputs[1] = inputs[1], inputs[0]
-			case "duplicate-equal", "duplicate-different":
-				inputs[1].Outpoint = inputs[0].Outpoint
-				if variant == "duplicate-different" {
-					inputs[1].Value[0]++
-				}
-			case "malformed":
-				inputs[1].Value = []byte{1}
+			case "duplicate":
+				inputs[1] = inputs[0]
+			case "count":
+				request.Primitive.Coverage.BlockMeta.EventCount = 2
+			case "genesis":
+				request.Primitive.Height, request.Primitive.Endpoint.Height, request.Primitive.Coverage.Height = 0, 0, 0
+				request.Parent = TreeEndpointV1{}
+				request.Primitive.Coverage.BlockMeta = TreeBlockV1{TxCount: 1, EventCount: 1}
+				inputs = inputs[:1]
 			}
 			request.Inputs = inputs
 			request.Primitive.Source = trCountingSourceV1(request.Primitive.Source, t)
@@ -376,49 +368,311 @@ func trIOV1(t *testing.T) {
 	})
 }
 
-func trMalformedV1(t *testing.T) {
+type trRowV1 struct {
+	name      string
+	value     []byte
+	malformed bool
+}
+
+func trRowsV1() []trRowV1 {
 	good := tdFormed(tdFrame(7, 0, []byte{3}), 1, 0)
 	badCoinbase := bytes.Clone(good)
 	badCoinbase[len(badCoinbase)-1] = 2
 	badCompact := append(bytes.Clone(good[:10]), 253, 1, 0)
 	badCompact = append(badCompact, good[11:]...)
-	for _, tc := range []struct {
-		name  string
-		value []byte
-	}{
-		{"short", good[:19]},
-		{"oversized-before-copy", make([]byte, 65561)},
-		{"nonminimal-length", badCompact},
-		{"truncated-data", good[:len(good)-1]},
-		{"coinbase-tag", badCoinbase},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, _, o := tsNew(t)
-			request, _, _ := trRequestV1(t, 6)
+	rows := []trRowV1{{"equal", good, false}, {"absent", nil, false}, {"short", good[:19], true}, {"oversized-before-copy", make([]byte, 65561), true}, {"nonminimal-length", badCompact, true}, {"truncated-data", good[:len(good)-1], true}, {"coinbase-tag", badCoinbase, true}}
+	for i, name := range []string{"value", "type", "data", "height", "coinbase"} {
+		value := bytes.Clone(good)
+		value[[]int{0, 8, 11, len(value)-9, len(value)-1}[i]]++
+		rows = append(rows, trRowV1{name, value, false})
+	}
+	return rows
+}
+
+func trNoWritesV1(t *testing.T, e SelectedDamageEvidence, owner *OperationReservationOwner) {
+	t.Helper()
+	if e.BeginWrite != 0 || e.Commits != 0 || e.Deletes != 0 || e.NodePulls != 0 || e.OldPulls != ([8]uint64{}) || reservationLive(owner) != 0 {
+		t.Fatalf("root read range/write/resource effects %+v", e)
+	}
+}
+
+func trMalformedV1(t *testing.T) {
+	rows := append(trRowsV1(), trRowV1{name: "EIO"})
+	for _, row := range rows {
+		if !row.malformed && row.name != "equal" && row.name != "absent" && row.name != "EIO" {
+			continue
+		}
+		for _, member := range []bool{false, true} {
+			for _, cancel := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/member%v/cancel%v", row.name, member, cancel), func(t *testing.T) {
+					s, _, o := tsNew(t)
+					op := TreeOutpointV1{Txid: tdTxid(8)}
+					key := tdUTXOKey(1, op.Txid, 0)
+					events := []TreeEventV1{{Kind: 2, Outpoint: op}}
+					if cancel {
+						events = append(events, TreeEventV1{Kind: 1, Outpoint: op})
+					}
+					request := trEventsV1(t, events...)
+					if member {
+						request.Inputs = []TreeOutpointV1{op}
+					}
+					trSeedV1(t, s, o, 0, tsRootKey(1), trBindingV1(t, 1, request.Parent))
+					if row.value != nil {
+						treeNativeSeed(t, s, 1, key, row.value)
+					}
+					scenario := SelectedDamageProbeOnly
+					if row.name == "EIO" {
+						scenario = SelectedDamageGetEIO
+					}
+					evidence, fixtureErr := FixtureSelectedDamage(s, o, scenario, 1, key, func() {
+						trReadV1(t, s, o, request, func(r *Reader, account *OperationAccount, root [32]byte, err error) {
+							trCreateResultV1(t, request, r, account, root, err, row, member, cancel, key)
+						})
+					})
+					mustEnvironment(t, fixtureErr)
+					want, faults := [8]uint64{0, 1}, uint64(0)
+					if row.name == "absent" && !member {
+						want[0] = 1
+					}
+					if row.name == "EIO" {
+						faults = 1
+					}
+					if evidence.OldGets != want || evidence.NodeGets != 0 || evidence.Faults != faults {
+						t.Fatalf("CREATE refusal precedes binding: %+v want%v faults%d", evidence, want, faults)
+					}
+					trNoWritesV1(t, evidence, o)
+				})
+			}
+		}
+	}
+}
+
+func trCreateResultV1(t *testing.T, request TreeRootReadV1, reader *Reader, account *OperationAccount, root [32]byte, err error, row trRowV1, member, cancel bool, key []byte) {
+	t.Helper()
+	if row.name == "absent" && !member {
+		mustEnvironment(t, err)
+		want := sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00"))
+		if !cancel {
+			want = testTreeBuild(1, []testTreeEntry{trEntryV1(key, tdFormed(tdFrame(7, 0, nil), 6, 0))}, map[string][]byte{}).digest
+		}
+		if root != want || !reader.usable() || reader.failure != nil {
+			t.Fatalf("coherent CREATE root%x want%x", root, want)
+		}
+		return
+	}
+	if !row.malformed && row.name != "EIO" {
+		trSemanticV1(t, request, reader, account, root, err)
+		return
+	}
+	if row.name == "EIO" {
+		treeNativeError(t, err, "update", "IO", 5, "error 5", nil)
+	} else {
+		treeNativeIntegrity(t, err, operationUpdate, errSchema)
+	}
+	engine := err.(*EngineError)
+	if root != ([32]byte{}) || reader.usable() || any(reader.failure) != any(err) {
+		t.Fatalf("CREATE row refusal root%x error%v", root, err)
+	}
+	if row.malformed {
+		want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 1, Block: request.Primitive.Block, Height: 6, Primitive: 0, Position: 1, Rank: 1, KeyLength: 44, Kind: 2, OriginalImage: true, OriginalReference: true}
+		copy(want.Key[:], key)
+		if engine.TreeObservation == nil || *engine.TreeObservation != want {
+			t.Fatalf("CREATE malformed observation %+v want%+v", engine.TreeObservation, want)
+		}
+	} else if engine.TreeObservation != nil {
+		t.Fatal("native CREATE failure acquired an observation")
+	}
+	if _, next := reader.DeriveTreeRootV1(account, request); next == nil || any(reader.failure) != any(err) {
+		t.Fatal("CREATE row refusal lost first cause")
+	}
+}
+
+func trOriginFaultV1(t *testing.T) {
+	for _, scenario := range []SelectedDamageScenario{SelectedDamageProbeOnly, SelectedDamageGetEIO} {
+		t.Run(fmt.Sprint(scenario), func(t *testing.T) {
+			s, path, o := tsNew(t)
 			op := TreeOutpointV1{Txid: tdTxid(8)}
-			key := tdUTXOKey(1, op.Txid, 0)
-			treeNativeSeed(t, s, 1, key, tc.value)
-			request.Inputs = []TreeResolvedInputV1{{Outpoint: op, Value: good}}
-			meta := TreeBlockV1{TxCount: 2, EventCount: 1}
-			request.Primitive.Coverage.BlockMeta = meta
-			request.Primitive.Source = tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
-				if err := sink.BeginV1(meta); err != nil {
-					return err
-				}
-				return sink.EventV1(TreeEventV1{Kind: 1, Outpoint: op, TxIndex: 1})
+			key, damaged := tdUTXOKey(1, op.Txid, 0), []byte{0xff}
+			request := trEventsV1(t, TreeEventV1{Kind: 1, Outpoint: op})
+			treeNativeSeed(t, s, 1, key, damaged)
+			var failed *Reader
+			var raw, outer error
+			evidence, fixtureErr := FixtureSelectedDamage(s, o, scenario, 1, key, func() {
+				outer = trReadV1(t, s, o, request, func(reader *Reader, account *OperationAccount, root [32]byte, err error) {
+					raw, failed = err, reader
+					trSemanticV1(t, request, reader, account, root, err)
+				})
 			})
-			trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
-				var engine *EngineError
-				if !errors.As(err, &engine) || engine.Class != EngineIntegrity || root != ([32]byte{}) || reader.usable() {
-					t.Fatalf("malformed D result %x/%v", root, err)
-				}
-				want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 1, Block: request.Primitive.Block, Height: 6, Primitive: 0, Position: 1, Rank: 1, KeyLength: 44, Kind: 2, OriginalImage: true, OriginalReference: true}
-				copy(want.Key[:], key)
-				if engine.TreeObservation == nil || *engine.TreeObservation != want {
-					t.Fatalf("malformed D observation %+v want %+v", engine.TreeObservation, want)
-				}
-			})
+			if scenario == SelectedDamageProbeOnly {
+				mustEnvironment(t, fixtureErr)
+			} else if fixtureErr == nil || fixtureErr.Error() != "selected damage fixture site was not reached exactly as armed" {
+				t.Fatalf("origin-before-get nonreach diagnostic %v", fixtureErr)
+			}
+			if evidence.OldGets != ([8]uint64{}) || evidence.NodeGets != 0 || evidence.Faults != 0 || any(outer) != any(raw) {
+				t.Fatalf("missing SPEND origin made a later request: %+v outer%v raw%v", evidence, outer, raw)
+			}
+			trNoWritesV1(t, evidence, o)
+			trBindingConsumedV1(t, s, failed, raw)
+			s = tsReopen(t, s, path)
+			equal, err := FixtureRawRowEqual(s, 1, key, damaged)
+			mustEnvironment(t, err)
+			if !equal {
+				t.Fatal("origin refusal changed raw parent row")
+			}
 		})
+	}
+}
+
+func trObtainedOrderV1(t *testing.T) {
+	a, b, c := TreeOutpointV1{}, TreeOutpointV1{Txid: [32]byte{0: 0x80}}, TreeOutpointV1{Txid: [32]byte{0: 0xc0}}
+	for _, late := range []bool{true, false} {
+		t.Run(fmt.Sprintf("late-leaf-%v", late), func(t *testing.T) {
+			s, path, o := tsNew(t)
+			request := trEventsV1(t, TreeEventV1{Kind: 1, Outpoint: a}, TreeEventV1{Kind: 1, Outpoint: b})
+			request.Inputs = []TreeOutpointV1{a, b}
+			entries := []testTreeEntry{trPremiseV1(a), trPremiseV1(c)}
+			top := trSeedNodesV1(t, s, o, request, entries...)
+			armed := testTreeNodeKey(1, top.depth, top.key)
+			if late {
+				armed = testTreeNodeKey(1, 288, entries[0].k)
+			}
+			var raw, outer error
+			var failed *Reader
+			evidence, fixtureErr := FixtureSelectedDamage(s, o, SelectedDamageGetEIO, 8, armed, func() {
+				outer = trReadV1(t, s, o, request, func(reader *Reader, account *OperationAccount, root [32]byte, err error) {
+					raw, failed = err, reader
+					if late {
+						trSemanticV1(t, request, reader, account, root, err)
+						return
+					}
+					treeNativeError(t, err, "update", "IO", 5, "error 5", nil)
+					if root != ([32]byte{}) || err.(*EngineError).TreeObservation != nil || reader.usable() || any(reader.failure) != any(err) {
+						t.Fatal("earlier branch EIO lost its raw no-result state")
+					}
+				})
+			})
+			faults := uint64(1)
+			if late {
+				faults = 0
+				if fixtureErr == nil || fixtureErr.Error() != "selected damage fixture site was not reached exactly as armed" {
+					t.Fatalf("obtained-before-leaf nonreach diagnostic %v", fixtureErr)
+				}
+			} else {
+				mustEnvironment(t, fixtureErr)
+			}
+			if evidence.OldGets != ([8]uint64{1, 0}) || evidence.NodeGets != 1 || evidence.Faults != faults || any(outer) != any(raw) {
+				t.Fatalf("obtained-order point requests %+v faults%d outer%v raw%v", evidence, faults, outer, raw)
+			}
+			trNoWritesV1(t, evidence, o)
+			trBindingConsumedV1(t, s, failed, raw)
+			s = tsReopen(t, s, path)
+			trPreservedNodesV1(t, s, request, entries)
+		})
+	}
+}
+
+func trPreservedNodesV1(t *testing.T, s *Store, request TreeRootReadV1, entries []testTreeEntry) {
+	t.Helper()
+	rows := map[string][]byte{}
+	top := testTreeBuild(1, entries, rows)
+	equal, err := FixtureRawRowEqual(s, 0, tsRootKey(1), trBindingV1(t, 1, request.Parent, entries...))
+	mustEnvironment(t, err)
+	if !equal {
+		t.Fatal("semantic refusal changed parent binding")
+	}
+	for _, entry := range entries {
+		digest := testTreeLeafPreimage(entry.k, entry.v)
+		equal, err := FixtureRawRowEqual(s, 8, testTreeNodeKey(1, 288, entry.k), digest[:])
+		mustEnvironment(t, err)
+		if !equal {
+			t.Fatal("semantic refusal changed parent leaf")
+		}
+	}
+	equal, err = FixtureRawRowEqual(s, 8, testTreeNodeKey(1, top.depth, top.key), rows[fmt.Sprintf("8:%x", testTreeNodeKey(1, top.depth, top.key))])
+	mustEnvironment(t, err)
+	if !equal {
+		t.Fatal("semantic refusal changed parent branch")
+	}
+}
+
+func trMixedV1(t *testing.T) {
+	for _, variant := range []string{"branch-short", "branch-identity", "semantic-and-digest", "digest-only", "binding-endpoint", "binding-database"} {
+		t.Run(variant, func(t *testing.T) {
+			s, _, o := tsNew(t)
+			a, b, c := TreeOutpointV1{}, TreeOutpointV1{Txid: [32]byte{0: 0x80}}, TreeOutpointV1{Txid: [32]byte{0: 0xc0}}
+			if variant == "digest-only" {
+				b = c
+			}
+			request := trEventsV1(t, TreeEventV1{Kind: 1, Outpoint: a}, TreeEventV1{Kind: 1, Outpoint: b})
+			request.Inputs = []TreeOutpointV1{a, b}
+			entries := []testTreeEntry{trPremiseV1(a), trPremiseV1(c)}
+			top := trSeedNodesV1(t, s, o, request, entries...)
+			binding, err := DecodeRootBindingV1(trBindingV1(t, 1, request.Parent, entries...))
+			mustEnvironment(t, err)
+			rows := map[string][]byte{}
+			_ = testTreeBuild(1, entries, rows)
+			key := testTreeNodeKey(1, top.depth, top.key)
+			branch, rank, kind := rows[fmt.Sprintf("8:%x", key)], uint8(8), TreeObservationMalformedV1
+			switch variant {
+			case "branch-short":
+				branch = branch[:139]
+			case "branch-identity":
+				copy(branch[70:108], branch[:38])
+				kind = TreeObservationIdentityMismatchV1
+			case "semantic-and-digest", "digest-only":
+				binding.RootDigest[0] ^= 1
+				kind = TreeObservationDigestMismatchV1
+			case "binding-endpoint", "binding-database":
+				if variant == "binding-endpoint" {
+					binding.Endpoint.BlockHash[0] ^= 1
+				} else {
+					binding.DatabaseID[0] ^= 1
+				}
+				id := TreeNodeIDV1{Kind: 1, Depth: 288, RoutingKey: entries[0].k}
+				binding.Top = TreeTopV1{Kind: 1, Node: &id}
+				rank, kind = 0, TreeObservationIdentityMismatchV1
+			}
+			treeNativeSeed(t, s, 8, key, branch)
+			encoded, err := binding.Encode()
+			mustEnvironment(t, err)
+			treeNativeSeed(t, s, 0, tsRootKey(1), encoded)
+			if rank == 0 {
+				key = tsRootKey(1)
+			}
+			evidence, fixtureErr := FixtureSelectedDamage(s, o, SelectedDamageProbeOnly, 0, nil, func() {
+				trReadV1(t, s, o, request, func(reader *Reader, account *OperationAccount, root [32]byte, err error) {
+					if variant == "semantic-and-digest" {
+						trSemanticV1(t, request, reader, account, root, err)
+						return
+					}
+					trMixedObservationV1(t, request, reader, root, err, rank, key, kind)
+				})
+			})
+			mustEnvironment(t, fixtureErr)
+			wantNodes := uint64(1)
+			if rank == 0 {
+				wantNodes = 0
+			}
+			if evidence.OldGets != ([8]uint64{1, 0}) || evidence.NodeGets != wantNodes || evidence.Faults != 0 {
+				t.Fatalf("mixed-error request timing %+v", evidence)
+			}
+			trNoWritesV1(t, evidence, o)
+		})
+	}
+}
+
+func trMixedObservationV1(t *testing.T, request TreeRootReadV1, reader *Reader, root [32]byte, err error, rank uint8, key []byte, kind TreeObservationKindV1) {
+	t.Helper()
+	var cause error
+	if kind == TreeObservationMalformedV1 || rank == 8 && kind == TreeObservationIdentityMismatchV1 {
+		cause = errSchema
+	}
+	treeNativeIntegrity(t, err, operationUpdate, cause)
+	engine := err.(*EngineError)
+	want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 1, Block: request.Primitive.Block, Height: 6, Primitive: 0, Position: 1, Rank: rank, KeyLength: uint8(len(key)), Kind: kind, OriginalImage: true, OriginalReference: true}
+	copy(want.Key[:], key)
+	if engine.TreeObservation == nil || *engine.TreeObservation != want || root != ([32]byte{}) || reader.usable() || any(reader.failure) != any(err) {
+		t.Fatalf("mixed-error exact observation %+v want%+v root%x", engine.TreeObservation, want, root)
 	}
 }
 
