@@ -5,11 +5,14 @@ package mdbx
 import (
 	"bytes"
 	"crypto/sha3"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"testing"
 	"unsafe"
 )
@@ -50,7 +53,11 @@ func trReadV1(t *testing.T, s *Store, o *OperationReservationOwner, request Tree
 	t.Helper()
 	mustEnvironment(t, o.WithOperation(TreeOperation, func(account *OperationAccount) error {
 		viewErr = s.View(func(reader *Reader) error {
+			before := append([]TreeOutpointV1(nil), request.Inputs...)
 			root, err := reader.DeriveTreeRootV1(account, request)
+			if !reflect.DeepEqual(append([]TreeOutpointV1(nil), request.Inputs...), before) {
+				t.Fatal("root derivation changed borrowed input keys")
+			}
 			use(reader, account, root, err)
 			return err
 		})
@@ -86,6 +93,8 @@ func trBindingV1(t *testing.T, generation uint64, endpoint TreeEndpointV1, entri
 
 func trBindingIDV1(t *testing.T, database [32]byte, generation uint64, endpoint TreeEndpointV1, entries ...testTreeEntry) []byte {
 	t.Helper()
+	entries = append([]testTreeEntry(nil), entries...)
+	sort.Slice(entries, func(i, j int) bool { return bytes.Compare(entries[i].k[:], entries[j].k[:]) < 0 })
 	var top *testTreeNode
 	if len(entries) != 0 {
 		root := testTreeBuild(generation, entries, map[string][]byte{})
@@ -137,6 +146,11 @@ func TestTreeRootReadV1(t *testing.T) {
 	t.Run("closed-input-domain", trInvalidV1)
 	t.Run("single-reservation-and-width", trBoundV1)
 	t.Run("trusted-unchanged-subtree", trTrustedV1)
+	t.Run("top-premises", trTopPremisesV1)
+	t.Run("child-premises", trChildPremisesV1)
+	t.Run("created-identities", trCreatedIdentitiesV1)
+	t.Run("matching-premises", trMatchingPremisesV1)
+	t.Run("formed-reinsertion", trReinsertV1)
 }
 
 func trTrustedV1(t *testing.T) {
@@ -165,7 +179,7 @@ func trOriginalV1(t *testing.T) {
 			op := TreeOutpointV1{Txid: tdTxid(9), Vout: 3}
 			key := tdUTXOKey(1, op.Txid, op.Vout)
 			value := tdFormed(tdFrame(7, 0, []byte{4}), 5, 1)
-			request.Inputs = []TreeResolvedInputV1{{Outpoint: op, Value: bytes.Clone(value)}}
+			request.Inputs = []TreeOutpointV1{op}
 			meta := TreeBlockV1{TxCount: 2, EventCount: 1}
 			request.Primitive.Coverage.BlockMeta = meta
 			request.Primitive.Source = tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
@@ -175,7 +189,7 @@ func trOriginalV1(t *testing.T) {
 				return sink.EventV1(TreeEventV1{Kind: 1, Outpoint: op, TxIndex: 1})
 			})
 			if variant == "absent-D" {
-				trSeedV1(t, s, o, 0, tsRootKey(1), trBindingV1(t, 1, request.Parent, trEntryV1(key, value)))
+				trSeedNodesV1(t, s, o, request, trEntryV1(key, value))
 			} else {
 				seed, _, _ := trRequestV1(t, 5)
 				frame := tdFrame(7, 0, []byte{4})
@@ -193,24 +207,27 @@ func trOriginalV1(t *testing.T) {
 			case "missing-R":
 				request.Inputs = nil
 			case "value":
-				request.Inputs[0].Value[0]++
+				value[0]++
 			case "type":
-				request.Inputs[0].Value[8]++
+				value[8]++
 			case "data":
-				request.Inputs[0].Value[11]++
+				value[11]++
 			case "height":
-				request.Inputs[0].Value[len(value)-9]++
+				value[len(value)-9]++
 			case "coinbase":
-				request.Inputs[0].Value[len(value)-1] = 0
+				value[len(value)-1] = 0
+			}
+			if variant != "absent-D" && variant != "missing-R" {
+				trSeedV1(t, s, o, 1, key, value)
 			}
 			before := trInputSnapshotV1(request.Inputs)
 			trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
 				if !reflect.DeepEqual(request.Inputs, before) {
 					t.Fatal("original comparison changed borrowed inputs")
 				}
-				if variant == "equal" {
+				if variant != "missing-R" {
 					mustEnvironment(t, err)
-					if root != sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")) {
+					if root != sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")) || !reader.usable() || reader.failure != nil {
 						t.Fatal("last original SPEND did not produce empty root")
 					}
 					return
@@ -225,19 +242,19 @@ func trOriginalV1(t *testing.T) {
 	}
 }
 
-func trGroupedRequestV1(t *testing.T, height uint64, paired bool) (TreeRootReadV1, []TreeEventV1, []TreeResolvedInputV1) {
+func trGroupedRequestV1(t *testing.T, height uint64, paired bool) (TreeRootReadV1, []TreeEventV1, []TreeOutpointV1) {
 	t.Helper()
 	request, _, _ := trRequestV1(t, height)
 	ops := []TreeOutpointV1{{Txid: [32]byte{31: 255}, Vout: 255}, {Txid: [32]byte{31: 255}, Vout: 256}, {Txid: [32]byte{0: 1}}}
 	body := initial148NativeLiteral(t)
 	var events []TreeEventV1
-	inputs := make([]TreeResolvedInputV1, len(ops))
+	inputs := make([]TreeOutpointV1, len(ops))
 	// Increasing output indexes, but key order differs from arrival order.
 	for _, i := range []int{2, 0, 1} {
 		frame := tdFrame(7, 0, []byte{4})
 		events = append(events, TreeEventV1{Kind: 2, Outpoint: ops[i], FrameOffset: uint64(len(body)), FrameLength: uint32(len(frame))})
 		body = append(body, frame...)
-		inputs[i] = TreeResolvedInputV1{Outpoint: ops[i], Value: tdFormed(frame, height, 1)}
+		inputs[i] = ops[i]
 	}
 	if paired {
 		for i, op := range ops {
@@ -299,6 +316,322 @@ func trOriginalGroupsV1(t *testing.T) {
 				var engine *EngineError
 				if root != ([32]byte{}) || !errors.As(err, &engine) || engine.TreeObservation != nil || reader.usable() || any(reader.failure) != any(err) {
 					t.Fatalf("grouped missing R root%x err%v active%v", root, err, reader.usable())
+				}
+			})
+		})
+	}
+}
+
+// trEventsV1 supplies actual ordered events and complete valid CREATE frames.
+func trEventsV1(t *testing.T, events ...TreeEventV1) TreeRootReadV1 {
+	t.Helper()
+	request, _, _ := trRequestV1(t, 6)
+	body := initial148NativeLiteral(t)
+	for i := range events {
+		events[i].TxIndex = uint32(i + 1)
+		if events[i].Kind == 2 {
+			frame := tdFrame(7, 0, nil)
+			events[i].FrameOffset, events[i].FrameLength = uint64(len(body)), uint32(len(frame))
+			body = append(body, frame...)
+		}
+	}
+	meta := TreeBlockV1{TxCount: uint32(len(events) + 1), EventCount: uint32(len(events))}
+	request.Primitive.Coverage.CurrentBody, request.Primitive.Coverage.BlockMeta = body, meta
+	request.Primitive.Source = tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+		if err := sink.BeginV1(meta); err != nil {
+			return err
+		}
+		for _, event := range events {
+			if err := sink.EventV1(event); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return request
+}
+
+func trPremiseV1(op TreeOutpointV1) testTreeEntry {
+	return trEntryV1(tdUTXOKey(1, op.Txid, op.Vout), tdFormed(tdFrame(7, 0, nil), 5, 0))
+}
+
+// trNodeSourceV1 recreates the supplied formed values through admitted CREATEs.
+func trNodeSourceV1(t *testing.T, entries []testTreeEntry) TreeRootReadV1 {
+	t.Helper()
+	height := binary.LittleEndian.Uint64(entries[0].v[len(entries[0].v)-9:])
+	var frames []byte
+	var events []TreeEventV1
+	for i, entry := range entries {
+		n := len(entry.v) - 9
+		if binary.LittleEndian.Uint64(entry.v[n:]) != height || entry.v[n+8] > 1 {
+			t.Fatal("node fixture requires one height and canonical coinbase tags")
+		}
+		txIndex := uint32(i + 1)
+		if entry.v[n+8] == 1 {
+			txIndex = 0
+		}
+		op := TreeOutpointV1{Txid: [32]byte(entry.k[:32]), Vout: binary.BigEndian.Uint32(entry.k[32:])}
+		events = append(events, TreeEventV1{Kind: 2, Outpoint: op, TxIndex: txIndex, FrameOffset: uint64(148 + len(frames)), FrameLength: uint32(n)})
+		frames = append(frames, entry.v[:n]...)
+	}
+	meta := TreeBlockV1{TxCount: uint32(len(entries) + 1), EventCount: uint32(len(entries))}
+	op := tsCoveredDelta(t, height, 0x47, meta, events, frames)
+	return TreeRootReadV1{Primitive: op.Primitives[0]}
+}
+
+// trSeedNodesV1 uses the writer for nodes, then removes its logical rows.
+func trSeedNodesV1(t *testing.T, s *Store, o *OperationReservationOwner, request TreeRootReadV1, entries ...testTreeEntry) testTreeNode {
+	t.Helper()
+	entries = append([]testTreeEntry(nil), entries...)
+	sort.Slice(entries, func(i, j int) bool { return bytes.Compare(entries[i].k[:], entries[j].k[:]) < 0 })
+	rows := map[string][]byte{}
+	top := testTreeBuild(1, entries, rows)
+	trPopulateV1(t, s, o, trNodeSourceV1(t, entries))
+	var mutations []Mutation
+	for _, entry := range entries {
+		key := append(binary.BigEndian.AppendUint64(nil, 1), entry.k[:]...)
+		tsRead(t, s, TreeSchemaV1DBIs()[1], key, entry.v)
+		mutations = append(mutations, Mutation{DBI: TreeSchemaV1DBIs()[1], Key: key, BeforePresent: true, AfterKind: 1})
+	}
+	result := tsRun(t, s, o, TreeOperation, TreeOperationV1{Pair: TreePairV1{Mutations: mutations}})
+	result.tuple(t, 2, 3, -1)
+	mustEnvironment(t, result.err)
+	for _, mutation := range mutations {
+		tsRead(t, s, mutation.DBI, mutation.Key, nil)
+	}
+	trSeedV1(t, s, o, 0, tsRootKey(1), trBindingV1(t, 1, request.Parent, entries...))
+	keys := make([]string, 0, len(rows))
+	for key := range rows {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		raw, err := hex.DecodeString(key[2:])
+		mustEnvironment(t, err)
+		tsRead(t, s, TreeSchemaV1DBIs()[8], raw, rows[key])
+	}
+	return top
+}
+
+func trSemanticV1(t *testing.T, request TreeRootReadV1, reader *Reader, account *OperationAccount, root [32]byte, err error) {
+	t.Helper()
+	trSemanticAssertionV1(t, request, reader, account, root, err)()
+}
+
+// Defer tuple assertions when native counters must also diagnose a mutant.
+func trSemanticAssertionV1(t *testing.T, request TreeRootReadV1, reader *Reader, account *OperationAccount, root [32]byte, err error) func() {
+	t.Helper()
+	usable, failure := reader.usable(), reader.failure
+	nextRoot, next := reader.DeriveTreeRootV1(account, request)
+	first := reader.failure
+	return func() {
+		t.Helper()
+		treeNativeError(t, err, "update", "Integrity", -30796, "invalid tree native representation", nil)
+		engine, _ := directTestEngineError(err)
+		if engine.TreeObservation != nil || root != ([32]byte{}) || usable || any(failure) != any(err) {
+			t.Fatalf("semantic integrity/no-result root%x error%v active%v", root, err, usable)
+		}
+		treeNativeError(t, next, "get", "InvalidInput", 22, "Reader is not active", nil)
+		if nextRoot != ([32]byte{}) || any(first) != any(err) {
+			t.Fatal("semantic refusal lost the first cause or allowed a sibling")
+		}
+	}
+}
+
+func trTopPremisesV1(t *testing.T) {
+	a, b, pad := TreeOutpointV1{Txid: [32]byte{0: 0x10}}, TreeOutpointV1{Txid: [32]byte{0: 0x70}}, TreeOutpointV1{Txid: [32]byte{0: 0xe0}}
+	for _, variant := range []string{"empty-digest-empty-top", "empty-digest-nonempty-top", "empty-top-nonempty-digest", "other-leaf", "outside-prefix", "no-group-last", "no-group-first"} {
+		t.Run(variant, func(t *testing.T) {
+			s, _, o := tsNew(t)
+			request := trEventsV1(t, TreeEventV1{Kind: 1, Outpoint: a}, TreeEventV1{Kind: 2, Outpoint: pad})
+			request.Inputs = []TreeOutpointV1{a, b}
+			if variant == "empty-digest-empty-top" || variant == "empty-digest-nonempty-top" || variant == "empty-top-nonempty-digest" {
+				request.Inputs = []TreeOutpointV1{a}
+			}
+			entries := []testTreeEntry{trPremiseV1(a)}
+			switch variant {
+			case "other-leaf":
+				entries = []testTreeEntry{trPremiseV1(b)}
+			case "outside-prefix":
+				other := a
+				other.Txid[0] = 0x18
+				entries = append(entries, trPremiseV1(other))
+			case "no-group-first":
+				request.Inputs = []TreeOutpointV1{{Txid: [32]byte{0: 0x05}}, a}
+			}
+			trSeedNodesV1(t, s, o, request, entries...)
+			binding, err := DecodeRootBindingV1(trBindingV1(t, 1, request.Parent, entries...))
+			mustEnvironment(t, err)
+			if variant == "empty-digest-empty-top" || variant == "empty-digest-nonempty-top" {
+				binding.RootDigest = sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00"))
+			}
+			if variant == "empty-digest-empty-top" || variant == "empty-top-nonempty-digest" {
+				binding.Top = TreeTopV1{Kind: 0}
+			}
+			encoded, err := binding.Encode()
+			mustEnvironment(t, err)
+			trSeedV1(t, s, o, 0, tsRootKey(1), encoded)
+			trReadV1(t, s, o, request, func(r *Reader, account *OperationAccount, root [32]byte, err error) {
+				trSemanticV1(t, request, r, account, root, err)
+			})
+		})
+	}
+}
+
+func trChildPremisesV1(t *testing.T) {
+	for _, variant := range []string{"zero-leaf", "one-leaf", "zero-prefix", "one-prefix", "first-fits-last-misses", "first-misses-last-fits"} {
+		t.Run(variant, func(t *testing.T) {
+			s, _, o := tsNew(t)
+			dirty := TreeOutpointV1{Txid: [32]byte{0: 0x80}}
+			missing, child := TreeOutpointV1{}, TreeOutpointV1{Txid: [32]byte{0: 0x40}}
+			pad := TreeOutpointV1{Txid: [32]byte{0: 0x60}}
+			if variant == "one-leaf" || variant == "one-prefix" {
+				dirty, missing, child = TreeOutpointV1{}, dirty, TreeOutpointV1{Txid: [32]byte{0: 0xc0}}
+			}
+			inputs := []TreeOutpointV1{missing, dirty}
+			entries := []testTreeEntry{trPremiseV1(dirty), trPremiseV1(child)}
+			events := []TreeEventV1{{Kind: 1, Outpoint: dirty}, {Kind: 2, Outpoint: pad}}
+			if variant == "zero-prefix" || variant == "one-prefix" {
+				other := child
+				other.Txid[0]++
+				entries = append(entries, trPremiseV1(other))
+			}
+			if variant == "first-fits-last-misses" || variant == "first-misses-last-fits" {
+				first, last := TreeOutpointV1{Txid: [32]byte{0: 0x10}}, TreeOutpointV1{Txid: [32]byte{0: 0x20}}
+				child = first
+				if variant == "first-misses-last-fits" {
+					child = last
+				}
+				inputs = []TreeOutpointV1{first, last, dirty}
+				entries = []testTreeEntry{trPremiseV1(child), trPremiseV1(dirty)}
+				events = append(events, TreeEventV1{Kind: 2, Outpoint: TreeOutpointV1{Txid: [32]byte{0: 0xe0}}})
+			}
+			sort.Slice(inputs, func(i, j int) bool {
+				return bytes.Compare(tdUTXOKey(1, inputs[i].Txid, inputs[i].Vout), tdUTXOKey(1, inputs[j].Txid, inputs[j].Vout)) < 0
+			})
+			request := trEventsV1(t, events...)
+			request.Inputs = inputs
+			trSeedNodesV1(t, s, o, request, entries...)
+			trReadV1(t, s, o, request, func(r *Reader, account *OperationAccount, root [32]byte, err error) {
+				trSemanticV1(t, request, r, account, root, err)
+			})
+		})
+	}
+}
+
+func trCreatedIdentitiesV1(t *testing.T) {
+	for _, place := range []string{"top", "zero-child", "one-child"} {
+		for _, length := range []int{1, 2, 4} {
+			t.Run(fmt.Sprintf("%s/events%d", place, length), func(t *testing.T) {
+				s, _, o := tsNew(t)
+				created, dirty := TreeOutpointV1{Txid: [32]byte{0: 0xc0}}, TreeOutpointV1{}
+				if place == "zero-child" {
+					created, dirty = TreeOutpointV1{Txid: [32]byte{0: 0x40}}, TreeOutpointV1{Txid: [32]byte{0: 0x80}}
+				}
+				var events []TreeEventV1
+				var inputs []TreeOutpointV1
+				entries := []testTreeEntry{trPremiseV1(created)}
+				if place != "top" {
+					events = append(events, TreeEventV1{Kind: 1, Outpoint: dirty})
+					inputs = []TreeOutpointV1{dirty}
+					entries = append(entries, trPremiseV1(dirty))
+				}
+				for i := range length {
+					events = append(events, TreeEventV1{Kind: TreeEventKindV1(2 - i%2), Outpoint: created})
+				}
+				request := trEventsV1(t, events...)
+				request.Inputs = inputs
+				trSeedNodesV1(t, s, o, request, entries...)
+				trReadV1(t, s, o, request, func(r *Reader, account *OperationAccount, root [32]byte, err error) {
+					trSemanticV1(t, request, r, account, root, err)
+				})
+			})
+		}
+	}
+}
+
+func trMatchingPremisesV1(t *testing.T) {
+	for _, variant := range []string{"depth0-both", "depth287-both", "vout-boundaries", "raw-txid-boundaries", "zero-side", "one-side", "empty-P", "no-group-many", "opaque-canceled"} {
+		t.Run(variant, func(t *testing.T) {
+			s, _, o := tsNew(t)
+			ops := []TreeOutpointV1{{}, {Txid: [32]byte{0: 0x80}}}
+			switch variant {
+			case "depth287-both":
+				ops[1] = TreeOutpointV1{Vout: 1}
+			case "vout-boundaries":
+				ops = []TreeOutpointV1{{Vout: 255}, {Vout: 256}, {Vout: 4294967295}}
+			case "raw-txid-boundaries":
+				ops[1].Txid = [32]byte{0: 255, 31: 255}
+				var maximum [32]byte
+				for i := range maximum {
+					maximum[i] = 255
+				}
+				ops = append(ops, TreeOutpointV1{Txid: maximum})
+			}
+			var entries, final []testTreeEntry
+			var events []TreeEventV1
+			for _, op := range ops {
+				entries = append(entries, trPremiseV1(op))
+				events = append(events, TreeEventV1{Kind: 1, Outpoint: op})
+			}
+			inputs := append([]TreeOutpointV1(nil), ops...)
+			if variant == "zero-side" || variant == "one-side" {
+				i := 0
+				if variant == "one-side" {
+					i = 1
+				}
+				inputs, events = inputs[i:i+1], events[i:i+1]
+				final = append(final, entries[1-i])
+			}
+			if variant == "no-group-many" || variant == "opaque-canceled" {
+				pad := TreeOutpointV1{Txid: [32]byte{0: 0xc0}}
+				events = []TreeEventV1{{Kind: 2, Outpoint: pad}, {Kind: 1, Outpoint: pad}}
+				final = append(final, entries...)
+				if variant == "opaque-canceled" {
+					inputs = nil
+					events[0].Outpoint, events[1].Outpoint = ops[0], ops[0]
+				}
+			}
+			if variant == "empty-P" {
+				fresh := TreeOutpointV1{Txid: [32]byte{0: 0x40}}
+				inputs, events = nil, []TreeEventV1{{Kind: 2, Outpoint: fresh}}
+				final = append(append(final, entries[0]), trEntryV1(tdUTXOKey(1, fresh.Txid, fresh.Vout), tdFormed(tdFrame(7, 0, nil), 6, 0)), entries[1])
+			}
+			request := trEventsV1(t, events...)
+			request.Inputs = inputs
+			trSeedNodesV1(t, s, o, request, entries...)
+			want := sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00"))
+			if len(final) != 0 {
+				want = testTreeBuild(1, final, map[string][]byte{}).digest
+			}
+			trReadV1(t, s, o, request, func(r *Reader, _ *OperationAccount, root [32]byte, err error) {
+				mustEnvironment(t, err)
+				if root != want || !r.usable() || r.failure != nil {
+					t.Fatalf("matching premise root%x want%x error%v", root, want, err)
+				}
+			})
+		})
+	}
+}
+
+func trReinsertV1(t *testing.T) {
+	for _, equal := range []bool{false, true} {
+		t.Run(fmt.Sprintf("equal-%v", equal), func(t *testing.T) {
+			s, _, o := tsNew(t)
+			op := TreeOutpointV1{Txid: tdTxid(9), Vout: 3}
+			request := trEventsV1(t, TreeEventV1{Kind: 1, Outpoint: op}, TreeEventV1{Kind: 2, Outpoint: op})
+			request.Inputs = []TreeOutpointV1{op}
+			final := trEntryV1(tdUTXOKey(1, op.Txid, op.Vout), tdFormed(tdFrame(7, 0, nil), 6, 0))
+			old := trPremiseV1(op)
+			if equal {
+				old = final
+			}
+			trSeedNodesV1(t, s, o, request, old)
+			want := testTreeBuild(1, []testTreeEntry{final}, map[string][]byte{}).digest
+			trReadV1(t, s, o, request, func(r *Reader, _ *OperationAccount, root [32]byte, err error) {
+				mustEnvironment(t, err)
+				if root != want || !r.usable() || r.failure != nil {
+					t.Fatalf("formed final value root%x want%x", root, want)
 				}
 			})
 		})
@@ -398,7 +731,7 @@ func trAdmissionV1(t *testing.T) {
 }
 
 func trInputsV1(t *testing.T) {
-	for _, variant := range []string{"descending", "duplicate-equal", "duplicate-different", "malformed"} {
+	for _, variant := range []string{"descending", "duplicate"} {
 		t.Run(variant, func(t *testing.T) {
 			s, _, o := tsNew(t)
 			request, _, inputs := trGroupedRequestV1(t, 6, false)
@@ -407,14 +740,8 @@ func trInputsV1(t *testing.T) {
 			switch variant {
 			case "descending":
 				inputs[0], inputs[1] = inputs[1], inputs[0]
-			case "duplicate-equal", "duplicate-different":
-				inputs[1].Outpoint = inputs[0].Outpoint
-				if variant == "duplicate-different" {
-					inputs[1].Value = bytes.Clone(inputs[0].Value)
-					inputs[1].Value[0]++
-				}
-			case "malformed":
-				inputs[1].Value = []byte{1}
+			case "duplicate":
+				inputs[1] = inputs[0]
 			}
 			before := trInputSnapshotV1(request.Inputs)
 			request.Primitive.Source = trCountingSourceV1(request.Primitive.Source, t)
@@ -435,21 +762,17 @@ func trInputsV1(t *testing.T) {
 	}
 }
 
-func trInputSnapshotV1(inputs []TreeResolvedInputV1) []TreeResolvedInputV1 {
-	copyInputs := append([]TreeResolvedInputV1(nil), inputs...)
-	for i := range copyInputs {
-		copyInputs[i].Value = bytes.Clone(copyInputs[i].Value)
-	}
-	return copyInputs
+func trInputSnapshotV1(inputs []TreeOutpointV1) []TreeOutpointV1 {
+	return append([]TreeOutpointV1(nil), inputs...)
 }
 
 func BenchmarkTreeRootInputsV1(b *testing.B) {
 	for _, count := range []int{64, 512, 4096} {
-		inputs := make([]TreeResolvedInputV1, count)
+		inputs := make([]TreeOutpointV1, count)
 		keys := make([][]byte, count)
 		value := tdFormed(tdFrame(7, 0, []byte{4}), 5, 1)
 		for i := range inputs {
-			inputs[i] = TreeResolvedInputV1{Outpoint: TreeOutpointV1{Txid: tdTxid(9), Vout: uint32(i)}, Value: value}
+			inputs[i] = TreeOutpointV1{Txid: tdTxid(9), Vout: uint32(i)}
 			keys[i] = tdUTXOKey(1, tdTxid(9), uint32(i))
 		}
 		b.Run(fmt.Sprintf("validate-%d", count), func(b *testing.B) {
@@ -474,8 +797,8 @@ func BenchmarkTreeRootInputsV1(b *testing.B) {
 	}
 }
 
-// Measure the real lookup owner without native I/O masking descriptor-search
-// cost. All groups are CREATEs and the request has no original inputs.
+// Measure CREATE-first premise admission without native I/O. Complete CREATE
+// groups remain in the setup; SPEND origin now belongs to spendV1.
 func BenchmarkTreeRootOriginalV1(b *testing.B) {
 	for _, count := range []int{64, 512, 4096} {
 		b.Run(fmt.Sprintf("events-%d", count), func(b *testing.B) {
@@ -506,7 +829,7 @@ func BenchmarkTreeRootOriginalV1(b *testing.B) {
 }
 
 func trInvalidV1(t *testing.T) {
-	variants := []string{"generation", "database", "coverage-generation", "coverage-block", "coverage-height", "header", "body-kind", "body-empty", "direction", "kind", "undo", "endpoint", "parent-height", "parent-kind", "parent-work", "meta-tx", "inputs-duplicate", "inputs-width", "inputs-count", "nil-source"}
+	variants := []string{"generation", "database", "coverage-generation", "coverage-block", "coverage-height", "header", "body-kind", "body-empty", "direction", "kind", "undo", "endpoint", "parent-height", "parent-kind", "parent-work", "meta-tx", "inputs-duplicate", "inputs-count", "inputs-genesis", "nil-source"}
 	for _, variant := range variants {
 		t.Run(variant, func(t *testing.T) {
 			s, _, o := tsNew(t)
@@ -547,13 +870,13 @@ func trInvalidV1(t *testing.T) {
 				c.BlockMeta.TxCount = 0
 			case "inputs-duplicate":
 				c.BlockMeta.EventCount = 2
-				v := tdFormed(tdFrame(1, 0, nil), 1, 0)
-				request.Inputs = []TreeResolvedInputV1{{Value: v}, {Value: v}}
-			case "inputs-width":
-				request.Inputs = []TreeResolvedInputV1{{Value: []byte{1}}}
+				request.Inputs = []TreeOutpointV1{{}, {}}
 			case "inputs-count":
-				v := tdFormed(tdFrame(1, 0, nil), 1, 0)
-				request.Inputs = []TreeResolvedInputV1{{Value: v}, {Outpoint: TreeOutpointV1{Vout: 1}, Value: v}}
+				request.Inputs = []TreeOutpointV1{{}, {Vout: 1}}
+			case "inputs-genesis":
+				p.Height, p.Endpoint.Height, c.Height = 0, 0, 0
+				request.Parent = TreeEndpointV1{}
+				request.Inputs = []TreeOutpointV1{{}}
 			case "nil-source":
 				p.Source = nil
 			}
@@ -579,7 +902,7 @@ func trCountingSourceV1(source TreeSourceV1, t *testing.T) TreeSourceV1 {
 }
 
 func trBoundV1(t *testing.T) {
-	if unsafe.Sizeof(TreeResolvedInputV1{}) > 64 {
+	if unsafe.Sizeof(TreeOutpointV1{}) > 64 {
 		t.Fatal("input descriptor exceeds captured allowance")
 	}
 	s, _, o := tsNew(t)
@@ -680,12 +1003,15 @@ func TestTreeRootReadGenesisV1(t *testing.T) {
 	// nonempty height-six image conflicts with the empty genesis parent.
 	stored, _, _ := trRequestV1(t, 6)
 	trPopulateV1(t, s, o, stored)
-	trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
-		mustEnvironment(t, err)
-		if root != trWantRootV1(t, frame, 0) || root == sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")) || !reader.usable() {
-			t.Fatalf("genesis CREATE result %x", root)
-		}
-	})
+	for _, inputs := range [][]TreeOutpointV1{nil, {}} {
+		request.Inputs = inputs
+		trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
+			mustEnvironment(t, err)
+			if root != trWantRootV1(t, frame, 0) || root == sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")) || !reader.usable() {
+				t.Fatalf("genesis CREATE result %x", root)
+			}
+		})
+	}
 }
 
 func trPopulateV1(t *testing.T, s *Store, o *OperationReservationOwner, request TreeRootReadV1) {

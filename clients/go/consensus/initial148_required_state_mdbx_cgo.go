@@ -39,7 +39,7 @@ type initial148RequiredScopeV1 struct {
 	account        *mdbx.OperationAccount
 	request        initial148RequiredRequestV1
 	facts          []initial148RequiredFactV1
-	inputs         []mdbx.TreeResolvedInputV1
+	inputs         []mdbx.TreeOutpointV1
 	counters       logicalStateCounters
 	first          error
 	calls          uint64
@@ -62,7 +62,7 @@ func withInitial148RequiredStateV1(reader *mdbx.Reader, account *mdbx.OperationA
 	return account.WithReservation(69656+196824*events, func() error {
 		scope := initial148RequiredScopeV1{
 			reader: reader, account: account, request: request, active: true,
-			facts: make([]initial148RequiredFactV1, 0, capacity), inputs: make([]mdbx.TreeResolvedInputV1, 0, capacity),
+			facts: make([]initial148RequiredFactV1, 0, capacity), inputs: make([]mdbx.TreeOutpointV1, 0, capacity),
 		}
 		defer scope.expireV1()
 		err := use(&scope, scope.deriveV1)
@@ -221,7 +221,7 @@ func (s *initial148RequiredScopeV1) rememberV1(op Outpoint, value []byte, presen
 	}
 	s.facts = append(s.facts, initial148RequiredFactV1{outpoint: op, original: value, length: 36 + uint64(len(value)), present: present})
 	if present {
-		s.inputs = append(s.inputs, mdbx.TreeResolvedInputV1{Outpoint: mdbx.TreeOutpointV1{Txid: op.Txid, Vout: op.Vout}, Value: value})
+		s.inputs = append(s.inputs, mdbx.TreeOutpointV1{Txid: op.Txid, Vout: op.Vout})
 	}
 	return s.residualV1()
 }
@@ -292,7 +292,7 @@ func (s *initial148RequiredScopeV1) deriveV1() initial148RootReadOutcomeV1 {
 		return initial148RequiredOutcomeV1(s.failV1(localLogicalStateFailure("invalid required state request")))
 	}
 	sort.Slice(s.inputs, func(i, j int) bool {
-		return logicalOutpointLess(Outpoint(s.inputs[i].Outpoint), Outpoint(s.inputs[j].Outpoint))
+		return logicalOutpointLess(Outpoint(s.inputs[i]), Outpoint(s.inputs[j]))
 	})
 	root, err := s.reader.DeriveTreeRootV1(s.account, mdbx.TreeRootReadV1{Primitive: s.request.Primitive, Parent: s.request.Parent, Inputs: s.inputs})
 	if err != nil {
