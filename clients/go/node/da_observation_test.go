@@ -486,11 +486,11 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The cgo-only dormant selected-side qualifier, retention and rolling files are the three default files a no-cgo
-	// build does not select.
-	wantGoFiles := 67
+	// The cgo-only dormant selected-side qualifier, retention, rolling and header-candidate inventory files are the four
+	// default files a no-cgo build does not select.
+	wantGoFiles := 68
 	if build.Default.CgoEnabled {
-		wantGoFiles = 70
+		wantGoFiles = 72
 	}
 	if len(defaultPkg.GoFiles) != wantGoFiles || slices.Contains(defaultPkg.GoFiles, tagged) || !slices.Contains(defaultPkg.IgnoredGoFiles, tagged) {
 		t.Fatalf("default build selects %d files, tagged file selected=%v", len(defaultPkg.GoFiles), slices.Contains(defaultPkg.GoFiles, tagged))
@@ -555,7 +555,7 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 					}
 				}
 			}
-			if dir == "." && tags == nil && (len(pkg.GoFiles) != 67 || len(pkg.CgoFiles) != 0 || slices.Contains(pkg.GoFiles, tagged) || !slices.Contains(pkg.IgnoredGoFiles, tagged)) {
+			if dir == "." && tags == nil && (len(pkg.GoFiles) != 68 || len(pkg.CgoFiles) != 0 || slices.Contains(pkg.GoFiles, tagged) || !slices.Contains(pkg.IgnoredGoFiles, tagged)) {
 				t.Fatalf("no-cgo node selects Go:%d Cgo:%d, observer selected=%v", len(pkg.GoFiles), len(pkg.CgoFiles), slices.Contains(pkg.GoFiles, tagged))
 			}
 		}
