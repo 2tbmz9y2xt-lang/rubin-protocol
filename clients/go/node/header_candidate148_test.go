@@ -229,7 +229,8 @@ func TestHeaderCandidate148Classification(t *testing.T) {
 			return prep(o, hcTr(o, nil, r1.Hash, r0.Hash)), nil
 		}},
 		{"row5 too long", HeaderCandidateInvalid148V1, func(t *testing.T, o *HeaderCandidateOwner148V1, r0, r1 HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
-			return prep(o, hcTr(o, make([]HeaderCandidateRecord148V1, 8), r0.Hash)), nil
+			// Eight otherwise valid additions plus one Retired exceed MaxTransitionHeaders 8.
+			return prep(o, hcTr(o, hcChain(t, r1, 8), r0.Hash)), nil
 		}},
 		{"row5 establish zero source", HeaderCandidateInvalid148V1, func(t *testing.T, _ *HeaderCandidateOwner148V1, _, _ HeaderCandidateRecord148V1) (HeaderCandidateOutcome148V1, func()) {
 			_, out := hcNew(t, hcLim()).EstablishV1([32]byte{}, nil)
@@ -886,6 +887,25 @@ func TestHeaderCandidate148Aliasing(t *testing.T) {
 	}); a != 0 {
 		t.Fatalf("allocs %v", a)
 	}
+	// R3 Retired term: Additions within the limit, Additions plus Retired over it.
+	overRetired := hcTr(o, hcChain(t, r1, 4), [32]byte{0x61}, [32]byte{0x62}, [32]byte{0x63}, [32]byte{0x64}, [32]byte{0x65})
+	if a := testing.AllocsPerRun(50, func() {
+		if h, out := o.PrepareV1(overRetired); out != HeaderCandidateInvalid148V1 || h != nil {
+			t.Fatalf("over-length Retired: %d", out)
+		}
+	}); a != 0 {
+		t.Fatalf("Retired allocs %v", a)
+	}
+}
+
+// hcChain returns n valid records, each the child of the previous one, starting under parent.
+func hcChain(t testing.TB, parent HeaderCandidateRecord148V1, n int) []HeaderCandidateRecord148V1 {
+	out := make([]HeaderCandidateRecord148V1, 0, n)
+	for i := 0; i < n; i++ {
+		parent = hcMk(t, parent.Hash, parent.Height+1, parent.Work.Int64()+1, uint64(500+i))
+		out = append(out, parent)
+	}
+	return out
 }
 
 func hcWithin(t *testing.T, what string, f func()) {
