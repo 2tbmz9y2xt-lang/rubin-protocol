@@ -623,9 +623,35 @@ func TestHeaderCandidate148Limits(t *testing.T) {
 }
 
 func TestHeaderCandidate148Receipts(t *testing.T) {
+	// D7 EstablishV1: Changed true, Version 2, Added the records' hashes in input order, Retired empty.
+	o := hcNew(t, hcLim())
+	e0 := hcExt(hcMk(t, hcRoot, 10, 100, 1))
+	e1 := hcMk(t, e0.Hash, 11, 110, 2)
+	e2 := hcExt(hcMk(t, [32]byte{0x55}, 10, 100, 3))
+	pub, out := o.EstablishV1(hcSrc1, []HeaderCandidateRecord148V1{e2, e0, e1})
+	if out != HeaderCandidateOK148V1 || !pub.Changed || pub.Version != 2 || len(pub.Retired) != 0 {
+		t.Fatalf("establish receipt: %d %+v", out, pub)
+	}
+	hcEqual(t, "establish added", pub.Added, [][32]byte{e2.Hash, e0.Hash, e1.Hash})
+	// V2/R4 Retired-only publication: Changed true, Version v+1, Retired exactly [R0], R0 gone, prior version stale.
 	o, r0, r1 := hcBase(t, hcLim())
 	v := o.VersionV1()
+	pub, out = hcPublish(t, o, hcTr(o, nil, r0.Hash))
+	if out != HeaderCandidateOK148V1 || !pub.Changed || pub.Version != v+1 || o.VersionV1() != v+1 || len(pub.Added) != 0 {
+		t.Fatalf("retired-only receipt: %d %+v", out, pub)
+	}
+	hcEqual(t, "retired-only retired", pub.Retired, [][32]byte{r0.Hash})
+	if _, ok := o.LookupV1(r0.Hash); ok {
+		t.Fatal("retired-only: R0 still present")
+	}
 	cur, rel := hcGuard(t, o, v)
+	rel()
+	if cur {
+		t.Fatal("retired-only: prior version still current")
+	}
+	o, r0, r1 = hcBase(t, hcLim())
+	v = o.VersionV1()
+	cur, rel = hcGuard(t, o, v)
 	t.Cleanup(rel)
 	if !cur {
 		t.Fatal("not current")
@@ -754,6 +780,21 @@ func TestHeaderCandidate148Capacity(t *testing.T) {
 		hcEqual(t, "retired", rec.Retired, hcHashes(r["A"], r["B"], r["S"]))
 		if p := hcPresent(o, r["A"], r["B"], r["S"]); p[0] || p[1] || p[2] {
 			t.Fatal("victim still present")
+		}
+	})
+	t.Run("candidate holding an addition is skipped whole", func(t *testing.T) {
+		// Post set: fixture plus N over MaxHeaders 7. A2 (work 4) is the weakest candidate but its reclaim [A2, I]
+		// holds A2, an identical duplicate in Additions, so it is skipped; A (work 5) with reclaim [A] is chosen.
+		o, r := hcCapFixture(t, lim)
+		n := hcMk(t, r["K"].Hash, 12, 60, 8)
+		rec, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{r["A2"], n}))
+		if out != HeaderCandidateOK148V1 {
+			t.Fatalf("%d", out)
+		}
+		hcEqual(t, "added", rec.Added, [][32]byte{n.Hash})
+		hcEqual(t, "retired", rec.Retired, [][32]byte{r["A"].Hash})
+		if p := hcPresent(o, r["A2"], r["I"]); !p[0] || !p[1] {
+			t.Fatal("skipped candidate lost")
 		}
 	})
 	t.Run("stops at first fit", func(t *testing.T) {
@@ -974,6 +1015,9 @@ func TestHeaderCandidate148WorkingSets(t *testing.T) {
 	if _, out := hcPublish(t, o, hcTr(o, nil, p.Hash)); out != HeaderCandidateOK148V1 {
 		t.Fatalf("retire P: %d", out)
 	}
+	if _, ok := o.LookupV1(p.Hash); ok {
+		t.Fatal("retire P: P still present")
+	}
 	v := o.VersionV1()
 	rec, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{h}))
 	if out != HeaderCandidateOK148V1 || rec.Changed || o.VersionV1() != v {
@@ -1021,6 +1065,23 @@ func TestHeaderCandidate148WorkingSets(t *testing.T) {
 	hcEqual(t, "D9 added literal", rec.Added, hcHashes(k))
 	if hcInnerOf(o) != hcInnerOf(o2) {
 		t.Fatal("D9 effect differs from Additions [K]")
+	}
+	// D9: P retired, then re-added External with a Height inconsistent with its admitted child H (row 7 compares an
+	// addition only with its own parent); H re-added identical is never refused for its parent's height.
+	o = hcNew(t, hcLim())
+	hcEstablish(t, o, p, h)
+	if _, out := hcPublish(t, o, hcTr(o, nil, p.Hash)); out != HeaderCandidateOK148V1 {
+		t.Fatalf("retire P: %d", out)
+	}
+	pFar := p
+	pFar.Height = h.Height + 5
+	if _, out := hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{pFar})); out != HeaderCandidateOK148V1 {
+		t.Fatalf("re-add P at an inconsistent height: %d", out)
+	}
+	v = o.VersionV1()
+	rec, out = hcPublish(t, o, hcTr(o, []HeaderCandidateRecord148V1{h}))
+	if out != HeaderCandidateOK148V1 || rec.Changed || rec.Version != v || o.VersionV1() != v {
+		t.Fatalf("D9 same hash under an inconsistent parent height: %d %+v", out, rec)
 	}
 	// V7: before anchor loss the producer re-adds the required suffix in one transition, or gets Capacity first.
 	o = hcNew(t, hcLim())
@@ -1251,6 +1312,23 @@ func hcBlocked(t *testing.T, done <-chan struct{}) {
 
 // TestHeaderCandidate148Faults covers X1, X5, V10, R4 and R5.
 func TestHeaderCandidate148Faults(t *testing.T) {
+	t.Run("changed-false publish does not wait for a guard", func(t *testing.T) {
+		o, r0, _ := hcBase(t, hcLim())
+		v := o.VersionV1()
+		cur, rel := hcGuard(t, o, v)
+		t.Cleanup(rel)
+		if !cur {
+			t.Fatal("not current")
+		}
+		h := hcPrepOK(t, o, hcTr(o, []HeaderCandidateRecord148V1{r0}))
+		var pub HeaderCandidatePublication148V1
+		var out HeaderCandidateOutcome148V1
+		hcWithin(t, "Changed-false PublishV1 under a held guard", func() { pub, out = h.PublishV1() })
+		if out != HeaderCandidateOK148V1 || pub.Changed || pub.Version != v || o.VersionV1() != v || hcInnerOf(o).guards != 1 {
+			t.Fatalf("changed-false publish: %d %+v", out, pub)
+		}
+		rel()
+	})
 	t.Run("abort then publish", func(t *testing.T) {
 		o, r0, r1 := hcBase(t, hcLim())
 		n := hcMk(t, r1.Hash, 12, 120, 9)

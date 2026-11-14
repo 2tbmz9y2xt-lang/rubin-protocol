@@ -7,7 +7,8 @@ import "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 var _ consensus.ReplayHeaderCandidateView148V1 = (*HeaderCandidateOwner148V1)(nil)
 
 // Inventory148V1 returns every admitted tip and received header at the current version, CapacityRefused above the
-// smaller of limit and MaxSnapshotBytes, or Incomplete when not established, latched or closed. Arrays are the caller's.
+// smaller of limit and MaxSnapshotBytes, or Incomplete when not established, latched or closed. Version is the current
+// version in every status, Incomplete and CapacityRefused included (RUB-1550 api_contract facet). Arrays are the caller's.
 func (o *HeaderCandidateOwner148V1) Inventory148V1(limit uint64) consensus.HeaderCandidateInventory148V1 {
 	o.mu.Lock()
 	defer o.mu.Unlock()

@@ -261,9 +261,11 @@ func (o *HeaderCandidateOwner148V1) gate(wantEstablished bool) HeaderCandidateOu
 	return HeaderCandidateOK148V1
 }
 
-// EstablishV1 is the once-per-owner complete startup source join; it performs no replacement. It evaluates rows 1-3, 5,
-// 7, 8, 11 and 12 of the first-refusal order with records read as Additions, waits for guards under the PublishV1 rule,
-// and on OK advances the version by exactly one with Changed true and Retired empty. Every non-OK return carries the
+// EstablishV1 is the once-per-owner complete startup source join; it performs no replacement. Empty records with a
+// nonzero source establish the positively empty received set. It evaluates rows 1-3, 5, 7, 8, 11 and 12 of the
+// first-refusal order with records read as Additions, waits for guards under the PublishV1 rule, and on OK advances the
+// version by exactly one and returns Changed true, the new Version, Added listing the hashes of the records not received
+// before, in input order, and Retired empty (RUB-1550 api_contract EstablishV1, D7). Every non-OK return carries the
 // zero publication and changes no owner state: an owner that was not established stays so, with an unchanged version.
 func (o *HeaderCandidateOwner148V1) EstablishV1(source [32]byte, records []HeaderCandidateRecord148V1) (HeaderCandidatePublication148V1, HeaderCandidateOutcome148V1) {
 	o.mu.Lock()
