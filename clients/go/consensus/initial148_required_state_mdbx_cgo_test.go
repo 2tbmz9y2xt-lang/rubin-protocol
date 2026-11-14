@@ -19,8 +19,20 @@ import (
 )
 
 func irRequestV1(height uint64, salt byte) blockTreeRequestV1 {
-	tx := btTransaction(uint64(salt), 0, nil, [][]byte{btFrame(17, 0, []byte{salt})}, nil, []byte{0}, nil)
-	r := btRequest(btBody(148, salt, [32]byte{}, tx), height)
+	return irEventsRequestV1(height, salt, 1)
+}
+
+func irEventsRequestV1(height uint64, salt byte, events int) blockTreeRequestV1 {
+	frames := make([][]byte, events)
+	for i := range frames {
+		frames[i] = btFrame(17, 0, []byte{salt})
+	}
+	var txs []btTx
+	for start := 0; start < events; start += MAX_TX_OUTPUTS {
+		end := min(start+MAX_TX_OUTPUTS, events)
+		txs = append(txs, btTransaction(uint64(salt)+uint64(start), 0, nil, frames[start:end], nil, []byte{0}, nil))
+	}
+	r := btRequest(btBody(148, salt, [32]byte{}, txs...), height)
 	r.Kind, r.Undo = 1, 2
 	return r
 }
@@ -72,40 +84,38 @@ func irFailureV1(t *testing.T, err error, kind logicalStateFailureKind, text str
 }
 
 func TestInitial148RequiredR(t *testing.T) {
-	t.Run("full-original-and-decoder-alias", func(t *testing.T) {
+	t.Run("full-record-and-length", func(t *testing.T) {
 		for _, tc := range []struct {
 			size     int
+			length   uint32
 			value    uint64
 			covenant uint16
 			height   uint64
-			coinbase bool
 		}{
-			{0, 0, 0, 0, false}, {1, 37, 1, 99, true}, {65536, ^uint64(0), ^uint16(0), ^uint64(0), true},
+			{0, 56, 0, 0, 0}, {1, 57, 37, 1, 99}, {252, 308, 37, 1, 99}, {253, 311, 37, 1, 99}, {65536, 65596, ^uint64(0), ^uint16(0), ^uint64(0)},
 		} {
-			t.Run(fmt.Sprint(tc.size), func(t *testing.T) {
-				size := tc.size
-				w := btNew(t)
-				op := Outpoint{Txid: [32]byte{42}, Vout: 7}
-				frame := btFrame(tc.value, tc.covenant, bytes.Repeat([]byte{5}, size))
-				value := btValue(frame, tc.height, tc.coinbase)
-				w.pair(t, btMutation(1, btUTXOKey(1, op), value))
-				irCounterV1(t, w, 36+uint64(len(value)), 1)
-				err := irRunV1(t, w, irRequestV1(1, 2), mdbx.TreeEndpointV1{Kind: 1, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
-					first := view.Lookup(op)
-					logicalMDBXAssert(t, first.kind == logicalStateRowPresent && first.entry.Value == tc.value && first.entry.CovenantType == tc.covenant && first.entry.CreationHeight == tc.height && first.entry.CreatedByCoinbase == tc.coinbase && bytes.Equal(first.entry.CovenantData, bytes.Repeat([]byte{5}, size)), "full decoded record lost a field")
-					scope := view.(*initial148RequiredScopeV1)
-					logicalMDBXAssert(t, bytes.Equal(scope.facts[0].original, value), "retained original suffix differs")
-					if size != 0 {
-						first.entry.CovenantData[0] = 9
-					}
-					second := view.Lookup(op)
-					logicalMDBXAssert(t, second.kind == logicalStateRowPresent && bytes.Equal(scope.facts[0].original, value) && bytes.Equal(second.entry.CovenantData, bytes.Repeat([]byte{5}, size)), "decoded clone changed retained R backing")
-					counter := view.Counters()
-					logicalMDBXAssert(t, counter.kind == logicalStateCountersPresent && counter.counters == (logicalStateCounters{bytes: 36 + uint64(len(value)), entries: 1}) && len(scope.facts) == 1, "repeat counted present Y twice")
-					return nil
+			for _, coinbase := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%d/coinbase-%v", tc.size, coinbase), func(t *testing.T) {
+					size := tc.size
+					w := btNew(t)
+					op := Outpoint{Txid: [32]byte{42}, Vout: 7}
+					frame := btFrame(tc.value, tc.covenant, bytes.Repeat([]byte{5}, size))
+					value := btValue(frame, tc.height, coinbase)
+					w.pair(t, btMutation(1, btUTXOKey(1, op), value))
+					irCounterV1(t, w, uint64(tc.length), 1)
+					err := irRunV1(t, w, irRequestV1(1, 2), mdbx.TreeEndpointV1{Kind: 1, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
+						first := view.Lookup(op)
+						logicalMDBXAssert(t, first.kind == logicalStateRowPresent && first.cause == nil && first.entry.Value == tc.value && first.entry.CovenantType == tc.covenant && first.entry.CreationHeight == tc.height && first.entry.CreatedByCoinbase == coinbase && bytes.Equal(first.entry.CovenantData, bytes.Repeat([]byte{5}, size)), "full decoded record lost a field")
+						scope := view.(*initial148RequiredScopeV1)
+						length, present, ok := scope.recordedV1(op)
+						logicalMDBXAssert(t, ok && present && length == tc.length && len(scope.keys) == 1, "literal recorded length: %d/%v/%v", length, present, ok)
+						counter := view.Counters()
+						logicalMDBXAssert(t, counter.kind == logicalStateCountersPresent && counter.counters == (logicalStateCounters{bytes: uint64(tc.length), entries: 1}), "record changed parent counters")
+						return nil
+					})
+					logicalMDBXAssert(t, err == nil, "first R record refused: %v", err)
 				})
-				logicalMDBXAssert(t, err == nil, "equal R copies refused: %v", err)
-			})
+			}
 		}
 	})
 	t.Run("absent-repeat", func(t *testing.T) {
@@ -122,6 +132,69 @@ func TestInitial148RequiredR(t *testing.T) {
 	})
 	t.Run("distinct-residual-checkpoints", irResidualV1)
 	t.Run("accumulated-distinct-residual", irDistinctResidualV1)
+	t.Run("recorded-growth-boundary", irRecordedGrowthV1)
+	t.Run("recorded-comparison-is-not-sticky", irRecordedRefusalV1)
+	t.Run("distinct-fact-bound", func(t *testing.T) {
+		w := btNew(t)
+		var first error
+		err := irRunV1(t, w, irRequestV1(0, 63), mdbx.TreeEndpointV1{}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
+			logicalMDBXAssert(t, view.Lookup(Outpoint{}).kind == logicalStateRowAbsent, "first fact refused")
+			first = view.Lookup(Outpoint{Vout: 1}).cause
+			irFailureV1(t, first, logicalStateFailureLocalInvariant, "required state fact bound exceeded")
+			logicalMDBXAssert(t, any(view.Counters().cause) == any(first), "fact bound lost sticky cause")
+			return nil
+		})
+		logicalMDBXAssert(t, any(err) == any(first), "callback dropped fact-bound cause")
+	})
+}
+
+func irRecordedRefusalV1(t *testing.T) {
+	w := btNew(t)
+	op := Outpoint{Txid: [32]byte{93}}
+	w.pair(t, btMutation(1, btUTXOKey(1, op), btValue(btFrame(1, 0, []byte{3}), 0, false)))
+	irCounterV1(t, w, 57, 1)
+	err := irRunV1(t, w, irRequestV1(6, 64), mdbx.TreeEndpointV1{Kind: 1, Height: 5, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
+		entry := view.Lookup(op)
+		logicalMDBXAssert(t, entry.kind == logicalStateRowPresent, "comparison input resolution")
+		_, failure := buildLogicalStatePlan(6, view, []logicalTouchedState{{Outpoint: op, FinalPresent: true, Final: entry.entry}}, 0)
+		irFailureV1(t, failure, logicalStateFailureLocalInvariant, "recorded parent row cannot be compared with its final entry")
+		scope := view.(*initial148RequiredScopeV1)
+		length, present, known := scope.recordedV1(op)
+		logicalMDBXAssert(t, scope.first == nil && scope.calls == 1 && length == 57 && present && known && view.Counters().cause == nil, "plan refusal poisoned scope")
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "comparison refusal escaped callback as sticky error: %v", err)
+}
+
+func irRecordedGrowthV1(t *testing.T) {
+	for _, extra := range []int{0, 1} {
+		w := btNew(t)
+		op := Outpoint{Txid: [32]byte{70}}
+		w.pair(t, btMutation(1, btUTXOKey(1, op), btValue(btFrame(1, 0, []byte{1}), 0, false)))
+		irCounterV1(t, w, 57, 1)
+		touched := []logicalTouchedState{{Outpoint: op}}
+		for i := range 12 {
+			size := 65536
+			if i == 11 {
+				size = 51563 + extra // 11*65596 + (58+51563) - 57 = 773120.
+			}
+			touched = append(touched, logicalTouchedState{Outpoint: Outpoint{Txid: [32]byte{byte(i + 71)}}, FinalPresent: true, Final: logicalStateTestEntry(size, 3)})
+		}
+		err := irRunV1(t, w, irEventsRequestV1(6, 62, 13), mdbx.TreeEndpointV1{Kind: 1, Height: 5, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
+			logicalMDBXAssert(t, view.Lookup(op).kind == logicalStateRowPresent, "growth input resolution")
+			registry, registryErr := validateLogicalStateCapRegistry(nil)
+			logicalMDBXAssert(t, registryErr == nil, "growth registry")
+			out, planErr := evaluateLogicalStateCap(nil, registry, [32]byte{}, 6, view, touched, 0)
+			if extra == 0 {
+				logicalMDBXAssert(t, planErr == nil && out.plan.Parent == (logicalStateCounters{bytes: 57, entries: 1}) && out.plan.Result == (logicalStateCounters{bytes: 773177, entries: 12}) && reflect.DeepEqual(out.plan.Deletes, []logicalStateDelete{{Outpoint: op, EntryBytes: 57}}), "record growth equality: %+v/%v", out.plan, planErr)
+			} else {
+				var tx *TxError
+				logicalMDBXAssert(t, errors.As(planErr, &tx) && tx.Code == BLOCK_ERR_STATE_GROWTH_EXCEEDED && tx.Msg == "logical state growth exceeded", "record growth plus one: %v", planErr)
+			}
+			return nil
+		})
+		logicalMDBXAssert(t, err == nil, "growth record scope: %v", err)
+	}
 }
 
 func irDistinctResidualV1(t *testing.T) {
@@ -349,7 +422,28 @@ func TestInitial148RequiredScope(t *testing.T) {
 	t.Run("callback-delivery", irDeliveryV1)
 	t.Run("concurrent-independent-scopes", irConcurrentV1)
 	t.Run("clean-Reader-reuse", irReusableV1)
-	logicalMDBXAssert(t, unsafe.Sizeof(initial148RequiredFactV1{}) <= 128 && unsafe.Sizeof(mdbx.TreeOutpointV1{}) <= 64 && unsafe.Sizeof(initial148RequiredScopeV1{}) < 4096, "captured fixed controls exceed their allowance")
+	t.Run("record-size", irRecordSizeV1)
+}
+
+func irRecordSizeV1(t *testing.T) {
+	w := btNew(t)
+	err := irRunV1(t, w, irEventsRequestV1(0, 57, 7), mdbx.TreeEndpointV1{}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
+		scope := view.(*initial148RequiredScopeV1)
+		fields, held := 0, uintptr(0)
+		value := reflect.ValueOf(scope).Elem()
+		for i := range value.NumField() {
+			field := value.Field(i)
+			if field.Kind() == reflect.Slice {
+				fields++
+				element := field.Type().Elem()
+				logicalMDBXAssert(t, element == reflect.TypeFor[mdbx.TreeOutpointV1]() || element == reflect.TypeFor[uint32](), "record retains another slice type: %v", element)
+				held += uintptr(field.Cap()) * element.Size()
+			}
+		}
+		logicalMDBXAssert(t, fields == 2 && held == 280 && held <= 336 && cap(scope.keys) == 7 && cap(scope.lengths) == 7 && unsafe.Sizeof(*scope) < 4096, "record/fixed allowance: %d slices %d bytes", fields, held)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "record size scope: %v", err)
 }
 
 func irAdmissionAttemptV1(t *testing.T, reader *mdbx.Reader, account, funding *mdbx.OperationAccount, request initial148RequiredRequestV1, operation, diagnostic string) {
@@ -437,25 +531,17 @@ func irInputOrderV1(t *testing.T) {
 	err := irRunV1(t, w, request, seed.Endpoint, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
 		logicalMDBXAssert(t, view.Counters().kind == logicalStateCountersPresent, "ordered R counters")
 		missing := Outpoint{Txid: coinbase.id}
-		for _, op := range []Outpoint{ops[1], missing, ops[0], ops[1], missing, ops[0]} {
+		for _, op := range []Outpoint{ops[1], missing, ops[0]} {
 			row := view.Lookup(op)
 			logicalMDBXAssert(t, row.cause == nil && (row.kind == logicalStateRowPresent) == (op != missing), "interleaved R lookup %v", row.cause)
 		}
 		scope := view.(*initial148RequiredScopeV1)
-		first := scope.facts[0].original
-		facts := append([]initial148RequiredFactV1(nil), scope.facts...)
-		originals := make([][]byte, len(facts))
-		for i, fact := range facts {
-			originals[i] = bytes.Clone(fact.original)
-		}
+		backing := &scope.keys[0]
 		out := derive()
 		logicalMDBXAssert(t, out.derived && out.cause == nil && out.root == want, "owned input sort root%x want%x cause%v", out.root, want, out.cause)
-		logicalMDBXAssert(t, reflect.DeepEqual(scope.inputs, []mdbx.TreeOutpointV1{{Txid: seedTx.id, Vout: 255}, {Txid: seedTx.id, Vout: 256}}), "present key projection: %+v", scope.inputs)
-		logicalMDBXAssert(t, len(scope.facts) == 3 && scope.facts[0].outpoint == ops[1] && bytes.Equal(first, btValue(frames[256], 3, true)) && &scope.facts[0].original[0] == &first[0], "sort reordered facts or replaced first suffix")
-		logicalMDBXAssert(t, reflect.DeepEqual(scope.facts, facts), "key projection changed retained facts")
-		for i, fact := range facts {
-			logicalMDBXAssert(t, bytes.Equal(scope.facts[i].original, originals[i]) && (len(fact.original) == 0 || &scope.facts[i].original[0] == &fact.original[0]), "key projection changed original bytes/backing at %d", i)
-		}
+		logicalMDBXAssert(t, &scope.keys[0] == backing && reflect.DeepEqual(scope.keys[:2], []mdbx.TreeOutpointV1{{Txid: seedTx.id, Vout: 255}, {Txid: seedTx.id, Vout: 256}}), "in-place sorted present prefix: %+v", scope.keys)
+		_, _, ok := scope.recordedV1(ops[0])
+		logicalMDBXAssert(t, !ok, "sealed record stayed available")
 		return out.cause
 	})
 	logicalMDBXAssert(t, err == nil, "ordered R derivation: %v", err)
@@ -489,7 +575,7 @@ func irCapacityV1(t *testing.T) {
 	logicalMDBXAssert(t, w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
 		return w.s.View(func(reader *mdbx.Reader) error {
 			request := irPrepareV1(t, reader, account, irRequestV1(0, 48), mdbx.TreeEndpointV1{})
-			return account.WithReservation(402653184-266480+1, func() error {
+			return account.WithReservation(402653184-135240+1, func() error {
 				err := withInitial148RequiredStateV1(reader, account, request, func(logicalStateView, func() initial148RootReadOutcomeV1) error {
 					t.Fatal("R capacity refusal reached callback")
 					return nil
@@ -504,7 +590,7 @@ func irCapacityV1(t *testing.T) {
 			request := irPrepareV1(t, reader, account, irRequestV1(0, 51), mdbx.TreeEndpointV1{})
 			var cause error
 			result := withInitial148RequiredStateV1(reader, account, request, func(_ logicalStateView, derive func() initial148RootReadOutcomeV1) error {
-				return account.WithReservation(402653184-266480-288504+1, func() error {
+				return account.WithReservation(402653184-135240-288504+1, func() error {
 					out := derive()
 					cause = out.cause
 					logicalMDBXAssert(t, !out.derived && out.root == ([32]byte{}) && mdbx.IsOperationReservationCapacity(cause) && !out.hasObservation && out.observation == (mdbx.TreeObservationV1{}), "D capacity outcome %+v", out)
@@ -521,6 +607,33 @@ func irCapacityV1(t *testing.T) {
 			return nil
 		})
 	}) == nil, "scoped D capacity outcome")
+	btReservationsReleased(t, w.owner)
+	t.Run("large-event-tariff", irLargeCapacityV1)
+}
+
+func irLargeCapacityV1(t *testing.T) {
+	w := btNew(t)
+	logicalMDBXAssert(t, w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
+		return w.s.View(func(reader *mdbx.Reader) error {
+			request := irPrepareV1(t, reader, account, irEventsRequestV1(1, 58, 2046), mdbx.TreeEndpointV1{Kind: 1, CumulativeChainwork: [40]byte{39: 1}})
+			logicalMDBXAssert(t, request.Source.coverage.BlockMeta.EventCount == 2046, "large event boundary changed")
+			for _, extra := range []uint64{0, 1} {
+				called := false
+				err := account.WithReservation(402653184-233400+extra, func() error {
+					return withInitial148RequiredStateV1(reader, account, request, func(logicalStateView, func() initial148RootReadOutcomeV1) error {
+						called = true
+						logicalMDBXAssert(t, account.WithReservation(1, func() error { t.Fatal("large R reservation too small"); return nil }) != nil, "large R retained less than literal tariff")
+						return nil
+					})
+				})
+				logicalMDBXAssert(t, called == (extra == 0) && (err == nil) == (extra == 0), "large R exact/minus-one %d: %v/%v", extra, called, err)
+				if extra != 0 {
+					logicalMDBXAssert(t, err.Error() == "storage operation reservation capacity unavailable", "large R refusal: %v", err)
+				}
+			}
+			return nil
+		})
+	}) == nil, "large R capacity scope")
 	btReservationsReleased(t, w.owner)
 }
 
@@ -605,15 +718,18 @@ func irLifetimeV1(t *testing.T) {
 			captured := irPrepareV1(t, reader, a, irRequestV1(0, 22), mdbx.TreeEndpointV1{})
 			return withInitial148RequiredStateV1(reader, a, captured, func(view logicalStateView, root func() initial148RootReadOutcomeV1) error {
 				kept, derive = view, root
-				logicalMDBXAssert(t, a.WithReservation(402653184-266480, func() error { return nil }) == nil, "exact R reservation refused")
-				logicalMDBXAssert(t, a.WithReservation(402653184-266480+1, func() error { t.Fatal("R allowance omitted clone/repeat backing"); return nil }) != nil, "R reservation too small")
+				logicalMDBXAssert(t, a.WithReservation(402653184-135240, func() error { return nil }) == nil, "exact R reservation refused")
+				logicalMDBXAssert(t, a.WithReservation(402653184-135240+1, func() error { t.Fatal("R allowance omitted records or transient backing"); return nil }) != nil, "R reservation too small")
 				out := root()
 				logicalMDBXAssert(t, out.derived && out.cause == nil, "first derive: %v", out.cause)
-				logicalMDBXAssert(t, a.WithReservation(402653184-266480+1, func() error { t.Fatal("R released before final callback consumer"); return nil }) != nil, "R last use uncharged")
+				logicalMDBXAssert(t, a.WithReservation(402653184-135240+1, func() error { t.Fatal("R released before final callback consumer"); return nil }) != nil, "R last use uncharged")
 				second := root()
 				logicalMDBXAssert(t, !second.derived && second.root == ([32]byte{}), "second derive returned root")
 				irFailureV1(t, second.cause, logicalStateFailureLocalInvariant, "required root derive is not available")
 				irFailureV1(t, view.Counters().cause, logicalStateFailureLocalInvariant, "required state scope is not active")
+				_, _, known := view.(*initial148RequiredScopeV1).recordedV1(Outpoint{})
+				_, failure := readLogicalStatePlanRow(1, view, Outpoint{})
+				logicalMDBXAssert(t, !known && failure != nil && failure.kind == logicalStateFailureLocalInvariant && failure.cause.Error() == "required state scope is not active", "sealed record fallback changed")
 				return nil
 			})
 		})
@@ -621,6 +737,9 @@ func irLifetimeV1(t *testing.T) {
 	logicalMDBXAssert(t, err == nil, "lifetime operation: %v", err)
 	irFailureV1(t, kept.Lookup(Outpoint{}).cause, logicalStateFailureLocalInvariant, "required state scope is not active")
 	irFailureV1(t, derive().cause, logicalStateFailureLocalInvariant, "required root derive is not available")
+	scope := kept.(*initial148RequiredScopeV1)
+	_, _, known := scope.recordedV1(Outpoint{})
+	logicalMDBXAssert(t, !known && scope.calls == 0 && scope.keys == nil && scope.lengths == nil, "expired scope retained records or counted lookup")
 	btReservationsReleased(t, w.owner)
 }
 
