@@ -522,6 +522,11 @@ func trMatchingPremisesV1(t *testing.T) {
 				ops = []TreeOutpointV1{{Vout: 255}, {Vout: 256}, {Vout: 4294967295}}
 			case "raw-txid-boundaries":
 				ops[1].Txid = [32]byte{0: 255, 31: 255}
+				var maximum [32]byte
+				for i := range maximum {
+					maximum[i] = 255
+				}
+				ops = append(ops, TreeOutpointV1{Txid: maximum})
 			}
 			var entries, final []testTreeEntry
 			var events []TreeEventV1
