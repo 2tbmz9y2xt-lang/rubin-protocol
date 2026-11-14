@@ -142,7 +142,29 @@ func cxPublish(t *testing.T, o *HeaderCandidateOwner148V1, in HeaderContextInput
 	if h == nil {
 		t.Fatal("prepare returned nil")
 	}
-	r, pub, d := h.PublishV1()
+	type publication struct {
+		record HeaderContextRecord148V1
+		receipt HeaderCandidatePublication148V1
+		decision HeaderContextDecision148V1
+	}
+	done := make(chan publication, 1)
+	go func() {
+		r, pub, result := h.PublishV1()
+		done <- publication{r, pub, result}
+	}()
+	var result publication
+	select {
+	case result = <-done:
+	case <-time.After(5 * time.Second):
+		o.CloseV1()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("PUBLISH_GUARD: publication did not join after owner Close")
+		}
+		t.Fatal("PUBLISH_GUARD: publication retained an invocation guard")
+	}
+	r, pub, d := result.record, result.receipt, result.decision
 	cxDecision(t, "publish", d, 0, 0, 0, nil)
 	cxClean(t, o, false)
 	return r, pub
