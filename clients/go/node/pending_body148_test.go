@@ -180,7 +180,9 @@ func TestPendingBody148Configuration(t *testing.T) {
 					return
 				}
 				cxEqual(t, "invalid captured body limits owner", o, (*HeaderCandidateOwner148V1)(nil))
-				cxEqual(t, "invalid captured body limits error", err, ErrPendingBodyConfig148V1)
+				if err != ErrPendingBodyConfig148V1 {
+					t.Fatalf("invalid captured body limits error: got %v want exact %v", err, ErrPendingBodyConfig148V1)
+				}
 			})
 		}
 	}
@@ -195,7 +197,9 @@ func TestPendingBody148Configuration(t *testing.T) {
 		}
 		o, err := NewHeaderCandidateBodyCustody148V1(cl, xl, PendingBodyLimits148V1{}, 7, [32]byte{91}, [32]byte{92})
 		cxEqual(t, prior+" config precedence owner", o, (*HeaderCandidateOwner148V1)(nil))
-		cxEqual(t, prior+" config precedence error", err, want)
+		if err != want {
+			t.Fatalf("%s config precedence error: got %v want exact %v", prior, err, want)
+		}
 	}
 	for _, l := range []PendingBodyLimits148V1{{1, 1, 1, 1}, {9, 9999, 17, 71}} {
 		o, err := NewHeaderCandidateBodyCustody148V1(hcLim(), cxLimits(), l, 7, [32]byte{91}, [32]byte{92})
