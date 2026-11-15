@@ -24,7 +24,7 @@ func TestHeaderContext148InventoryComposition(t *testing.T) {
 		t.Fatalf("complete inventory %+v", inv)
 	}
 	cxEqual(t, "inventory tips", inv.Tips, [][32]byte{r.Hash})
-	if !((inv.Headers[0] == p.Raw && inv.Headers[1] == r.Raw) || (inv.Headers[1] == p.Raw && inv.Headers[0] == r.Raw)) {
+	if (inv.Headers[0] != p.Raw || inv.Headers[1] != r.Raw) && (inv.Headers[1] != p.Raw || inv.Headers[0] != r.Raw) {
 		t.Fatal("inventory must include both admitted raw headers")
 	}
 	current, release := view.ProtectV1(inv.Version)
