@@ -861,27 +861,29 @@ func servingInputOrderV1(t *testing.T) {
 		t.Fatal("invalid input callback")
 		return nil
 	}
+	spanCallback := func() error {
+		t.Fatal("refused span callback ran")
+		return nil
+	}
+	for _, row := range []struct {
+		owner *ServingViewOwnerV1
+		store *Store
+		ctx   context.Context
+		view  func(*Reader, *ServingEpochV1) error
+		span  func() error
+	}{
+		{nil, nil, nil, nil, nil},
+		{&ServingViewOwnerV1{}, s, ctx, callback, spanCallback},
+		{o, nil, ctx, callback, spanCallback},
+		{o, s, nil, callback, spanCallback},
+		{o, s, ctx, nil, nil},
+	} {
+		out, err := row.owner.WithViewV1(row.ctx, row.store, nil, row.view)
+		servingWantInputV1(t, err, "view")
+		servingWantOutcomeV1(t, out, 0, false)
+		servingWantInputV1(t, row.owner.WithQuiescenceV1(row.ctx, row.store, row.span), "update")
+	}
 	mustEnvironment(t, reservations.WithOperation(LaneOperation, func(a *OperationAccount) error {
-		for _, row := range []struct {
-			owner      *ServingViewOwnerV1
-			store      *Store
-			nilContext bool
-			use        func(*Reader, *ServingEpochV1) error
-		}{
-			{nil, nil, true, nil},
-			{&ServingViewOwnerV1{}, s, false, callback},
-			{o, nil, false, callback},
-			{o, s, true, callback},
-			{o, s, false, nil},
-		} {
-			rowCtx := ctx
-			if row.nilContext {
-				rowCtx = nil
-			}
-			out, err := row.owner.WithViewV1(rowCtx, row.store, nil, row.use)
-			servingWantInputV1(t, err, "view")
-			servingWantOutcomeV1(t, out, 0, false)
-		}
 		out, err := o.WithViewV1(ctx, s, a, callback)
 		if !sameError(err, context.Canceled) {
 			t.Fatal("canceled context result changed")
@@ -890,7 +892,9 @@ func servingInputOrderV1(t *testing.T) {
 		return nil
 	}))
 	servingBadAccountsV1(t, o, s, ctx, callback)
-	servingSpanInputsV1(t, o, s, ctx)
+	if err := o.WithQuiescenceV1(ctx, s, spanCallback); !sameError(err, context.Canceled) || o.span != nil || o.priority != nil {
+		t.Fatal("canceled no-effect span changed context or retained mark")
+	}
 	low := reservationOwner(t, 805306367)
 	called := 0
 	out, err := servingCallV1(t, o, s, low, func(_ *Reader, _ *ServingEpochV1, a *OperationAccount) error {
@@ -926,36 +930,6 @@ func servingBadAccountsV1(t *testing.T, o *ServingViewOwnerV1, s *Store, ctx con
 		}
 		return nil
 	}))
-}
-
-// servingSpanInputsV1 checks all span static rows before cancellation or marking.
-func servingSpanInputsV1(t *testing.T, o *ServingViewOwnerV1, s *Store, ctx context.Context) {
-	t.Helper()
-	use := func() error {
-		t.Fatal("refused span callback ran")
-		return nil
-	}
-	for _, row := range []struct {
-		owner      *ServingViewOwnerV1
-		store      *Store
-		nilContext bool
-		use        func() error
-	}{
-		{nil, nil, true, nil},
-		{&ServingViewOwnerV1{}, s, false, use},
-		{o, nil, false, use},
-		{o, s, true, use},
-		{o, s, false, nil},
-	} {
-		rowCtx := ctx
-		if row.nilContext {
-			rowCtx = nil
-		}
-		servingWantInputV1(t, row.owner.WithQuiescenceV1(rowCtx, row.store, row.use), "update")
-	}
-	if err := o.WithQuiescenceV1(ctx, s, use); !sameError(err, context.Canceled) || o.span != nil || o.priority != nil {
-		t.Fatal("canceled no-effect span changed context or retained mark")
-	}
 }
 
 // servingEscapeV1 rejects zero, copied and escaped epochs and actual expired Readers.
