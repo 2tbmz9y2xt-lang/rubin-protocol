@@ -244,9 +244,11 @@ func (s *Store) UpdateTreeV1(account *OperationAccount, callback func(*Reader) (
 	if err != nil {
 		return CommitTruthOld, UpdateStagePrewrite, -1, err
 	}
+	serving := s.requestServingCloseV1()
 	if !s.operations.TryLock() {
 		return CommitTruthOld, UpdateStagePrewrite, -1, adapterError(operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
+	defer serving.completeV1()
 	var unwind treeUnwindV1
 	defer func() { unwind.resumeV1() }()
 	defer s.operations.Unlock()
