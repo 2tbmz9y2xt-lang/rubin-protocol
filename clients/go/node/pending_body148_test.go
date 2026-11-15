@@ -488,7 +488,7 @@ func pbAdvance(t *testing.T, f pbFixture, source bool) HeaderContextView148V1 {
 }
 
 func TestPendingBody148CurrentContext(t *testing.T) {
-	for _, kind := range []string{"incarnation", "version", "source", "stored-view", "parent", "provenance"} {
+	for _, kind := range []string{"incarnation", "version", "source", "authority", "stored-view", "parent", "provenance"} {
 		t.Run(kind, func(t *testing.T) {
 			f := pbNew(t, pbLimits())
 			b := pbBundle(t, f, 1, 1)
@@ -501,6 +501,8 @@ func TestPendingBody148CurrentContext(t *testing.T) {
 			case "source":
 				fresh := pbAdvance(t, f, true)
 				b.View.Version = fresh.Version
+			case "authority":
+				b.View.Authority = [32]byte{99}
 			case "stored-view":
 				b.View = pbAdvance(t, f, false)
 			case "parent":
