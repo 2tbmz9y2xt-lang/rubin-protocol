@@ -491,12 +491,20 @@ func treeCoverageBodyV1(pair TreePairV1, p TreePrimitiveV1) bool {
 		if m.DBI.Rank != 4 || !bytes.Equal(m.Key, p.Block[:]) {
 			continue
 		}
-		if c.BodyKind == 2 {
-			return c.CurrentBody == nil && m.AfterKind != AfterLiteral
-		}
-		return c.BodyKind == 1 && treeCoverageLiteralV1(m, c)
+		return treeCoveragePairBodyV1(m, c)
+	}
+	if c.BodyKind == 3 {
+		return len(c.CurrentBody) != 0
 	}
 	return c.BodyKind == 2 && c.CurrentBody == nil
+}
+
+// treeCoveragePairBodyV1 admits only the literal/stored kinds beside a body target.
+func treeCoveragePairBodyV1(m Mutation, c *TreeSourceCoverageV1) bool {
+	if c.BodyKind == 2 {
+		return c.CurrentBody == nil && m.AfterKind != AfterLiteral
+	}
+	return c.BodyKind == 1 && treeCoverageLiteralV1(m, c)
 }
 
 func treeCoverageLiteralV1(m Mutation, c *TreeSourceCoverageV1) bool {

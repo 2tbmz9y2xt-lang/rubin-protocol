@@ -21,6 +21,18 @@ func treeStoredBodyV1(old treeOldV1, block [32]byte) (treeBodyV1, error) {
 	return treeBodyV1{bytes: image.value}, nil
 }
 
+// treeHeldBodyV1 binds borrowed bytes only after the protected row proves absent.
+func treeHeldBodyV1(old treeOldV1, block [32]byte, held []byte) (treeBodyV1, error) {
+	image, err := old.getV1(schemaDBIs[4], block[:])
+	if err != nil {
+		return treeBodyV1{}, err
+	}
+	if image.present {
+		return treeBodyV1{}, adapterError(operationUpdate, EngineStateMismatch, codeProblem, "tree held body row present", nil)
+	}
+	return treeBodyV1{bytes: held}, nil
+}
+
 func treeDeltaInvalidV1() error {
 	return adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "invalid tree delta", nil)
 }

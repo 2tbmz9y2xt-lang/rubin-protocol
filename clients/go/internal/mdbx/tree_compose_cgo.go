@@ -150,8 +150,12 @@ func treePairBodyV1(pair []ownedMutation, block [32]byte) *ownedMutation {
 	return nil
 }
 
-// bodyV1 binds j's body: a Pair literal; else the ORIGINAL OLD row, with pair = true for a Pair delete (D14-4).
-func (e *treeScopeV1) bodyV1(block [32]byte) (treeBodyV1, error) {
+// bodyV1 binds j's held body, Pair literal, or protected ORIGINAL OLD row.
+func (e *treeScopeV1) bodyV1(p *TreePrimitiveV1) (treeBodyV1, error) {
+	block := p.Block
+	if c := p.Coverage; c != nil && c.BodyKind == 3 {
+		return treeHeldBodyV1(e.checkedV1(), block, c.CurrentBody)
+	}
 	mutation := treePairBodyV1(e.plan.pair, block)
 	if mutation != nil && mutation.after == AfterLiteral {
 		return treeBodyV1{bytes: mutation.literal, pair: true}, nil
@@ -191,7 +195,7 @@ func (e *treeScopeV1) stepV1(j int) error {
 	}
 	e.held = true
 	prim := treeAdmittedPrimitiveV1(&e.plan.primitives[j])
-	body, err := e.bodyV1(prim.block)
+	body, err := e.bodyV1(&e.plan.primitives[j])
 	if err != nil {
 		return err
 	}
