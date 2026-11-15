@@ -14,6 +14,8 @@ import (
 // The composer qualifies the complete body, header, work, Generated and index
 // preconditions, and funds the request/result/backing before allocating them.
 // They remain immutable and funded through native readback and cleanup.
+// BodyKind 3 borrows nonempty Raw without emitting a CurrentBody mutation;
+// that backing remains immutable through the operation's return.
 type blockTreeRequestV1 struct {
 	DatabaseID             [32]byte
 	Generation             uint64
@@ -36,6 +38,7 @@ type blockTreeSourceV1 struct {
 	Raw      []byte
 }
 
+// blockTreeEffectV1 emits CurrentBody only for BodyKind 1, never held kind 3.
 type blockTreeEffectV1 struct {
 	Primitive   mdbx.TreePrimitiveV1
 	Index       [2]mdbx.Mutation
@@ -50,7 +53,7 @@ func blockTreeRequestValidV1(r blockTreeRequestV1) bool {
 		return false
 	}
 	switch r.BodyKind {
-	case 1:
+	case 1, 3:
 		return len(r.Raw) != 0
 	case 2:
 		return r.Raw == nil
@@ -145,7 +148,7 @@ func (s *blockTreeSourceV1) framingV1() error {
 // Only the immutable coverage/borrowed Raw survives; no source reservation exists.
 func (s *blockTreeSourceV1) visitV1(old *mdbx.Reader, window []byte, visit func(*blockTreeCursorV1) error) error {
 	c := blockTreeCursorV1{raw: s.Raw, window: window, source: s, length: uint64(len(s.Raw))}
-	if s.coverage.BodyKind == 1 {
+	if s.coverage.BodyKind == 1 || s.coverage.BodyKind == 3 {
 		return visit(&c)
 	}
 	found := false

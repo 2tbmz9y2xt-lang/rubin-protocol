@@ -341,11 +341,13 @@ func btShape(t *testing.T) {
 		{"width0", func(r *blockTreeRequestV1) { r.HeaderBytes = 0 }},
 		{"width117", func(r *blockTreeRequestV1) { r.HeaderBytes = 117 }},
 		{"kind0", func(r *blockTreeRequestV1) { r.BodyKind = 0 }},
-		{"kind3", func(r *blockTreeRequestV1) { r.BodyKind = 3 }},
+		{"kind4", func(r *blockTreeRequestV1) { r.BodyKind = 4 }},
 		{"kind1nil", func(r *blockTreeRequestV1) { r.Raw = nil }},
 		{"kind1empty", func(r *blockTreeRequestV1) { r.Raw = []byte{} }},
 		{"kind2extra", func(r *blockTreeRequestV1) { r.BodyKind = 2 }},
 		{"kind2empty", func(r *blockTreeRequestV1) { r.BodyKind = 2; r.Raw = []byte{} }},
+		{"kind3nil", func(r *blockTreeRequestV1) { r.BodyKind, r.Raw = 3, nil }},
+		{"kind3empty", func(r *blockTreeRequestV1) { r.BodyKind, r.Raw = 3, []byte{} }},
 		{"invalid-tag-payload", func(r *blockTreeRequestV1) { r.BodyKind = 255; r.Raw = nil }},
 	}
 	w := btNew(t)
@@ -356,6 +358,16 @@ func btShape(t *testing.T) {
 			source, effect, err := btPrepare(t, w, r)
 			btFailure(t, err, logicalStateFailureLocalInvariant, "invalid block tree source request")
 			logicalMDBXAssert(t, reflect.ValueOf(effect).IsZero() && reflect.ValueOf(*source).IsZero(), "failure published a source/effect")
+			btReservationsReleased(t, w.owner)
+		})
+	}
+	for kind := 5; kind < 255; kind++ {
+		t.Run(fmt.Sprintf("kind%d", kind), func(t *testing.T) {
+			r := valid
+			r.BodyKind = uint8(kind)
+			source, effect, err := btPrepare(t, w, r)
+			btFailure(t, err, logicalStateFailureLocalInvariant, "invalid block tree source request")
+			logicalMDBXAssert(t, reflect.ValueOf(effect).IsZero() && reflect.ValueOf(*source).IsZero(), "unassigned kind published source/effect")
 		})
 	}
 	for _, row := range []string{"dst", "reader", "account"} {
@@ -686,12 +698,54 @@ func btCapturedRequest() blockTreeRequestV1 {
 }
 
 func TestBlockTreeEffectV1(t *testing.T) {
+	t.Run("held-body", btHeldBody)
 	t.Run("new-body-hash-frames", btNewBody)
 	t.Run("spend-cancel-inverse-restore", btRoundTrip)
 	t.Run("genesis", btGenesis)
 	t.Run("indexes-and-body-admission", btAdmission)
 	t.Run("CURRENT-LAG", btCompound)
 	t.Run("original-replacement", btReplacement)
+}
+
+// The held producer differs only in its declared body kind and body mutation.
+func btHeldBody(t *testing.T) {
+	for _, width := range []uint16{116, 148} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			w := btNew(t)
+			r := btCapturedRequest()
+			if width == 116 {
+				r.Raw = append(bytes.Clone(r.Raw[:116]), r.Raw[148:]...)
+				r.Block = sha3.Sum256(r.Raw[:116])
+				r.Endpoint.BlockHash = r.Block
+			}
+			r.HeaderBytes = width
+			r.CanonicalBeforePresent, r.OwnerBeforePresent = true, true
+			oracle, expected, err := btPrepare(t, w, r)
+			logicalMDBXAssert(t, err == nil, "kind1 oracle preparation: %v", err)
+			r.BodyKind = 3
+			source, effect, err := btPrepare(t, w, r)
+			logicalMDBXAssert(t, err == nil, "held preparation visited absent stored row: %v", err)
+			logicalMDBXAssert(t, reflect.ValueOf(effect.CurrentBody).IsZero(), "held producer emitted CurrentBody: %+v", effect.CurrentBody)
+			logicalMDBXAssert(t, effect.Primitive.Source == source && effect.Primitive.Coverage == &source.coverage, "held primitive lost source/coverage owner")
+			logicalMDBXAssert(t, source.coverage.BodyKind == 3 && bytes.Equal(source.Raw, r.Raw) && &source.coverage.CurrentBody[0] == &source.Raw[0], "held coverage/backing differs")
+			got, want := effect.Primitive, expected.Primitive
+			got.Source, want.Source, got.Coverage, want.Coverage = nil, nil, nil, nil
+			logicalMDBXAssert(t, reflect.DeepEqual(got, want) && reflect.DeepEqual(effect.Index, expected.Index), "held primitive/index differs from kind1 oracle: %+v/%+v", effect, expected)
+			coverage := source.coverage
+			coverage.BodyKind = 1
+			logicalMDBXAssert(t, reflect.DeepEqual(coverage, oracle.coverage), "held coverage metadata differs from kind1 oracle: %+v/%+v", coverage, oracle.coverage)
+			btReservationsReleased(t, w.owner)
+			next := btRequest(btBody(148, 9, [32]byte{}, btTransaction(9, 0, nil, nil, nil, []byte{0}, nil)), 9)
+			next.BodyKind = 3
+			result, _, observed := w.run(t, []blockTreeRequestV1{next}, nil)
+			result.want(t, 2, 3, -1)
+			logicalMDBXAssert(t, result.err == nil && observed[0].calls == ([3]int{0, 1, 0}), "held writer/account reuse: %v", result.err)
+			clear(observed[0].source.Raw)
+			w.reopen(t)
+			w.read(t, 4, next.Block[:], nil)
+			btState(t, w, 1, next.Endpoint, nil)
+		})
+	}
 }
 
 func btUTXOKey(g uint64, op Outpoint) []byte {

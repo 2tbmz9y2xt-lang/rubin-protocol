@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"slices"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -21,6 +22,7 @@ func TestBlockTreeSourceFixtureV1(t *testing.T) {
 	t.Run("section-cleanup", btfSectionCleanup)
 	t.Run("late-original", btfLateOriginal)
 	t.Run("commit-readback", btfReadback)
+	t.Run("held-framing", btfHeldFraming)
 	t.Run("proof-report", btfProofReport)
 	t.Run("proof-truncated", btfProofTruncated)
 }
@@ -528,15 +530,34 @@ func btfDamage(t *testing.T, w *btWorld, rank uint8, key []byte, damage string) 
 }
 
 func btfReadback(t *testing.T) {
-	for _, failSource := range []bool{false, true} {
-		t.Run(fmt.Sprint(failSource), func(t *testing.T) {
+	for _, row := range []struct {
+		kind       uint8
+		failSource bool
+	}{{1, false}, {1, true}, {3, false}, {3, true}} {
+		kind, failSource := row.kind, row.failSource
+		name := fmt.Sprint(failSource)
+		if kind == 3 {
+			name = "held-" + name
+		}
+		t.Run(name, func(t *testing.T) {
 			w := btNew(t)
 			r := btfRequest(17)
+			r.BodyKind = kind
 			var result btResult
 			var observed []*btObserved
 			var sourceErr error
+			var report mdbx.TreeDeltaReportV1
+			proofs := 0
 			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageCommitNew, 0, []byte{2}, func() {
-				result, _, observed = w.run(t, []blockTreeRequestV1{r}, func(_ []blockTreeEffectV1, sources []*btObserved, _ *mdbx.TreeOperationV1) {
+				result, _, observed = w.run(t, []blockTreeRequestV1{r}, func(_ []blockTreeEffectV1, sources []*btObserved, op *mdbx.TreeOperationV1) {
+					if kind == 3 {
+						op.Proof = func(got *mdbx.TreeDeltaReportV1) error {
+							proofs++
+							report = *got
+							report.Undo = slices.Clone(got.Undo)
+							return nil
+						}
+					}
 					if failSource {
 						sources[0].before = func(p mdbx.TreePositionV1, reader *mdbx.Reader, sink *mdbx.TreeDeltaSinkV1) error {
 							if p == 2 {
@@ -549,6 +570,9 @@ func btfReadback(t *testing.T) {
 				})
 			})
 			logicalMDBXAssert(t, err == nil && evidence.Faults == 1 && evidence.Commits == 1 && evidence.BeginRead == 1 && observed[0].calls == ([3]int{0, 1, 1}), "real readback: %+v/%v calls%v", evidence, err, observed[0].calls)
+			if kind == 3 {
+				logicalMDBXAssert(t, proofs == 1, "Proof repeated at readback: %d", proofs)
+			}
 			truth := uint8(2)
 			if failSource {
 				truth = 3
@@ -561,11 +585,45 @@ func btfReadback(t *testing.T) {
 				btFailure(t, sourceErr, logicalStateFailureLocalInvariant, "invalid block tree source position")
 			}
 			btfCached(t, w, result)
+			clear(observed[0].source.Raw)
 			w.reopen(t)
-			w.read(t, 4, r.Block[:], r.Raw)
+			body := r.Raw
+			if kind == 3 {
+				body = nil
+			}
+			w.read(t, 4, r.Block[:], body)
 			btIndexes(t, w, r, true)
+			if kind == 3 && !failSource {
+				oracle := btNew(t)
+				r.BodyKind = 1
+				var expected mdbx.TreeDeltaReportV1
+				calls := 0
+				plain := btfProofRun(t, oracle, []blockTreeRequestV1{r}, &calls, &expected)
+				plain.want(t, 2, 3, -1)
+				logicalMDBXAssert(t, plain.err == nil && calls == 1 && reflect.DeepEqual(report, expected), "held Proof report differs from independent kind1 oracle: %+v/%+v/%v", report, expected, plain.err)
+				rows := btfOldRows(t, oracle, r.Block)
+				rows = slices.DeleteFunc(rows, func(row btfRow) bool { return row.rank == 4 && bytes.Equal(row.key, r.Block[:]) })
+				btfWantOld(t, w, rows, 255, nil, "unchanged")
+			}
 		})
 	}
+}
+
+// A malformed held body is a local preparation refusal, before native effects.
+func btfHeldFraming(t *testing.T) {
+	w := btNew(t)
+	r := btfRequest(23)
+	r.BodyKind = 3
+	r.Raw = append(r.Raw, 0)
+	result, effects, observed := w.run(t, []blockTreeRequestV1{r}, nil)
+	result.want(t, 1, 1, -1)
+	btFailure(t, result.err, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
+	logicalMDBXAssert(t, reflect.ValueOf(effects[0]).IsZero() && observed[0] == nil, "held framing failure published source/effect")
+	logicalMDBXAssert(t, w.s.View(func(*mdbx.Reader) error { return nil }) == nil, "held framing refusal consumed Store")
+	w.pair(t, btMutation(6, binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, 1), 91), make([]byte, 104)))
+	w.reopen(t)
+	w.read(t, 4, r.Block[:], nil)
+	btState(t, w, 1, mdbx.TreeEndpointV1{}, nil)
 }
 
 // btfProofScene stores two LAG bodies: block 1 creates an output that block 2 spends.
