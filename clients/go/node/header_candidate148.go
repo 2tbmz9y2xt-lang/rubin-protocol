@@ -182,6 +182,7 @@ func (o *HeaderCandidateOwner148V1) VersionV1() uint64 { return o.version.Load()
 // Incomplete, ProtectV1 returns current false with a non-nil release, mutators return Closed, Header148V1 returns false,
 // LookupV1 returns the zero record and false, and VersionV1 keeps the version current at close. A waiting EstablishV1,
 // PublishV1 or UnknownV1 is woken and returns Closed with no effect and no receipt; a later guard release applies nothing.
+// Attached C2 records and charges are cleared; LookupContextV1 returns Unavailable with CandidateOutcome Closed.
 func (o *HeaderCandidateOwner148V1) CloseV1() {
 	o.mu.Lock()
 	o.closed = true
@@ -342,7 +343,7 @@ func (o *HeaderCandidateOwner148V1) waitGuards() HeaderCandidateOutcome148V1 {
 // PublishV1 applies additions, retirements, charges and source atomically. A state-changing transition waits until no
 // guard is held and advances the version by one; a Changed-false transition does not wait and keeps the version. A
 // second call of any handle method returns Consumed; otherwise a destroyed owner returns Closed (also when CloseV1 wakes
-// the wait). Every non-OK return carries the zero publication and applies nothing.
+// the wait). Attached context is promoted before Version. Every non-OK return carries the zero publication and applies nothing.
 func (h *HeaderCandidatePrepared148V1) PublishV1() (HeaderCandidatePublication148V1, HeaderCandidateOutcome148V1) {
 	o := h.owner
 	o.mu.Lock()
@@ -360,7 +361,7 @@ func (h *HeaderCandidatePrepared148V1) PublishV1() (HeaderCandidatePublication14
 	return o.apply(&h.plan), HeaderCandidateOK148V1
 }
 
-// AbortV1 is a known abort: the reservation is released and membership, charges and version are unchanged. It returns
+// AbortV1 releases its C1 reservation and attached C2 charges; retained membership, charges and version are unchanged. It returns
 // OK on a first call to an open owner, Consumed on a later handle call, otherwise Closed.
 func (h *HeaderCandidatePrepared148V1) AbortV1() HeaderCandidateOutcome148V1 {
 	o := h.owner
@@ -375,10 +376,11 @@ func (h *HeaderCandidatePrepared148V1) AbortV1() HeaderCandidateOutcome148V1 {
 }
 
 // UnknownV1 is an unknown native outcome. It always waits until no guard is held, applies no addition or retirement,
-// keeps the slot occupied, advances the version when representable and latches the owner: later Inventory148V1 is
+// releases attached C2 charges, keeps the slot occupied, advances the version when representable and latches the owner: later Inventory148V1 is
 // Incomplete, ProtectV1 returns current false with a non-nil release, and EstablishV1, PrepareV1 and
 // AcquireDependencyV1 return UnknownSource until a new incarnation. Reads answer the unchanged membership. It returns OK
 // on a first call to an open owner, Consumed on a later handle call, otherwise Closed (also when CloseV1 wakes the wait).
+// SeedGenesisContextV1, LookupContextV1, RebindContextV1 and PrepareContextV1 become Unavailable with CandidateOutcome UnknownSource.
 func (h *HeaderCandidatePrepared148V1) UnknownV1() HeaderCandidateOutcome148V1 {
 	o := h.owner
 	o.mu.Lock()

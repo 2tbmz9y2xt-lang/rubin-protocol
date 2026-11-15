@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/big"
 	"slices"
+	"unsafe"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -362,7 +363,7 @@ func (r *hctxReservation) reserveContext(hash [32]byte, n, a uint64) HeaderConte
 
 // hctxPlanFits validates finite counts and aggregate scratch before any charge/allocation.
 func hctxPlanFits(l HeaderContextLimits148V1, maxAdditions, n, a, scratch, used uint64) bool {
-	return n <= min(l.MaxReads, l.MaxReadWork) && hctxMul(148, n) <= l.MaxReadBytes && a <= maxAdditions && scratch <= min(l.MaxScratchBytes, uint64(math.MaxInt)) && used <= l.MaxScratchBytes-scratch
+	return n <= min(l.MaxReads, l.MaxReadWork, uint64(math.MaxInt)/148) && hctxMul(148, n) <= l.MaxReadBytes && a <= min(maxAdditions, uint64(math.MaxInt)/uint64(unsafe.Sizeof(HeaderCandidateRecord148V1{}))) && scratch <= l.MaxScratchBytes && used <= l.MaxScratchBytes-scratch
 }
 
 // hctxScratch evaluates exactly S with saturating failure, before any proportional allocation.
@@ -508,6 +509,7 @@ func hctxClone(r HeaderContextRecord148V1) HeaderContextRecord148V1 {
 }
 
 // LookupContextV1 returns only exact current-view evidence under its L output reservation.
+// The caller retains source protection and rechecks it through use of the copy.
 func (o *HeaderCandidateOwner148V1) LookupContextV1(v HeaderContextView148V1, hash [32]byte) (HeaderContextRecord148V1, HeaderContextDecision148V1) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -600,7 +602,7 @@ func hctxGenesis(v HeaderContextView148V1, raw [148]byte, prov [32]byte) HeaderC
 	}
 }
 
-// SeedGenesisContextV1 caches published genesis evidence without admitting a header.
+// SeedGenesisContextV1 caches published genesis evidence under retained source protection without admitting a header.
 func (o *HeaderCandidateOwner148V1) SeedGenesisContextV1(v HeaderContextView148V1, raw [148]byte, prov [32]byte, source HeaderContextSource148V1) HeaderContextDecision148V1 {
 	hash, shape := hctxSeedShape(v, raw, prov)
 	r, d := o.startContext(v, shape)
@@ -658,7 +660,8 @@ func (o *HeaderCandidateOwner148V1) matchSeedContext(v HeaderContextView148V1, r
 	return HeaderContextDecision148V1{}
 }
 
-// RebindContextV1 refreshes only View/Provenance after a positive fresh proof.
+// RebindContextV1 preserves all immutable fields and refreshes only View/Provenance after fresh source qualification.
+// The old stored producer tag may differ from the proof's new nonzero tag.
 func (o *HeaderCandidateOwner148V1) RebindContextV1(v HeaderContextView148V1, proof HeaderContextAnchor148V1, source HeaderContextSource148V1) (HeaderContextRecord148V1, HeaderContextDecision148V1) {
 	o.mu.Lock()
 	m := uint64(0)
@@ -1102,10 +1105,10 @@ func (o *HeaderCandidateOwner148V1) suffixContext(in HeaderContextInput148V1, ra
 
 // hctxAdmittedFacts forbids omitting a suffix addition on conflicting current C1 evidence.
 func hctxAdmittedFacts(a HeaderCandidateRecord148V1, b HeaderContextRecord148V1) bool {
-	return a.Raw == b.Raw && a.Height == b.Height && a.Work.Cmp(b.Work) == 0 && a.Provenance == b.Provenance
+	return a.Raw == b.Raw && a.Height == b.Height && a.Work.Cmp(b.Work) == 0
 }
 
-// PrepareContextV1 qualifies immutable evidence and attaches it to the real C1 plan.
+// PrepareContextV1 qualifies immutable evidence under retained source protection and attaches it to the real C1 plan.
 func (o *HeaderCandidateOwner148V1) PrepareContextV1(in HeaderContextInput148V1) (*HeaderContextPrepared148V1, HeaderContextDecision148V1) {
 	r, d := o.startContext(in.View, o.inputContextShape(in))
 	if r == nil {
