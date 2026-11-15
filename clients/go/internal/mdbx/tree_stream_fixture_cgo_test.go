@@ -131,7 +131,8 @@ func primitiveReadFusedErrorV1(t *testing.T) {
 	ttOutcome(t, outcome, 1, 2)
 	treeNativeError(t, outcome.primary, "update", "IO", 5, "error 5", nil)
 	mustEnvironment(t, outcome.secondary)
-	if outcome.commitAttempted || counts != (PairReadObservation{Gets: 2, Writes: 1}) || evidence != (fixtureLargeEvidence{gets: 1, aborts: 1}) {
+	// fixtureTreeCommitV1 aborts OLD via rubin_fixture_txn_abort, bypassing the OLD-only counter.
+	if outcome.commitAttempted || counts != (PairReadObservation{Gets: 2, Writes: 1}) || evidence != (fixtureLargeEvidence{gets: 1}) {
 		t.Fatal("fused error preserves native prefix and clean abort", outcome, counts, ledger.held, evidence)
 	}
 	equal, err := FixtureRawRowEqual(s, 1, key, nil)
