@@ -3693,25 +3693,369 @@ func tsfSlotDiffers(t *testing.T, err error) {
 
 // tsfDump is every committed row of every rank, keyed "rank/key".
 func tsfDump(t *testing.T, s *Store) map[string]string {
+	return tsHeldDumpV1(t, s)
+}
+
+// tsHeldSceneV1 keeps the existing real three-primitive scene, borrowing each
+// complete qualified body before removing its stored row and Pair target.
+func tsHeldSceneV1(t *testing.T) *tsfScene {
 	t.Helper()
-	rows := map[string]string{}
-	mustEnvironment(t, s.View(func(r *Reader) error {
-		for rank := range r.dbis {
-			for from := []byte{0}; ; {
-				key, value, ok, err := treeReadNextV1(r.txn, r.dbis[rank], from)
-				if err != nil || !ok {
-					if err != nil {
-						return err
-					}
-					break
+	s := tsfNew(t)
+	tsfCover(t, s)
+	for j := 1; j < len(s.op.Primitives); j++ {
+		p := &s.op.Primitives[j]
+		mustEnvironment(t, s.s.View(func(r *Reader) error {
+			value, present, err := r.Get(TreeSchemaV1DBIs()[4], p.Block[:])
+			if err == nil && !present {
+				t.Fatal("held fixture body missing")
+			}
+			p.Coverage.CurrentBody = bytes.Clone(value)
+			return err
+		}))
+		mustEnvironment(t, fixtureDeletePrefixRow(s.s, TreeSchemaV1DBIs()[4], p.Block[:]))
+	}
+	tsHeldV1(&s.op)
+	return s
+}
+
+func TestTreeHeldBodyReadbackV1(t *testing.T) {
+	for _, row := range []struct {
+		name     string
+		scenario SelectedDamageScenario
+		truth    CommitTruth
+	}{
+		{"OLD", SelectedDamageCommitOld, 1},
+		{"NEW", SelectedDamageCommitNew, 2},
+		{"UNKNOWN", SelectedDamageCommitUnreadable, 3},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f := tbNewV1(t)
+			tsHeldV1(&f.op)
+			before := tsHeldDumpV1(t, f.s)
+			oracle := tbNewV1(t)
+			mustEnvironment(t, oracle.run(t).err)
+			after := tsHeldDumpV1(t, oracle.s)
+			block := f.op.Primitives[0].Block
+			delete(after, fmt.Sprintf("4/%x", block))
+			var r tsResult
+			evidence, err := FixtureSelectedDamage(f.s, f.o, row.scenario, 0, tsRootKey(1), func() { r = f.run(t) })
+			mustEnvironment(t, err)
+			r.tuple(t, row.truth, 3, -1)
+			ce, ok := r.err.(*CommitError)
+			if !ok || ce.Truth != row.truth || evidence.Commits != 1 || reservationLive(f.o) != 0 {
+				t.Fatal("held readback disposition", r, evidence)
+			}
+			treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+			if row.truth == 3 {
+				treeNativeError(t, ce.ReadbackCause, "update", "IO", 5, "error 5", nil)
+			} else if ce.ReadbackCause != nil || f.source.calls != [3]int{0, 1, 1} {
+				t.Fatal("held bytes not checked at both positions", ce, f.source.calls)
+			}
+			tsConsumed(t, f.s, f.o, row.truth, r.err)
+			clear(f.op.Primitives[0].Coverage.CurrentBody)
+			want := after
+			if row.truth == 1 {
+				want = before
+			}
+			if got := tsHeldDumpV1(t, tsReopen(t, f.s, f.path)); !reflect.DeepEqual(got, want) {
+				t.Fatal("held readback durable image differs from oracle")
+			}
+		})
+	}
+	t.Run("absent-reference", func(t *testing.T) {
+		f := tbNewV1(t)
+		tsHeldV1(&f.op)
+		var r tsResult
+		block := f.op.Primitives[0].Block
+		drift, err := FixtureCleanupReadbackDrift(f.s, 4, block[:], func() { r = f.run(t) })
+		mustEnvironment(t, err)
+		r.tuple(t, 3, 3, -1)
+		ce, ok := r.err.(*CommitError)
+		if !ok || ce.Truth != 3 || ce.ReadbackCause != nil || drift != 1 || f.source.calls != [3]int{0, 1, 1} {
+			t.Fatal("strict equality omitted absent blocks-v1 reference", r, drift, f.source.calls)
+		}
+		tsConsumed(t, f.s, f.o, 3, r.err)
+	})
+}
+
+// Every refusal occurs at LAG1 (j=1), after CURRENT planning and before Proof,
+// its header slot, the LAG1 Source or the later LAG2 primitive.
+func TestTreeHeldBodyBindingRefusalsV1(t *testing.T) {
+	for _, mode := range []string{"identical", "different", "drift", "read-error"} {
+		t.Run(mode, func(t *testing.T) {
+			s := tsHeldSceneV1(t)
+			p := &s.op.Primitives[1]
+			key, body := bytes.Clone(p.Block[:]), bytes.Clone(p.Coverage.CurrentBody)
+			if mode == "identical" || mode == "different" {
+				if mode == "different" {
+					body[148] ^= 1
 				}
-				rows[fmt.Sprintf("%d/%x", rank, key)] = string(value.value)
-				from = append(bytes.Clone(key), 0)
+				treeNativeSeed(t, s.s, 4, key, body)
+			}
+			before := tsHeldDumpV1(t, s.s)
+			proofs := 0
+			s.op.Proof = func(*TreeDeltaReportV1) error { proofs++; return nil }
+			s.op.HeaderSlot = tsSlot(t)
+			var r tsResult
+			switch mode {
+			case "drift":
+				count, err := FixtureWriteSnapshotDrift(s.s, 4, key, func() { r = s.run(t) })
+				mustEnvironment(t, err)
+				if count != 1 {
+					t.Fatal("held presence drift not reached")
+				}
+				before[fmt.Sprintf("4/%x", key)] = string([]byte{0x7f})
+			case "read-error":
+				evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamageGetEIO, 4, key, func() { r = s.run(t) })
+				mustEnvironment(t, err)
+				if evidence.Faults != 1 {
+					t.Fatal("held presence read fault not reached", evidence)
+				}
+			default:
+				r = s.run(t)
+			}
+			r.tuple(t, 1, 1, 1)
+			switch mode {
+			case "drift":
+				treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+			case "read-error":
+				treeNativeError(t, r.err, "update", "IO", 5, "error 5", nil)
+			default:
+				tsHeldPresentV1(t, r.err)
+			}
+			if proofs != 0 || s.p[0].calls != [3]int{0, 1, 0} || s.p[1].calls != [3]int{} || s.p[2].calls != [3]int{} {
+				t.Fatal("held binding refusal order", proofs, s.p[0].calls, s.p[1].calls, s.p[2].calls)
+			}
+			tsConsumed(t, s.s, s.o, 1, r.err)
+			if got := tsHeldDumpV1(t, tsReopen(t, s.s, s.path)); !reflect.DeepEqual(got, before) {
+				t.Fatal("held binding refusal changed durable OLD")
+			}
+		})
+	}
+}
+
+func TestTreeHeldBodySourceResultsV1(t *testing.T) {
+	for _, position := range []TreePositionV1{1, 2} {
+		cleanups := []uint32{0, 9, 10}
+		if position == 2 {
+			cleanups = []uint32{12, 15, 16}
+		}
+		for _, cleanup := range cleanups {
+			for _, mode := range []string{"direct", "wrapped", "caused", "typed-nil", "panic", "goexit"} {
+				t.Run(fmt.Sprintf("position%d/cleanup%d/%s", position, cleanup, mode), func(t *testing.T) {
+					tsHeldSourceResultV1(t, position, cleanup, mode, "clean")
+				})
 			}
 		}
-		return nil
+		for _, recorded := range []string{"reader", "sink"} {
+			for _, mode := range []string{"panic", "goexit"} {
+				cleanup := uint32(0)
+				if position == 2 {
+					cleanup = 12
+				}
+				t.Run(fmt.Sprintf("position%d/%s/%s", position, recorded, mode), func(t *testing.T) {
+					tsHeldSourceResultV1(t, position, cleanup, mode, recorded)
+				})
+			}
+		}
+	}
+}
+
+func tsHeldSourceResultV1(t *testing.T, position TreePositionV1, cleanup uint32, mode, recorded string) {
+	t.Helper()
+	s := tsHeldSceneV1(t)
+	before := tsHeldDumpV1(t, s.s)
+	if position == 2 {
+		oracle := tsHeldSceneV1(t)
+		mustEnvironment(t, oracle.run(t).err)
+		before = tsHeldDumpV1(t, oracle.s)
+	}
+	marker, value := errors.New("held source failure"), new(int)
+	var primary error = marker
+	switch mode {
+	case "wrapped":
+		primary = fmt.Errorf("held source context: %w", marker)
+	case "caused":
+		primary = &EngineError{Class: "IO", Operation: "get", Code: 5, Diagnostic: "held source", Cause: marker}
+	case "typed-nil":
+		var typed *nilPointerError
+		primary = typed
+	case "panic", "goexit":
+		primary = nil
+	}
+	s.p[1].before = func(pos TreePositionV1, r *Reader, sink *TreeDeltaSinkV1) error {
+		if pos != position {
+			return nil
+		}
+		if recorded == "reader" {
+			_, _, primary = r.Get(TreeSchemaV1DBIs()[6], tsTarget(77).Key)
+		} else if recorded == "sink" {
+			primary = sink.BeginV1(TreeBlockV1{})
+		}
+		if mode == "panic" {
+			panic(value)
+		}
+		if mode == "goexit" {
+			runtime.Goexit()
+		}
+		return primary
+	}
+	var r tsResult
+	var recovered any
+	returned := false
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			recovered = recover()
+			if reservationLive(s.o) != 0 {
+				t.Error("held consumers still charged at unwind delivery")
+			}
+		}()
+		run := func() {
+			invoke := func() { r = s.run(t); returned = true }
+			if cleanup == 0 {
+				invoke()
+				return
+			}
+			_, err := fixtureLargeFault(s.s, cleanup, 0, tsCounterKey(2), invoke)
+			mustEnvironment(t, err)
+		}
+		if recorded == "reader" {
+			_, err := FixtureSelectedDamage(s.s, s.o, SelectedDamageGetEIO, 6, tsTarget(77).Key, run)
+			mustEnvironment(t, err)
+		} else {
+			run()
+		}
+	}()
+	eiAwait(t, done)
+	if mode == "panic" && recovered != value || mode != "panic" && recovered != nil || returned != (mode != "panic" && mode != "goexit") {
+		t.Fatal("held original source delivery", mode, recovered, returned)
+	}
+	if recorded == "reader" {
+		treeNativeError(t, primary, "get", "IO", 5, "error 5", nil)
+	} else if recorded == "sink" {
+		treeNativeError(t, primary, "update", "InvalidInput", 22, "invalid tree delta", nil)
+	}
+	tsHeldSourceOutcomeV1(t, s, position, cleanup, primary, r, returned)
+	tsExpiredReader(t, s.p[1].reader)
+	if s.p[1].sink.WindowV1() != nil || s.p[2].calls[position] != 0 || reservationLive(s.o) != 0 {
+		t.Fatal("held source retained consumers or reached later primitive")
+	}
+	for _, p := range s.op.Primitives {
+		clear(p.Coverage.CurrentBody)
+	}
+	if position == 1 && cleanup == 0 && primary == nil {
+		m := tsTarget(900_000)
+		before[fmt.Sprintf("6/%x", m.Key)] = string(m.Literal)
+	}
+	if !reflect.DeepEqual(tsHeldDumpV1(t, tsReopen(t, s.s, s.path)), before) {
+		t.Fatal("held source failure changed the expected durable image")
+	}
+}
+
+func tsHeldSourceOutcomeV1(t *testing.T, s *tsfScene, position TreePositionV1, cleanup uint32, primary error, r tsResult, returned bool) {
+	t.Helper()
+	if position == 1 && cleanup == 0 && primary == nil {
+		if s.s.state != storeOPEN || s.s.terminal != nil {
+			t.Fatal("clean held writer unwind consumed Store")
+		}
+		tsFollowing(t, s.s, s.o)
+		return
+	}
+	truth := CommitTruth(1)
+	if position == 2 {
+		truth = 3
+		ce, ok := s.s.terminal.(*CommitError)
+		if !ok || ce.Truth != 3 {
+			t.Fatal("held readback cause identity", s.s.terminal, primary)
+		}
+		tsHeldCausesV1(t, ce.ReadbackCause, primary, cleanup)
+		treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+	} else {
+		tsHeldCausesV1(t, s.s.terminal, primary, cleanup)
+	}
+	if returned {
+		index, stage := 1, UpdateStage(1)
+		if position == 2 {
+			index, stage = -1, 3
+		}
+		r.tuple(t, truth, stage, index)
+		if any(r.err) != any(s.s.terminal) {
+			t.Fatal("returned failure differs from terminal")
+		}
+	}
+	if cleanup != 10 && cleanup != 15 {
+		tsConsumed(t, s.s, s.o, truth, s.s.terminal)
+		return
+	}
+	if s.s.state != storePOISONEDTHREAD || s.s.txn == nil || s.s.terminalTruth != truth {
+		t.Fatal("held retained cleanup disposition", s.s.state)
+	}
+	calls := 0
+	accountRun(t, "held retained next operation", s.o, TreeOperation, func(a *OperationAccount) {
+		next := tsInvoke(s.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return s.op, nil })
+		next.tuple(t, truth, 1, -1)
+		if calls != 0 || any(next.err) != any(s.s.terminal) {
+			t.Fatal("held retained instance ran next callback")
+		}
+	})
+	mustEnvironment(t, fixtureLargeRelease(s.s))
+}
+
+// tsHeldCausesV1 pins provider identity before the optional cleanup failure.
+func tsHeldCausesV1(t *testing.T, got, primary error, cleanup uint32) {
+	t.Helper()
+	if cleanup == 0 || cleanup == 12 {
+		if any(got) != any(primary) {
+			t.Fatal("held primary identity", got, primary)
+		}
+		return
+	}
+	if primary != nil {
+		joined, ok := got.(interface{ Unwrap() []error })
+		if !ok {
+			t.Fatal("held primary/cleanup causes not retained", got)
+		}
+		parts := joined.Unwrap()
+		if len(parts) != 2 || any(parts[0]) != any(primary) {
+			t.Fatal("held primary/cleanup cause order", parts)
+		}
+		got = parts[1]
+	}
+	if cleanup == 10 || cleanup == 15 {
+		engine := requireEnvironmentError(t, got, "LocalInvariant", "abort", -30416, "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread")
+		if !engine.ReopenRequired || engine.Cause != nil {
+			t.Fatal("held retained abort error", engine)
+		}
+		return
+	}
+	treeNativeError(t, got, "abort", "IO", 5, "error 5", nil)
+}
+
+func TestTreeHeldBodyStepChargeV1(t *testing.T) {
+	s, path, o := tsNew(t)
+	op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Fatal("uncharged Source"); return nil }))
+	tsCover(&op, TreeBlockV1{TxCount: 1})
+	body := op.Pair.Mutations[0]
+	mustEnvironment(t, tsRun(t, s, o, TreeOperation, TreeOperationV1{Pair: op.Pair}).err)
+	tsHeldV1(&op)
+	var r tsResult
+	mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+		return a.WithReservation(402653184-74912+1, func() error {
+			r = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil })
+			if reservationLive(o) != 402653184-74912+1 {
+				t.Fatal("step refusal changed caller hold")
+			}
+			return nil
+		})
 	}))
-	return rows
+	r.tuple(t, 1, 1, 0)
+	if any(r.err) != any(errOperationReservationCapacity) {
+		t.Fatal("step charge did not precede held presence", r.err)
+	}
+	tsConsumed(t, s, o, 1, r.err)
+	tsRead(t, tsReopen(t, s, path), body.DBI, body.Key, body.Literal)
 }
 
 // P1: an absent row x is inserted with Header; the complete committed store
@@ -4578,7 +4922,7 @@ func tbReadbackSourceV1(t *testing.T) {
 
 // TestTreeBoundedFallbackV1 keeps legal adjacent ownership profiles executable.
 func TestTreeBoundedFallbackV1(t *testing.T) {
-	for _, shape := range []string{"connect", "no-index-pair", "Proof", "slot", "consulted", "stored-body"} {
+	for _, shape := range []string{"connect", "no-index-pair", "Proof", "slot", "consulted", "stored-body", "held-body"} {
 		f := tbNewV1(t)
 		switch shape {
 		case "connect":
@@ -4598,6 +4942,8 @@ func TestTreeBoundedFallbackV1(t *testing.T) {
 			treeNativeSeed(t, f.s, 4, f.op.Pair.Mutations[1].Key, f.op.Pair.Mutations[1].Literal)
 			f.op.Pair.Mutations = append(f.op.Pair.Mutations[:1], f.op.Pair.Mutations[2])
 			f.op.Primitives[0].Coverage.BodyKind, f.op.Primitives[0].Coverage.CurrentBody = 2, nil
+		case "held-body":
+			tsHeldV1(&f.op)
 		}
 		plan := treeOwnPlanV1(f.op)
 		if treeBoundedPlanV1(&plan) {
