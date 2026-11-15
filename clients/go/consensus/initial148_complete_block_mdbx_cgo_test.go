@@ -272,7 +272,7 @@ func TestInitial148CompleteBlockTariffFit(t *testing.T) {
 		}
 		e := min(uint64(414_634), b/41)
 		w, ok := initial148CompleteBodyTariffV1(n, 7227)
-		ordinary := w + 135192 + 48*e + 288408 + 104*e
+		ordinary := w + 135192 + 48*e + 288440 + 104*e
 		if !ok || ordinary+n > 402653184 {
 			t.Fatalf("fit n=%d E=%d W=%d/%v total=%d", n, e, w, ok, ordinary+n)
 		}
@@ -282,9 +282,9 @@ func TestInitial148CompleteBlockTariffFit(t *testing.T) {
 			}
 		}
 	}
-	logicalMDBXAssert(t, maxima == [3]uint64{305777373, 369225341, 386225498}, "fit maxima=%v", maxima)
+	logicalMDBXAssert(t, maxima == [3]uint64{305777373, 369225373, 386225530}, "fit maxima=%v", maxima)
 	logicalMDBXAssert(t, at == [3]uint64{17000157, 17000157, 17000157}, "fit maxima positions=%v", at)
-	logicalMDBXAssert(t, 402653184-maxima[1] == 33427843 && 402653184-maxima[2] == 16427686, "fit margins")
+	logicalMDBXAssert(t, 402653184-maxima[1] == 33427811 && 402653184-maxima[2] == 16427654, "fit margins")
 }
 
 // icbMaximumInputV1 supplies store-domain maximum rows. Their invalid suite
@@ -1006,7 +1006,7 @@ func TestInitial148CompleteBlockDeriveCapacityNoResult(t *testing.T) {
 		in, _ := icbGenesisInputV1(t, -1)
 		tariff, ok := initial148CompleteTariffV1(in)
 		logicalMDBXAssert(t, ok, "tariff")
-		hold := uint64(402_653_184) - tariff - (135_192 + 48*genesisEvents) - (288_408 + 104*genesisEvents)
+		hold := uint64(402_653_184) - tariff - (135_192 + 48*genesisEvents) - (288_440 + 104*genesisEvents)
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			// Control: with exactly D remaining the same input derives and is delivered.
 			logicalMDBXAssert(t, account.WithReservation(hold, func() error {
@@ -2057,7 +2057,7 @@ func TestInitial148CompleteBlockDeriveCapacityH5(t *testing.T) {
 			})
 			logicalMDBXAssert(t, err == nil && events != 0, "event count control: %v", err)
 		})
-		hold := uint64(402_653_184) - tariff - (135_192 + 48*events) - (288_408 + 104*events)
+		hold := uint64(402_653_184) - tariff - (135_192 + 48*events) - (288_440 + 104*events)
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			logicalMDBXAssert(t, account.WithReservation(hold, func() error {
 				out, delivered, err := icbDiscardRunV1(w, account, f.in, workers)
@@ -2172,7 +2172,7 @@ func TestInitial148CompleteBlockTariffH5(t *testing.T) {
 		got, ok := initial148CompleteTariffV1(f.in)
 		logicalMDBXAssert(t, ok && got == tariff, "h5 W %d/%v want literal %d", got, ok, tariff)
 		events := icbEventsV1(t, w, f.in)
-		r, d := uint64(135_192+48*events), uint64(288_408+104*events)
+		r, d := uint64(135_192+48*events), uint64(288_440+104*events)
 		cases := []struct {
 			name             string
 			free             uint64

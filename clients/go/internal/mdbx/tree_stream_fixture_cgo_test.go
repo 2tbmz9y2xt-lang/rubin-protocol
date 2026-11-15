@@ -83,18 +83,806 @@ func TestTreePairReadNativeV1(t *testing.T) {
 	}
 }
 
+// Each row reaches an existing production owner, with literal windows and
+// native probes distinguishing admission from payload use and later failure.
+func TestTreePrimitiveReadNativeV1(t *testing.T) {
+	t.Run("Pair-before-payload", primitiveReadPairNativeV1)
+	t.Run("owner-scratch", primitiveReadOwnerNativeV1)
+	t.Run("owner-pre-key", primitiveReadOwnerPrekeyV1)
+	t.Run("owner-disposable-and-targeted", primitiveReadOwnerDisposableV1)
+	t.Run("amended-point", primitiveReadPointNativeV1)
+	t.Run("successor", primitiveReadSuccessorNativeV1)
+	t.Run("future-seal", primitiveReadFutureNativeV1)
+	t.Run("partial-growth", primitiveReadPartialNativeV1)
+	t.Run("reached-stage", primitiveReadStagesV1)
+	t.Run("late-header", primitiveReadHeaderNativeV1)
+	t.Run("closed-account", func(t *testing.T) { treeReadClosedNativeV1(t, true) })
+	t.Run("mutable-window-Goexit", primitiveReadGoexitV1)
+	t.Run("candidate-MaxInt-before-mismatch", func(t *testing.T) { primitiveReadPointMetadataV1(t, 35, true) })
+	t.Run("planned-absence-native-present", primitiveReadPointAbsentV1)
+	for _, mode := range []uint32{31, 32, 33, 34, 35, 36, 37} {
+		t.Run(fmt.Sprintf("point-metadata%d", mode), func(t *testing.T) {
+			primitiveReadPointMetadataV1(t, mode, false)
+		})
+	}
+}
+
+func primitiveReadPairNativeV1(t *testing.T) {
+	for _, width := range []int{0, 1, 32, 70000} {
+		for _, short := range []uint64{0, 1} {
+			if width == 0 && short == 1 {
+				continue
+			}
+			t.Run(fmt.Sprintf("width%d/short%d", width, short), func(t *testing.T) {
+				s, path, o := tsNew(t)
+				key, later := tsCounterKey(9), tsCounterKey(10)
+				value := bytes.Repeat([]byte{0x56}, width)
+				treeNativeSeed(t, s, 0, key, value)
+				treeNativeSeed(t, s, 0, later, []byte{7})
+				op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Error("Pair prefix reached Source"); return nil }))
+				op.Pair = TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 1}}, Consulted: []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: later}}}
+				tsCover(&op, TreeBlockV1{TxCount: 1})
+				window := uint64(2 * width)
+				var result tsResult
+				var counts PairReadObservation
+				mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					return a.WithReservation(402653184-194-window+short, func() error {
+						before := reservationLive(o)
+						var err error
+						counts, err = FixturePairReadObservation(s, func(site uint32) {
+							if site == 2 && reservationLive(o) != 402653184 {
+								t.Error("primitive Pair before-payload coverage")
+							}
+						}, func() {
+							_, faultErr := fixtureLargeFault(s, 34, 0, later, func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
+							mustEnvironment(t, faultErr)
+						})
+						mustEnvironment(t, err)
+						if reservationLive(o) != before {
+							t.Fatal("primitive Pair earlier window/caller cleanup")
+						}
+						return nil
+					})
+				}))
+				result.tuple(t, 1, 1, -1)
+				if short != 0 {
+					if !treeSameErrorV1(result.err, errOperationReservationCapacity) || counts.Comparisons != 0 || counts.Gets != 3 {
+						t.Fatal("primitive Pair before-payload coverage/refusal prefix", result, counts)
+					}
+				} else {
+					treeNativeError(t, result.err, "update", "IO", 5, "error 5", nil)
+					want := uint64(1)
+					if width == 0 {
+						want = 0
+					}
+					if counts.Comparisons != want || counts.Gets != 5 {
+						t.Fatal("one get per reached position/later EIO", counts)
+					}
+				}
+				if counts.Writes != 0 {
+					t.Fatal("Pair refusal wrote")
+				}
+				tsConsumed(t, s, o, 1, result.err)
+				equal, err := FixtureRawRowEqual(tsReopen(t, s, path), 0, key, value)
+				if err != nil || !equal {
+					t.Fatal("primitive Pair durable OLD", err)
+				}
+			})
+		}
+	}
+}
+
+func primitiveReadOwnerNativeV1(t *testing.T) {
+	hash := [32]byte{0x41}
+	f, o := canonicalForwardLiteral(1, 5, hash, [40]byte{39: 1}), canonicalOwnerLiteral(1, 5, hash)
+	for _, row := range []struct {
+		name       string
+		pair, seed []Mutation
+		pc, room   uint64
+		capacity   bool
+		gets       [8]uint64
+	}{
+		{"N1-39", []Mutation{f}, nil, 248, 39, true, [8]uint64{2: 1}},
+		{"N1-40", []Mutation{f}, nil, 248, 40, false, [8]uint64{2: 1}},
+		{"N2-39", []Mutation{o}, nil, 176, 39, true, [8]uint64{7: 1}},
+		{"N2-40", []Mutation{o}, nil, 176, 40, false, [8]uint64{7: 1}},
+		{"O1-false-obligation-175", []Mutation{f, o}, []Mutation{f, o}, 424, 175, true, [8]uint64{2: 2, 7: 1}},
+		{"O1-partner-176", []Mutation{canonicalDelete(f)}, []Mutation{f, o}, 144, 176, false, [8]uint64{2: 2, 7: 1}},
+		{"O2-partner-191", []Mutation{canonicalDelete(o)}, []Mutation{f, o}, 168, 191, true, [8]uint64{2: 1, 7: 2}},
+		{"O2-partner-192", []Mutation{canonicalDelete(o)}, []Mutation{f, o}, 168, 192, false, [8]uint64{2: 1, 7: 2}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			s, path, reservations := tsNew(t)
+			for _, m := range row.seed {
+				treeNativeSeed(t, s, m.DBI.Rank, m.Key, m.Literal)
+			}
+			op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Error("owner preflight reached Source"); return nil }))
+			op.Pair.Mutations = row.pair
+			var result tsResult
+			var evidence SelectedDamageEvidence
+			mustEnvironment(t, reservations.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return a.WithReservation(402653184-row.pc-row.room, func() error {
+					before := reservationLive(reservations)
+					var err error
+					evidence, err = FixtureSelectedDamage(s, reservations, SelectedDamageProbeOnly, 0, nil, func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
+					if reservationLive(reservations) != before {
+						t.Fatal("owner scratch cleanup/caller hold")
+					}
+					return err
+				})
+			}))
+			result.tuple(t, 1, 1, -1)
+			if row.capacity {
+				if !treeSameErrorV1(result.err, errOperationReservationCapacity) {
+					t.Fatal("primitive owner scratch boundary", result.err)
+				}
+			} else {
+				treeNativeError(t, result.err, "update", "InvalidInput", 22, "unpaired canonical owner mutation", nil)
+			}
+			if evidence.OldGets != row.gets || evidence.Deletes != 0 || evidence.Commits != 0 {
+				t.Fatal("primitive owner get prefix", evidence)
+			}
+			tsConsumed(t, s, reservations, 1, result.err)
+			s = tsReopen(t, s, path)
+			for _, m := range row.seed {
+				equal, err := FixtureRawRowEqual(s, m.DBI.Rank, m.Key, m.Literal)
+				if err != nil || !equal {
+					t.Fatal("owner scratch durable OLD", err)
+				}
+			}
+		})
+	}
+}
+
+func primitiveReadPointNativeV1(t *testing.T) {
+	for _, planned := range []bool{false, true} {
+		for _, distinct := range []bool{false, true} {
+			for _, short := range []uint64{0, 1} {
+				t.Run(fmt.Sprintf("P%v/distinct%v/short%d", planned, distinct, short), func(t *testing.T) {
+					s, _ := ttStore(t)
+					key, value := []byte{0x81}, bytes.Repeat([]byte{0x46}, 70000)
+					treeNativeSeed(t, s, 1, key, value)
+					need, p := uint64(140000), uint64(0)
+					if planned {
+						need, p = 70000, 70001
+					}
+					ledger := &pairReadTestLedgerV1{limit: p + need - short}
+					var observed PairReadObservation
+					var result error
+					run := func() {
+						var err error
+						observed, err = FixturePairReadObservation(s, func(site uint32) {
+							if site == 2 && ledger.held != p+need {
+								t.Error("native expected and candidate140000/owned expected candidate70000", ledger.held)
+							}
+						}, func() {
+							result = fixtureTreeSectionV1(s, ledger, func(section *treeSectionV1) error {
+								if planned {
+									section.covered = true
+									if err := section.writerV1().emitV1(treeTargetV1{dbi: ttUTXO, key: key, after: treeImageV1{present: true, value: value}}); err != nil {
+										return err
+									}
+									section.covered = false
+								}
+								image, err := section.oldV1(true).getV1(ttUTXO, key)
+								if err == nil && (!image.present || !bytes.Equal(image.value, value)) {
+									t.Error("amended point value")
+								}
+								return err
+							})
+						})
+						mustEnvironment(t, err)
+					}
+					if distinct {
+						_, err := fixtureLargeFault(s, 37, 1, key, run)
+						mustEnvironment(t, err)
+					} else {
+						run()
+					}
+					if short != 0 {
+						if !treeSameErrorV1(result, errOperationReservationCapacity) || observed.Comparisons != 0 || observed.Writes != 0 || ledger.held != p {
+							t.Fatal("point/future NEW before payload refusal", result, observed, ledger.held)
+						}
+					} else {
+						mustEnvironment(t, result)
+						gets := uint64(2)
+						if planned {
+							gets = 1
+							}
+						alias := uint64(1)
+						if distinct || planned {
+							alias = 0
+							}
+						if observed.Gets != gets || observed.Comparisons != 1 || observed.Aliases != alias || ledger.held != p+need {
+							t.Fatal("complete point window/one get/alias", observed, ledger.held)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func primitiveReadPointMetadataV1(t *testing.T, mode uint32, planned bool) {
+	s, _ := ttStore(t)
+	key, value := []byte{0x82}, bytes.Repeat([]byte{0x55}, 32)
+	treeNativeSeed(t, s, 1, key, value)
+	ledger := &pairReadTestLedgerV1{limit: 64}
+	if planned {
+		ledger.limit = 65 // P(key1+value32) and independent native candidate32.
+	}
+	var result error
+	var counts PairReadObservation
+	_, err := fixtureLargeFault(s, mode, 1, key, func() {
+		var observeErr error
+		counts, observeErr = FixturePairReadObservation(s, nil, func() {
+			result = fixtureTreeSectionV1(s, ledger, func(section *treeSectionV1) error {
+				if planned {
+					if err := section.recordV1(ttUTXO, key, treeEntryImageV1, value); err != nil {
+						return err
+					}
+				}
+				_, err := section.oldV1(true).getV1(ttUTXO, key)
+				return err
+			})
+		})
+		mustEnvironment(t, observeErr)
+	})
+	mustEnvironment(t, err)
+	switch mode {
+	case 31, 32, 36:
+		ttMismatch(t, result, "OLD/write snapshot mismatch")
+	case 33, 35:
+		treeNativeError(t, result, "update", "LocalInvariant", -30779, "mdbx_get returned invalid result shape", nil)
+	case 34:
+		treeNativeError(t, result, "update", "IO", 5, "error 5", nil)
+	case 37:
+		mustEnvironment(t, result)
+	}
+	wantGets, wantCompares := uint64(2), uint64(0)
+	if mode == 35 {
+		wantGets = 1 // representability refuses ORIGINAL metadata before exposure.
+	}
+	if mode == 37 {
+		wantCompares = 1
+	}
+	if counts.Gets != wantGets || counts.Comparisons != wantCompares || counts.Aliases != 0 || counts.Writes != 0 {
+		t.Fatal("native shape/rc before payload capacity", counts)
+	}
+}
+
+func primitiveReadPointAbsentV1(t *testing.T) {
+	s, _ := ttStore(t)
+	key := []byte{0x84}
+	treeNativeSeed(t, s, 1, key, bytes.Repeat([]byte{0x54}, 32))
+	ledger := &pairReadTestLedgerV1{limit: 1} // P absence key1; no native payload capacity.
+	var result error
+	counts, err := FixturePairReadObservation(s, nil, func() {
+		result = fixtureTreeSectionV1(s, ledger, func(section *treeSectionV1) error {
+			if err := section.recordV1(ttUTXO, key, treeEntryAbsentV1, nil); err != nil {
+				return err
+			}
+			_, err := section.oldV1(true).getV1(ttUTXO, key)
+			if section.pairReadLimit != 0 || ledger.held != 1 {
+				t.Error("absence metadata mismatch must not acquire native payload")
+			}
+			return err
+		})
+	})
+	mustEnvironment(t, err)
+	ttMismatch(t, result, "OLD/write snapshot mismatch")
+	if counts.Gets != 1 || counts.Comparisons != 0 || counts.Writes != 0 {
+		t.Fatal("planned absent/native present is metadata-only false", counts)
+	}
+}
+
+func primitiveReadSuccessorNativeV1(t *testing.T) {
+	t.Run("planned-key-and-value", primitiveReadPlannedNextV1)
+	for _, covered := range []bool{false, true} {
+		for _, variant := range []string{"exact", "short", "key-mismatch", "key-length", "value-length", "value-bytes"} {
+			t.Run(fmt.Sprintf("covered%v/%s", covered, variant), func(t *testing.T) {
+				s, _ := ttStore(t)
+				key, value := []byte{0x81}, bytes.Repeat([]byte{0x4a}, 32)
+				wantHeld := uint64(66)
+				if variant == "value-bytes" {
+					value, wantHeld = []byte{0x7e}, 4
+				}
+				treeNativeSeed(t, s, 1, key, value)
+				limit := uint64(66)
+				if variant == "short" {
+					limit = 65
+				}
+				ledger := &pairReadTestLedgerV1{limit: limit}
+				var result error
+				var counts PairReadObservation
+				var evidence SelectedDamageEvidence
+				run := func() {
+					var err error
+					evidence, err = FixtureSelectedDamage(s, nil, SelectedDamageProbeOnly, 0, nil, func() {
+						var observeErr error
+						counts, observeErr = FixturePairReadObservation(s, nil, func() {
+							result = fixtureTreeSectionV1(s, ledger, func(section *treeSectionV1) error {
+								section.covered = covered
+								got, image, ok, err := section.oldV1(true).nextV1(ttUTXO, []byte{0x80})
+								if err == nil && (!ok || !bytes.Equal(got, key) || !bytes.Equal(image.value, value)) {
+									t.Error("successor logical image")
+								}
+								return err
+							})
+						})
+						mustEnvironment(t, observeErr)
+					})
+					mustEnvironment(t, err)
+				}
+				if variant != "exact" && variant != "short" {
+					driftKey := []byte{0x80}
+					if variant == "key-length" {
+						driftKey = []byte{0x80, 0x01}
+					}
+					if variant == "value-length" || variant == "value-bytes" {
+						driftKey = key
+					}
+					_, err := FixtureWriteSnapshotDrift(s, 1, driftKey, run)
+					mustEnvironment(t, err)
+				} else {
+					run()
+				}
+				wantCompares := uint64(2)
+				switch variant {
+				case "short":
+					wantCompares = 0
+					if !treeSameErrorV1(result, errOperationReservationCapacity) || ledger.held != 0 {
+						t.Fatal("complete successor extent before exposure", result, ledger.held)
+					}
+				case "key-mismatch":
+					wantCompares = 1
+					ttMismatch(t, result, "OLD/write snapshot mismatch")
+				case "key-length":
+					wantCompares = 0
+					ttMismatch(t, result, "OLD/write snapshot mismatch")
+				case "value-length":
+					wantCompares = 1
+					ttMismatch(t, result, "OLD/write snapshot mismatch")
+				case "value-bytes":
+					ttMismatch(t, result, "OLD/write snapshot mismatch")
+				default:
+					mustEnvironment(t, result)
+				}
+				if counts.Comparisons != wantCompares || counts.Writes != 0 || evidence.OldPulls[1] != 1 || variant != "short" && ledger.held != wantHeld {
+					t.Fatal("successor key mismatch value payload=0/one OLD pull", counts, evidence, ledger.held)
+				}
+			})
+		}
+	}
+}
+
+func primitiveReadPlannedNextV1(t *testing.T) {
+	for _, short := range []uint64{0, 1} {
+		t.Run(fmt.Sprintf("short%d", short), func(t *testing.T) {
+			s, _ := ttStore(t)
+			key, value := []byte{0x81}, bytes.Repeat([]byte{0x4a}, 70000)
+			ledger := &pairReadTestLedgerV1{limit: 140002 - short}
+			var result error
+			counts, err := FixturePairReadObservation(s, nil, func() {
+				result = fixtureTreeSectionV1(s, ledger, func(section *treeSectionV1) error {
+					if err := section.writerV1().emitV1(treeTargetV1{dbi: ttUTXO, key: key, after: treeImageV1{present: true, value: value}}); err != nil {
+						return err
+					}
+					_, _, _, err := section.oldV1(true).nextV1(ttUTXO, key)
+					if section.reached != 2 || section.pBudgetV1() != 70001 || section.pairReadLimit != 70001-short {
+						t.Error("P and native successor capacity are distinct", section.reached, section.pBudgetV1(), section.pairReadLimit)
+					}
+					return err
+				})
+			})
+			mustEnvironment(t, err)
+			if short != 0 {
+				if !treeSameErrorV1(result, errOperationReservationCapacity) || counts.Comparisons != 2 || ledger.held != 140001 {
+					t.Fatal("planned successor full k+b refusal after key", result, counts, ledger.held)
+				}
+			} else if result != nil || counts.Comparisons != 3 || ledger.held != 140002 {
+				t.Fatal("planned successor k+b complete", result, counts, ledger.held)
+			}
+			if counts.Writes != 1 {
+				t.Fatal("raw successor producer changed native write sequence", counts)
+			}
+			equal, err := FixtureRawRowEqual(s, 1, key, nil)
+			if err != nil || !equal {
+				t.Fatal("raw successor fixture abort durable OLD", err)
+			}
+		})
+	}
+}
+
+func primitiveReadFutureNativeV1(t *testing.T) {
+	for _, mode := range []string{"raw-OLD", "covered-NEW", "reference-OLD"} {
+		for _, short := range []uint64{0, 1} {
+			t.Run(fmt.Sprintf("%s/short%d", mode, short), func(t *testing.T) {
+				s, _ := ttStore(t)
+				key := []byte{0x83}
+				limit, native, p := uint64(140010), uint64(140000), uint64(10)
+				if mode != "covered-NEW" {
+					treeNativeSeed(t, s, 1, key, bytes.Repeat([]byte{0x61}, 70000))
+				}
+				if mode == "covered-NEW" {
+					limit, p = 280001, 140001
+				}
+				if mode == "reference-OLD" {
+					limit, p = 140001, 1
+				}
+				if short != 0 {
+					limit = native + p - 1
+					if mode == "raw-OLD" {
+						limit = 139999
+					}
+				}
+				ledger := &pairReadTestLedgerV1{limit: limit}
+				var result error
+				counts, err := FixturePairReadObservation(s, func(site uint32) {
+					if site == 3 && ledger.held < native {
+						t.Error("future OLD before raw write/future NEW before flush", mode, ledger.held)
+					}
+				}, func() {
+					result = fixtureTreeSectionV1(s, ledger, func(section *treeSectionV1) error {
+						if mode == "reference-OLD" {
+							if err := section.writerV1().referV1(ttUTXO, key); err != nil {
+								return err
+							}
+							return section.finalV1(nil, nil)
+						}
+						section.covered = mode == "covered-NEW"
+						value := []byte("abc")
+						if section.covered {
+							value = bytes.Repeat([]byte{0x7a}, 140000)
+						}
+						if err := section.writerV1().emitV1(treeTargetV1{dbi: ttUTXO, key: key, after: treeImageV1{present: true, value: value}}); err != nil {
+							return err
+						}
+						if !section.covered {
+							if err := section.writerV1().emitV1(ttTarget(ttUTXO, key, "abcde")); err != nil {
+								return err
+							}
+						} else if err := section.flushV1(nil); err != nil {
+							return err
+						}
+						if section.pairReadLimit != native || section.pBudgetV1() != p {
+							t.Error("future OLD/NEW exact native/P high-waters", section.pairReadLimit, section.pBudgetV1())
+						}
+						return section.finalV1(nil, nil)
+					})
+				})
+				mustEnvironment(t, err)
+				if short != 0 {
+					if !treeSameErrorV1(result, errOperationReservationCapacity) || counts.Writes != 0 || counts.Comparisons != 0 {
+						t.Fatal("future declaration refused before native work", result, counts)
+					}
+				} else if result != nil || ledger.held != native+p {
+					t.Fatal("future declaration/native and P remain separate", result, ledger.held)
+				}
+			})
+		}
+	}
+}
+
+func primitiveReadPartialNativeV1(t *testing.T) {
+	s, _ := ttStore(t)
+	keys := [][]byte{tsCounterKey(8), tsCounterKey(9)}
+	for i, width := range []int{32, 70000} {
+		treeNativeSeed(t, s, 0, keys[i], bytes.Repeat([]byte{0x42}, width))
+	}
+	ledger := &pairReadTestLedgerV1{limit: 139999}
+	var high uint64
+	err := fixtureTreeSectionV1(s, ledger, func(section *treeSectionV1) error {
+		pair := []ownedMutation{{dbi: schemaDBIs[0], key: keys[0], beforePresent: true, after: AfterAbsent}, {dbi: schemaDBIs[0], key: keys[1], beforePresent: true, after: AfterAbsent}}
+		err := section.pairPreflightV1(pair, nil)
+		high = section.pairReadLimit
+		return err
+	})
+	if !treeSameErrorV1(err, errOperationReservationCapacity) || high != 64 || ledger.held != 64 {
+		t.Fatal("earlier admitted window retained on later refusal", err, high, ledger.held)
+	}
+	ledger.releaseV1(64) // This seam omits the public enclosing hold.
+	if ledger.held != 0 {
+		t.Fatal("earlier admitted window exact release")
+	}
+}
+
+func primitiveReadOwnerPrekeyV1(t *testing.T) {
+	for _, room := range []uint64{87, 88} {
+		t.Run(fmt.Sprint(room), func(t *testing.T) {
+			s, path, o := tsNew(t)
+			f, owner := canonicalForwardLiteral(1, 5, [32]byte{0x41}, [40]byte{39: 1}), canonicalOwnerLiteral(1, 5, [32]byte{0x41})
+			treeNativeSeed(t, s, 7, owner.Key, owner.Literal)
+			treeNativeSeed(t, s, 2, f.Key, f.Literal)
+			op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Error("pre-key reached Source"); return nil }))
+			op.Pair.Mutations = []Mutation{canonicalDelete(owner)}
+			var result tsResult
+			var evidence SelectedDamageEvidence
+			var faultErr error
+			mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return a.WithReservation(402653184-168-room, func() error {
+					evidence, faultErr = FixtureSelectedDamage(s, o, SelectedDamageGetEIO, 2, f.Key, func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
+					return nil
+				})
+			}))
+			result.tuple(t, 1, 1, -1)
+			want := [8]uint64{7: 2}
+			if room == 87 {
+				tsfSlotUnreached(t, evidence, faultErr)
+				if !treeSameErrorV1(result.err, errOperationReservationCapacity) {
+					t.Fatal("primitive O2 pre-key87 before partner get", result.err)
+				}
+			} else {
+				mustEnvironment(t, faultErr)
+				want[2] = 1
+				treeNativeError(t, result.err, "update", "IO", 5, "error 5", nil)
+			}
+			if evidence.OldGets != want || reservationLive(o) != 0 {
+				t.Fatal("primitive pre-key get prefix/earlier80 cleanup", evidence)
+			}
+			tsConsumed(t, s, o, 1, result.err)
+			equal, err := FixtureRawRowEqual(tsReopen(t, s, path), 7, owner.Key, owner.Literal)
+			if err != nil || !equal {
+				t.Fatal("pre-key durable OLD", err)
+			}
+		})
+	}
+}
+
+func primitiveReadOwnerDisposableV1(t *testing.T) {
+	f, o := canonicalForwardLiteral(1, 5, [32]byte{0x41}, [40]byte{39: 1}), canonicalOwnerLiteral(1, 5, [32]byte{0x41})
+	badF, badO := f, o
+	badF.Literal, badO.Literal = bytes.Clone(f.Literal[:103]), append(bytes.Clone(o.Literal), 0)
+	for _, row := range []struct {
+		name       string
+		pair, seed []Mutation
+		pc, room   uint64
+		gets       [8]uint64
+	}{
+		{"wrong-target-width", []Mutation{canonicalDelete(o)}, []Mutation{badO}, 168, 18, [8]uint64{7: 3}},
+		{"wrong-partner-width", []Mutation{canonicalDelete(o)}, []Mutation{badF, o}, 168, 88, [8]uint64{2: 1, 7: 3}},
+		{"targeted-partner", []Mutation{canonicalDelete(f), canonicalDelete(o)}, []Mutation{f, o}, 312, 208, [8]uint64{2: 3, 7: 3}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			s, _, reservations := tsNew(t)
+			for _, m := range row.seed {
+				treeNativeSeed(t, s, m.DBI.Rank, m.Key, m.Literal)
+			}
+			op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Error("owner prefix reached Source"); return nil }))
+			op.Pair.Mutations = row.pair
+			var result tsResult
+			var evidence SelectedDamageEvidence
+			mustEnvironment(t, reservations.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return a.WithReservation(402653184-row.pc-row.room, func() error {
+					var err error
+					evidence, err = FixtureSelectedDamage(s, reservations, SelectedDamageProbeOnly, 0, nil, func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
+					return err
+				})
+			}))
+			result.tuple(t, 1, 1, 0) // All owner checks completed; the later step needs74912.
+			if !treeSameErrorV1(result.err, errOperationReservationCapacity) || evidence.OldGets != row.gets || evidence.Deletes != 0 || evidence.Commits != 0 {
+				t.Fatal("metadata-only/targeted partner prefix", result, evidence)
+			}
+			tsConsumed(t, s, reservations, 1, result.err)
+		})
+	}
+}
+
+func primitiveReadGoexitV1(t *testing.T) {
+	s, _, o := tsNew(t)
+	key, old := tsCounterKey(9), bytes.Repeat([]byte{0x77}, 32)
+	treeNativeSeed(t, s, 0, key, old)
+	op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Error("Goexit prefix reached Source"); return nil }))
+	op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 1}}
+	fired, returned := false, false
+	mustEnvironment(t, o.WithReservation(19, func() error {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return a.WithReservation(137, func() error {
+					defer func() {
+						if reservationLive(o) != 156 {
+							t.Error("Goexit caller/source hold survived exact native cleanup")
+						}
+					}()
+					_, err := FixturePairReadObservation(s, func(site uint32) {
+						if site == 2 {
+							fired = true
+							if reservationLive(o) != 357 {
+								t.Error("Goexit mutable window64 held before comparison")
+							}
+							runtime.Goexit()
+						}
+					}, func() { _ = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
+					returned = true
+					return err
+				})
+			})
+		}()
+		eiAwait(t, done)
+		if !fired || returned || reservationLive(o) != 19 || s.state != storeOPEN {
+			t.Fatal("mutable-window Goexit cleanup/lifecycle", fired, returned, reservationLive(o), s.state)
+		}
+		return nil
+	}))
+	equal, err := FixtureRawRowEqual(s, 0, key, old)
+	if err != nil || !equal || reservationLive(o) != 0 {
+		t.Fatal("Goexit durable OLD and foreign release", err)
+	}
+	tsFollowing(t, s, o)
+}
+
+func primitiveReadHeaderNativeV1(t *testing.T) {
+	for _, short := range []uint64{0, 1} {
+		t.Run(fmt.Sprintf("short%d", short), func(t *testing.T) {
+			s, log, key, _ := tsfSlot(t)
+			value := bytes.Repeat([]byte{0x69}, 70000)
+			treeNativeSeed(t, s.s, 3, key, value)
+			p := s.budgets(t)[2]
+			// Q=body319+report152+undo72+slot/spare388; heldR=419632+104*2.
+			competitor := uint64(805306368-931-419840-8808) - p + short
+			proved, compared := false, false
+			s.op.Proof = func(report *TreeDeltaReportV1) error {
+				if err := log.proof(report); err != nil {
+					return err
+				}
+				if reservationLive(s.o) != 931+p+419840 {
+					t.Error("late HeaderSlot combined P+B_r+floor", reservationLive(s.o), p)
+				}
+				reservationFill(t, s.o, competitor)
+				proved = true
+				return nil
+			}
+			var result tsResult
+			builders := 0
+			counts, err := FixturePairReadObservation(s.s, func(site uint32) {
+				if proved && site == 2 {
+					compared = true
+					if reservationLive(s.o) != 805306368 {
+						t.Error("late HeaderSlot complete140000/floor shortfall8808")
+					}
+				}
+			}, func() {
+				mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					result = tsInvoke(s.s, a, func(*Reader) (TreeOperationV1, error) { builders++; return s.op, nil })
+					return nil
+				}))
+			})
+			mustEnvironment(t, err)
+			result.tuple(t, 1, 1, -1)
+			if short != 0 {
+				if !treeSameErrorV1(result.err, errOperationReservationCapacity) || compared {
+					t.Fatal("late HeaderSlot room-1 before payload", result)
+				}
+			} else {
+				tsfSlotDiffers(t, result.err)
+				if !compared {
+					t.Fatal("funded late HeaderSlot reaches native comparison")
+				}
+			}
+			if !proved || log.calls != 1 || builders != 1 || counts.Writes != 0 || reservationLive(s.o) != competitor {
+				t.Fatal("late HeaderSlot Proof/write/own-remainder cleanup", proved, log.calls, counts, reservationLive(s.o))
+			}
+			tsConsumed(t, s.s, s.o, 1, result.err)
+			s.durable(t, false)
+			equal, err := FixtureRawRowEqual(s.s, 3, key, value)
+			if err != nil || !equal {
+				t.Fatal("late HeaderSlot durable OLD", err)
+			}
+		})
+	}
+}
+
+// A disposable raw body is observed only through its resource prefix; the funded
+// control stops at the Source marker before interpreting it. The second row
+// reaches the same new native-window refusal after an earlier primitive wrote.
+func primitiveReadStagesV1(t *testing.T) {
+	for _, afterWrite := range []bool{false, true} {
+		for _, short := range []uint64{0, 1} {
+			t.Run(fmt.Sprintf("after-write%v/short%d", afterWrite, short), func(t *testing.T) {
+				s, path, o := tsNew(t)
+				marker, calls := errors.New("funded raw body Source marker"), 0
+				source := tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return marker })
+				op := tsOperation(t, tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error { return sink.BeginV1(TreeBlockV1{TxCount: 1}) }))
+				p := op.Primitives[0]
+				p.Kind, p.Generation, p.Height, p.Block, p.Source = 6, 2, 6, tdTxid(0xb1), source
+				p.Endpoint = tcEndpoint(6, p.Block)
+				value := bytes.Repeat([]byte{0x6b}, 70000)
+				treeNativeSeed(t, s, 4, p.Block[:], value)
+				filler := uint64(402653184 - 74912 - 140000 + short)
+				stage, index := UpdateStage(1), 0
+				if afterWrite {
+					tsRoots(t, s, o, 1)
+					op.Primitives = append(op.Primitives, p)
+					filler, stage, index = 0, 2, 1
+				} else {
+					op.Primitives, op.Pair = []TreePrimitiveV1{p}, TreePairV1{}
+				}
+				var result tsResult
+				var counts PairReadObservation
+				filled, ready, writes := false, false, 0
+				competitor := uint64(0)
+				mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					return a.WithReservation(filler, func() error {
+						var err error
+						counts, err = FixturePairReadObservation(s, func(site uint32) {
+							if site == 3 {
+								writes++
+							}
+							if site == 2 && writes == 3 {
+								ready = true // synchronous fused root equality completed before the next get.
+							}
+							if afterWrite && ready && !filled && site == 1 {
+								// Q319 + P284 + prior H266 + next step74912 =75781.
+								if reservationLive(o) != 75781 {
+									t.Error("late native body owning prefix", reservationLive(o))
+								}
+								competitor = 805090853 + short // leave139734-short for H140000-H266.
+								reservationFill(t, o, competitor)
+								filled = true
+							}
+						}, func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) })
+						mustEnvironment(t, err)
+						if reservationLive(o) != filler+competitor {
+							t.Fatal("new native stage refusal releases attempt and preserves caller/competitor")
+						}
+						return nil
+					})
+				}))
+				result.tuple(t, 1, stage, index)
+				wantCalls := 1
+				if short != 0 {
+					wantCalls = 0
+					if !treeSameErrorV1(result.err, errOperationReservationCapacity) {
+						t.Fatal("new native window room-1 retains exact reached stage/index", result)
+					}
+				} else if !treeSameErrorV1(result.err, marker) {
+					t.Fatal("funded native prefix reaches original Source marker", result)
+				}
+				if calls != wantCalls || afterWrite && (!filled || writes != 3 || counts.Gets != 11) || !afterWrite && (writes != 0 || counts.Gets != 1) {
+					t.Fatal("new native refusal source/get/write prefix", calls, counts, filled)
+				}
+				tsConsumed(t, s, o, 1, result.err)
+				s = tsReopen(t, s, path)
+				equal, err := FixtureRawRowEqual(s, 4, p.Block[:], value)
+				if err != nil || !equal {
+					t.Fatal("native-stage refusal durable OLD body", err)
+				}
+				if afterWrite {
+					tsRead(t, s, TreeSchemaV1DBIs()[0], tsRootKey(1), tsRootBytes(t, TreeEndpointV1{}))
+					tsRead(t, s, TreeSchemaV1DBIs()[5], tdManifestKey(op.Primitives[0].Block), nil)
+				}
+			})
+		}
+	}
+}
+
 func pairReadClosedNativeV1(t *testing.T) {
+	treeReadClosedNativeV1(t, false)
+}
+
+func treeReadClosedNativeV1(t *testing.T, primitive bool) {
 	s, _, o := tsNew(t)
 	key := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}
 	treeNativeSeed(t, s, 0, key, bytes.Repeat([]byte{0x44}, 32))
 	ready, closeNow, closed := make(chan *OperationAccount), make(chan struct{}), make(chan struct{})
+	kind := LaneOperation
+	if primitive {
+		kind = TreeOperation
+	}
 	go func() {
 		defer close(closed)
-		_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error { ready <- a; <-closeNow; return nil })
+		_ = o.WithOperation(kind, func(a *OperationAccount) error { ready <- a; <-closeNow; return nil })
 	}()
 	a := <-ready
 	fired := false
 	op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 1}}}}
+	if primitive {
+		pair := op.Pair
+		op = tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Error("closed grow reached Source"); return nil }))
+		op.Pair = pair
+	}
 	mustEnvironment(t, a.WithReservation(137, func() error {
 		var result tsResult
 		_, err := FixturePairReadObservation(s, func(site uint32) {
@@ -254,6 +1042,55 @@ func pairReadMetadataNativeV1(t *testing.T) {
 
 // Strict readback consumes only the seal, even when other accounts fill actual R.
 func TestTreePairReadCrossedV1(t *testing.T) {
+	treeReadCrossedV1(t, false)
+}
+
+func TestTreePrimitiveReadCrossedV1(t *testing.T) {
+	treeReadCrossedV1(t, true)
+	t.Run("unexpected-seal", primitiveReadUnexpectedSealV1)
+}
+
+// Deliberately shrinking this test-only strict carrier is an unexpected-source
+// probe, never a normally attainable public source or a fit counterexample.
+func primitiveReadUnexpectedSealV1(t *testing.T) {
+	s, _ := ttStore(t)
+	key, old := tsCounterKey(9), bytes.Repeat([]byte{0x64}, 32)
+	treeNativeSeed(t, s, 0, key, old)
+	ledger := &pairReadTestLedgerV1{}
+	var heldBefore, heldAfter uint64
+	script := fixtureTreeScriptV1{
+		ledger: ledger,
+		write: func(section *treeSectionV1) error {
+			if err := section.writerV1().referV1(schemaDBIs[0], key); err != nil {
+				return err
+			}
+			err := section.finalV1(nil, nil)
+			heldBefore = ledger.held
+			return err
+		},
+		readback: func(r *treeReadbackStateV1) error {
+			r.nativeLimit = 63 // Writer established OLD64, deliberately violate the carried seal.
+			err := r.emitterV1().referV1(schemaDBIs[0], key)
+			heldAfter = ledger.held
+			return err
+		},
+	}
+	var outcome updateNativeOutcome
+	_, err := fixtureLargeFault(s, 12, 0, key, func() { outcome = fixtureTreeCommitV1(s, script) })
+	mustEnvironment(t, err)
+	commit := ttCommitError(t, outcome, 3)
+	if !treeSameErrorV1(commit.ReadbackCause, errOperationReservationCapacity) || heldBefore != 73 || heldAfter != 73 || ledger.held != 73 {
+		t.Fatal("unexpected sealed excess is UNKNOWN/capacity without grow", commit, heldBefore, heldAfter, ledger.held)
+	}
+	equal, err := FixtureRawRowEqual(s, 0, key, old)
+	if err != nil || !equal {
+		t.Fatal("unexpected seal durable bytes", err)
+	}
+}
+
+// The same native crossing oracle covers the two production consumers. Primitive
+// rows add real covered projection/floor/replay; Pair-only rows retain their seal.
+func treeReadCrossedV1(t *testing.T, primitive bool) {
 	for _, row := range []struct {
 		name      string
 		scenario  SelectedDamageScenario
@@ -271,7 +1108,13 @@ func TestTreePairReadCrossedV1(t *testing.T) {
 		{"readback-abort-consumed", 0, 16, 2, true},
 		{"readback-abort-retained-NEW", 0, 15, 2, true},
 		{"readback-abort-retained-OLD", 0, 19, 1, true},
+		{"reference", SelectedDamageCommitNew, 0, 2, false},
+		{"projection-neither", 0, 3, 3, false},
+		{"reference-neither", 0, 3, 3, false},
 	} {
+		if (row.name == "reference" || row.name == "projection-neither" || row.name == "reference-neither") && !primitive {
+			continue
+		}
 		t.Run(row.name, func(t *testing.T) {
 			s, path, o := tsNew(t)
 			key := tdUTXOKey(1, tdTxid(0x31), 0)
@@ -287,34 +1130,76 @@ func TestTreePairReadCrossedV1(t *testing.T) {
 			treeNativeSeed(t, s, 1, key, old)
 			treeNativeSeed(t, s, 0, consulted, bytes.Repeat([]byte{0x44}, 32))
 			op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[1], Key: key, BeforePresent: true, AfterKind: 2, Literal: next}}, Consulted: []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: consulted}}}}
+			faultKey, faultRank := key, uint8(1)
+			ceiling, fill, engine := uint64(154611183), uint64(650695185), window
+			if primitive {
+				tsRoots(t, s, o, 1)
+				tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+				pair := op.Pair
+				meta := TreeBlockV1{TxCount: 1}
+				op = tsOperation(t, tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error { return sink.BeginV1(meta) }))
+				body := op.Pair.Mutations[0]
+				pc += 319 // body PC=128+32+159; independently owned by this Pair.
+				p := uint64(309) // counter25 + manifest66 + applied-empty root218.
+				if row.name == "reference" || row.name == "reference-neither" {
+					mustEnvironment(t, tsRun(t, s, o, TreeOperation, TreeOperationV1{Pair: op.Pair}).err)
+					op.Pair.Mutations, pc, p = nil, pc-319, p+32
+				}
+				op.Pair.Mutations = append(op.Pair.Mutations, pair.Mutations...)
+				op.Pair.Consulted = pair.Consulted
+				tsCover(&op, meta)
+				if row.name == "both-OLD-first" {
+					mustEnvironment(t, tsRun(t, s, o, TreeOperation, op).err)
+					p -= 33 // Existing manifest is now a key33 reference, not an image66.
+					for i := range op.Pair.Mutations {
+						if bytes.Equal(op.Pair.Mutations[i].Key, body.Key) {
+							op.Pair.Mutations[i].BeforePresent = true
+						}
+					}
+				}
+				ceiling, fill, engine = 402653184, 402653184, p+419632
+				if row.name == "projection-neither" {
+					faultKey, faultRank = tsCounterKey(1), 0
+				}
+				if row.name == "reference-neither" {
+					faultKey, faultRank = body.Key, 4
+				}
+			}
 			var result tsResult
 			filled := false
-			mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+			kind := LaneOperation
+			if primitive {
+				kind = TreeOperation
+			}
+			mustEnvironment(t, o.WithOperation(kind, func(a *OperationAccount) error {
 				return a.WithReservation(pc, func() error {
-					return a.WithReservation(154611183-2*pc-window, func() error {
+					return a.WithReservation(ceiling-2*pc-engine, func() error {
 						_, err := FixturePairReadObservation(s, func(site uint32) {
 							if site == 3 {
-								if reservationLive(o) != 805306368 && reservationLive(o) != 154611183 {
+								if reservationLive(o) != 805306368 && reservationLive(o) != ceiling {
 									t.Error("complete read window before first write")
 								}
 								if !filled {
-									reservationFill(t, o, 650695185)
+									reservationFill(t, o, fill)
 									filled = true
 								}
 							}
-							if filled && reservationLive(o) != 805306368 {
-								t.Error("after-crossing window grew/released")
+							wantLive := uint64(805306368)
+							if primitive && site >= 4 {
+								wantLive -= engine // P/full heldR end before ORIGINAL OLD cleanup.
+							}
+							if filled && reservationLive(o) != wantLive {
+								t.Error("after-crossing native lifetime/cleanup release", site, reservationLive(o), wantLive)
 							}
 						}, func() {
 							run := func() { result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }) }
 							if row.mode != 0 {
-								faultKey := key
-								faultRank := uint8(1)
+								selectedKey, selectedRank := faultKey, faultRank
 								if row.mode == 8 {
-									faultKey = consulted
-									faultRank = 0
+									selectedKey = consulted
+									selectedRank = 0
 								}
-								_, faultErr := fixtureLargeFault(s, row.mode, faultRank, faultKey, run)
+								_, faultErr := fixtureLargeFault(s, row.mode, selectedRank, selectedKey, run)
 								mustEnvironment(t, faultErr)
 							} else {
 								_, faultErr := FixtureSelectedDamage(s, o, row.scenario, 1, key, run)
@@ -322,7 +1207,7 @@ func TestTreePairReadCrossedV1(t *testing.T) {
 							}
 						})
 						mustEnvironment(t, err)
-						if reservationLive(o) != 805306368-pc-window {
+						if reservationLive(o) != 805306368-pc-engine {
 							t.Fatal("crossed engine remainder/caller holds")
 						}
 						return nil
@@ -338,20 +1223,21 @@ func TestTreePairReadCrossedV1(t *testing.T) {
 			if !ok || ce.Truth != row.truth || s.state != state {
 				t.Fatalf("complete crossed tuple %+v/state%s", result, s.state)
 			}
+			calls := 0
+			mustEnvironment(t, o.WithOperation(kind, func(a *OperationAccount) error {
+				next := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { calls++; return op, nil })
+				next.tuple(t, row.truth, 1, -1)
+				if calls != 0 || any(next.err) != any(s.terminal) {
+					t.Fatal("crossed owner next operation callback0/terminal identity", next)
+				}
+				return nil
+			}))
 			treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
 			if row.mode == 15 || row.mode == 19 {
 				engine := requireEnvironmentError(t, ce.ReadbackCause, "LocalInvariant", "abort", -30416, "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread")
 				if engine.Cause != nil || !engine.ReopenRequired {
 					t.Fatal("retained readback error cause/reopen", engine)
 				}
-				calls := 0
-				_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
-					next := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { calls++; return op, nil })
-					if next.truth != row.truth || next.stage != 1 || calls != 0 || any(next.err) != any(s.terminal) {
-						t.Fatal("retained read owner next operation", next)
-					}
-					return nil
-				})
 				mustEnvironment(t, fixtureLargeRelease(s))
 			} else if row.mode == 16 {
 				treeNativeError(t, ce.ReadbackCause, "abort", "IO", 5, "error 5", nil)
@@ -371,6 +1257,12 @@ func TestTreePairReadCrossedV1(t *testing.T) {
 			equal, err := FixtureRawRowEqual(s, 1, key, want)
 			if err != nil || !equal {
 				t.Fatal("crossed durable bytes", err)
+			}
+			if row.name == "projection-neither" || row.name == "reference-neither" {
+				equal, err := FixtureRawRowEqual(s, faultRank, faultKey, []byte{0x7f})
+				if err != nil || !equal {
+					t.Fatal("independent projection/reference durable damage", err)
+				}
 			}
 		})
 	}
@@ -1441,7 +2333,7 @@ func tsfCoveredReserve(t *testing.T) {
 			tsfCover(t, s)
 			budgets := s.budgets(t)
 			pc := uint64(128 + 32 + len(s.op.Pair.Mutations[0].Literal))
-			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_408 - 208 + short
+			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_440 - 208 + short
 			var r tsResult
 			run := func() {
 				mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
@@ -1625,7 +2517,7 @@ func tsfCoveredCapacity(t *testing.T) {
 					filler := uint64(0)
 					if denied {
 						pair := uint64(128 + 32 + len(op.Pair.Mutations[0].Literal))
-						filler = 402_653_184 - pair - 74_880 - 104*3 - 65_560 - 147_968
+						filler = 402_653_184 - pair - 74_912 - 104*3 - 65_560 - 147_968 - 196801
 					}
 					return a.WithReservation(filler, func() error {
 						r = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil })
@@ -1783,8 +2675,8 @@ func TestTreeStreamComposedAndExactAccountV1(t *testing.T) {
 				r = s.run(t)
 			}
 			r.tuple(t, 2, 3, -1)
-			if sample != pc+wantP[1]+74_880 {
-				t.Fatalf("A4 live%d want PC%d+P%d+74880", sample, pc, wantP[1])
+			if sample != pc+wantP[1]+74_912+266 {
+				t.Fatalf("A4 live%d want PC%d+P%d+74912+native266", sample, pc, wantP[1])
 			}
 			if crossed {
 				tcCrossedCause(t, r.err, 2, nil)
@@ -1813,7 +2705,7 @@ func TestTreeStreamReadbackReservationV1(t *testing.T) {
 			s := tsfNew(t)
 			budgets := s.budgets(t)
 			pc := uint64(len(s.op.Pair.Mutations[0].Key) + len(s.op.Pair.Mutations[0].Literal) + 128)
-			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_408 - 104*2 + short
+			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_440 - 104*2 + short
 			var r tsResult
 			mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
 				return a.WithReservation(filler, func() error {
@@ -1844,7 +2736,7 @@ func TestTreeStreamReadbackReservationV1(t *testing.T) {
 		s := tsfNew(t)
 		pc := uint64(len(s.op.Pair.Mutations[0].Key) + len(s.op.Pair.Mutations[0].Literal) + 128)
 		// CURRENT UTXO64 + manifest(33+33) =130; its first node needs78.
-		filler := uint64(402_653_184) - pc - 74_880 - 104 - 65_560 - 147_968 - 207
+		filler := uint64(402_653_184) - pc - 74_912 - 104 - 65_560 - 147_968 - 266 - 207
 		var r tsResult
 		mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
 			return a.WithReservation(filler, func() error {
@@ -2584,7 +3476,7 @@ func TestTreeProofAfterReserveV1(t *testing.T) {
 			s.op.Proof = log.proof
 			budgets := s.budgets(t)
 			pc := uint64(128+32+len(s.op.Pair.Mutations[0].Literal)) + 152 + 3*24
-			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_408 - 208 + short
+			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_440 - 208 + short
 			var r tsResult
 			mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
 				return a.WithReservation(filler, func() error {
@@ -2959,7 +3851,7 @@ func TestTreeHeaderSlotEarlierResultsV1(t *testing.T) {
 		s, log, key, _ := tsfSlot(t)
 		budgets := s.budgets(t)
 		pc := uint64(128+32+len(s.op.Pair.Mutations[0].Literal)) + 152 + 3*24 + 128 + 32 + 148 + 48 + 32
-		filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_408 - 208 + 1
+		filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_440 - 208 + 1
 		var r tsResult
 		evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamageGetEIO, 3, key, func() {
 			mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {

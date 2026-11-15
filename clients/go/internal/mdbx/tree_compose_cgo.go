@@ -14,7 +14,7 @@ import (
 
 // ---- tree_compose_cgo.go (owner L5a) ----
 
-const treeReaderBytesV1 uint64 = 1152 // R: the provider Reader newUpdateReaderV1 allocates per Source call (216, D33) plus the engine-side allocation of one LargeImageBlockBodyV1 visit with one ReadAt on it (728, D34) plus two 64-byte amended read objects reachable at once (128, D36) plus one mergedNextV1 seek copy (80, D37)
+const treeReaderBytesV1 uint64 = 1184 // R: Reader216 + body visit728 + two amended objects160 + seek copy80.
 
 // treeStepBytesV1 is the per-primitive charge W + F_fixed + C + R (D12-E, D14-2, D33), made before the body read.
 const treeStepBytesV1 = treeWindowBytesV1 + treeFixedBytesV1 + treeControlBytesV1 + treeReaderBytesV1
@@ -354,7 +354,7 @@ func (c *treeComposeV1) opV1(out *transactionOutcome) treeUnwindV1 {
 }
 
 // cleanupV1 is op's deferred cleanup (D4 T3), run after the slot function expired and released the recorder: it
-// releases every engine charge still held exactly once, then on a writer-position panic or Goexit aborts the write
+// releases P and full heldR exactly once, then on a writer-position panic or Goexit aborts the write
 // txn with R_j, and writes *out field by field from the captured outcome.
 func (c *treeComposeV1) cleanupV1(out *transactionOutcome) {
 	unwound := !c.done && !c.committed && c.writer.t != nil
@@ -386,6 +386,8 @@ func (c *treeComposeV1) releaseV1() {
 	if c.heldR != 0 {
 		w.ledger.releaseV1(c.heldR)
 	}
+	// Full heldR includes the shared S_r floor. The enclosing operation hold
+	// releases H_final-S_r after reserve success, or all H before/refused reserve.
 }
 
 func treeCoveredV1(p []TreePrimitiveV1) bool { return len(p) != 0 && p[0].Coverage != nil }
@@ -513,12 +515,22 @@ func (c *treeComposeV1) reserveV1() error {
 	if len(w.plan.primitives) == 0 {
 		return nil
 	}
-	hr := treeScratchBytesV1 + treeStepBytesV1 + treeValueBytesV1 + treeNodeWorkBytesV1 + treeDescSizeV1*uint64(w.events)
-	err := w.ledger.chargeV1(hr)
+	// E is uint32, so this fixed base, 104E and nominal B_r+S_r fit uint64.
+	br := treeStepBytesV1 + treeValueBytesV1 + treeNodeWorkBytesV1 + treeDescSizeV1*uint64(w.events)
+	shortfall := uint64(0)
+	if w.t.pairReadLimit < treeScratchBytesV1 {
+		shortfall = treeScratchBytesV1 - w.t.pairReadLimit
+	}
+	n, err := treePairReadSizeV1(br, shortfall, false)
 	if err != nil {
 		return err
 	}
-	c.heldR = hr
+	err = w.ledger.chargeV1(n)
+	if err != nil {
+		return err
+	}
+	c.heldR = br + treeScratchBytesV1
+	w.t.pairReadLimit = max(w.t.pairReadLimit, treeScratchBytesV1)
 	return nil
 }
 
@@ -604,7 +616,7 @@ func (c *treeComposeV1) unwoundV1(completed *bool, e *treeScopeV1, read *C.MDBX_
 // readbackV1 replays every primitive at the readback position inside budget = P + S_r + B_r (D13-15), then verdictV1.
 func (c *treeComposeV1) readbackV1(e *treeScopeV1, read *C.MDBX_txn) (CommitTruth, error) {
 	budget := treeBudgetV1{held: c.writer.t.pBudgetV1() + c.heldR}
-	rb, err := newTreeReadbackV1(e.old, read, e.s.dbis, &budget)
+	rb, err := newTreeReadbackV1(e.old, read, e.s.dbis, &budget, c.writer.t.pairReadLimit)
 	if err != nil {
 		return CommitTruthUnknown, err
 	}

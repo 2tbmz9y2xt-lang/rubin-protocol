@@ -244,7 +244,7 @@ func TestTreeLagReadbackNewV1(t *testing.T) {
 		t.Fatalf("readback NEW: %v %+v calls %d read %v", commit.ReadbackCause, evidence, run.calls, run.read)
 	}
 	// Non-fatal, so the after-commit check below is observed in the same run.
-	if got := strings.Join(run.ledger.log, "|"); got != "charge 46|charge 46|charge 48|charge 44|charge 7|commit" {
+	if got := strings.Join(run.ledger.log, "|"); got != "charge 4|charge 46|charge 46|charge 48|charge 44|charge 3|charge 7|commit" {
 		t.Errorf("P_w ledger log %s, want high-water %d", got, ttHW)
 	}
 	if after := run.ledger.after(t, "commit"); len(after) != 0 {
@@ -500,7 +500,7 @@ func TestTreeAmendedReadV1(t *testing.T) {
 		r := bytes.Repeat([]byte{0x99}, 7)
 		mustEnvironment(t, w.referV1(ttBlocks, r))
 		// Non-fatal, so the P budget check below is observed in the same run.
-		if got := strings.Join(ledger.log, "|"); got != "charge 3|charge 1|charge 1|charge 7" {
+		if got := strings.Join(ledger.log, "|"); got != "charge 4|charge 2|charge 3|charge 1|charge 1|charge 7" {
 			t.Errorf("A12 reference charges %s", got)
 		}
 		if got := s.pBudgetV1(); got != held+7 {
@@ -594,7 +594,15 @@ func TestTreeCoveredOriginalReadsV1(t *testing.T) {
 				run := func() {
 					observed = fixtureTreeSectionV1(store, &ttLedger{}, func(section *treeSectionV1) error {
 						section.covered = true
-						return ttCoveredRead(t, section, mode)
+						err := ttCoveredRead(t, section, mode)
+						want := uint64(8) // complete native successor key1 + value3, doubled.
+						if mode == "point-shadow" || mode == "range-end" {
+							want = 7 // existing P NEW7 dominates point OLD6; no successor at end.
+						}
+						if section.pairReadLimit != want {
+							t.Error("covered physical successor complete extent", mode, section.pairReadLimit, want)
+						}
+						return err
 					})
 				}
 				if drift {
@@ -666,7 +674,7 @@ func ttCoveredRead(t *testing.T, section *treeSectionV1, mode string) error {
 func TestTreeWriterChargeRefusedV1(t *testing.T) {
 	store, path := ttStore(t)
 	ttLagSeed(t, store)
-	ledger := &ttLedger{refuseAt: 3}
+	ledger := &ttLedger{refuseAt: 5}
 	var after string
 	var held uint64
 	outcome := fixtureTreeCommitV1(store, fixtureTreeScriptV1{ledger: ledger, mark: ledger.mark, write: func(s *treeSectionV1) error {
@@ -679,7 +687,7 @@ func TestTreeWriterChargeRefusedV1(t *testing.T) {
 		t.Fatalf("refusal %v after %s held %d", outcome.primary, after, held)
 	}
 	ttOutcome(t, outcome, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit)
-	if got := strings.Join(ledger.log, "|"); got != "charge 46|charge 46|refuse 48|abort" {
+	if got := strings.Join(ledger.log, "|"); got != "charge 2|charge 46|charge 2|charge 46|refuse 48|abort" {
 		t.Fatalf("ledger %s", got)
 	}
 	ttReopen(t, store, path, ttRow{ttNode, ttX, []byte("x0")}, ttRow{ttUTXO, ttZ, nil})
@@ -739,7 +747,7 @@ func TestTreeFinalAndPairPreflightV1(t *testing.T) {
 }
 
 // A9, M13: with zero primitives the test passes truth = nil (L5a's choice, D13-3) and checks the Pair-domain
-// outcomes, a P budget of 0 and no ledger call.
+// outcomes, a P budget of 0 and the independent native OLD4 window.
 func TestTreeZeroPrimitivesV1(t *testing.T) {
 	insert, replace := bytes.Repeat([]byte{0x71}, 44), bytes.Repeat([]byte{0x72}, 44)
 	pair := []ownedMutation{
@@ -786,8 +794,8 @@ func TestTreeZeroPrimitivesV1(t *testing.T) {
 				_, err := fixtureLargeFault(store, row.mode, row.rank, row.key, op)
 				mustEnvironment(t, err)
 			}
-			if held != 0 || len(ledger.log) != 0 {
-				t.Fatalf("zero primitives charged: %d %v", held, ledger.log)
+			if held != 0 || strings.Join(ledger.log, "|") != "charge 4" {
+				t.Fatalf("zero primitives P/native charges: %d %v", held, ledger.log)
 			}
 			if row.mode == 14 {
 				ttMismatch(t, outcome.primary, "OLD/write snapshot mismatch")
@@ -895,7 +903,14 @@ func TestTreeSelectedDamageV1(t *testing.T) {
 			mustEnvironment(t, err)
 			ttEngine(t, outcome.primary, row.class, row.code, nativeDiagnostic(row.code))
 			ttOutcome(t, outcome, CommitTruthOld, row.stage)
-			if ran || evidence.Faults != 1 || evidence.Commits != 0 || len(ledger.log) != 0 || row.scenario == SelectedDamageDeleteEIO && evidence.Deletes != 1 || row.scenario == SelectedDamageWriteBeginTxnFull && evidence.BeginWrite != 1 {
+			wantLog := "charge 4"
+			if row.name == "begin" {
+				wantLog = ""
+			}
+			if row.name == "pair put" {
+				wantLog = "charge 2"
+			}
+			if ran || evidence.Faults != 1 || evidence.Commits != 0 || strings.Join(ledger.log, "|") != wantLog || row.scenario == SelectedDamageDeleteEIO && evidence.Deletes != 1 || row.scenario == SelectedDamageWriteBeginTxnFull && evidence.BeginWrite != 1 {
 				t.Fatalf("evidence %+v log %v ran %v", evidence, ledger.log, ran)
 			}
 			ttReopen(t, store, path, ttRow{ttUTXO, ttU, []byte("od")}, ttRow{ttUTXO, kp, nil})
@@ -942,7 +957,7 @@ func TestTreeOutOfBandDeleteV1(t *testing.T) {
 				ttEngine(t, outcome.primary, EngineStateMismatch, codeNotFound, "MDBX_NOTFOUND: No matching key/data pair found")
 				ttOutcome(t, outcome, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit)
 			}
-			if evidence.Drift < 1 || evidence.Commits != 0 || len(ledger.log) != 0 {
+			if evidence.Drift < 1 || evidence.Commits != 0 || strings.Join(ledger.log, "|") != "charge 4" {
 				t.Fatalf("evidence %+v log %v", evidence, ledger.log)
 			}
 			var after string
@@ -1207,8 +1222,8 @@ func TestTreeAbsentTargetSizeV1(t *testing.T) {
 	mustEnvironment(t, err)
 	fixtureTreeReleaseV1(outcome)
 	// Non-fatal, so each position's size is observed in the same run.
-	if got := strings.Join(ledger.log, "|"); got != "charge 44|commit" {
-		t.Errorf("writer absent entry: ledger %s, want charge 44", got)
+	if got := strings.Join(ledger.log, "|"); got != "charge 4|charge 44|commit" {
+		t.Errorf("writer absent entry: ledger %s, want native4/P44", got)
 	}
 	if held != 44 {
 		t.Errorf("writer absent entry: P budget %d, want 44", held)

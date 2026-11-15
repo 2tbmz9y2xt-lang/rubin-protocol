@@ -127,6 +127,8 @@ type treeAmendedV1 struct {
 	handles    [9]C.MDBX_dbi
 	covered    bool
 	p          *treeProjectionV1
+	section    *treeSectionV1
+	readLimit  uint64
 }
 
 func (a *treeAmendedV1) logicalV1(dbi DBI, key []byte) (treeImageV1, error) {
@@ -137,7 +139,7 @@ func (a *treeAmendedV1) logicalV1(dbi DBI, key []byte) (treeImageV1, error) {
 		entry := a.p.entries[i]
 		return treeImageV1{present: entry.kind == treeEntryImageV1, value: entry.value, planned: true, links: entry.links}, nil
 	}
-	return treeReadPointV1(a.old, a.handles[dbi.Rank], key)
+	return a.pointV1(dbi, key)
 }
 
 func (a *treeAmendedV1) getV1(dbi DBI, key []byte) (treeImageV1, error) {
@@ -147,16 +149,16 @@ func (a *treeAmendedV1) getV1(dbi DBI, key []byte) (treeImageV1, error) {
 	}
 	expected := image
 	if a.covered {
-		expected, err = treeReadPointV1(a.old, a.handles[dbi.Rank], key)
+		expected, err = a.pointV1(dbi, key)
 		if err != nil {
 			return treeImageV1{}, err
 		}
 	}
-	actual, err := treeReadPointV1(a.write, a.handles[dbi.Rank], key)
+	equal, err := a.pointEqualV1(dbi, key, expected)
 	if err != nil {
 		return treeImageV1{}, err
 	}
-	if !treeSameImageV1(actual, expected) {
+	if !equal {
 		return treeImageV1{}, treeSnapshotMismatchV1()
 	}
 	return image, nil
@@ -170,11 +172,11 @@ func (a *treeAmendedV1) nextV1(dbi DBI, from []byte) ([]byte, treeImageV1, bool,
 	if err != nil || a.write == nil || a.covered {
 		return key, image, ok, err
 	}
-	actualKey, actual, actualOK, err := treeReadNextV1(a.write, a.handles[dbi.Rank], from)
+	equal, err := a.nextEqualV1(dbi, from, key, image, ok)
 	if err != nil {
 		return nil, treeImageV1{}, false, err
 	}
-	if !treeSameSuccessorV1(actualKey, actual, actualOK, key, image, ok) {
+	if !equal {
 		return nil, treeImageV1{}, false, treeSnapshotMismatchV1()
 	}
 	return key, image, ok, nil
@@ -200,26 +202,59 @@ func (a *treeAmendedV1) mergedNextV1(dbi DBI, from []byte) ([]byte, treeImageV1,
 
 // nativeNextV1 checks each physical successor before P can hide or precede it.
 func (a *treeAmendedV1) nativeNextV1(dbi DBI, seek []byte) ([]byte, treeImageV1, bool, error) {
-	key, image, ok, err := treeReadNextV1(a.old, a.handles[dbi.Rank], seek)
+	key, image, ok, err := a.physicalNextV1(dbi, seek)
 	if err != nil || !a.covered || a.write == nil {
 		return key, image, ok, err
 	}
-	actualKey, actual, actualOK, err := treeReadNextV1(a.write, a.handles[dbi.Rank], seek)
+	equal, err := a.nextEqualV1(dbi, seek, key, image, ok)
 	if err != nil {
 		return nil, treeImageV1{}, false, err
 	}
-	if !treeSameSuccessorV1(actualKey, actual, actualOK, key, image, ok) {
+	if !equal {
 		return nil, treeImageV1{}, false, treeSnapshotMismatchV1()
 	}
 	return key, image, ok, nil
 }
 
-func treeSameImageV1(a, b treeImageV1) bool {
-	return a.present == b.present && bytes.Equal(a.value, b.value)
+// pointV1 admits native OLD before handing its borrowed view to a consumer.
+func (a *treeAmendedV1) pointV1(dbi DBI, key []byte) (treeImageV1, error) {
+	if a.section == nil {
+		return treeReadPointBoundedV1(a.old, a.handles[dbi.Rank], key, nil, a.readLimit)
+	}
+	return a.section.pointV1(dbi, key)
 }
 
-func treeSameSuccessorV1(aKey []byte, a treeImageV1, aOK bool, bKey []byte, b treeImageV1, bOK bool) bool {
-	return aOK == bOK && bytes.Equal(aKey, bKey) && treeSameImageV1(a, b)
+// pointEqualV1 keeps mutable credit inside the writer call only.
+func (a *treeAmendedV1) pointEqualV1(dbi DBI, key []byte, image treeImageV1) (bool, error) {
+	if a.section == nil {
+		return treePointEqualV1(a.write, a.handles[dbi.Rank], key, image, nil, a.readLimit)
+	}
+	t := a.section
+	budget := treePairReadBudgetV1{credit: t.pairReadLimit, ledger: t.ledger}
+	defer t.publishReadV1(&budget)
+	return treePointEqualV1(a.write, a.handles[dbi.Rank], key, image, &budget, 0)
+}
+
+// physicalNextV1 covers even successors hidden by P's merge.
+func (a *treeAmendedV1) physicalNextV1(dbi DBI, seek []byte) ([]byte, treeImageV1, bool, error) {
+	if a.section == nil {
+		return treeReadNextBoundedV1(a.old, a.handles[dbi.Rank], seek, nil, a.readLimit)
+	}
+	t := a.section
+	budget := treePairReadBudgetV1{credit: t.pairReadLimit, ledger: t.ledger}
+	defer t.publishReadV1(&budget)
+	return treeReadNextBoundedV1(a.old, a.handles[dbi.Rank], seek, &budget, 0)
+}
+
+// nextEqualV1 preserves key-before-value comparison at the candidate position.
+func (a *treeAmendedV1) nextEqualV1(dbi DBI, seek, key []byte, image treeImageV1, ok bool) (bool, error) {
+	if a.section == nil {
+		return treeNextEqualV1(a.write, a.handles[dbi.Rank], seek, key, image, ok, nil, a.readLimit)
+	}
+	t := a.section
+	budget := treePairReadBudgetV1{credit: t.pairReadLimit, ledger: t.ledger}
+	defer t.publishReadV1(&budget)
+	return treeNextEqualV1(a.write, a.handles[dbi.Rank], seek, key, image, ok, &budget, 0)
 }
 
 func (a *treeAmendedV1) skipReferencesV1(dbi DBI, at int) int {
@@ -272,7 +307,7 @@ func beginTreeSectionV1(env *C.MDBX_env, dbis [9]C.MDBX_dbi, old *C.MDBX_txn, le
 }
 
 func (t *treeSectionV1) oldV1(checked bool) treeOldV1 {
-	amended := &treeAmendedV1{old: t.old, handles: t.handles, p: &t.pw, covered: t.covered}
+	amended := &treeAmendedV1{old: t.old, handles: t.handles, p: &t.pw, covered: t.covered, section: t}
 	if checked {
 		amended.write = t.write
 	}
@@ -293,6 +328,55 @@ func (t *treeSectionV1) recordV1(dbi DBI, key []byte, kind uint8, value []byte) 
 		t.heldP += n - free
 	}
 	t.pw.storeV1(i, found, dbi, key, kind, value)
+	return t.requireReadV1(uint64(len(value)))
+}
+
+// publishReadV1 retains earlier successful growth even when later work fails.
+func (t *treeSectionV1) publishReadV1(budget *treePairReadBudgetV1) {
+	t.pairReadLimit = budget.credit + budget.extra // coverV1 checked this sum before admitting extra.
+}
+
+// requireReadV1 declares future native candidate capacity, separately from P.
+func (t *treeSectionV1) requireReadV1(n uint64) error {
+	budget := treePairReadBudgetV1{credit: t.pairReadLimit, ledger: t.ledger}
+	defer t.publishReadV1(&budget)
+	return budget.requireV1(n)
+}
+
+// pointV1 admits future native OLD capacity at the existing point observation.
+func (t *treeSectionV1) pointV1(dbi DBI, key []byte) (treeImageV1, error) {
+	budget := treePairReadBudgetV1{credit: t.pairReadLimit, ledger: t.ledger}
+	defer t.publishReadV1(&budget)
+	return treeReadPointBoundedV1(t.old, t.handles[dbi.Rank], key, &budget, 0)
+}
+
+// oldMatchV1 preserves the original snapshot comparison and native error order.
+func (t *treeSectionV1) oldMatchV1(dbi DBI, key []byte, diagnostic string) error {
+	budget := treePairReadBudgetV1{credit: t.pairReadLimit, ledger: t.ledger}
+	defer t.publishReadV1(&budget)
+	equal, err := updateNativePairOldEqual(t.old, t.write, t.handles[dbi.Rank], key, &budget)
+	if err != nil {
+		return err
+	}
+	if !equal {
+		return adapterError(operationUpdate, EngineStateMismatch, codeProblem, diagnostic, nil)
+	}
+	return nil
+}
+
+// matchV1 covers the candidate; callers retain the exact existing expected producer.
+// Raw fused callers use V, prior P, a prior complete native window, C or node L;
+// covered flush and final callers use P. The later raw P copy is never this grant.
+func (t *treeSectionV1) matchV1(dbi DBI, key []byte, expected updateImage, diagnostic string) error {
+	budget := treePairReadBudgetV1{credit: t.pairReadLimit, ledger: t.ledger}
+	defer t.publishReadV1(&budget)
+	equal, err := updateNativePairEqual(t.write, t.handles[dbi.Rank], key, expected, false, &budget, 0)
+	if err != nil {
+		return err
+	}
+	if !equal {
+		return adapterError(operationUpdate, EngineStateMismatch, codeProblem, diagnostic, nil)
+	}
 	return nil
 }
 
@@ -320,7 +404,7 @@ func (t *treeSectionV1) writeTargetV1(target treeTargetV1, prior bool) error {
 		}
 		expected = image
 	}
-	err := updateNativeMatch(t.write, handle, target.key, expected, "final update image mismatch")
+	err := t.matchV1(target.dbi, target.key, expected, "final update image mismatch")
 	runtime.KeepAlive(target.after.value)
 	return err
 }
@@ -329,36 +413,28 @@ func (t *treeSectionV1) writeTargetV1(target treeTargetV1, prior bool) error {
 // ORIGINAL OLD), including updateNativePairing (N1/N2/O1/O2; refusal canonicalPairingError, OLD/Prewrite/-1,
 // plan consumed). It runs right after beginTreeSectionV1 and before primitive 0 (D12-F).
 func (t *treeSectionV1) pairPreflightV1(pair []ownedMutation, consulted []ownedConsulted) error {
-	if t.pairOnly {
-		_, err := updateNativeImages(t.old, t.handles, pair)
-		if err != nil {
-			return err
-		}
-		return t.pairReadPreflightV1(pair, consulted)
+	_, err := updateNativeImages(t.old, t.handles, pair)
+	if err != nil {
+		return err
 	}
-	references, err := updateNativePreflight(t.old, t.write, t.handles, pair, consulted)
-	t.references = references
-	return err
+	return t.pairReadPreflightV1(pair, consulted)
 }
 
 // pairPreflightContextV1 is pairPreflightV1 with the admitted context window as one more consulted domain (D4 site 1).
 func (t *treeSectionV1) pairPreflightContextV1(pair []ownedMutation, consulted []ownedConsulted, window CanonicalContextWindowV1) error {
-	if t.pairOnly {
-		_, err := updateNativeImages(t.old, t.handles, pair)
-		if err != nil {
-			return err
-		}
-		return t.pairReadPreflightV1(pair, consulted, contextTreeScopeV1(window))
+	_, err := updateNativeImages(t.old, t.handles, pair)
+	if err != nil {
+		return err
 	}
-	references, err := updateNativePreflight(t.old, t.write, t.handles, pair, consulted, contextTreeScopeV1(window))
-	t.references = references
-	return err
+	return t.pairReadPreflightV1(pair, consulted, contextTreeScopeV1(window))
 }
 
-// pairReadPreflightV1 owns the mutable ordinary window; only its scalar seal escapes.
-// Scoped context work returns before sealing and is funded independently.
+// pairReadPreflightV1 admits Pair/owner windows for both operation modes. The
+// section keeps the scalar high-water; primitives may still grow it before commit.
+// Scoped context work is funded independently.
 func (t *treeSectionV1) pairReadPreflightV1(pair []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) error {
 	budget := treePairReadBudgetV1{credit: t.pairReadLimit, ledger: t.ledger}
+	defer t.publishReadV1(&budget)
 	var err error
 	for _, side := range canonicalSides {
 		err = canonicalNewPaired(pair, side, &budget)
@@ -416,7 +492,8 @@ func (t *treeSectionV1) pairReadSealV1(pair []ownedMutation, budget *treePairRea
 	return err
 }
 
-// pairReadFinalV1 uses only the sealed ordinary limit and the unchanged scope owner.
+// pairReadFinalV1 uses the established Pair capacity and unchanged scope owner.
+// The last primitive final-equality return fixes the scalar carried into commit.
 func (t *treeSectionV1) pairReadFinalV1(pair []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) error {
 	err := updateNativePairVerify(t.write, t.handles, pair, t.pairReadLimit)
 	if err != nil {
@@ -446,11 +523,11 @@ func (t *treeSectionV1) freezeV1(pair []ownedMutation, consulted []ownedConsulte
 		if treeProjectionConflictV1(*e, pair, consulted) {
 			return updateInvalidBatch()
 		}
-		err := updateNativeOldMatch(t.old, t.write, t.handles[e.dbi.Rank], e.key, "OLD/write snapshot mismatch")
+		err := t.oldMatchV1(e.dbi, e.key, "OLD/write snapshot mismatch")
 		if err != nil {
 			return err
 		}
-		image, err := treeReadPointV1(t.old, t.handles[e.dbi.Rank], e.key)
+		image, err := t.pointV1(e.dbi, e.key)
 		if err != nil {
 			return err
 		}
@@ -479,20 +556,27 @@ func (t *treeSectionV1) headerSlotV1(plan *treePlanV1) error {
 	if plan.slot == nil {
 		return nil
 	}
-	handle, key, header := t.handles[3], plan.slot[:32:32], plan.slot[32:]
-	err := updateNativeOldMatch(t.old, t.write, handle, key, "OLD/write snapshot mismatch")
+	key, header := plan.slot[:32:32], plan.slot[32:]
+	err := t.oldMatchV1(schemaDBIs[3], key, "OLD/write snapshot mismatch")
 	if err != nil {
 		return err
 	}
-	image, err := treeReadPointV1(t.old, handle, key)
+	image, err := t.pointV1(schemaDBIs[3], key)
 	if err != nil {
 		return err
 	}
 	if !image.present {
+		if err = t.requireReadV1(uint64(len(header))); err != nil {
+			return err
+		}
 		plan.pair = treeSlotInsertV1(plan.pair, ownedMutation{dbi: schemaDBIs[3], key: key, after: AfterLiteral, literal: header})
 		return nil
 	}
-	if !bytes.Equal(image.value, header) {
+	equal, err := treeOwnedPointEqualV1(image, header, t.pairReadLimit)
+	if err != nil {
+		return err
+	}
+	if !equal {
 		return adapterError(operationUpdate, EngineStateMismatch, codeProblem, "tree header slot differs", nil)
 	}
 	plan.consulted = treeSlotConsultedV1(plan.consulted, ownedConsulted{dbi: schemaDBIs[3], key: key})
@@ -575,9 +659,6 @@ func treeFlushPassV1(e treeEntryV1) uint8 {
 // finalV1 is complete final pair equality (D2-4): P_w identities, Pair targets, references and Consulted rows.
 // It then drops P_w data; the P charge is kept as the P budget (D5-2).
 func (t *treeSectionV1) finalV1(pair []ownedMutation, consulted []ownedConsulted) error {
-	if t.pairOnly {
-		return t.pairReadFinalV1(pair, consulted)
-	}
 	const diagnostic = "final update image mismatch"
 	for _, entry := range t.pw.entries {
 		err := t.finalEntryV1(entry, diagnostic)
@@ -585,11 +666,7 @@ func (t *treeSectionV1) finalV1(pair []ownedMutation, consulted []ownedConsulted
 			return err
 		}
 	}
-	err := updateNativeVerify(t.old, t.write, t.handles, pair, t.references)
-	if err != nil {
-		return err
-	}
-	err = updateNativeScopedMatch(t.old, t.write, t.handles, pair, consulted, diagnostic)
+	err := t.pairReadFinalV1(pair, consulted)
 	if err != nil {
 		return err
 	}
@@ -599,9 +676,6 @@ func (t *treeSectionV1) finalV1(pair []ownedMutation, consulted []ownedConsulted
 
 // finalContextV1 is finalV1 with the admitted context window compared after the Consulted rows (D4 site 2).
 func (t *treeSectionV1) finalContextV1(pair []ownedMutation, consulted []ownedConsulted, window CanonicalContextWindowV1) error {
-	if t.pairOnly {
-		return t.pairReadFinalV1(pair, consulted, contextTreeScopeV1(window))
-	}
 	const diagnostic = "final update image mismatch"
 	for _, entry := range t.pw.entries {
 		err := t.finalEntryV1(entry, diagnostic)
@@ -609,11 +683,7 @@ func (t *treeSectionV1) finalContextV1(pair []ownedMutation, consulted []ownedCo
 			return err
 		}
 	}
-	err := updateNativeVerify(t.old, t.write, t.handles, pair, t.references)
-	if err != nil {
-		return err
-	}
-	err = updateNativeScopedMatch(t.old, t.write, t.handles, pair, consulted, diagnostic, contextTreeScopeV1(window))
+	err := t.pairReadFinalV1(pair, consulted, contextTreeScopeV1(window))
 	if err != nil {
 		return err
 	}
@@ -622,15 +692,14 @@ func (t *treeSectionV1) finalContextV1(pair []ownedMutation, consulted []ownedCo
 }
 
 func (t *treeSectionV1) finalEntryV1(entry treeEntryV1, diagnostic string) error {
-	handle := t.handles[entry.dbi.Rank]
 	if entry.kind == treeEntryReferenceV1 {
-		return updateNativeOldMatch(t.old, t.write, handle, entry.key, diagnostic)
+		return t.oldMatchV1(entry.dbi, entry.key, diagnostic)
 	}
 	expected, err := treeExpectedV1(entry)
 	if err != nil {
 		return err
 	}
-	err = updateNativeMatch(t.write, handle, entry.key, expected, diagnostic)
+	err = t.matchV1(entry.dbi, entry.key, expected, diagnostic)
 	runtime.KeepAlive(entry.value)
 	return err
 }
@@ -694,26 +763,27 @@ func (e treeWriterEmitterV1) referV1(dbi DBI, key []byte) error {
 	return t.recordV1(dbi, key, treeEntryReferenceV1, nil)
 }
 
-// treeReadbackStateV1 holds P_r and the two scratches drawn from the budget inside one strict snapshot.
+// treeReadbackStateV1 holds P_r and a scalar native seal inside one strict snapshot.
 type treeReadbackStateV1 struct {
-	old, read *C.MDBX_txn
-	handles   [9]C.MDBX_dbi
-	budget    *treeBudgetV1
-	pr        treeProjectionV1
-	failed    error
+	old, read   *C.MDBX_txn
+	handles     [9]C.MDBX_dbi
+	budget      *treeBudgetV1
+	pr          treeProjectionV1
+	failed      error
+	nativeLimit uint64
 }
 
 // newTreeReadbackV1 is called only when the plan has at least one primitive. It draws S_r at construction and each
 // P_r entry at its emitV1/referV1; a failed draw returns errOperationReservationCapacity (D5-5 structural stop).
-func newTreeReadbackV1(old, read *C.MDBX_txn, dbis [9]C.MDBX_dbi, budget *treeBudgetV1) (*treeReadbackStateV1, error) {
+func newTreeReadbackV1(old, read *C.MDBX_txn, dbis [9]C.MDBX_dbi, budget *treeBudgetV1, nativeLimit uint64) (*treeReadbackStateV1, error) {
 	if budget == nil || !budget.drawV1(treeScratchBytesV1) {
 		return nil, errOperationReservationCapacity
 	}
-	return &treeReadbackStateV1{old: old, read: read, handles: dbis, budget: budget}, nil
+	return &treeReadbackStateV1{old: old, read: read, handles: dbis, budget: budget, nativeLimit: nativeLimit}, nil
 }
 
 func (r *treeReadbackStateV1) oldV1() treeOldV1 {
-	return &treeAmendedV1{old: r.old, handles: r.handles, p: &r.pr}
+	return &treeAmendedV1{old: r.old, handles: r.handles, p: &r.pr, readLimit: r.nativeLimit}
 }
 
 func (r *treeReadbackStateV1) emitterV1() treeEmitterV1 { return treeReadbackEmitterV1{r} }
@@ -769,7 +839,7 @@ func (r *treeReadbackStateV1) foldProjectionV1() (bool, bool, error) {
 	oldImage, newImage := true, true
 	for _, entry := range r.pr.entries {
 		handle := r.handles[entry.dbi.Rank]
-		oldEqual, err := updateNativeOldEqual(r.old, r.read, handle, entry.key)
+		oldEqual, err := treeOldEqualBoundedV1(r.old, r.read, handle, entry.key, r.nativeLimit)
 		if err != nil {
 			return false, false, err
 		}
@@ -790,26 +860,26 @@ func (r *treeReadbackStateV1) planEqualV1(handle C.MDBX_dbi, entry treeEntryV1) 
 	if err != nil {
 		return false, err
 	}
-	equal, err := updateNativeEqual(r.read, handle, entry.key, expected)
+	equal, err := updateNativePairEqual(r.read, handle, entry.key, expected, false, nil, r.nativeLimit)
 	runtime.KeepAlive(entry.value)
 	return equal, err
 }
 
-// foldPairV1 folds the Pair targets and Consulted rows with the legacy readback helpers (scoped, legacy law).
+// foldPairV1 completes Pair and consulted domains under the immutable native seal.
 func (r *treeReadbackStateV1) foldPairV1(pair []ownedMutation, consulted []ownedConsulted, oldImage, newImage bool, scopes ...largeImageScope) (bool, bool, error) {
-	references, err := updateNativeImages(r.old, r.handles, pair)
+	_, err := updateNativeImages(r.old, r.handles, pair)
 	if err != nil {
 		return false, false, err
 	}
-	oldPair, newPair, err := updateNativeReadbackTargets(r.old, r.read, r.handles, pair, references)
+	oldPair, newPair, err := updateNativePairReadbackTargets(r.old, r.read, r.handles, pair, r.nativeLimit)
 	if err != nil {
 		return false, false, err
 	}
-	oldImage, newImage, err = updateNativeReadbackReferences(r.old, r.read, r.handles, pair, references, oldImage && oldPair, newImage && newPair)
+	oldImage, newImage, err = updateNativePairReadbackConsulted(r.old, r.read, r.handles, consulted, oldImage && oldPair, newImage && newPair, r.nativeLimit)
 	if err != nil {
 		return false, false, err
 	}
-	return updateNativeReadbackScoped(r.old, r.read, r.handles, pair, consulted, oldImage, newImage, scopes...)
+	return updateNativeReadbackScoped(r.old, r.read, r.handles, pair, nil, oldImage, newImage, scopes...)
 }
 
 // treeReadbackEmitterV1 is the readback-position emitter: it draws from the carried budget and never writes MDBX.
