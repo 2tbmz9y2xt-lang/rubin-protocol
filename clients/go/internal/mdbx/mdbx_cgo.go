@@ -1731,7 +1731,8 @@ func treeReadPointBoundedV1(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, budget 
 	if err != nil {
 		return treeImageV1{}, err
 	}
-	if err := budget.coverV1(need, limit); err != nil {
+	err = budget.coverV1(need, limit)
+	if err != nil {
 		return treeImageV1{}, err
 	}
 	return treeBorrowV1(image)
@@ -1824,7 +1825,8 @@ func treeReadNextBoundedV1(txn *C.MDBX_txn, dbi C.MDBX_dbi, from []byte, budget 
 	if err != nil {
 		return nil, treeImageV1{}, false, err
 	}
-	if err := budget.coverV1(n, limit); err != nil {
+	err = budget.coverV1(n, limit)
+	if err != nil {
 		return nil, treeImageV1{}, false, err
 	}
 	k, _ := treeBorrowV1(key)
