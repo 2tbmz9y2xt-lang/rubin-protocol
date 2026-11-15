@@ -2002,7 +2002,11 @@ func TestHeaderContext148Lifecycle(t *testing.T) {
 					cxEqual(t, "terminal changed retained context/leases", len(o.context.records) != 2 || o.context.bytes != retainedBytes || o.leases != leaseCount || o.context.pins != pins || o.context.pinned[p.Hash] != pins, false)
 				}
 				if lease != nil {
+					beforeRelease := cxState(o)
 					lease.ReleaseV1()
+					if terminal == "Close" {
+						cxEqual(t, "CLEANUP_CLOSE late release complete state", cxState(o), beforeRelease)
+					}
 					afterRelease := cxState(o)
 					lease.ReleaseV1()
 					cxEqual(t, "terminal RELEASE_ONCE", cxState(o), afterRelease)
