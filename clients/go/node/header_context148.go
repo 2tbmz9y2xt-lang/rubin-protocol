@@ -931,6 +931,28 @@ func hctxSummary(p HeaderContextRecord148V1) bool {
 	return delta.IsUint64() && delta.Uint64()>=p.EpochCount-1 && delta.Uint64()<=(p.EpochCount-1)*1200
 }
 
+// checkWarmContext resolves cache absence and freshness before admission without copying Work.
+func (o *HeaderCandidateOwner148V1) checkWarmContext(v HeaderContextView148V1, hash [32]byte) HeaderContextDecision148V1 {
+	_,release := o.ProtectV1(v.Version)
+	defer release()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if d := o.contextGate(); d.Outcome != HeaderContextOK148V1 {
+		return d
+	}
+	if d := o.contextView(v); d.Outcome != HeaderContextOK148V1 {
+		return d
+	}
+	p,ok := o.context.records[hash]
+	if !ok {
+		return hctxDecision(HeaderContextUnavailable148V1)
+	}
+	if p.View != v {
+		return hctxDecision(HeaderContextStale148V1)
+	}
+	return HeaderContextDecision148V1{}
+}
+
 // warmContext consumes only exact cached evidence plus the positive current proof.
 func (o *HeaderCandidateOwner148V1) warmContext(v HeaderContextView148V1, a HeaderContextAnchor148V1) (HeaderContextRecord148V1,HeaderContextDecision148V1) {
 	o.mu.Lock()
@@ -1120,6 +1142,11 @@ func (o *HeaderCandidateOwner148V1) PrepareContextV1(in HeaderContextInput148V1)
 // prepareContextEvidence reserves before cloning inputs and performing the sole cold pass.
 func (r *hctxReservation) prepareContextEvidence(in HeaderContextInput148V1, hash [32]byte) (HeaderContextInput148V1, HeaderContextAnchor148V1, [][148]byte, HeaderContextDecision148V1) {
 	o := r.owner
+	if in.WarmParent != nil {
+		if d := o.checkWarmContext(in.View, in.WarmParent.Hash); d.Outcome != HeaderContextOK148V1 {
+			return in, HeaderContextAnchor148V1{}, nil, d
+		}
+	}
 	var proof HeaderContextAnchor148V1
 	n,a := uint64(0),uint64(1)
 	if c := in.ColdParent; c != nil {

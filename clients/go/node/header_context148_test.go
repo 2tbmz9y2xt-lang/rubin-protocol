@@ -188,7 +188,7 @@ func cxState(o *HeaderCandidateOwner148V1) string {
 		keys = append(keys, hash)
 	}
 	slices.SortFunc(keys, func(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) })
-	value := fmt.Sprintf("%d/%x/%d/%d/%d/%d/%d/%d/%v/%v/%v/%v/%v/%d", o.version.Load(), o.source, len(o.recs), o.context.bytes, o.context.pins, o.context.scratch, o.leases, len(o.context.pinned), o.prepared!=nil, o.context.active!=nil, o.closed, o.latched, o.established, o.tips)
+	value := fmt.Sprintf("%d/%x/%d/%d/%d/%d/%d/%d/%v/%v/%v/%v/%v/%d/%d", o.version.Load(), o.source, len(o.recs), o.context.bytes, o.context.pins, o.context.scratch, o.leases, len(o.context.pinned), o.prepared!=nil, o.context.active!=nil, o.closed, o.latched, o.established, o.tips, o.guards)
 	for _, hash := range keys {
 		r := o.context.records[hash]
 		work,clamp:=r.Work.String(),r.LastClampedTimestamp.String()
@@ -491,6 +491,17 @@ func TestHeaderContext148Cold(t *testing.T) {
 			}
 		})
 	}
+	t.Run("local-prefix-target", func(t *testing.T) {
+		genesis := cxMine([32]byte{}, 0, cxTarget(255))
+		h1 := cxMine(cxHash(genesis), 1, cxTarget(127))
+		h2 := cxMine(cxHash(h1), 2, cxTarget(255))
+		o, v, s := cxNew(t, cxLimits(), hcLim(), genesis)
+		s.raws[cxHash(h1)], s.raws[cxHash(h2)] = h1, h2
+		a := HeaderContextAnchor148V1{Kind: HeaderContextCanonical148V1, Raw: h2, Hash: cxHash(h2), Height: 2, Work: big.NewInt(4), Provenance: [32]byte{9}}
+		in := cxCold(v, cxMine(a.Hash, 3, cxTarget(255)), a, 0, s)
+		cxRefuse(t, "PREFIX_TARGET_LOCAL_INCONSISTENT", o, in, 4, 0, 0, nil)
+		cxEqual(t, "prefix exact single pass", s.reads, [][32]byte{cxHash(h2), cxHash(h1), cxHash(genesis)})
+	})
 	// Each malformed local suffix is read exactly once and can never become an incoming mismatch.
 	for _, defect:=range []string{"range","pow","target","old","future","wrong-hash","absent"} {
 		t.Run("local-"+defect,func(t *testing.T) {
@@ -578,6 +589,45 @@ type cxNilError struct{}
 func (*cxNilError) Error() string { return "typed nil source error" }
 
 func TestHeaderContext148Outcomes(t *testing.T) {
+	t.Run("warm-miss-before-capacity", func(t *testing.T) {
+		genesis := cxMine([32]byte{}, 0, cxTarget(255))
+		limits := cxLimits()
+		limits.MaxBytes = 512
+		o, v, s := cxNew(t, limits, hcLim(), genesis)
+		proof := &HeaderContextAnchor148V1{Kind: HeaderContextCanonical148V1, Raw: genesis, Hash: cxHash(genesis), Work: big.NewInt(1), Provenance: [32]byte{9}}
+		in := cxInput(v, cxMine(proof.Hash, 1, cxTarget(255)), proof, s)
+		cxRefuse(t, "WARM_MISS_BEFORE_CAPACITY", o, in, 2, 0, 0, nil)
+		cxEqual(t, "warm miss no header reads", s.reads, [][32]byte(nil))
+	})
+	t.Run("warm-stored-view-before-capacity", func(t *testing.T) {
+		genesis := cxMine([32]byte{}, 0, cxTarget(255))
+		limits := cxLimits()
+		limits.MaxBytes = 1246
+		o, v, s := cxNew(t, limits, hcLim(), genesis)
+		p := cxSeed(t, o, v, genesis, s)
+		lease, d := o.PinContextV1(v, p.Hash)
+		cxDecision(t, "pin before source update", d, 0, 0, 0, nil)
+		if lease == nil {
+			t.Fatal("pin before source update returned nil")
+		}
+		defer lease.ReleaseV1()
+		tr := hcTr(o, nil)
+		tr.NewSource = [32]byte{2}
+		pub, out := hcPublish(t, o, tr)
+		if out != 0 || !pub.Changed || pub.Version != 3 {
+			t.Fatalf("source update: %+v %d", pub, out)
+		}
+		v.Version, v.Source = pub.Version, tr.NewSource
+		in := cxInput(v, cxMine(p.Hash, 1, cxTarget(255)), cxProof(p, HeaderContextCanonical148V1), s)
+		cxRefuse(t, "WARM_STORED_VIEW_BEFORE_CAPACITY", o, in, 3, 0, 0, nil)
+		cxEqual(t, "stale warm no header reads", s.reads, [][32]byte(nil))
+		cxEqual(t, "stale warm pin preserved", o.context.pins, uint64(1))
+		cxEqual(t, "stale warm logical bytes preserved", o.context.bytes, uint64(1246))
+		lease.ReleaseV1()
+		cxEqual(t, "stale warm pin released", o.context.pins, uint64(0))
+		cxEqual(t, "stale warm retained bytes", o.context.bytes, uint64(1118))
+		cxClean(t, o, false)
+	})
 	for _, tc:=range []struct{name string; change func(*HeaderContextInput148V1); out,sub uint8}{
 		{"neither",func(in *HeaderContextInput148V1){in.WarmParent=nil},2,0},
 		{"both",func(in *HeaderContextInput148V1){in.ColdParent=&HeaderContextCold148V1{Missing:true}},4,0},
