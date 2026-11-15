@@ -165,11 +165,17 @@ func pbMoved(t *testing.T, got *PendingBodyBundle148V1, original PendingBodyBund
 
 func TestPendingBody148Configuration(t *testing.T) {
 	for _, field := range []string{"MaxCandidates", "MaxBytes", "MaxDependencies", "MaxLifetime"} {
-		for _, value := range []uint64{0, math.MaxUint64} {
+		for _, value := range []uint64{0, math.MaxUint64, math.MaxUint64 - 1} {
 			t.Run(fmt.Sprintf("%s-%d", field, value), func(t *testing.T) {
 				l := pbLimits()
 				reflect.ValueOf(&l).Elem().FieldByName(field).SetUint(value)
 				o, err := NewHeaderCandidateBodyCustody148V1(hcLim(), cxLimits(), l, 7, [32]byte{91}, [32]byte{92})
+				if value == math.MaxUint64-1 {
+					cxEqual(t, "valid captured upper body limit error", err, nil)
+					cxEqual(t, "valid captured upper body limit", o.pendingBody.limits, l)
+					o.CloseV1()
+					return
+				}
 				cxEqual(t, "invalid captured body limits owner", o, (*HeaderCandidateOwner148V1)(nil))
 				cxEqual(t, "invalid captured body limits error", err, ErrPendingBodyConfig148V1)
 			})
@@ -321,6 +327,7 @@ func TestPendingBody148WeakShapes(t *testing.T) {
 		{"unknown-kind", func(w *PendingBodyWeak148V1) { w.completion = 3 }},
 		{"ended", func(w *PendingBodyWeak148V1) { w.ended = true }},
 		{"consumed", func(w *PendingBodyWeak148V1) { w.consumed = true }},
+		{"ended-and-consumed", func(w *PendingBodyWeak148V1) { w.ended, w.consumed = true, true }},
 		{"wrong-origin", func(w *PendingBodyWeak148V1) { w.origin++ }},
 		{"wrong-hash", func(w *PendingBodyWeak148V1) { w.hash = [32]byte{98} }},
 		{"wrong-provenance", func(w *PendingBodyWeak148V1) { w.provenance = [32]byte{99} }},
