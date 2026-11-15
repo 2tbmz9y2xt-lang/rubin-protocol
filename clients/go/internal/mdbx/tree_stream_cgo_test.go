@@ -990,6 +990,7 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 		{unsafe.Sizeof(treePrimitiveV1{}), 144},
 		{unsafe.Sizeof(TreeDeltaSinkV1{}), 8},
 		{unsafe.Sizeof(treeImageV1{}), 32},
+		{unsafe.Sizeof(updateImage{}), 24},
 		{unsafe.Sizeof(treeAmendedV1{}), 80},
 		{unsafe.Sizeof(treeReadbackStateV1{}), 120},
 		{unsafe.Sizeof(treeSectionV1{}), 168},
@@ -1017,11 +1018,20 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	var leaves treeLeafIterV1
 	total := uint64(unsafe.Sizeof(treeRecorderV1{})) + uint64(unsafe.Sizeof(treeDeltaV1{})) + uint64(unsafe.Sizeof(treeKeysV1{})) + 2*uint64(unsafe.Sizeof(leaves)) + 32
 	control := total + 144 + 8 + 2*uint64(unsafe.Sizeof(treeScopeV1{})) + uint64(unsafe.Sizeof(TreeObservationV1{}))
-	// The deepest successor helper chain: one budget32, six updateImage24
-	// cells, one C prefix40, seek/expected slice headers72, two borrowed
-	// treeImage32 cells, four uint64 scalars32 and eight result/flag slots64.
-	helper := uint64(32 + 6*24 + 40 + 72 + 2*32 + 32 + 64)
-	if control != 1809 || helper != 448 || helper > 512 {
+	// Count logical constructed owners, conservatively including sequential
+	// phases: budget32; six updateImage records (owned constructor, seek,
+	// native key/value, expected key/value); C prefix40; two borrowed views;
+	// and the from/expectedKey slice headers. Synchronous return/parameter
+	// transport carries those owners, rather than creating independent logical
+	// owners. This is not a stack/ABI, compiler-elision or physical-memory claim.
+	// Scalar/error working cells156: amended t8; metadata err/rc24;
+	// next ok/err/equal18; value scratch/err/equal25; comparator need/err24;
+	// exposure ok/err/n25; cover available/err24; checked-size working n8.
+	// Owners: treeNextImagesV1, treeReadNextBoundedV1, treeNextEqualV1,
+	// treeNextValueEqualV1, updatePairImageEqualV1 and coverV1.
+	helper := uint64(unsafe.Sizeof(treePairReadBudgetV1{})) + 6*uint64(unsafe.Sizeof(updateImage{})) + 40 +
+		2*uint64(unsafe.Sizeof(treeImageV1{})) + 2*uint64(unsafe.Sizeof([]byte{})) + 156
+	if control != 1809 || helper != 484 || helper > 512 {
 		t.Fatal("fixed control/helper cell census", control, helper)
 	}
 	control += 168 + 112 + 120 + 16 + helper
