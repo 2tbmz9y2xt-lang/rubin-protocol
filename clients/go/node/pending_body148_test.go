@@ -139,6 +139,16 @@ func pbEmpty(t *testing.T, o *HeaderCandidateOwner148V1, label string) {
 	cxEqual(t, label+" terminal owner retained state", [3]uint64{uint64(len(o.pendingBody.records)), o.pendingBody.bytes, o.pendingBody.dependencies}, [3]uint64{})
 }
 
+func pbSpentRequest(t *testing.T, q *PendingBodyRequest148V1) {
+	t.Helper()
+	if q == nil || !q.consumed || q.record == nil {
+		t.Fatal("terminal request disposition changed")
+	}
+	cxEqual(t, "terminal request retained body references", q.record.bundle, PendingBodyBundle148V1{})
+	cxEqual(t, "terminal record retained request", q.record.request, (*PendingBodyRequest148V1)(nil))
+	cxEqual(t, "terminal record retained drain link", q.record.next, (*pendingBodyRecord148)(nil))
+}
+
 func pbMoved(t *testing.T, got *PendingBodyBundle148V1, original PendingBodyBundle148V1) {
 	t.Helper()
 	if got == nil {
@@ -215,6 +225,7 @@ func TestPendingBody148Move(t *testing.T) {
 			pbDecision(t, "take", d, 0, 0)
 			pbMoved(t, out, original)
 			pbEmpty(t, f.o, "take")
+			pbSpentRequest(t, req)
 			if pin.released || pin.candidate.released || f.o.context.pins != 1 || f.o.leases != 1 {
 				t.Fatal("handoff released receiving dependency")
 			}
@@ -518,6 +529,7 @@ func TestPendingBody148Terminal(t *testing.T) {
 				pbDecision(t, "terminal request", d, 0, 0)
 				pbDecision(t, "terminal release", f.o.ReleasePendingBodyV1(key, PendingBodyRelease148V1(cause)), 0, 0)
 				pbEmpty(t, f.o, "release")
+				pbSpentRequest(t, req)
 				cxEqual(t, "released exact real accounting", cxState(f.o), baseline)
 				for _, pin := range pins {
 					if !pin.released || !pin.candidate.released {
@@ -574,6 +586,7 @@ func TestPendingBody148Expiry(t *testing.T) {
 				pbDecision(t, "replacement cleanup", f.o.ReleasePendingBodyV1(key, 3), 0, 0)
 			}
 			pbEmpty(t, f.o, "expiry")
+			pbSpentRequest(t, req)
 			if !weak.ended || !pin.released || !pin.candidate.released {
 				t.Fatal("expiry did not end real owner")
 			}
@@ -623,6 +636,7 @@ func TestPendingBody148Replacement(t *testing.T) {
 	old, d := f.o.RequestPendingBodyV1(&key, 100)
 	pbDecision(t, "old record request", d, 0, 0)
 	pbDecision(t, "old record release", f.o.ReleasePendingBodyV1(key, 3), 0, 0)
+	pbSpentRequest(t, old)
 	replacement := pbBundle(t, f, 1, 2)
 	replacement.Body[0] = 77
 	newWeak := replacement.Weak
@@ -1138,6 +1152,7 @@ func TestPendingBody148ConcurrentTerminal(t *testing.T) {
 				}
 				taken, disposed := pbConcurrent(t, take, dispose)
 				pbEmpty(t, f.o, "concurrent terminal")
+				pbSpentRequest(t, q)
 				if taken.d == (PendingBodyDecision148V1{}) {
 					pbMoved(t, taken.bundle, original)
 					if terminal != "Expire" {
@@ -1231,6 +1246,12 @@ func TestPendingBody148ConcurrentClose(t *testing.T) {
 					if !won && emitted != nil {
 						t.Fatal("concurrent closed Request emitted token")
 					}
+					if won {
+						pbSpentRequest(t, emitted)
+					}
+				}
+				if q != nil {
+					pbSpentRequest(t, q)
 				}
 				// A released winner may drain on either side of Close's C1 history cut.
 				// The actual C1 handle disposition determines the exact historical count.
