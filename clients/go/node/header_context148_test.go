@@ -1288,7 +1288,7 @@ func TestHeaderContext148Reservations(t *testing.T) {
 	r, pub, d := h.PublishV1()
 	cxDecision(t, "original reservation publishes after contention", d, 0, 0, 0, nil)
 	cxClean(t, o, false)
-	cxEqual(t, "original reservation receipt", pub, HeaderCandidatePublication148V1{Changed: true, Version: 3, Added: [][32]byte{r.Hash}})
+	cxEqual(t, "original reservation receipt", pub, HeaderCandidatePublication148V1{Changed: true, Version: 3, Added: [][32]byte{r.Hash}, Retired: [][32]byte{}})
 	missing, d := o.LookupContextV1(r.View, p.Hash)
 	cxDecision(t, "CACHE_VERSION cache miss", d, 2, 0, 0, nil)
 	cxEqual(t, "evicted genesis zero payload", missing, HeaderContextRecord148V1{})
