@@ -570,7 +570,7 @@ func TestHeaderContext148Cold(t *testing.T) {
 		cxEqual(t, "prefix exact single pass", s.reads, [][32]byte{cxHash(h2), cxHash(h1), cxHash(genesis)})
 	})
 	// Each malformed local suffix is read exactly once and can never become an incoming mismatch.
-	for _, defect := range []string{"range", "pow", "target", "old", "future", "wrong-hash", "absent"} {
+	for _, defect := range []string{"range", "pow", "target", "old", "future", "wrong-hash", "genesis-substitution", "absent"} {
 		t.Run("local-"+defect, func(t *testing.T) {
 			genesis := cxMine([32]byte{}, 10, cxTarget(255))
 			o, v, s := cxNew(t, cxLimits(), hcLim(), genesis)
@@ -589,8 +589,8 @@ func TestHeaderContext148Cold(t *testing.T) {
 			}
 			child := cxMine(cxHash(parent), 12, cxTarget(255))
 			s.raws[cxHash(parent)] = parent
-			if defect == "wrong-hash" {
-				s.raws[cxHash(parent)] = genesis
+			if replacement, ok := map[string][148]byte{"wrong-hash": cxMine(cxHash(genesis), 12, cxTarget(255)), "genesis-substitution": genesis}[defect]; ok {
+				s.raws[cxHash(parent)] = replacement
 			}
 			if defect == "absent" {
 				delete(s.raws, cxHash(parent))
@@ -602,7 +602,7 @@ func TestHeaderContext148Cold(t *testing.T) {
 			}
 			cxRefuse(t, "SUFFIX_LOCAL_INCONSISTENT", o, cxCold(v, child, a, 1, s), outcome, 0, 0, nil)
 			wantReads := 2
-			if defect == "range" || defect == "pow" || defect == "wrong-hash" || defect == "absent" {
+			if defect == "range" || defect == "pow" || defect == "wrong-hash" || defect == "genesis-substitution" || defect == "absent" {
 				wantReads = 1
 			}
 			cxEqual(t, "COLD_NO_RETRY", len(s.reads), wantReads)
