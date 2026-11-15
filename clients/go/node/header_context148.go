@@ -16,7 +16,7 @@ var ErrHeaderContextConfig148V1 = errors.New("header context 148: invalid config
 // HeaderContextLimits148V1 captures the logical resource ceilings of RUB-1817.
 type HeaderContextLimits148V1 struct {
 	MaxRecords, MaxBytes, MaxReads, MaxReadBytes, MaxReadWork uint64
-	MaxScratchBytes, MaxSuffix, MaxWorkBytes                uint64
+	MaxScratchBytes, MaxSuffix, MaxWorkBytes                  uint64
 }
 
 // HeaderContextView148V1 binds both candidate and separately protected source truth.
