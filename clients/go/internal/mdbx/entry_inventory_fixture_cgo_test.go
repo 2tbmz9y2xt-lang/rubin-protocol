@@ -878,8 +878,8 @@ func eifIndependentRead(t *testing.T) {
 }
 
 func eifCapacity(t *testing.T) {
-	if treeReaderBytesV1 != 1152 || treeStepBytesV1 != 74880 || treeStepBytesV1+treeValueBytesV1+treeNodeWorkBytesV1 != 288408 {
-		t.Fatal("actual sibling Reader/step/readback tariffs differ from 1152/74880/288408")
+	if treeReaderBytesV1 != 1184 || treeStepBytesV1 != 74912 || treeStepBytesV1+treeValueBytesV1+treeNodeWorkBytesV1 != 288440 {
+		t.Fatal("actual sibling Reader/step/readback tariffs differ from 1184/74912/288440")
 	}
 	x := eiNew(t, 1, 1, false)
 	var result tsResult

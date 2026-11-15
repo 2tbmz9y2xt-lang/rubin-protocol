@@ -501,6 +501,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1694,13 +1695,19 @@ func updateNativePairEqual(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected
 	if err != nil {
 		return false, err
 	}
+	return updatePairImageEqualV1(actual, expected, old, 0, budget, limit)
+}
+
+// updatePairImageEqualV1 covers both native operands, or only the candidate
+// against an independently funded expected image, before synchronous C use.
+func updatePairImageEqualV1(actual, expected updateImage, old bool, scratch uint64, budget *treePairReadBudgetV1, limit uint64) (bool, error) {
 	if actual.present != expected.present || actual.length != expected.length {
 		return false, nil
 	}
 	if actual.length == 0 {
 		return true, nil
 	}
-	need, err := treePairReadSizeV1(uint64(actual.length), 0, old)
+	need, err := treePairReadSizeV1(uint64(actual.length), scratch, old)
 	if err != nil {
 		return false, err
 	}
@@ -1709,6 +1716,156 @@ func updateNativePairEqual(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected
 		return false, err
 	}
 	return C.rubin_mdbx_pair_equal(actual.bytes, expected.bytes, actual.length) != 0, nil
+}
+
+// treeReadPointBoundedV1 funds future OLD equality before exposing its bytes.
+func treeReadPointBoundedV1(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, budget *treePairReadBudgetV1, limit uint64) (treeImageV1, error) {
+	image, err := updateNativeImage(txn, dbi, key)
+	if err != nil {
+		return treeImageV1{}, err
+	}
+	if uint64(image.length) > uint64(math.MaxInt) {
+		return treeImageV1{}, updateNativeInvariant("mdbx_get returned invalid result shape")
+	}
+	need, err := treePairReadSizeV1(uint64(image.length), 0, true)
+	if err != nil {
+		return treeImageV1{}, err
+	}
+	err = budget.coverV1(need, limit)
+	if err != nil {
+		return treeImageV1{}, err
+	}
+	return treeBorrowV1(image)
+}
+
+// treePointEqualV1 keeps expected validation and the existing candidate get.
+func treePointEqualV1(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, image treeImageV1, budget *treePairReadBudgetV1, limit uint64) (bool, error) {
+	expected, err := updateOwnedImage(image.value)
+	if err != nil {
+		return false, err
+	}
+	expected.present = image.present
+	actual, err := updateNativeImage(txn, dbi, key)
+	if err != nil {
+		return false, err
+	}
+	if uint64(actual.length) > uint64(math.MaxInt) {
+		return false, updateNativeInvariant("mdbx_get returned invalid result shape")
+	}
+	equal, err := updatePairImageEqualV1(actual, expected, !image.planned, 0, budget, limit)
+	runtime.KeepAlive(image.value)
+	return equal, err
+}
+
+// treeOwnedPointEqualV1 compares an already admitted native image to owned bytes.
+func treeOwnedPointEqualV1(image treeImageV1, expected []byte, limit uint64) (bool, error) {
+	actual, err := updateOwnedImage(image.value)
+	if err != nil {
+		return false, err
+	}
+	want, err := updateOwnedImage(expected)
+	if err != nil {
+		return false, err
+	}
+	equal, err := updatePairImageEqualV1(actual, want, false, 0, nil, limit)
+	runtime.KeepAlive(image.value)
+	runtime.KeepAlive(expected)
+	return equal, err
+}
+
+// treeOldEqualBoundedV1 uses only pre-crossing capacity for strict OLD equality.
+func treeOldEqualBoundedV1(old, read *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, limit uint64) (bool, error) {
+	image, err := updateNativeImage(old, dbi, key)
+	if err != nil {
+		return false, err
+	}
+	return updateNativePairEqual(read, dbi, key, image, true, nil, limit)
+}
+
+// treeNextImagesV1 reads metadata at the existing successor position only.
+func treeNextImagesV1(txn *C.MDBX_txn, dbi C.MDBX_dbi, from []byte) (updateImage, updateImage, bool, error) {
+	seek, err := updateOwnedImage(from)
+	if err != nil {
+		return updateImage{}, updateImage{}, false, err
+	}
+	row := C.rubin_mdbx_get_equal_or_great(txn, dbi, seek.bytes, seek.length)
+	runtime.KeepAlive(from)
+	switch rc := int(row.rc); rc {
+	case codeSuccess, codeResultTrue:
+	case codeNotFound:
+		return updateImage{}, updateImage{}, false, nil
+	default:
+		return updateImage{}, updateImage{}, false, nativeError(operationUpdate, rc)
+	}
+	key := updateImage{present: true, bytes: unsafe.Pointer(row.key_bytes), length: row.key_len}
+	value := updateImage{present: true, bytes: unsafe.Pointer(row.value_bytes), length: row.value_len}
+	if !treeNextShapeV1(key, value) {
+		return updateImage{}, updateImage{}, false, updateNativeInvariant("mdbx_get returned invalid result shape")
+	}
+	return key, value, true, nil
+}
+
+// treeNextShapeV1 preserves both native shape and Go representation priority.
+func treeNextShapeV1(key, value updateImage) bool {
+	return key.bytes != nil && key.length != 0 && validUpdateImage(value) &&
+		uint64(key.length) <= uint64(math.MaxInt) && uint64(value.length) <= uint64(math.MaxInt)
+}
+
+// treeReadNextBoundedV1 covers the complete physical successor before exposure.
+func treeReadNextBoundedV1(txn *C.MDBX_txn, dbi C.MDBX_dbi, from []byte, budget *treePairReadBudgetV1, limit uint64) ([]byte, treeImageV1, bool, error) {
+	key, value, ok, err := treeNextImagesV1(txn, dbi, from)
+	if err != nil || !ok {
+		return nil, treeImageV1{}, false, err
+	}
+	n, err := treePairReadSizeV1(uint64(key.length), uint64(value.length), false)
+	if err != nil {
+		return nil, treeImageV1{}, false, err
+	}
+	n, err = treePairReadSizeV1(n, 0, true)
+	if err != nil {
+		return nil, treeImageV1{}, false, err
+	}
+	err = budget.coverV1(n, limit)
+	if err != nil {
+		return nil, treeImageV1{}, false, err
+	}
+	k, _ := treeBorrowV1(key)
+	v, _ := treeBorrowV1(value)
+	return k.value, v, true, nil
+}
+
+// treeNextEqualV1 compares keys before requesting or using value payloads.
+func treeNextEqualV1(txn *C.MDBX_txn, dbi C.MDBX_dbi, from, expectedKey []byte, expected treeImageV1, expectedOK bool, budget *treePairReadBudgetV1, limit uint64) (bool, error) {
+	key, value, ok, err := treeNextImagesV1(txn, dbi, from)
+	if err != nil || ok != expectedOK || !ok {
+		return ok == expectedOK, err
+	}
+	k, err := updateOwnedImage(expectedKey)
+	if err != nil {
+		return false, err
+	}
+	equal, err := updatePairImageEqualV1(key, k, !expected.planned, 0, budget, limit)
+	runtime.KeepAlive(expectedKey)
+	if err != nil || !equal {
+		return false, err
+	}
+	return treeNextValueEqualV1(value, uint64(key.length), expected, budget, limit)
+}
+
+// treeNextValueEqualV1 is reached only after the complete key comparison.
+func treeNextValueEqualV1(value updateImage, keyLength uint64, expected treeImageV1, budget *treePairReadBudgetV1, limit uint64) (bool, error) {
+	scratch := keyLength
+	if !expected.planned {
+		scratch *= 2 // The successful key comparison already checked and admitted 2k.
+	}
+	v, err := updateOwnedImage(expected.value)
+	if err != nil {
+		return false, err
+	}
+	v.present = expected.present
+	equal, err := updatePairImageEqualV1(value, v, !expected.planned, scratch, budget, limit)
+	runtime.KeepAlive(expected.value)
+	return equal, err
 }
 
 // updateNativePairOldEqual retains ORIGINAL OLD only through this comparison.

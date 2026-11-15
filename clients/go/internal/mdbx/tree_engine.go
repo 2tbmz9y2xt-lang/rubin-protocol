@@ -77,8 +77,8 @@ type treeLedgerV1 interface {
 	releaseV1(n uint64)
 }
 
-// treePairReadBudgetV1 owns only the ordinary Pair read shortfall during preflight.
-// Credit belongs to the caller; extra stays on the enclosing engine hold.
+// treePairReadBudgetV1 owns a short-lived native comparison window. Credit is
+// the existing window; admitted extra stays on the enclosing engine hold.
 type treePairReadBudgetV1 struct {
 	credit uint64
 	extra  uint64

@@ -115,8 +115,8 @@ func BenchmarkTreeBudgetDrawV1(b *testing.B) {
 }
 
 type pairReadTestLedgerV1 struct {
-	held uint64
-	err  error
+	held, limit uint64
+	err         error
 }
 
 type pairReadNilErrorV1 struct{}
@@ -126,6 +126,9 @@ func (*pairReadNilErrorV1) Error() string { return "typed-nil ledger error" }
 func (l *pairReadTestLedgerV1) chargeV1(n uint64) error {
 	if l.err != nil {
 		return l.err
+	}
+	if l.limit != 0 && (l.held > l.limit || n > l.limit-l.held) {
+		return errOperationReservationCapacity
 	}
 	l.held += n
 	return nil
@@ -165,6 +168,7 @@ func TestTreePairReadBudgetV1(t *testing.T) {
 		refused    bool
 	}{
 		{0, 0, true, 0, false},
+		{1, 0, true, 2, false},
 		{32, 0, true, 64, false},
 		{70000, 0, true, 140000, false},
 		{104, 72, false, 176, false},
@@ -174,6 +178,8 @@ func TestTreePairReadBudgetV1(t *testing.T) {
 		{9223372036854775808, 0, true, 0, true},
 		{18446744073709551615, 0, true, 0, true},
 		{18446744073709551615, 1, false, 0, true},
+		{9223372036854775807, 1, false, 9223372036854775808, false},
+		{18446744073709551615, 0, false, 18446744073709551615, false},
 	} {
 		got, err := treePairReadSizeV1(row.n, row.scratch, row.old)
 		if got != row.want || (err != nil) != row.refused || row.refused && !treeSameErrorV1(err, errOperationReservationCapacity) {
