@@ -4,7 +4,11 @@ package consensus
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
+	"fmt"
+	"maps"
+	"slices"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -316,7 +320,7 @@ func TestInitial148CompleteBlockGenesisPersistedStateH0(t *testing.T) {
 // failure after it crossed (SelectedDamageCommitNew): the native truth
 // evaluator replays the source at TreeReadbackV1, so the writer and the
 // readback each consume it exactly once through a fresh Reader after the
-// builder's Reader expired, with W held; the outer error is the native
+// builder's Reader expired, with retained M held; the outer error is the native
 // *CommitError (truth New) returned by run, never a validation projection;
 // the Store is consumed with that terminal error and, reopened, holds the
 // final rows.
@@ -338,4 +342,286 @@ func TestInitial148CompleteBlockUpdateTreeReadbackH5(t *testing.T) {
 		w.reopen(t)
 		icbFinalRowsH5V1(t, w, f)
 	}
+}
+
+// icbHistoryBlockV1 binds actual transaction outpoints, independent root and
+// subsidy state for one validated source-history block.
+type icbHistoryBlockV1 struct {
+	in   initial148CompleteBlockInputV1
+	root [32]byte
+	rows map[Outpoint]UtxoEntry
+}
+
+func icbHistorySignV1(t *testing.T, kp *MLDSA87Keypair, chain [32]byte, tx *Tx, value uint64) []byte {
+	t.Helper()
+	for i := range tx.Inputs {
+		digest, err := SighashV1DigestWithType(tx, uint32(i), value, chain, SIGHASH_ALL)
+		logicalMDBXAssert(t, err == nil, "history sighash: %v", err)
+		sig, err := kp.SignDigest32(digest)
+		logicalMDBXAssert(t, err == nil, "history signature: %v", err)
+		tx.Witness[i] = WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp.PubkeyBytes(), Signature: append(sig, SIGHASH_ALL)}
+	}
+	return icbSignedRawV1(t, tx)
+}
+
+// icbHistoryTransactionsV1 spends only TxCore identifiers from the validated
+// history; h101 fans eight matured h1 payouts into 8192 actual outputs.
+func icbHistoryTransactionsV1(t *testing.T, h uint64, kp *MLDSA87Keypair, chain [32]byte, rows map[Outpoint]UtxoEntry) [][]byte {
+	t.Helper()
+	if h != 101 && h != 102 {
+		return nil
+	}
+	var keys []Outpoint
+	for key, row := range rows {
+		if h == 101 && row.CreationHeight == 1 || h == 102 && row.CreationHeight == 101 {
+			keys = append(keys, key)
+		}
+	}
+	slices.SortFunc(keys, func(a, b Outpoint) int {
+		if c := bytes.Compare(a.Txid[:], b.Txid[:]); c != 0 {
+			return c
+		}
+		return int(a.Vout) - int(b.Vout)
+	})
+	width := 1
+	if h == 102 {
+		width = 13
+	}
+	var txs [][]byte
+	for i := 0; i < len(keys); i += width {
+		ops := keys[i:min(i+width, len(keys))]
+		tx := inputViewTx(uint64(i+1), ops...)
+		if h == 101 {
+			tx.Outputs = slices.Repeat([]TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes())}}, 1024)
+		} else {
+			tx.Outputs[0].Value = uint64(len(ops))
+		}
+		txs = append(txs, icbHistorySignV1(t, kp, chain, tx, rows[ops[0]].Value))
+	}
+	logicalMDBXAssert(t, h == 101 && len(txs) == 8 || h == 102 && len(txs) == 631, "history h%d transaction count%d", h, len(txs))
+	return txs
+}
+
+func icbHistoryRowsV1(t *testing.T, previous map[Outpoint]UtxoEntry, h uint64, txs [][]byte) map[Outpoint]UtxoEntry {
+	t.Helper()
+	rows := maps.Clone(previous)
+	for ordinal, raw := range txs {
+		tx, id, _, _, err := ParseTx(raw)
+		logicalMDBXAssert(t, err == nil, "history TxCore identifiers: %v", err)
+		if ordinal != 0 {
+			for _, in := range tx.Inputs {
+				key := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+				_, present := rows[key]
+				logicalMDBXAssert(t, present, "history spends nonexistent outpoint: %+v", key)
+				delete(rows, key)
+			}
+		}
+		for i, out := range tx.Outputs {
+			if out.CovenantType == COV_TYPE_ANCHOR {
+				continue
+			}
+			rows[Outpoint{Txid: id, Vout: uint32(i)}] = UtxoEntry{Value: out.Value, CovenantType: out.CovenantType, CovenantData: bytes.Clone(out.CovenantData), CreationHeight: h, CreatedByCoinbase: ordinal == 0}
+		}
+	}
+	return rows
+}
+
+func icbHistoryRootV1(rows map[Outpoint]UtxoEntry) [32]byte {
+	leaves := map[[36]byte][]byte{}
+	for key, row := range rows {
+		icbLeafKindV1(leaves, key, row.Value, row.CovenantType, row.CovenantData, row.CreationHeight, row.CreatedByCoinbase)
+	}
+	return icbRootV1(leaves)
+}
+
+func icbHistoryV1(t *testing.T, genesis PublishedGenesisContextV1) []icbHistoryBlockV1 {
+	t.Helper()
+	kp := icbKeyV1(t)
+	rows := icbHistoryRowsV1(t, map[Outpoint]UtxoEntry{}, 0, [][]byte{genesis.Published[149:]})
+	parent := mdbx.TreeEndpointV1{Kind: 1, BlockHash: genesis.GenesisHash, CumulativeChainwork: [40]byte{39: 1}}
+	generated := Uint128{}
+	times := []uint64{initial148GenesisTimestamp}
+	var history []icbHistoryBlockV1
+	for height := uint64(1); height <= 102; height++ {
+		txs := icbHistoryTransactionsV1(t, height, kp, genesis.ChainID, rows)
+		commit := initial148BlockWitnessCommit(t, txs...)
+		outs := []testOutput{{covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}}
+		if height == 1 {
+			outs = append(slices.Repeat([]testOutput{{value: 1024, covenantType: COV_TYPE_P2PK, covenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes())}}, 8), outs...)
+		}
+		if height == 102 {
+			outs = append([]testOutput{{value: 1, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}}, outs...)
+		}
+		txs = append([][]byte{coinbaseTxWithOutputs(uint32(height), outs)}, txs...)
+		rows = icbHistoryRowsV1(t, rows, height, txs)
+		root := icbHistoryRootV1(rows)
+		raw := initial148BlockFrame(t, txs, func(h *initial148BlockHead) {
+			h.parent, h.root, h.timestamp = parent.BlockHash, root, initial148GenesisTimestamp+height
+		})
+		hash, err := Initial148BlockHash(raw[:148])
+		logicalMDBXAssert(t, err == nil, "history hash: %v", err)
+		endpoint := mdbx.TreeEndpointV1{Kind: 1, Height: height, BlockHash: hash}
+		binary.BigEndian.PutUint64(endpoint.CumulativeChainwork[32:], height+1)
+		in := initial148CompleteBlockInputV1{
+			Raw: raw, Height: height, ParentHash: parent.BlockHash, ExpectedTarget: POW_LIMIT, ChainID: genesis.ChainID,
+			DatabaseID: [32]byte{7}, Generation: 1, ParentTimestamps: slices.Clone(times[max(0, len(times)-11):]), AlreadyGenerated: generated,
+			Parent: parent, Endpoint: endpoint, CapRegistry: &validatedLogicalStateCapRegistry{}, Registry: DefaultSuiteRegistry(), Rotation: icbFrozenV1(height),
+		}
+		history = append(history, icbHistoryBlockV1{in: in, root: root, rows: rows})
+		generated, err = checkedAdvanceAlreadyGenerated(height, generated, generated.Big())
+		logicalMDBXAssert(t, err == nil, "history generated scalar: %v", err)
+		parent, times = endpoint, append(times, initial148GenesisTimestamp+height)
+	}
+	return history
+}
+
+// icbHistoryApplyV1 validates inside the actual public builder. Filler starts
+// only after validation/M reduction and its holder is released and joined
+// before the account closes; the observer records Source once per position.
+func icbHistoryApplyV1(t *testing.T, w *fgWorld, block icbHistoryBlockV1, workers int, filler uint64) (btResult, initial148CompleteBlockOutcomeV1, [3]int) {
+	t.Helper()
+	var got btResult
+	var out initial148CompleteBlockOutcomeV1
+	var calls [3]int
+	var events uint32
+	validM := false
+	var finish chan struct{}
+	var held <-chan error
+	err := w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+		defer func() {
+			if finish != nil {
+				close(finish)
+				logicalMDBXAssert(t, <-held == nil, "history filler cleanup")
+			}
+		}()
+		observed := &icbNativeSourceV1{before: func(pos mdbx.TreePositionV1, _ *mdbx.Reader, _ *mdbx.TreeDeltaSinkV1) error { calls[pos]++; return nil }}
+		var runErr error
+		out, runErr = icbEntryWorkersV1(workers)(a, block.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+			got.truth, got.stage, got.index, got.err = w.s.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+				result, err := validate(r)
+				if err != nil {
+					return mdbx.TreeOperationV1{}, err
+				}
+				validM = result != nil && icbHoldsExactlyV1(a, icbMV1(uint64(len(block.in.Raw))))
+				if !validM {
+					return mdbx.TreeOperationV1{}, errors.New("history M after root differs")
+				}
+				events = result.effect.Primitive.Coverage.BlockMeta.EventCount
+				if filler != 0 {
+					ready, done := make(chan error, 1), make(chan error, 1)
+					finish, held = make(chan struct{}), done
+					go func() {
+						err := a.WithReservation(filler, func() error { ready <- nil; <-finish; return nil })
+						if err != nil {
+							ready <- err
+						}
+						done <- err
+					}()
+					if err := <-ready; err != nil {
+						return mdbx.TreeOperationV1{}, err
+					}
+				}
+				observed.source = result.effect.Primitive.Source.(*blockTreeSourceV1)
+				return icbComposeV1(result, observed, block.in.Raw[:148], false), nil
+			})
+			return got.err
+		})
+		logicalMDBXAssert(t, any(runErr) == any(got.err), "history native error identity: %v/%v", runErr, got.err)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "history operation: %v", err)
+	logicalMDBXAssert(t, validM, "history retained-phase observation")
+	logicalMDBXAssert(t, block.in.Height != 102 || events == 8824, "actual history h102 E=%d", events)
+	btReservationsReleased(t, w.owner)
+	return got, out, calls
+}
+
+func icbHistoryReadV1(t *testing.T, w *fgWorld, block icbHistoryBlockV1) {
+	t.Helper()
+	w.reopen(t)
+	logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error {
+		binding, present, err := r.ReadTreeRootBindingV1(1)
+		logicalMDBXAssert(t, err == nil && present && binding.RootDigest == block.root && binding.Endpoint == block.in.Endpoint, "history reopened root/endpoint: %v", err)
+		for key, row := range block.rows {
+			value, present, err := r.Get(mdbx.TreeSchemaV1DBIs()[1], btUTXOKey(1, key))
+			logicalMDBXAssert(t, err == nil && present && bytes.Equal(value, btValue(btFrame(row.Value, row.CovenantType, row.CovenantData), row.CreationHeight, row.CreatedByCoinbase)), "history reopened outpoint %+v", key)
+		}
+		return nil
+	}) == nil, "history reopened rows")
+}
+
+// TestInitial148WriterHistoryV1 is A1/R1: actual validated history, both entries,
+// definite NEW, forced strict NEW and exact/minus-one writer acquisition.
+func TestInitial148WriterHistoryV1(t *testing.T) {
+	genesis := fgContext(t, initial148BlockGenesis(t))
+	history := icbHistoryV1(t, genesis)
+	last := history[101]
+	summary, err := ValidateInitial148BlockSteps1To12(last.in.Raw, last.in.ParentHash, last.in.ExpectedTarget, 102, last.in.ParentTimestamps)
+	logicalMDBXAssert(t, err == nil && len(last.in.Raw) == 59580771 && summary.SumWeight == 60773472 && summary.TxCount == 632, "actual h102 shape: n=%d %+v/%v", len(last.in.Raw), summary, err)
+	for _, workers := range []int{-1, 4} {
+		for _, mode := range []string{"NEW", "strict-NEW", "exact", "one-short"} {
+			t.Run(fmt.Sprintf("workers%d/%s", workers, mode), func(t *testing.T) {
+				w := fgNew(t, [32]byte{7}, 1, 2)
+				fgTuple(t, w.call(), "ACCEPTED", 2, 3)
+				for _, block := range history[:101] {
+					got, out, calls := icbHistoryApplyV1(t, w, block, -1, 0)
+					got.want(t, 2, 3, -1)
+					logicalMDBXAssert(t, got.err == nil && out.required.root == block.root && calls == [3]int{0, 1, 0}, "validated history h%d: %v/%+v/%v", block.in.Height, got.err, out, calls)
+				}
+				filler := uint64(0)
+				if mode == "exact" || mode == "one-short" {
+					n := uint64(len(last.in.Raw))
+					// E=8192 spends+631 outputs+one spendable coinbase.
+					peak := icbMV1(n) + (n + 892) + n + 2*(288440+104*8824)
+					filler = 402653184 - peak
+					if mode == "one-short" {
+						filler++
+					}
+				}
+				var got btResult
+				var out initial148CompleteBlockOutcomeV1
+				var calls [3]int
+				scenario := mdbx.SelectedDamageProbeOnly
+				if mode == "strict-NEW" {
+					scenario = mdbx.SelectedDamageCommitNew
+				}
+				evidence, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, scenario, 0, btMeta(0x11, 1), func() { got, out, calls = icbHistoryApplyV1(t, w, last, workers, filler) })
+				logicalMDBXAssert(t, fixtureErr == nil && out.required.derived && out.required.root == last.root, "history selected fixture: %v/%+v", fixtureErr, evidence)
+				if mode == "one-short" {
+					got.want(t, 1, 2, -1)
+					logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(got.err) && evidence.Commits == 0 && evidence.Deletes == 8193 && calls == [3]int{0, 1, 0}, "writer node-work refusal: %v/%+v/%v", got.err, evidence, calls)
+					icbHistoryTerminalV1(t, w, got, 1)
+					icbHistoryReadV1(t, w, history[100])
+					fresh, _, _ := icbHistoryApplyV1(t, w, last, workers, 0)
+					fresh.want(t, 2, 3, -1)
+					logicalMDBXAssert(t, fresh.err == nil, "reopened fresh operation: %v", fresh.err)
+				} else {
+					got.want(t, 2, 3, -1)
+					wantCalls := [3]int{0, 1, 0}
+					if mode == "strict-NEW" {
+						wantCalls[2] = 1
+						ce, ok := got.err.(*mdbx.CommitError)
+						logicalMDBXAssert(t, ok && ce.Truth == 2 && ce.ReadbackCause == nil && evidence.BeginRead == 1, "history strict NEW: %v", got.err)
+						icbHistoryTerminalV1(t, w, got, 2)
+					} else {
+						logicalMDBXAssert(t, got.err == nil, "history definite NEW: %v", got.err)
+					}
+					logicalMDBXAssert(t, calls == wantCalls && evidence.Commits == 1, "history Source counts %v/%v", calls, wantCalls)
+				}
+				icbHistoryReadV1(t, w, last)
+			})
+		}
+	}
+}
+
+func icbHistoryTerminalV1(t *testing.T, w *fgWorld, got btResult, truth mdbx.CommitTruth) {
+	t.Helper()
+	calls := 0
+	logicalMDBXAssert(t, w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+		tr, stage, index, err := w.s.UpdateTreeV1(a, func(*mdbx.Reader) (mdbx.TreeOperationV1, error) { calls++; return mdbx.TreeOperationV1{}, nil })
+		logicalMDBXAssert(t, tr == truth && stage == 1 && index == -1 && any(err) == any(got.err) && calls == 0, "history consumed UpdateTree terminal: %v", err)
+		return nil
+	}) == nil, "history terminal operation")
+	err := w.s.View(func(*mdbx.Reader) error { calls++; return nil })
+	logicalMDBXAssert(t, any(err) == any(got.err) && calls == 0, "history consumed View terminal")
 }

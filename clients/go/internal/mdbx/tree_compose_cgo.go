@@ -64,6 +64,9 @@ type treeScopeV1 struct {
 	held        bool   // W + F_fixed + C + R of j is charged
 	events      uint32 // max_j EventCount_j at the writer
 	observation TreeObservationV1
+	delta       *treeDeltaV1 // selected frozen writer descriptors through reserve/write
+	bounded     bool
+	enclosing   bool // selected checker and regeneration own index -1
 }
 
 // treeComposeV1 is the frame-held state of one updateTreeLockedV1 call: the captured outcome and index (D17 item 3)
@@ -80,7 +83,7 @@ type treeComposeV1 struct {
 }
 
 func newTreeScopeV1(s *Store, old *C.MDBX_txn, plan *treePlanV1, position treePositionV1, ledger treeLedgerV1) *treeScopeV1 {
-	e := &treeScopeV1{s: s, old: old, plan: plan, position: position, ledger: ledger}
+	e := &treeScopeV1{s: s, old: old, plan: plan, position: position, ledger: ledger, bounded: treeBoundedPlanV1(plan)}
 	if len(plan.primitives) != 0 {
 		e.call = e.sourceV1
 	}
@@ -206,11 +209,19 @@ func (e *treeScopeV1) stepV1(j int) error {
 	if err != nil {
 		return err
 	}
+	if e.delta != nil {
+		return nil // the selected writer retains its recorder through reserve/write
+	}
+	e.retireStepV1()
+	return nil
+}
+
+// retireStepV1 retires writer work before strict readback allocates its own.
+func (e *treeScopeV1) retireStepV1() {
 	e.rec.releaseV1()
-	e.rec = nil
+	e.rec, e.delta = nil, nil
 	e.held = false
 	e.ledger.releaseV1(treeStepBytesV1)
-	return nil
 }
 
 // deltaV1 is steps 3-7: finish, resolve, the writer-only fold, apply and node emission.
@@ -230,12 +241,38 @@ func (e *treeScopeV1) deltaV1(prim *treePrimitiveV1) error {
 			return err
 		}
 	}
+	if e.bounded {
+		return e.boundedDeltaV1(d, prim)
+	}
 	err = d.applyV1(e.emitterV1())
 	if err != nil {
 		return err
 	}
 	e.reportV1(d)
 	return treeEmitNodesV1(e.uncheckedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.emitterV1(), e.ledger, e.rec.observation)
+}
+
+// boundedDeltaV1 preserves source/finish/resolve/pure-fold precedence, then
+// checks the complete domain or immediately folds both strict predicates.
+func (e *treeScopeV1) boundedDeltaV1(d *treeDeltaV1, prim *treePrimitiveV1) error {
+	e.enclosing = true
+	var emit treeEmitterV1
+	if e.rb != nil {
+		emit = treeBoundedReadbackEmitterV1{e.rb}
+	} else {
+		e.delta = d
+		emit = treeBoundedEmitterV1{section: e.t}
+	}
+	return e.regenerateV1(d, prim, emit)
+}
+
+// regenerateV1 consumes the frozen original-event delta and one paired walker.
+func (e *treeScopeV1) regenerateV1(d *treeDeltaV1, prim *treePrimitiveV1, emit treeEmitterV1) error {
+	err := d.applyV1(emit)
+	if err != nil {
+		return err
+	}
+	return treeEmitNodesV1(e.uncheckedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), emit, e.ledger, e.rec.observation)
 }
 
 // reportV1 captures primitive j's report values at the writer from its applied derivation: the role's first
@@ -253,7 +290,7 @@ func (e *treeScopeV1) reportV1(d *treeDeltaV1) {
 		role.Present, role.Generation = true, d.rec.prim.generation
 		role.BytesBefore, role.CountBefore = d.parentBytes, d.parentCount
 	}
-	role.BytesAfter, role.CountAfter = binary.BigEndian.Uint64(d.counter[:8]), binary.BigEndian.Uint64(d.counter[8:])
+	role.BytesAfter, role.CountAfter = binary.BigEndian.Uint64(d.keys.counter[:8]), binary.BigEndian.Uint64(d.keys.counter[8:])
 	report.Undo[e.j] = treeUndoRecordV1(d)
 }
 
@@ -366,9 +403,10 @@ func (c *treeComposeV1) cleanupV1(out *transactionOutcome) {
 	out.poisoned = c.outcome.retainedWrite != nil || c.outcome.retainedRead != nil
 }
 
-// unwoundIndexV1 is the index of a writer unwind: -1 inside the Proof frame, else the primitive that unwound.
+// unwoundIndexV1 assigns -1 to Proof and selected enclosing work; original
+// Source/finish/resolve/pure-fold work retains its primitive index.
 func (c *treeComposeV1) unwoundIndexV1() int {
-	if c.proving {
+	if c.proving || c.writer.enclosing {
 		return -1
 	}
 	return c.writer.j
@@ -422,7 +460,7 @@ func (c *treeComposeV1) runV1() {
 		return
 	}
 	if stopped {
-		c.abortV1(err, w.j)
+		c.abortV1(err, c.unwoundIndexV1())
 		return
 	}
 	err = c.holdV1()
@@ -441,6 +479,9 @@ func (c *treeComposeV1) abortV1(err error, index int) {
 // H_r = S_r + B_r with B_r = W + F_fixed + C + R + V + L2 + descSize x max_j EventCount_j (D13-14).
 func (c *treeComposeV1) holdV1() error {
 	w := c.writer
+	if w.bounded {
+		return c.boundedHoldV1()
+	}
 	if w.t.covered {
 		return c.coveredHoldV1()
 	}
@@ -461,6 +502,24 @@ func (c *treeComposeV1) holdV1() error {
 		return err
 	}
 	return c.reserveV1()
+}
+
+// boundedHoldV1 reserves the complete future readback before the first write.
+// Pair is emitted by the root callback, so the final root is never rewritten.
+func (c *treeComposeV1) boundedHoldV1() error {
+	w := c.writer
+	err := c.reserveV1()
+	if err != nil {
+		return err
+	}
+	prim := treeAdmittedPrimitiveV1(&w.plan.primitives[0])
+	emit := treeBoundedEmitterV1{section: w.t, pair: w.plan.pair, writing: true}
+	err = w.regenerateV1(w.delta, &prim, emit)
+	if err != nil {
+		return err
+	}
+	w.retireStepV1()
+	return w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted)
 }
 
 func (c *treeComposeV1) coveredHoldV1() error {
@@ -621,6 +680,7 @@ func (c *treeComposeV1) readbackV1(e *treeScopeV1, read *C.MDBX_txn) (CommitTrut
 		return CommitTruthUnknown, err
 	}
 	e.rb, e.ledger = rb, budget.ledgerV1()
+	rb.bounded, rb.oldImage, rb.newImage = e.bounded, true, true
 	if stopped, err := e.loopV1(); stopped {
 		c.unwind = e.unwind
 		return CommitTruthUnknown, err

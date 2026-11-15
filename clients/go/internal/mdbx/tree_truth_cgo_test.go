@@ -169,6 +169,47 @@ func ttLagRead(old treeOldV1, seen *[]string) error {
 
 var ttLagSeen = "false:|true:x0|true:v1|true:x1"
 
+// TestTreeBoundedProjectionV1 protects the distinct zero-P representation at
+// the real private emitter boundary, independently of the public fit tests.
+func TestTreeBoundedProjectionV1(t *testing.T) {
+	s, _ := ttStore(t)
+	treeNativeSeed(t, s, 4, ttR, []byte("or"))
+	ledger := &ttLedger{}
+	checkWrite := func(section *treeSectionV1) error {
+		preflight := treeBoundedEmitterV1{section: section}
+		writer := treeBoundedEmitterV1{section: section, writing: true}
+		for _, target := range []treeTargetV1{ttTarget(ttUTXO, ttZ, "z1"), ttTarget(ttUTXO, ttU, "")} {
+			mustEnvironment(t, preflight.emitV1(target))
+			mustEnvironment(t, writer.emitV1(target))
+			if section.heldP != 0 || len(section.pw.entries) != 0 || cap(section.pw.entries) != 0 || section.pw.live != 0 {
+				t.Fatal("selected writer retained P", section.heldP, section.pw)
+			}
+		}
+		mustEnvironment(t, preflight.referV1(ttBlocks, ttR))
+		return writer.referV1(ttBlocks, ttR)
+	}
+	readback := func(r *treeReadbackStateV1) error {
+		r.bounded, r.oldImage, r.newImage = true, true, true
+		emit := treeBoundedReadbackEmitterV1{r}
+		for _, target := range []treeTargetV1{ttTarget(ttUTXO, ttZ, "z1"), ttTarget(ttUTXO, ttU, "")} {
+			mustEnvironment(t, emit.emitV1(target))
+			if len(r.pr.entries) != 0 || cap(r.pr.entries) != 0 || r.pr.live != 0 || r.budget.used != 131192 {
+				t.Fatal("selected readback retained P or redrew Sr", r.pr, r.budget)
+			}
+		}
+		return emit.referV1(ttBlocks, ttR)
+	}
+	var outcome updateNativeOutcome
+	evidence, err := fixtureLargeFault(s, 8, 6, ttOut, func() {
+		outcome = fixtureTreeCommitV1(s, fixtureTreeScriptV1{ledger: ledger, write: checkWrite, readback: readback, held: 419632})
+	})
+	mustEnvironment(t, err)
+	commit := ttCommitError(t, outcome, 2)
+	if commit.ReadbackCause != nil || evidence.commits != 1 {
+		t.Fatal("selected zero-P result", commit, evidence)
+	}
+}
+
 type ttLagRun struct {
 	ledger        ttLedger
 	written, read []string

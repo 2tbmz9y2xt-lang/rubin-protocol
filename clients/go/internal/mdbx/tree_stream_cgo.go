@@ -835,6 +835,98 @@ func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
 	return plan
 }
 
+// treeBoundedPlanV1 recognizes only the admitted ordinary owned-plan shape.
+// It grants no caller capability and every other legal shape keeps P fallback.
+func treeBoundedPlanV1(plan *treePlanV1) bool {
+	if len(plan.primitives) != 1 || !treeBoundedAuxV1(plan) {
+		return false
+	}
+	p := &plan.primitives[0]
+	if !treeBoundedPrimitiveV1(p) {
+		return false
+	}
+	var domains uint8
+	for i := range plan.pair {
+		domain := treeBoundedPairV1(&plan.pair[i], p)
+		if domain == 0 || domains&domain != 0 {
+			return false
+		}
+		domains |= domain
+	}
+	return domains|8 == 15
+}
+
+// treeBoundedAuxV1 excludes every auxiliary ownership domain from streaming.
+func treeBoundedAuxV1(plan *treePlanV1) bool {
+	return plan.proof == nil && plan.slot == nil && plan.inventory == nil &&
+		plan.context.Count == 0 && len(plan.consulted) == 0 && plan.prepaidReadBytes == 0
+}
+
+// treeBoundedPrimitiveV1 preserves the fixed forward/direct/transient profile.
+func treeBoundedPrimitiveV1(p *TreePrimitiveV1) bool {
+	c := p.Coverage
+	return p.Direction == TreeForwardV1 && p.Kind == TreeKindDirectApplyV1 && p.Undo == UndoTransientV1 &&
+		c != nil && c.HeaderBytes == 148 && c.BodyKind == 1
+}
+
+// treeBoundedPairV1 identifies the disjoint generation/block/height-bound rows.
+func treeBoundedPairV1(m *ownedMutation, p *TreePrimitiveV1) uint8 {
+	if m.after != AfterLiteral {
+		return 0
+	}
+	switch m.dbi.Rank {
+	case 2:
+		return treeBoundedIndexV1(m, p)
+	case 7:
+		return treeBoundedOwnerV1(m, p)
+	case 4:
+		return treeBoundedBodyV1(m, p)
+	case 3:
+		return treeBoundedHeaderV1(m, p)
+	}
+	return 0
+}
+
+// treeBoundedBodyV1 recognizes the already-admitted owned BodyKind1 clone.
+func treeBoundedBodyV1(m *ownedMutation, p *TreePrimitiveV1) uint8 {
+	if bytes.Equal(m.key, p.Block[:]) && len(m.literal) == len(p.Coverage.CurrentBody) {
+		return 4
+	}
+	return 0
+}
+
+// treeBoundedHeaderV1 recognizes only the optional expected-absent header.
+func treeBoundedHeaderV1(m *ownedMutation, p *TreePrimitiveV1) uint8 {
+	if !m.beforePresent && bytes.Equal(m.key, p.Block[:]) && len(m.literal) == 148 {
+		return 8
+	}
+	return 0
+}
+
+// treeBoundedIndexV1 checks the canonical index without changing admission.
+func treeBoundedIndexV1(m *ownedMutation, p *TreePrimitiveV1) uint8 {
+	if len(m.key) != 16 || len(m.literal) != 104 {
+		return 0
+	}
+	bound := binary.BigEndian.Uint64(m.key) == p.Generation && binary.BigEndian.Uint64(m.key[8:]) == p.Height
+	if bound && bytes.Equal(m.literal[:32], p.Block[:]) && bytes.Equal(m.literal[64:], p.Endpoint.CumulativeChainwork[:]) {
+		return 1
+	}
+	return 0
+}
+
+// treeBoundedOwnerV1 checks the matching canonical owner and height literal.
+func treeBoundedOwnerV1(m *ownedMutation, p *TreePrimitiveV1) uint8 {
+	if len(m.key) != 40 || len(m.literal) != 8 {
+		return 0
+	}
+	bound := binary.BigEndian.Uint64(m.key) == p.Generation && bytes.Equal(m.key[8:], p.Block[:])
+	if bound && binary.BigEndian.Uint64(m.literal) == p.Height {
+		return 2
+	}
+	return 0
+}
+
 // treeHeaderSlotRowsV1 is the spare owned Pair and Consulted capacity of a slot.
 func treeHeaderSlotRowsV1(slot *TreeHeaderSlotV1) int {
 	if slot == nil {

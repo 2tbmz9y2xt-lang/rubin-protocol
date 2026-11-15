@@ -56,8 +56,8 @@ type initial148CompleteBlockOutcomeV1 struct {
 
 type initial148CompleteRunV1 func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error
 
-// initial148CompleteBlockFrameV1 owns every validation datum held under W from
-// validate through the end of run.
+// initial148CompleteBlockFrameV1 owns validation under full W and retains only
+// Raw/result/source ownership under M after successful required/root completion.
 type initial148CompleteBlockFrameV1 struct {
 	input    initial148CompleteBlockInputV1
 	account  *mdbx.OperationAccount
@@ -67,6 +67,7 @@ type initial148CompleteBlockFrameV1 struct {
 	workers  int
 	parallel bool
 	active   bool
+	reduce   func() error
 }
 
 // withInitial148CompleteBlockV1 is the dormant sequential complete initial148
@@ -87,7 +88,10 @@ func withInitial148CompleteBlockBodyV1(account *mdbx.OperationAccount, input ini
 		return initial148CompleteBlockOutcomeV1{}, err
 	}
 	frame := &initial148CompleteBlockFrameV1{input: input, account: account, workers: workers, parallel: parallel}
-	err = account.WithReservation(w, func() error { return frame.runV1(run) })
+	err = account.WithPhaseReservationV1(w, initial148RetainedTariffV1(uint64(len(input.Raw))), func(release func() error) error {
+		frame.reduce = release
+		return frame.runV1(run)
+	})
 	if err == nil && frame.outcome.validationErr != nil {
 		err = frame.outcome.validationErr
 	}
@@ -218,6 +222,17 @@ func initial148CompleteBodyTariffV1(n, m uint64) (uint64, bool) {
 	return initial148TariffSumV1(16_777_216+n, phase[:])
 }
 
+// initial148RetainedTariffV1 covers Raw, compact result ownership and fixed
+// current-transaction metadata after required/root/queue work has completed.
+// Admission has already bounded n, so every operation here fits uint64.
+func initial148RetainedTariffV1(n uint64) uint64 {
+	var b uint64
+	if n > 149 {
+		b = min(17_000_000, n-149, (68_000_157-n)/3)
+	}
+	return 16_777_216 + n + 6*b
+}
+
 // initial148MinimumWitnessV1 counts the suite byte, both CompactSizes and
 // SigLen+1. Negative lengths admit no task; zero means no eligible suite.
 func initial148MinimumWitnessV1(registry *SuiteRegistry) (uint64, bool) {
@@ -262,8 +277,9 @@ func initial148DistinctGenesisBytesV1(raw, published []byte) uint64 {
 	return uint64(len(published))
 }
 
-// runV1 runs the caller under W and then releases every frame-owned datum,
-// including after a run error, panic or Goexit.
+// runV1 holds full W through required/root/queue validation, then M through
+// writer/readback and the run tail. Failed validation retains W. Every
+// frame-owned datum is released after return, error, panic or Goexit.
 func (f *initial148CompleteBlockFrameV1) runV1(run initial148CompleteRunV1) error {
 	f.active = true
 	defer f.releaseV1()
@@ -286,6 +302,7 @@ func (f *initial148CompleteBlockFrameV1) releaseV1() {
 	}
 	f.result, f.source = nil, blockTreeSourceV1{}
 	f.input = initial148CompleteBlockInputV1{}
+	f.reduce = nil
 }
 
 // validateV1 is usable once, only while run is active.
@@ -300,7 +317,20 @@ func (f *initial148CompleteBlockFrameV1) validateV1(reader *mdbx.Reader) (*initi
 		return nil, err
 	}
 	f.result = result
+	if err := f.retireValidationV1(); err != nil {
+		f.outcome.validationErr = err
+		return nil, err
+	}
 	return result, nil
+}
+
+// retireValidationV1 drops only references with no consumer after requiredV1
+// returned successfully. Raw, result/spent/current and scalar source identity
+// remain live under M through the enclosing writer/readback and run tail.
+func (f *initial148CompleteBlockFrameV1) retireValidationV1() error {
+	f.input.CapRegistry, f.input.Registry, f.input.Rotation = nil, nil, nil
+	f.input.PublishedGenesis, f.input.ParentTimestamps = nil, nil
+	return f.reduce()
 }
 
 func (f *initial148CompleteBlockFrameV1) validateBodyV1(reader *mdbx.Reader) (*initial148CompleteBlockResultV1, error) {

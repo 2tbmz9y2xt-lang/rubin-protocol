@@ -772,6 +772,9 @@ type treeReadbackStateV1 struct {
 	pr          treeProjectionV1
 	failed      error
 	nativeLimit uint64
+	bounded     bool
+	oldImage    bool
+	newImage    bool
 }
 
 // newTreeReadbackV1 is called only when the plan has at least one primitive. It draws S_r at construction and each
@@ -834,9 +837,13 @@ func (r *treeReadbackStateV1) verdictV1(pair []ownedMutation, consulted []ownedC
 	return CommitTruthUnknown, nil
 }
 
-// foldProjectionV1 compares every P_r identity with ORIGINAL OLD (OLD predicate) and with P_r, or ORIGINAL OLD for a
-// reference (NEW predicate), in (rank, key) order.
+// foldProjectionV1 returns the selected stream's complete folded predicates.
+// Fallback compares every P_r identity with ORIGINAL OLD and its planned image
+// (ORIGINAL OLD for a reference), in (rank, key) order.
 func (r *treeReadbackStateV1) foldProjectionV1() (bool, bool, error) {
+	if r.bounded {
+		return r.oldImage, r.newImage, nil
+	}
 	oldImage, newImage := true, true
 	for _, entry := range r.pr.entries {
 		handle := r.handles[entry.dbi.Rank]
@@ -905,4 +912,84 @@ func (e treeReadbackEmitterV1) referV1(dbi DBI, key []byte) error {
 		}
 	}
 	return r.recordV1(dbi, key, treeEntryReferenceV1, nil)
+}
+
+// treeBoundedEmitterV1 consumes one selected target while its complete expected
+// bytes remain held. Preflight owns OLD/write then future NEW extent; writer
+// regenerates from protected ORIGINAL OLD with no P or per-node metadata.
+type treeBoundedEmitterV1 struct {
+	section *treeSectionV1
+	pair    []ownedMutation
+	writing bool
+}
+
+// emitV1 never retains a target. The walk's final root callback writes Pair
+// first, then obtains only physical-before metadata and performs fused equality.
+func (e treeBoundedEmitterV1) emitV1(target treeTargetV1) error {
+	t := e.section
+	if !e.writing {
+		err := t.oldMatchV1(target.dbi, target.key, "OLD/write snapshot mismatch")
+		if err != nil {
+			return err
+		}
+		return t.requireReadV1(uint64(len(target.after.value)))
+	}
+	if target.dbi.Rank == 0 && len(target.key) == 9 && target.key[0] == 0x11 {
+		err := t.pairEmitV1(e.pair)
+		if err != nil {
+			return err
+		}
+	}
+	prior, err := updateNativeImage(t.old, t.handles[target.dbi.Rank], target.key)
+	if err != nil {
+		return err
+	}
+	return t.writeTargetV1(target, prior.present)
+}
+
+// referV1 compares every complete kept reference at its owning callback.
+func (e treeBoundedEmitterV1) referV1(dbi DBI, key []byte) error {
+	diagnostic := "OLD/write snapshot mismatch"
+	if e.writing {
+		diagnostic = "final update image mismatch"
+	}
+	return e.section.oldMatchV1(dbi, key, diagnostic)
+}
+
+// treeBoundedReadbackEmitterV1 folds both predicates immediately under the
+// immutable native seal and the existing local Br+Sr budget, never retaining P.
+type treeBoundedReadbackEmitterV1 struct{ readback *treeReadbackStateV1 }
+
+// emitV1 completes both comparisons even after either accumulated predicate is
+// false. A later unavailable domain therefore remains UNKNOWN with its cause.
+func (e treeBoundedReadbackEmitterV1) emitV1(target treeTargetV1) error {
+	r := e.readback
+	handle := r.handles[target.dbi.Rank]
+	oldEqual, err := treeOldEqualBoundedV1(r.old, r.read, handle, target.key, r.nativeLimit)
+	if err != nil {
+		return err
+	}
+	expected, err := updateOwnedImage(target.after.value)
+	if err != nil {
+		return err
+	}
+	expected.present = target.after.present
+	newEqual, err := updateNativePairEqual(r.read, handle, target.key, expected, false, nil, r.nativeLimit)
+	runtime.KeepAlive(target.after.value)
+	if err != nil {
+		return err
+	}
+	r.oldImage, r.newImage = r.oldImage && oldEqual, r.newImage && newEqual
+	return nil
+}
+
+// referV1 includes kept boundaries in both predicates without retained entries.
+func (e treeBoundedReadbackEmitterV1) referV1(dbi DBI, key []byte) error {
+	r := e.readback
+	equal, err := treeOldEqualBoundedV1(r.old, r.read, r.handles[dbi.Rank], key, r.nativeLimit)
+	if err != nil {
+		return err
+	}
+	r.oldImage, r.newImage = r.oldImage && equal, r.newImage && equal
+	return nil
 }

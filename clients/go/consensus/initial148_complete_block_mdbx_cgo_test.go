@@ -108,7 +108,7 @@ func TestInitial148CompleteBlockTariffCensus(t *testing.T) {
 		{"group entry", unsafe.Sizeof(SimplicityTxContextGroupEntry{}), 32},
 		{"self view", unsafe.Sizeof(SimplicityTxContextSelfView{}), 104},
 		{"same-CMR view", unsafe.Sizeof(SimplicityTxContextSameCMRView{}), 80},
-		{"frame", unsafe.Sizeof(initial148CompleteBlockFrameV1{}), 872},
+		{"frame", unsafe.Sizeof(initial148CompleteBlockFrameV1{}), 880},
 		{"result", unsafe.Sizeof(initial148CompleteBlockResultV1{}), 624},
 		{"connect work", unsafe.Sizeof(blockInputViewConnectWork{}), 192},
 		{"connect result", unsafe.Sizeof(connectBlockInputViewResult{}), 64},
@@ -169,7 +169,7 @@ func TestInitial148CompleteBlockTariffMargins(t *testing.T) {
 		{"steps metadata", 2*164176+2*2064 < 4194304},
 		{"DA records", 56 < 60},
 		{"default witness", 1+3+2592+3+4627+1 == 7227},
-		{"fixed owners", 872+624+192+64+80+56+40+168 == 2096 && 2096 <= 2456},
+		{"fixed owners", 880+624+192+64+80+56+40+168 == 2104 && 2104 <= 2456},
 		{"cap constant", 192*(40+88)+2456 == 27032},
 	}
 	for _, row := range rows {
@@ -386,6 +386,7 @@ type icbReleaseOwnerV1 struct {
 func icbReleaseFramesV1() []icbReleaseOwnerV1 {
 	return []icbReleaseOwnerV1{
 		{initial148CompleteBlockFrameV1{}, []string{
+			"reduce:func() error",
 			"input.Raw:bytes", "input.PublishedGenesis:bytes", "input.Rotation:consensus.RotationProvider",
 			"outcome.validationErr:error", "outcome.required.cause:error",
 			"source.Raw:bytes", "source.coverage.CurrentBody:bytes",
@@ -1509,7 +1510,7 @@ func icbComposeV1(result *initial148CompleteBlockResultV1, observed *icbNativeSo
 }
 
 // icbSourceCallsV1 records each native source call per TreePositionV1:
-// the call count, calls made while W was not held, and calls whose Reader is
+// the call count, calls made while retained M was not held, and calls whose Reader is
 // the builder's own Reader or while the builder's Reader still answers a Get
 // (internal/mdbx expires it when the builder returns, tree_stream_cgo.go
 // callbackV1, so a later Get refuses with "Reader is not active").
@@ -1520,7 +1521,7 @@ type icbSourceCallsV1 struct {
 }
 
 func (c *icbSourceCallsV1) record(account *mdbx.OperationAccount, tariff uint64, p mdbx.TreePositionV1, r *mdbx.Reader) {
-	// W stays held: the remaining lane cannot fit another W.
+	// M stays held: its complement plus one byte cannot fit in the lane.
 	held := account.WithReservation(402_653_184-tariff+1, func() error { return nil })
 	if !mdbx.IsOperationReservationCapacity(held) {
 		c.unheld[p]++
@@ -1545,8 +1546,7 @@ type icbUpdateTreeV1 struct {
 // every native source call per position.
 func icbUpdateTreeH5V1(t *testing.T, w *btWorld, f icbH5V1, parallel bool) icbUpdateTreeV1 {
 	t.Helper()
-	tariff, ok := initial148CompleteTariffV1(f.in)
-	logicalMDBXAssert(t, ok, "tariff")
+	tariff := icbMV1(uint64(len(f.in.Raw)))
 	var got icbUpdateTreeV1
 	icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 		observed := &icbNativeSourceV1{}
@@ -1578,7 +1578,7 @@ func icbUpdateTreeH5V1(t *testing.T, w *btWorld, f icbH5V1, parallel bool) icbUp
 }
 
 // check asserts the accepted outcome under run error runErr, the exact
-// per-position call counts want, and W held and the builder's Reader expired
+// per-position call counts want, and M held and the builder's Reader expired
 // at every call.
 func (got icbUpdateTreeV1) check(t *testing.T, f icbH5V1, name string, runErr error, want [3]int) {
 	t.Helper()
@@ -1607,7 +1607,7 @@ func icbFinalRowsH5V1(t *testing.T, w *btWorld, f icbH5V1) {
 // TestInitial148CompleteBlockUpdateTreeH5 (C13) composes the root-valid h=5
 // result into a real Store.UpdateTreeV1 inside run: the native writer
 // consumes the immutable source exactly once through a fresh Reader after
-// the builder's Reader expired, while W is still held on the same account;
+// the builder's Reader expired, while M is still held on the same account;
 // the native truth/stage/index are the owner's own values and the final rows
 // are written. A commit that reports success runs no readback (internal/mdbx
 // updateNativeReadback runs the truth evaluator only after a possibly
@@ -1628,7 +1628,7 @@ func TestInitial148CompleteBlockUpdateTreeH5(t *testing.T) {
 // parent rows stay. A root-valid result composed into the operation whose
 // native source consumption then fails returns that native error unchanged
 // (validationErr stays nil, the result is not replaced by a validation
-// projection), W is still held at the native failure and released after run,
+// projection), M is still held at the native failure and released after run,
 // and nothing is written.
 func TestInitial148CompleteBlockUpdateTreeFailuresH5(t *testing.T) {
 	nativeErr := errors.New("native source consumption failure")
@@ -1640,8 +1640,7 @@ func TestInitial148CompleteBlockUpdateTreeFailuresH5(t *testing.T) {
 				opts.flip = 1
 			}
 			f := icbH5VariantV1(t, w, opts)
-			tariff, ok := initial148CompleteTariffV1(f.in)
-			logicalMDBXAssert(t, ok, "tariff")
+			tariff := icbMV1(uint64(len(f.in.Raw)))
 			composed, consumed, released := false, 0, 0
 			var nativeOut error
 			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
@@ -2242,9 +2241,10 @@ func icbEventsV1(t *testing.T, w *btWorld, in initial148CompleteBlockInputV1) ui
 // TestInitial148CompleteBlockStageHoldsH5 (C12 last-use holds) probes the
 // same account at every run-visible stage of the h=5 block through each
 // entry: before validate, inside the Reader after validate returned (source
-// scratch, R and D already released), after the builder's Reader expired, and
-// for a rejected variant after validate returned; each holds exactly W. After
-// the entry returns, nothing is held.
+// scratch, R and D released; queued work finished), and after the builder's Reader
+// expired. Full W remains before validation and after a rejected validation;
+// successful required/root/queue completion reduces it to M for later stages.
+// After the entry returns, nothing is held.
 func TestInitial148CompleteBlockStageHoldsH5(t *testing.T) {
 	for _, flip := range []int{0, 1} {
 		for _, workers := range []int{-1, 1, 4} {
@@ -2262,6 +2262,9 @@ func TestInitial148CompleteBlockStageHoldsH5(t *testing.T) {
 					probe("before-validate")
 					err := w.s.View(func(reader *mdbx.Reader) error {
 						_, verr := validate(reader)
+						if verr == nil {
+							tariff = icbMV1(uint64(len(f.in.Raw)))
+						}
 						probe("after-validate")
 						return verr
 					})
@@ -2690,6 +2693,79 @@ func TestInitial148CompleteBlockNoGenesisDemandNoSpare(t *testing.T) {
 				return nil
 			})
 			logicalMDBXAssert(t, err == nil, "no-spare outer hold: %v", err)
+		})
+	}
+}
+
+// icbMV1 is an independent literal retained-phase oracle.
+func icbMV1(n uint64) uint64 {
+	b := uint64(0)
+	if n >= 150 {
+		b = min(n-149, uint64(17000000), (68000157-n)/3)
+	}
+	return 16777216 + n + 6*b
+}
+
+// TestInitial148WriterFitV1 scans the complete integer envelope, independently
+// counting both overlapping Br grants. It makes no attained-block-size claim.
+func TestInitial148WriterFitV1(t *testing.T) {
+	var maximum, argmax uint64
+	for n := uint64(0); n <= 68000157; n++ {
+		b := uint64(0)
+		if n > 149 {
+			b = min(uint64(17000000), n-149, (68000157-n)/3)
+		}
+		e := min(uint64(414634), b/41)
+		m := 16777216 + n + 6*b
+		q, h, br := n+892, max(n, uint64(131192)), 288440+104*e
+		f := m + q + h + br + br
+		if f > 307730523 || f >= 402653184 || initial148RetainedTariffV1(n) != m {
+			t.Fatalf("writer fit n=%d b=%d E=%d M=%d Q=%d H=%d Br=%d F=%d", n, b, e, m, q, h, br, f)
+		}
+		if f > maximum {
+			maximum, argmax = f, n
+		}
+	}
+	logicalMDBXAssert(t, maximum == 256599349 && argmax == 17000175, "writer envelope %d at %d", maximum, argmax)
+	for _, n := range []uint64{0, 149, 150, 131191, 131192, 131193, 17000157, 17000175, 68000157} {
+		m := icbMV1(n)
+		w, ok := initial148CompleteBodyTariffV1(n, 7227)
+		logicalMDBXAssert(t, ok && m <= w && initial148RetainedTariffV1(n) == m, "retained endpoint n=%d M=%d W=%d", n, m, w)
+	}
+	logicalMDBXAssert(t, initial148RetainedTariffV1(298) == 16778408 && initial148RetainedTariffV1(1000) == 16783322, "non-default retained literals")
+	logicalMDBXAssert(t, 139146042+16778408+1451+554+288544+131274 == 156346273, "actual first-genesis writer bound")
+}
+
+// TestInitial148WriterRetirementV1 observes complete payload ownership after
+// reduction and the refusal of a second validation before retired payload use.
+func TestInitial148WriterRetirementV1(t *testing.T) {
+	for _, workers := range []int{-1, 1, 4} {
+		w := btNew(t)
+		f := icbH5FixtureV1(t, w)
+		original := bytes.Clone(f.in.Raw)
+		icbWithAccountV1(t, w, func(a *mdbx.OperationAccount) {
+			_, err := icbEntryWorkersV1(workers)(a, f.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+				logicalMDBXAssert(t, icbHoldsExactlyV1(a, icbW5V1(len(f.in.Raw))), "writer before-run W")
+				return w.s.View(func(r *mdbx.Reader) error {
+					result, err := validate(r)
+					logicalMDBXAssert(t, err == nil && result != nil && icbHoldsExactlyV1(a, icbMV1(uint64(len(original)))), "writer post-root M: %v", err)
+					spent := result.transition.spentInputs
+					logicalMDBXAssert(t, &spent.raw[0] == &f.in.Raw[0] && bytes.Equal(spent.raw, original), "retained Raw alias")
+					first, have := spent.next()
+					logicalMDBXAssert(t, have && first.outpoint == f.a && spent.current != nil, "retained current Tx")
+					payload := spent.current.Witness[0].Signature
+					start := uintptr(unsafe.Pointer(&f.in.Raw[0]))
+					at := uintptr(unsafe.Pointer(&payload[0]))
+					logicalMDBXAssert(t, at >= start && at+uintptr(len(payload)) <= start+uintptr(len(f.in.Raw)), "current Tx payload is not a Raw alias")
+					rows := icbSpentV1(spent)
+					logicalMDBXAssert(t, len(rows) == 1 && rows[0].outpoint == f.b, "retained later spent-source row: %+v", rows)
+					again, rejected := validate(r)
+					logicalMDBXAssert(t, again == nil && rejected != nil && rejected.Error() == "complete initial148 validate is not available", "second validation: %v", rejected)
+					logicalMDBXAssert(t, bytes.Equal(f.in.Raw, original) && f.in.Registry != nil && f.in.CapRegistry != nil && f.in.Rotation != nil, "caller input mutated")
+					return nil
+				})
+			})
+			logicalMDBXAssert(t, err == nil && icbHoldsExactlyV1(a, 0), "writer retirement cleanup: %v", err)
 		})
 	}
 }

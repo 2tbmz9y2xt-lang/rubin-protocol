@@ -219,6 +219,8 @@ func TestInitial148FirstGenesisCommitAndRepeat(t *testing.T) {
 			}
 			before := w.image(t)
 			raw, published := bytes.Clone(w.raw), bytes.Clone(w.genesis.Published)
+			q := map[string]uint64{"absent": 1451, "header": 1223, "body": 1073, "both": 845, "nondefault": 1451}[shape]
+			fgPlanBoundV1(t, w, q)
 			fgTuple(t, w.call(), "ACCEPTED", 2, 3)
 			logicalMDBXAssert(t, bytes.Equal(raw, w.raw) && bytes.Equal(published, w.genesis.Published), "accepted call mutated input")
 			w.applied(t, before)
@@ -231,6 +233,46 @@ func TestInitial148FirstGenesisCommitAndRepeat(t *testing.T) {
 			btReservationsReleased(t, w.owner)
 		})
 	}
+}
+
+// fgPlanBoundV1 observes the actual dormant builder's complete owned Pair
+// footprint for each independent header/body presence combination.
+func fgPlanBoundV1(t *testing.T, w *fgWorld, expectedQ uint64) {
+	t.Helper()
+	err := w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+		input := initial148FirstGenesisInputV1(w.raw, w.genesis.Published, w.genesis.ChainID, w.genesis.GenesisHash, w.database, w.current)
+		_, err := withInitial148CompleteBlockV1(a, input, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+			return a.WithReservation(139146042, func() error {
+				return w.s.View(func(r *mdbx.Reader) error {
+					call := initial148FirstGenesisCallV1{input: input, account: a, validate: validate}
+					op, err := call.planV1(r)
+					if err != nil {
+						return err
+					}
+					q := fgPairBytesV1(op.Pair)
+					logicalMDBXAssert(t, q == expectedQ && icbHoldsExactlyV1(a, 155924450), "first-genesis Q/B+M: %d/%d", q, expectedQ)
+					logicalMDBXAssert(t, 139146042+16778408+q+554+288544+131274 <= 156346273, "actual finite first-genesis writer bound")
+					return nil
+				})
+			})
+		})
+		return err
+	})
+	logicalMDBXAssert(t, err == nil, "first-genesis bound builder: %v", err)
+	btReservationsReleased(t, w.owner)
+}
+
+// fgPairBytesV1 counts the independently pinned 128/48-byte owned rows plus
+// every distinct cloned key/literal, including fixed meta consultations.
+func fgPairBytesV1(pair mdbx.TreePairV1) uint64 {
+	var q uint64
+	for _, m := range pair.Mutations {
+		q += 128 + uint64(len(m.Key)+len(m.Literal))
+	}
+	for _, row := range pair.Consulted {
+		q += 48 + uint64(len(row.Key))
+	}
+	return q
 }
 
 // G12 observes the real operation builder under W/B. Its validated and
@@ -255,7 +297,7 @@ func TestInitial148FirstGenesisValidatedEffectEquality(t *testing.T) {
 						if got != nil {
 							validated, transition = got.effect, got.transition
 						}
-						logicalMDBXAssert(t, icbHoldsExactlyV1(a, 160513459), "E or required scope survived validation before engine")
+						logicalMDBXAssert(t, icbHoldsExactlyV1(a, 155924450), "first-genesis retains exactly B+M after required/D")
 						return got, e
 					}
 					truth, stage, index, e := w.s.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
@@ -279,6 +321,12 @@ func TestInitial148FirstGenesisValidatedEffectEquality(t *testing.T) {
 
 func fgPlanEquality(t *testing.T, w *fgWorld, op mdbx.TreeOperationV1, validated blockTreeEffectV1, transition *connectBlockInputViewResult, reuse bool) {
 	t.Helper()
+	q := fgPairBytesV1(op.Pair)
+	wantQ := uint64(1451)
+	if reuse {
+		wantQ = 1073
+	}
+	logicalMDBXAssert(t, len(w.raw) == 298 && q == wantQ && 139146042+16778408+q+554+288544+131274 <= 156346273, "actual first-genesis fallback bound Q=%d want=%d", q, wantQ)
 	logicalMDBXAssert(t, len(op.Primitives) == 1 && op.Proof == nil && op.HeaderSlot == nil && op.Pair.ContextConsulted == nil && op.Pair.EntryInventory == nil, "first genesis added a non-owned domain")
 	p := op.Primitives[0]
 	logicalMDBXAssert(t, p.Kind == 4 && p.Undo == 1 && p.Direction == 1 && p.Generation == w.current && p.Height == 0 && p.Endpoint == (mdbx.TreeEndpointV1{Kind: 1, BlockHash: w.genesis.GenesisHash, CumulativeChainwork: [40]byte{39: 1}}), "committing primitive: %+v", p)

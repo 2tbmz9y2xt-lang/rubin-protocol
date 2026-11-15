@@ -22,7 +22,7 @@ import (
 // and returns D_j + V through ledger; the recorder owns that charge for the whole position (D13-8, D26, D29). L1
 // heap-allocates only the recorder, the delta, one iterator per leavesV1 call, the D_j array, the V scratch, one key
 // scratch (a type with no Go pointer: every key and from L1 passes to treeOldV1 or treeEmitterV1 and the regenerated
-// manifest bytes) and at most one 32-byte copy of block in treeStoredBodyV1; the fixed objects, the key scratch and
+// manifest/counter bytes) and at most one 32-byte copy of block in treeStoredBodyV1; the fixed objects, the key scratch and
 // that copy fit treeControlBytesV1, which L5a charges before treeStoredBodyV1 and newTreeRecorderV1 (D14-2, D25, D28).
 const treeControlBytesV1 uint64 = 4096 // C: L1 per-primitive control objects (recorder, delta, key scratch, 2 leaves iterators, treeStoredBodyV1's 32-byte block copy)
 
@@ -235,7 +235,7 @@ func treeUndoValueOKV1(key, value []byte) bool {
 // for a SPEND, that input's undo-entry effect; after the last event the manifest effect. Unchanged family rows are
 // referred (D13-5, D13-6).
 // applyV1 and leavesV1 read nothing. applyV1 copies no OLD or entry value: each emitted value is the body span, a value
-// formed in V, the regenerated manifest or an image resolveV1 obtained, passed as after.value, and each such image is
+// formed in V, the regenerated manifest/counter or an image resolveV1 obtained, passed as after.value. Each image is
 // consumed before any emitV1 or referV1 of its own identity in this primitive (D20). Each leaves nextV1 writes newValue
 // into V: the formed body value, or, for an inverse group with newPresent true, a copy of the entry image resolveV1
 // obtained for that group, which the treeImageV1 lifetime keeps readable after applyV1 (D24).
@@ -248,11 +248,10 @@ type treeDeltaV1 struct {
 	parentBytes, parentCount uint64
 	beforeBytes, beforeCount uint64
 	afterBytes, afterCount   uint64
-	counter                  [16]byte
 }
 
-// treeKeysV1 is the key scratch K (D28, G10): every key and from L1 passes to treeOldV1 or treeEmitterV1 and the
-// regenerated manifest. It holds only byte arrays, so a slice of it is a valid cgo argument.
+// treeKeysV1 is the key scratch K (D28, G10): every key and from L1 passes to treeOldV1 or treeEmitterV1,
+// plus the regenerated manifest and counter. It holds only byte arrays, so a slice of it is a valid cgo argument.
 type treeKeysV1 struct {
 	block      [32]byte
 	manifest   [33]byte
@@ -260,6 +259,7 @@ type treeKeysV1 struct {
 	entry      [77]byte
 	from       [78]byte
 	counterKey [9]byte
+	counter    [16]byte
 }
 
 // Undo effect values (D8-2), compared by number as L5b converts them by identity.
@@ -397,7 +397,7 @@ func (d *treeDeltaV1) applyV1(emit treeEmitterV1) error {
 	if d.rec.observation == nil {
 		return nil
 	}
-	return emit.emitV1(treeTargetV1{dbi: schemaDBIs[0], key: d.keys.counterKey[:], after: treeImageV1{present: true, value: d.counter[:]}})
+	return emit.emitV1(treeTargetV1{dbi: schemaDBIs[0], key: d.keys.counterKey[:], after: treeImageV1{present: true, value: d.keys.counter[:]}})
 }
 
 // applyGroupV1 emits one group's effects at its first event in the S11 order.

@@ -188,6 +188,11 @@ type treeTargetV1 struct {
 }
 
 // treeEmitterV1 receives j's targets and references.
+// The selected single forward/direct/transient covered profile consumes each
+// target/reference immediately without P. Its complete nonmutating checker
+// precedes reservation; its writer uses protected ORIGINAL physical presence,
+// fused equality and Pair-before-root order; strict readback folds both complete
+// predicates without retention. Other profiles keep the projection rules below.
 // emitV1, writer (D14-10): prior presence = the amended logical read (P_w entry, else ORIGINAL OLD), never the write txn.
 // present->present: delete then put; present->absent: delete; absent->present: put (put_nooverwrite); absent->absent: no
 // native write call. rc law of updateNativePut/updateNativeDeletes: stage 2 before the call; KEYEXIST (put) and NOTFOUND

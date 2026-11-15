@@ -992,9 +992,9 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 		{unsafe.Sizeof(treeImageV1{}), 32},
 		{unsafe.Sizeof(updateImage{}), 24},
 		{unsafe.Sizeof(treeAmendedV1{}), 80},
-		{unsafe.Sizeof(treeReadbackStateV1{}), 120},
+		{unsafe.Sizeof(treeReadbackStateV1{}), 128},
 		{unsafe.Sizeof(treeSectionV1{}), 168},
-		{unsafe.Sizeof(treeScopeV1{}), 288},
+		{unsafe.Sizeof(treeScopeV1{}), 304},
 		{unsafe.Sizeof(treeComposeV1{}), 112},
 		{unsafe.Sizeof(TreeOperationV1{}), 112},
 		{unsafe.Sizeof(treePlanV1{}), 152},
@@ -1031,10 +1031,19 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	// treeNextValueEqualV1, updatePairImageEqualV1 and coverV1.
 	helper := uint64(unsafe.Sizeof(treePairReadBudgetV1{})) + 6*uint64(unsafe.Sizeof(updateImage{})) + 40 +
 		2*uint64(unsafe.Sizeof(treeImageV1{})) + 2*uint64(unsafe.Sizeof([]byte{})) + 156
-	if control != 1809 || helper != 484 || helper > 512 {
+	if control != 1841 || helper != 484 || helper > 512 {
 		t.Fatal("fixed control/helper cell census", control, helper)
 	}
-	control += 168 + 112 + 120 + 16 + helper
+	control += 168 + 112 + 128 + 16 + helper
+	// Fixed selected owners: bounded emitter40, readback emitter8, prim144,
+	// target80 and scalar/return transport128, with no per-node collection.
+	control += 40 + 8 + 144 + 80 + 128
+	if unsafe.Sizeof(treeBoundedEmitterV1{}) != 40 || unsafe.Sizeof(treeBoundedReadbackEmitterV1{}) != 8 || unsafe.Sizeof(treeTargetV1{}) != 80 {
+		t.Fatal("selected fixed owner census")
+	}
+	if control != 3149 || control-2709 > 1024 {
+		t.Fatal("selected fixed control increment", control)
+	}
 	if treeReaderBytesV1 != 1184 || treeStepBytesV1 != 74912 || control > 4096 {
 		t.Fatalf("enlarged control objects%d exceed4096", control)
 	}
@@ -3195,6 +3204,187 @@ func TestTreeHeaderSlotJoinAllocsV1(t *testing.T) {
 	}
 	if n := testing.AllocsPerRun(10, func() { rowsOut = treeSlotConsultedV1(plan.consulted, row) }); n != 0 || len(rowsOut) != rows+1 {
 		t.Fatalf("Consulted join allocations %v", n)
+	}
+}
+
+// tbOperationV1 supplies the exact admitted ordinary shape, independently of
+// the classifier. The small body is a codec fixture, not a valid-chain proof.
+func tbOperationV1(t *testing.T, source TreeSourceV1) TreeOperationV1 {
+	t.Helper()
+	op := tsOperation(t, source)
+	p := &op.Primitives[0]
+	p.Kind, p.Undo = TreeKindDirectApplyV1, UndoTransientV1
+	k, err := HeightKey(p.Generation, p.Height)
+	mustEnvironment(t, err)
+	owner, err := CanonicalOwnerKey(p.Generation, p.Block)
+	mustEnvironment(t, err)
+	op.Pair.Mutations = append(op.Pair.Mutations,
+		Mutation{DBI: schemaDBIs[2], Key: k, AfterKind: AfterLiteral, Literal: ChainValue(p.Block, [32]byte{}, p.Endpoint.CumulativeChainwork)},
+		Mutation{DBI: schemaDBIs[7], Key: owner, AfterKind: AfterLiteral, Literal: CanonicalOwnerValue(p.Height)})
+	slices.SortFunc(op.Pair.Mutations, func(a, b Mutation) int { return treeMutationCmpV1(a, treeRowKeyV1{rank: b.DBI.Rank, key: b.Key}) })
+	tsCover(&op, TreeBlockV1{TxCount: 1, EventCount: 1})
+	return op
+}
+
+// TestTreeBoundedProfileV1 pins the selector's finite boundaries after public
+// admission. Its distinct risk is accidentally selecting a legal P fallback.
+func TestTreeBoundedProfileV1(t *testing.T) {
+	source := tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { return nil })
+	rows := []struct {
+		name     string
+		edit     func(*TreeOperationV1)
+		selected bool
+	}{
+		{"ordinary", func(*TreeOperationV1) {}, true},
+		{"index-before-present", func(o *TreeOperationV1) {
+			o.Pair.Mutations[0].BeforePresent = true
+			o.Pair.Mutations[2].BeforePresent = true
+		}, true},
+		{"optional-header", func(o *TreeOperationV1) {
+			p := &o.Primitives[0]
+			o.Pair.Mutations = append(o.Pair.Mutations, Mutation{DBI: schemaDBIs[3], Key: p.Block[:], AfterKind: AfterLiteral, Literal: o.Pair.Mutations[1].Literal[:148]})
+		}, true},
+		{"optional-header-other-block", func(o *TreeOperationV1) {
+			header := bytes.Clone(o.Pair.Mutations[1].Literal[:148])
+			header[143] ^= 1
+			key := sha3.Sum256(header)
+			if key == o.Primitives[0].Block {
+				t.Error("independent header key matches primitive block")
+			}
+			o.Pair.Mutations = append(o.Pair.Mutations, Mutation{DBI: schemaDBIs[3], Key: key[:], AfterKind: AfterLiteral, Literal: header})
+			slices.SortFunc(o.Pair.Mutations, func(a, b Mutation) int { return treeMutationCmpV1(a, treeRowKeyV1{rank: b.DBI.Rank, key: b.Key}) })
+		}, false},
+		{"zero-primitives", func(o *TreeOperationV1) { o.Primitives = nil }, false},
+		{"two-primitives", func(o *TreeOperationV1) { o.Primitives = append(o.Primitives, o.Primitives[0]) }, false},
+		{"connect", func(o *TreeOperationV1) { o.Primitives[0].Kind = TreeKindConnectV1 }, false},
+		{"first-genesis", func(o *TreeOperationV1) { o.Primitives[0].Kind = TreeKindFirstGenesisV1 }, false},
+		{"inverse", func(o *TreeOperationV1) {
+			o.Primitives[0].Direction = TreeInverseV1
+			o.Primitives[0].Kind = TreeKindDisconnectV1
+		}, false},
+		{"undo-write", func(o *TreeOperationV1) { o.Primitives[0].Undo = UndoWriteOrReuseV1 }, false},
+		{"nil-coverage", func(o *TreeOperationV1) { o.Primitives[0].Coverage = nil }, false},
+		{"header116", func(o *TreeOperationV1) { o.Primitives[0].Coverage.HeaderBytes = 116 }, false},
+		{"body2", func(o *TreeOperationV1) { o.Primitives[0].Coverage.BodyKind = 2 }, false},
+		{"proof", func(o *TreeOperationV1) { o.Proof = func(*TreeDeltaReportV1) error { return nil } }, false},
+		{"slot", func(o *TreeOperationV1) { o.HeaderSlot = &TreeHeaderSlotV1{} }, false},
+		{"context", func(o *TreeOperationV1) { o.Pair.ContextConsulted = &CanonicalContextWindowV1{Count: 1} }, false},
+		{"consulted", func(o *TreeOperationV1) { o.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[0], Key: []byte{2}}} }, false},
+		{"prepaid", func(o *TreeOperationV1) { o.Pair.PrepaidReadBytes = 1 }, false},
+		{"missing-index", func(o *TreeOperationV1) { o.Pair.Mutations = o.Pair.Mutations[1:] }, false},
+		{"missing-owner", func(o *TreeOperationV1) { o.Pair.Mutations = o.Pair.Mutations[:2] }, false},
+		{"missing-body", func(o *TreeOperationV1) { o.Pair.Mutations = append(o.Pair.Mutations[:1], o.Pair.Mutations[2]) }, false},
+		{"extra-row", func(o *TreeOperationV1) { o.Pair.Mutations = append(o.Pair.Mutations, tsTarget(91)) }, false},
+		{"index-generation", func(o *TreeOperationV1) { o.Pair.Mutations[0].Key[7]++ }, false},
+		{"index-height", func(o *TreeOperationV1) { o.Pair.Mutations[0].Key[15]++ }, false},
+		{"index-block", func(o *TreeOperationV1) { o.Pair.Mutations[0].Literal[0]++ }, false},
+		{"index-chainwork", func(o *TreeOperationV1) { o.Pair.Mutations[0].Literal[103]++ }, false},
+		{"owner-generation", func(o *TreeOperationV1) { o.Pair.Mutations[2].Key[7]++ }, false},
+		{"owner-block", func(o *TreeOperationV1) { o.Pair.Mutations[2].Key[8]++ }, false},
+		{"owner-height", func(o *TreeOperationV1) { o.Pair.Mutations[2].Literal[7]++ }, false},
+		{"body-block", func(o *TreeOperationV1) { o.Pair.Mutations[1].Key = bytes.Repeat([]byte{0x31}, 32) }, false},
+		{"body-length", func(o *TreeOperationV1) {
+			o.Pair.Mutations[1].Literal = append(bytes.Clone(o.Pair.Mutations[1].Literal), 0)
+		}, false},
+		{"index-key-width", func(o *TreeOperationV1) { o.Pair.Mutations[0].Key = o.Pair.Mutations[0].Key[:15] }, false},
+		{"index-value-width", func(o *TreeOperationV1) { o.Pair.Mutations[0].Literal = o.Pair.Mutations[0].Literal[:103] }, false},
+		{"owner-key-width", func(o *TreeOperationV1) { o.Pair.Mutations[2].Key = o.Pair.Mutations[2].Key[:39] }, false},
+		{"owner-value-width", func(o *TreeOperationV1) { o.Pair.Mutations[2].Literal = o.Pair.Mutations[2].Literal[:7] }, false},
+		{"after-absent", func(o *TreeOperationV1) {
+			o.Pair.Mutations[0].AfterKind = AfterAbsent
+			o.Pair.Mutations[0].Literal = nil
+		}, false},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			op := tbOperationV1(t, source)
+			row.edit(&op)
+			plan := treeOwnPlanV1(op)
+			if selected := treeBoundedPlanV1(&plan); selected != row.selected {
+				t.Fatalf("selected=%v want=%v", selected, row.selected)
+			}
+		})
+	}
+	for kind := TreePrimitiveKindV1(0); kind <= 10; kind++ {
+		op := tbOperationV1(t, source)
+		op.Primitives[0].Kind = kind
+		plan := treeOwnPlanV1(op)
+		if treeBoundedPlanV1(&plan) != (kind == 1) {
+			t.Fatal("selected Kind closed domain", kind)
+		}
+	}
+	for undo := TreeUndoEffectV1(0); undo <= 7; undo++ {
+		op := tbOperationV1(t, source)
+		op.Primitives[0].Undo = undo
+		plan := treeOwnPlanV1(op)
+		if treeBoundedPlanV1(&plan) != (undo == 2) {
+			t.Fatal("selected Undo closed domain", undo)
+		}
+	}
+	for direction := TreeDirectionV1(0); direction <= 3; direction++ {
+		op := tbOperationV1(t, source)
+		op.Primitives[0].Direction = direction
+		plan := treeOwnPlanV1(op)
+		if treeBoundedPlanV1(&plan) != (direction == 1) {
+			t.Fatal("selected Direction closed domain", direction)
+		}
+	}
+	op := tbOperationV1(t, source)
+	plan := treeOwnPlanV1(op)
+	plan.inventory = &entryInventoryStateV1{}
+	if treeBoundedPlanV1(&plan) {
+		t.Fatal("ENTRY ownership selected")
+	}
+}
+
+// TestTreeBoundedFundingV1 connects the zero-P owner to an actual classified
+// public operation. Literal peak is Q743+Sr131192+2*Br288544 = 709023.
+func TestTreeBoundedFundingV1(t *testing.T) {
+	for _, short := range []uint64{0, 1} {
+		s, path, owner := tsNew(t)
+		tsRoots(t, s, owner, 1)
+		tsSeedCounter(t, s, owner, 1, false, make([]byte, 16))
+		calls := [3]int{}
+		meta := TreeBlockV1{TxCount: 1, EventCount: 1}
+		source := tsSource(func(pos TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+			calls[pos]++
+			if err := sink.BeginV1(meta); err != nil {
+				return err
+			}
+			return sink.EventV1(tsCreate(0x31, 0, 0, 148, 11))
+		})
+		op := tbOperationV1(t, source)
+		var result tsResult
+		accountRun(t, "selected exact peak", owner, TreeOperation, func(a *OperationAccount) {
+			mustEnvironment(t, a.WithReservation(402653184-709023+short, func() error {
+				before := reservationLive(owner)
+				result = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil })
+				if reservationLive(owner) != before {
+					t.Fatal("selected public engine cleanup")
+				}
+				return nil
+			}))
+		})
+		if short == 0 {
+			result.tuple(t, 2, 3, -1)
+			mustEnvironment(t, result.err)
+		} else {
+			result.tuple(t, 1, 2, -1)
+			if any(result.err) != any(errOperationReservationCapacity) {
+				t.Fatal("selected writer one byte short", result.err)
+			}
+			tsConsumed(t, s, owner, 1, result.err)
+		}
+		if calls != [3]int{0, 1, 0} || reservationLive(owner) != 0 {
+			t.Fatal("selected Source/account", calls)
+		}
+		s = tsReopen(t, s, path)
+		want := []byte(nil)
+		if short == 0 {
+			want = tdFormed(op.Pair.Mutations[1].Literal[148:], 5, 1)
+		}
+		tsRead(t, s, schemaDBIs[1], tdUTXOKey(1, tdTxid(0x31), 0), want)
+		tsFollowing(t, s, owner)
 	}
 }
 
