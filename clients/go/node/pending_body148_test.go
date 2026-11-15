@@ -526,7 +526,7 @@ func TestPendingBody148Terminal(t *testing.T) {
 				}
 				if !weak.ended || weak.consumed {
 					t.Fatal("released weak capability still live")
-					}
+				}
 				before := pbImage(f.o)
 				pbDecision(t, "repeated terminal release", f.o.ReleasePendingBodyV1(key, PendingBodyRelease148V1(cause)), 6, 0)
 				cxEqual(t, "repeat release changed owner", pbImage(f.o), before)
@@ -1080,5 +1080,182 @@ func TestPendingBody148MultipleTerminalRecords(t *testing.T) {
 			}
 			cxEqual(t, "multiple exact terminal accounting", [3]uint64{f.o.context.bytes, f.o.context.pins, f.o.leases}, want)
 		})
+	}
+}
+
+// pbConcurrent releases both ready callers from one channel and joins both results.
+// Unlike pbOrdered, neither operation waits for the other operation to return.
+func pbConcurrent(t *testing.T, first, second func() pbOperationResult) (pbOperationResult, pbOperationResult) {
+	t.Helper()
+	start, ready := make(chan struct{}), make(chan struct{}, 2)
+	one, two := make(chan pbOperationResult, 1), make(chan pbOperationResult, 1)
+	go func() { ready <- struct{}{}; <-start; one <- first() }()
+	go func() { ready <- struct{}{}; <-start; two <- second() }()
+	for range 2 {
+		select {
+		case <-ready:
+		case <-time.After(5 * time.Second):
+			t.Fatal("pending concurrent callers did not become ready")
+		}
+	}
+	close(start)
+	var a, b pbOperationResult
+	select {
+	case a = <-one:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close did not release ownership: concurrent first operation did not complete")
+	}
+	select {
+	case b = <-two:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close did not release ownership: concurrent second operation did not complete")
+	}
+	return a, b
+}
+
+func TestPendingBody148ConcurrentTerminal(t *testing.T) {
+	for _, terminal := range []string{"Expire", "Cancel", "SourceLost"} {
+		for round := range 8 {
+			t.Run(fmt.Sprintf("%s-%d", terminal, round), func(t *testing.T) {
+				f := pbNew(t, pbLimits())
+				b := pbBundle(t, f, 1, 1)
+				key, original := pbKey(b), *b
+				pin, weak := b.Dependencies[0], b.Weak
+				pbDecision(t, "concurrent retain", f.o.RetainPendingBodyV1(b, 100), 0, 0)
+				q, d := f.o.RequestPendingBodyV1(&key, 100)
+				pbDecision(t, "concurrent request", d, 0, 0)
+				take := func() pbOperationResult { out, result := f.o.TakePendingBodyV1(q, 109); return pbOperationResult{out, result} }
+				dispose := func() pbOperationResult {
+					if terminal == "Expire" {
+						f.o.ExpirePendingBodiesV1(110)
+						return pbOperationResult{}
+					}
+					cause := PendingBodyRelease148V1(3)
+					if terminal == "SourceLost" {
+						cause = 4
+					}
+					return pbOperationResult{d: f.o.ReleasePendingBodyV1(key, cause)}
+				}
+				taken, disposed := pbConcurrent(t, take, dispose)
+				pbEmpty(t, f.o, "concurrent terminal")
+				if taken.d == (PendingBodyDecision148V1{}) {
+					pbMoved(t, taken.bundle, original)
+					if terminal != "Expire" {
+						pbDecision(t, "concurrent terminal loser", disposed.d, 6, 0)
+					}
+					cxEqual(t, "concurrent receiver owns real pins", [3]uint64{f.o.context.bytes, f.o.context.pins, f.o.leases}, [3]uint64{1853, 1, 1})
+					cxEqual(t, "concurrent receiving dependency disposition", [4]bool{pin.released, pin.candidate.released, weak.ended, weak.consumed}, [4]bool{})
+					pbReleaseProducer(taken.bundle)
+				} else {
+					pbDecision(t, "concurrent take loser", taken.d, 7, 0)
+					pbDecision(t, "concurrent terminal winner", disposed.d, 0, 0)
+					cxEqual(t, "concurrent terminal returned no bundle", taken.bundle, (*PendingBodyBundle148V1)(nil))
+					cxEqual(t, "concurrent terminal actual dispositions", [4]bool{pin.released, pin.candidate.released, weak.ended, weak.consumed}, [4]bool{true, true, true, false})
+				}
+				cxEqual(t, "concurrent terminal final real resources", [3]uint64{f.o.context.bytes, f.o.context.pins, f.o.leases}, [3]uint64{1725, 0, 0})
+				before := pbImage(f.o)
+				again, result := f.o.TakePendingBodyV1(q, 111)
+				pbDecision(t, "concurrent no second bundle tuple", result, 7, 0)
+				cxEqual(t, "concurrent no second bundle", again, (*PendingBodyBundle148V1)(nil))
+				cxEqual(t, "concurrent replay preserves owner", pbImage(f.o), before)
+			})
+		}
+	}
+}
+
+func TestPendingBody148ConcurrentClose(t *testing.T) {
+	for _, operation := range []string{"retain", "request", "take", "release"} {
+		for round := range 8 {
+			t.Run(fmt.Sprintf("%s-%d", operation, round), func(t *testing.T) {
+				f := pbNew(t, pbLimits())
+				b := pbBundle(t, f, 1, 2)
+				key, original, producer := pbKey(b), *b, pbBundleImage(b)
+				pin, weak := b.Dependencies[0], b.Weak
+				var q, emitted *PendingBodyRequest148V1
+				if operation != "retain" {
+					pbDecision(t, "concurrent close retain", f.o.RetainPendingBodyV1(b, 100), 0, 0)
+				}
+				if operation == "take" {
+					var d PendingBodyDecision148V1
+					q, d = f.o.RequestPendingBodyV1(&key, 100)
+					pbDecision(t, "concurrent close request", d, 0, 0)
+				}
+				act := func() pbOperationResult {
+					switch operation {
+					case "retain":
+						return pbOperationResult{d: f.o.RetainPendingBodyV1(b, 100)}
+					case "request":
+						var d PendingBodyDecision148V1
+						emitted, d = f.o.RequestPendingBodyV1(&key, 100)
+						return pbOperationResult{d: d}
+					case "take":
+						out, d := f.o.TakePendingBodyV1(q, 100)
+						return pbOperationResult{out, d}
+					default:
+						return pbOperationResult{d: f.o.ReleasePendingBodyV1(key, 3)}
+					}
+				}
+				closeOwner := func() pbOperationResult { f.o.CloseV1(); return pbOperationResult{} }
+				result, _ := pbConcurrent(t, act, closeOwner)
+				pbEmpty(t, f.o, "concurrent closed custody")
+				cxEqual(t, "concurrent closed C2 shape", [5]uint64{f.o.context.bytes, f.o.context.pins, f.o.context.scratch, uint64(len(f.o.context.records)), uint64(len(f.o.context.pinned))}, [5]uint64{512, 0, 0, 0, 0})
+				won := result.d == (PendingBodyDecision148V1{})
+				if !won {
+					outcome, candidate := uint8(1), uint8(1)
+					if operation == "release" {
+						outcome, candidate = 6, 0
+					}
+					pbDecision(t, "concurrent closed operation tuple", result.d, outcome, candidate)
+				}
+				receiverOwns := operation == "take" && won
+				producerOwns := operation == "retain" && !won
+				if receiverOwns {
+					pbMoved(t, result.bundle, original)
+				} else {
+					cxEqual(t, "concurrent Close no receiving bundle", result.bundle, (*PendingBodyBundle148V1)(nil))
+				}
+				if producerOwns {
+					cxEqual(t, "concurrent Close preserved refused producer", pbBundleImage(b), producer)
+				} else {
+					cxEqual(t, "concurrent Close producer cleared", *b, PendingBodyBundle148V1{})
+				}
+				if receiverOwns || producerOwns {
+					cxEqual(t, "concurrent Close external owner disposition", [3]bool{pin.released, weak.ended, weak.consumed}, [3]bool{})
+				} else {
+					cxEqual(t, "concurrent Close actual drain disposition", [3]bool{pin.released, weak.ended, weak.consumed}, [3]bool{true, true, false})
+				}
+				if operation == "request" {
+					if won && (emitted == nil || !emitted.consumed) {
+						t.Fatal("concurrent Close retained emitted request")
+					}
+					if !won && emitted != nil {
+						t.Fatal("concurrent closed Request emitted token")
+					}
+				}
+				// A released winner may drain on either side of Close's C1 history cut.
+				// The actual C1 handle disposition determines the exact historical count.
+				historical := uint64(1)
+				if pin.candidate.released {
+					historical = 0
+				}
+				cxEqual(t, "concurrent Close exact C1 historical shape", [2]uint64{f.o.leases, f.o.leased[key.Hash]}, [2]uint64{historical, historical})
+				if receiverOwns {
+					pbReleaseProducer(result.bundle)
+				}
+				if producerOwns {
+					pbReleaseProducer(b)
+				}
+				before := pbImage(f.o)
+				f.o.CloseV1()
+				pbDecision(t, "concurrent Close repeated cleanup", f.o.ReleasePendingBodyV1(key, 6), 6, 0)
+				f.o.ExpirePendingBodiesV1(111)
+				if q != nil {
+					again, d := f.o.TakePendingBodyV1(q, 111)
+					pbDecision(t, "concurrent Close no second bundle tuple", d, 1, 1)
+					cxEqual(t, "concurrent Close no second bundle", again, (*PendingBodyBundle148V1)(nil))
+				}
+				cxEqual(t, "concurrent Close late cleanup unchanged", pbImage(f.o), before)
+			})
+		}
 	}
 }
