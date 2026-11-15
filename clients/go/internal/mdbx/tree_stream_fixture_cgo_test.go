@@ -786,7 +786,7 @@ func primitiveReadStagesV1(t *testing.T) {
 				source := tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return marker })
 				op := tsOperation(t, tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error { return sink.BeginV1(TreeBlockV1{TxCount: 1}) }))
 				p := op.Primitives[0]
-				p.Kind, p.Generation, p.Height, p.Block, p.Source = 6, 2, 6, tdTxid(0xb1), source
+				p.Kind, p.Generation, p.Height, p.Block, p.Source = 2, 2, 6, tdTxid(0xb1), source
 				p.Endpoint = tcEndpoint(6, p.Block)
 				value := bytes.Repeat([]byte{0x6b}, 70000)
 				treeNativeSeed(t, s, 4, p.Block[:], value)
@@ -794,6 +794,7 @@ func primitiveReadStagesV1(t *testing.T) {
 				stage, index := UpdateStage(1), 0
 				if afterWrite {
 					tsRoots(t, s, o, 1)
+					p.Kind = 6
 					op.Primitives = append(op.Primitives, p)
 					filler, stage, index = 0, 2, 1
 				} else {
@@ -832,15 +833,20 @@ func primitiveReadStagesV1(t *testing.T) {
 				}))
 				result.tuple(t, 1, stage, index)
 				wantCalls := 1
+				wantGets := uint64(2) // OLD exposure, then funded write-candidate equality.
+				if afterWrite {
+					wantGets = 12 // First primitive10, then the same two body reads.
+				}
 				if short != 0 {
 					wantCalls = 0
+					wantGets-- // Refused OLD coverage stops before the candidate get.
 					if !treeSameErrorV1(result.err, errOperationReservationCapacity) {
 						t.Fatal("new native window room-1 retains exact reached stage/index", result)
 					}
 				} else if !treeSameErrorV1(result.err, marker) {
 					t.Fatal("funded native prefix reaches original Source marker", result)
 				}
-				if calls != wantCalls || afterWrite && (!filled || writes != 3 || counts.Gets != 11) || !afterWrite && (writes != 0 || counts.Gets != 1) {
+				if calls != wantCalls || counts.Gets != wantGets || afterWrite && (!filled || writes != 3) || !afterWrite && writes != 0 {
 					t.Fatal("new native refusal source/get/write prefix", calls, counts, filled)
 				}
 				tsConsumed(t, s, o, 1, result.err)
@@ -1127,35 +1133,44 @@ func treeReadCrossedV1(t *testing.T, primitive bool) {
 				next = bytes.Clone(old)
 				window, pc = 64, 261
 			}
-			treeNativeSeed(t, s, 1, key, old)
+			if !primitive {
+				treeNativeSeed(t, s, 1, key, old)
+			}
 			treeNativeSeed(t, s, 0, consulted, bytes.Repeat([]byte{0x44}, 32))
 			op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[1], Key: key, BeforePresent: true, AfterKind: 2, Literal: next}}, Consulted: []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: consulted}}}}
-			faultKey, faultRank := key, uint8(1)
+			pairRank := uint8(1)
+			faultKey, faultRank := key, pairRank
 			ceiling, fill, engine := uint64(154611183), uint64(650695185), window
 			if primitive {
 				tsRoots(t, s, o, 1)
 				tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
 				pair := op.Pair
+				// Generation9 is outside this covered primitive's generation1 ownership.
+				key, old, next = tsCounterKey(9), bytes.Repeat([]byte{0x33}, 32), bytes.Repeat([]byte{0x66}, 16)
+				if row.name == "both-OLD-first" {
+					old = bytes.Clone(next)
+				}
+				pairRank = 0
+				treeNativeSeed(t, s, pairRank, key, old)
+				pair.Mutations[0].DBI, pair.Mutations[0].Key, pair.Mutations[0].Literal = TreeSchemaV1DBIs()[0], key, next
+				faultKey, faultRank = key, pairRank
 				meta := TreeBlockV1{TxCount: 1}
 				op = tsOperation(t, tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error { return sink.BeginV1(meta) }))
 				body := op.Pair.Mutations[0]
-				pc += 319 // body PC=128+32+159; independently owned by this Pair.
+				// Counter PC=128+9+16, Consulted=48+9, body=128+32+159.
+				pc = 529
 				p := uint64(309) // counter25 + manifest66 + applied-empty root218.
 				if row.name == "reference" || row.name == "reference-neither" {
 					mustEnvironment(t, tsRun(t, s, o, TreeOperation, TreeOperationV1{Pair: op.Pair}).err)
 					op.Pair.Mutations, pc, p = nil, pc-319, p+32
 				}
-				op.Pair.Mutations = append(op.Pair.Mutations, pair.Mutations...)
+				op.Pair.Mutations = append(pair.Mutations, op.Pair.Mutations...)
 				op.Pair.Consulted = pair.Consulted
 				tsCover(&op, meta)
 				if row.name == "both-OLD-first" {
 					mustEnvironment(t, tsRun(t, s, o, TreeOperation, op).err)
-					p -= 33 // Existing manifest is now a key33 reference, not an image66.
-					for i := range op.Pair.Mutations {
-						if bytes.Equal(op.Pair.Mutations[i].Key, body.Key) {
-							op.Pair.Mutations[i].BeforePresent = true
-						}
-					}
+					op.Pair.Mutations, pc, p = pair.Mutations, 210, 308 // Body32 and manifest33 references; counter25 + root218.
+					tsCover(&op, meta) // Stored body, so BodyKind2 with no CurrentBody literal.
 				}
 				ceiling, fill, engine = 402653184, 402653184, p+419632
 				if row.name == "projection-neither" {
@@ -1202,7 +1217,7 @@ func treeReadCrossedV1(t *testing.T, primitive bool) {
 								_, faultErr := fixtureLargeFault(s, row.mode, selectedRank, selectedKey, run)
 								mustEnvironment(t, faultErr)
 							} else {
-								_, faultErr := FixtureSelectedDamage(s, o, row.scenario, 1, key, run)
+								_, faultErr := FixtureSelectedDamage(s, o, row.scenario, pairRank, key, run)
 								mustEnvironment(t, faultErr)
 							}
 						})
@@ -1254,7 +1269,7 @@ func treeReadCrossedV1(t *testing.T, primitive bool) {
 			if row.name == "neither" {
 				want = []byte{0x7f}
 			}
-			equal, err := FixtureRawRowEqual(s, 1, key, want)
+			equal, err := FixtureRawRowEqual(s, pairRank, key, want)
 			if err != nil || !equal {
 				t.Fatal("crossed durable bytes", err)
 			}
