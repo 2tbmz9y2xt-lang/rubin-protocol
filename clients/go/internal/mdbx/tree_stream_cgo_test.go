@@ -2050,9 +2050,10 @@ func tsHeldAdmissionV1(t *testing.T, kind uint8, body, mutation, old int) {
 	}
 	c := op.Primitives[0].Coverage
 	c.BodyKind = kind
-	if body == 0 {
+	switch body {
+	case 0:
 		c.CurrentBody = nil
-	} else if body == 1 {
+	case 1:
 		c.CurrentBody = []byte{}
 	}
 	op.Pair.Mutations = nil
@@ -2096,7 +2097,7 @@ func tsHeldAdmissionV1(t *testing.T, kind uint8, body, mutation, old int) {
 func tsHeldPresentV1(t *testing.T, err error) {
 	t.Helper()
 	treeNativeError(t, err, "update", "StateMismatch", -30779, "tree held body row present", nil)
-	engine, ok := err.(*EngineError)
+	engine, ok := directTestEngineError(err)
 	if !ok || engine.Cause != nil || engine.ReopenRequired || engine.TreeObservation != nil {
 		t.Fatal("held presence error has extra context", err)
 	}
