@@ -81,6 +81,7 @@ func pbBundleImage(b *PendingBodyBundle148V1) string {
 		return "nil"
 	}
 	image := fmt.Sprintf("%p/%x/%#v/deps=%p/weak=%p:%#v", b.Body, b.Body[:cap(b.Body)], *b, b.Dependencies, b.Weak, b.Weak)
+	image += fmt.Sprintf("/body-shape=%d:%d/deps-shape=%d:%d", len(b.Body), cap(b.Body), len(b.Dependencies), cap(b.Dependencies))
 	for _, l := range b.Dependencies {
 		image += fmt.Sprintf("/pin=%p:%#v", l, l)
 		if l != nil {
@@ -150,7 +151,7 @@ func pbSpentRequest(t *testing.T, q *PendingBodyRequest148V1) {
 	cxEqual(t, "terminal record retained logical charge", q.record.charge, uint64(0))
 }
 
-func pbMoved(t *testing.T, got *PendingBodyBundle148V1, original PendingBodyBundle148V1) {
+func pbMoved(t *testing.T, got *PendingBodyBundle148V1, original PendingBodyBundle148V1, before string) {
 	t.Helper()
 	if got == nil {
 		t.Fatal("moved bundle missing")
@@ -162,6 +163,7 @@ func pbMoved(t *testing.T, got *PendingBodyBundle148V1, original PendingBodyBund
 		t.Fatal("weak capability owner or provenance changed")
 	}
 	cxEqual(t, "exact moved bundle", *got, original)
+	cxEqual(t, "moved payload or slice shape changed", pbBundleImage(got), before)
 }
 
 func TestPendingBody148Configuration(t *testing.T) {
@@ -210,9 +212,11 @@ func TestPendingBody148Move(t *testing.T) {
 			baseline := cxState(f.o)
 			b := pbBundle(t, f, 91, kind)
 			original, key, pin := *b, pbKey(b), b.Dependencies[0]
+			before := pbBundleImage(b)
 			c1 := hcInnerOf(f.o)
 			contextBefore := cxState(f.o)
 			pbDecision(t, "valid weak shape refused", f.o.RetainPendingBodyV1(b, 100), 0, 0)
+			pbMoved(t, &f.o.pendingBody.records[key].bundle, original, before)
 			cxEqual(t, "producer still owns transferred bundle", *b, PendingBodyBundle148V1{})
 			cxEqual(t, "C1 unchanged by custody", hcInnerOf(f.o), c1)
 			cxEqual(t, "C2 unchanged by custody", cxState(f.o), contextBefore)
@@ -230,7 +234,7 @@ func TestPendingBody148Move(t *testing.T) {
 			cxEqual(t, "request refreshed ownership", pbImage(f.o), requested)
 			out, d := f.o.TakePendingBodyV1(req, 109)
 			pbDecision(t, "take", d, 0, 0)
-			pbMoved(t, out, original)
+			pbMoved(t, out, original, before)
 			pbEmpty(t, f.o, "take")
 			pbSpentRequest(t, req)
 			if pin.released || pin.candidate.released || f.o.context.pins != 1 || f.o.leases != 1 {
@@ -397,11 +401,12 @@ func TestPendingBody148Bounds(t *testing.T) {
 				return
 			}
 			key, original := pbKey(b), *b
+			before := pbBundleImage(b)
 			pbDecision(t, "pending exact fit/"+row.name, f.o.RetainPendingBodyV1(b, row.now), 0, 0)
 			r := f.o.pendingBody.records[key]
 			cxEqual(t, "literal metadata charge", r.charge, row.charge+256+8*uint64(row.pins))
 			cxEqual(t, "captured deadline", r.deadline, row.now+10)
-			pbMoved(t, &r.bundle, original)
+			pbMoved(t, &r.bundle, original, before)
 			if r.deadline == math.MaxUint64 {
 				cxEqual(t, "maximum deadline minus one", f.o.PendingBodyRetainedV1(key, math.MaxUint64-1), true)
 				cxEqual(t, "maximum deadline equality expires", f.o.PendingBodyRetainedV1(key, math.MaxUint64), false)
@@ -821,6 +826,7 @@ func TestPendingBody148TerminalOrders(t *testing.T) {
 				f := pbNew(t, pbLimits())
 				b := pbBundle(t, f, 1, 1)
 				key, original := pbKey(b), *b
+				before := pbBundleImage(b)
 				pbDecision(t, "race prerequisite", f.o.RetainPendingBodyV1(b, 100), 0, 0)
 				q, d := f.o.RequestPendingBodyV1(&key, 100)
 				pbDecision(t, "race request", d, 0, 0)
@@ -844,7 +850,7 @@ func TestPendingBody148TerminalOrders(t *testing.T) {
 				pbEmpty(t, f.o, "terminal orders")
 				if takeFirst {
 					pbDecision(t, "take winner", a.d, 0, 0)
-					pbMoved(t, a.bundle, original)
+					pbMoved(t, a.bundle, original, before)
 					if original.Dependencies[0].released || original.Weak.ended {
 						t.Fatal("handoff released receiving dependency")
 					}
@@ -873,6 +879,7 @@ func TestPendingBody148CloseOrders(t *testing.T) {
 				f := pbNew(t, pbLimits())
 				b := pbBundle(t, f, 1, 1)
 				key, original := pbKey(b), *b
+				producer := pbBundleImage(b)
 				var q *PendingBodyRequest148V1
 				if operation != "retain" {
 					pbDecision(t, "close owned prerequisite", f.o.RetainPendingBodyV1(b, 100), 0, 0)
@@ -926,7 +933,7 @@ func TestPendingBody148CloseOrders(t *testing.T) {
 				pbEmpty(t, f.o, "closed custody retained state")
 				cxEqual(t, "close actual C2 clear semantics", [3]uint64{f.o.context.bytes, f.o.context.pins, uint64(len(f.o.context.pinned))}, [3]uint64{512, 0, 0})
 				if operation == "take" && !closeFirst {
-					pbMoved(t, result.bundle, original)
+					pbMoved(t, result.bundle, original, producer)
 					cxEqual(t, "Close released receiving pin", original.Dependencies[0].released, false)
 					pbReleaseProducer(result.bundle)
 				} else if operation == "retain" && closeFirst {
@@ -1075,6 +1082,7 @@ func TestPendingBody148MultipleTerminalRecords(t *testing.T) {
 			f := pbNew(t, pbLimits())
 			var pins []*HeaderContextLease148V1
 			var weak []*PendingBodyWeak148V1
+			var requests []*PendingBodyRequest148V1
 			for origin := uint64(1); origin <= 2; origin++ {
 				b := pbBundle(t, f, origin, uint8(origin))
 				pins, weak = append(pins, b.Dependencies[0]), append(weak, b.Weak)
@@ -1085,6 +1093,7 @@ func TestPendingBody148MultipleTerminalRecords(t *testing.T) {
 				if q == nil {
 					t.Fatal("multiple request missing")
 				}
+				requests = append(requests, q)
 			}
 			if terminal == "Close" {
 				pbOrdered(t, func() pbOperationResult { f.o.CloseV1(); return pbOperationResult{} }, func() pbOperationResult { return pbOperationResult{} })
@@ -1093,6 +1102,9 @@ func TestPendingBody148MultipleTerminalRecords(t *testing.T) {
 				f.o.ExpirePendingBodiesV1(110)
 			}
 			pbEmpty(t, f.o, "multiple terminal")
+			for _, q := range requests {
+				pbSpentRequest(t, q)
+			}
 			for i, pin := range pins {
 				if !pin.released || !weak[i].ended {
 					t.Fatal("terminal did not drain every detached record")
@@ -1144,6 +1156,7 @@ func TestPendingBody148ConcurrentTerminal(t *testing.T) {
 				f := pbNew(t, pbLimits())
 				b := pbBundle(t, f, 1, 1)
 				key, original := pbKey(b), *b
+				producer := pbBundleImage(b)
 				pin, weak := b.Dependencies[0], b.Weak
 				pbDecision(t, "concurrent retain", f.o.RetainPendingBodyV1(b, 100), 0, 0)
 				q, d := f.o.RequestPendingBodyV1(&key, 100)
@@ -1164,7 +1177,7 @@ func TestPendingBody148ConcurrentTerminal(t *testing.T) {
 				pbEmpty(t, f.o, "concurrent terminal")
 				pbSpentRequest(t, q)
 				if taken.d == (PendingBodyDecision148V1{}) {
-					pbMoved(t, taken.bundle, original)
+					pbMoved(t, taken.bundle, original, producer)
 					if terminal != "Expire" {
 						pbDecision(t, "concurrent terminal loser", disposed.d, 6, 0)
 					}
@@ -1235,7 +1248,7 @@ func TestPendingBody148ConcurrentClose(t *testing.T) {
 				receiverOwns := operation == "take" && won
 				producerOwns := operation == "retain" && !won
 				if receiverOwns {
-					pbMoved(t, result.bundle, original)
+					pbMoved(t, result.bundle, original, producer)
 				} else {
 					cxEqual(t, "concurrent Close no receiving bundle", result.bundle, (*PendingBodyBundle148V1)(nil))
 				}
@@ -1306,16 +1319,18 @@ func TestPendingBody148DetachedBudget(t *testing.T) {
 			f := pbNew(t, limits)
 			first := pbBundle(t, f, 1, 1)
 			key, original := pbKey(first), *first
+			before := pbBundleImage(first)
 			pbDecision(t, "detach budget prerequisite", f.o.RetainPendingBodyV1(first, 100), 0, 0)
 			q, d := f.o.RequestPendingBodyV1(&key, 100)
 			pbDecision(t, "detach budget request", d, 0, 0)
 			incoming := pbBundle(t, f, 2, 2)
 			incomingKey, incomingOriginal := pbKey(incoming), *incoming
+			incomingBefore := pbBundleImage(incoming)
 			// This is the legitimate public terminal path's state after detach and before drain.
 			f.o.mu.Lock()
 			detached := f.o.detachPendingBody(key)
 			f.o.mu.Unlock()
-			pbMoved(t, &detached.bundle, original)
+			pbMoved(t, &detached.bundle, original, before)
 			cxEqual(t, "detached budget stays charged", [4]uint64{uint64(len(f.o.pendingBody.records)), f.o.pendingBody.count, f.o.pendingBody.bytes, f.o.pendingBody.dependencies}, [4]uint64{0, 1, 272, 1})
 			cxEqual(t, "detached actual leases remain live", [4]bool{original.Dependencies[0].released, original.Dependencies[0].candidate.released, original.Weak.ended, original.Weak.consumed}, [4]bool{})
 			cxEqual(t, "detached actual C2/C1 charges", [3]uint64{f.o.context.bytes, f.o.context.pins, f.o.leases}, [3]uint64{1981, 2, 2})
@@ -1336,7 +1351,7 @@ func TestPendingBody148DetachedBudget(t *testing.T) {
 			pbDecision(t, "handoff budget request", d, 0, 0)
 			receiver, d := f.o.TakePendingBodyV1(req, 100)
 			pbDecision(t, "handoff budget transfer", d, 0, 0)
-			pbMoved(t, receiver, incomingOriginal)
+			pbMoved(t, receiver, incomingOriginal, incomingBefore)
 			pbEmpty(t, f.o, "genuine handoff returns budget")
 			cxEqual(t, "handoff receiver retains actual charge", [3]uint64{f.o.context.bytes, f.o.context.pins, f.o.leases}, [3]uint64{1853, 1, 1})
 			cxEqual(t, "handoff receiver pin remains live", receiver.Dependencies[0].released, false)
@@ -1376,6 +1391,7 @@ func TestPendingBody148RequestCopies(t *testing.T) {
 	f := pbNew(t, pbLimits())
 	b := pbBundle(t, f, 1, 1)
 	key, original := pbKey(b), *b
+	before := pbBundleImage(b)
 	pbDecision(t, "copied request retain", f.o.RetainPendingBodyV1(b, 100), 0, 0)
 	q, d := f.o.RequestPendingBodyV1(&key, 100)
 	pbDecision(t, "copied request original emission", d, 0, 0)
@@ -1390,7 +1406,7 @@ func TestPendingBody148RequestCopies(t *testing.T) {
 	cxEqual(t, "live copied request changed copy", fmt.Sprintf("%#v", copyOfRequest), copyImage)
 	receiver, d := f.o.TakePendingBodyV1(q, 100)
 	pbDecision(t, "original emitted request still takes once", d, 0, 0)
-	pbMoved(t, receiver, original)
+	pbMoved(t, receiver, original, before)
 	pbSpentRequest(t, q)
 	owner, originalToken = pbImage(f.o), fmt.Sprintf("%#v", *q)
 	receiverImage := pbBundleImage(receiver)
