@@ -57,7 +57,7 @@ func (s *cxSource) Header148V1(hash [32]byte, dst *[148]byte) (HeaderContextRead
 }
 
 func cxLimits() HeaderContextLimits148V1 {
-	return HeaderContextLimits148V1{MaxRecords: 32, MaxBytes: 1 << 20, MaxReads: 20000, MaxReadBytes: 4 << 20, MaxReadWork: 20000, MaxScratchBytes: 8 << 20, MaxSuffix: 16, MaxWorkBytes: 64}
+	return HeaderContextLimits148V1{MaxRecords: 32, MaxBytes: 1 << 20, MaxPins: 32, MaxReads: 20000, MaxReadBytes: 4 << 20, MaxReadWork: 20000, MaxScratchBytes: 8 << 20, MaxSuffix: 16, MaxWorkBytes: 64}
 }
 
 func cxTarget(first byte) [32]byte {
@@ -184,6 +184,10 @@ func cxState(o *HeaderCandidateOwner148V1) string {
 	}
 	slices.SortFunc(keys, func(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) })
 	value := fmt.Sprintf("%d/%x/%d/%d/%d/%d/%v/%v/%v/%v/%v/%d/%d", o.version.Load(), o.source, len(o.recs), o.context.bytes, o.context.scratch, o.leases, o.prepared != nil, o.context.active != nil, o.closed, o.latched, o.established, o.tips, o.guards)
+	value += fmt.Sprintf("/pins=%d/map=%v", o.context.pins, o.context.pinned)
+	if r := o.context.active; r != nil {
+		value += fmt.Sprintf("/prospective=%d/victims=%v", r.prospective, r.victims)
+	}
 	for _, hash := range keys {
 		r := o.context.records[hash]
 		work, clamp := r.Work.String(), r.LastClampedTimestamp.String()
@@ -713,23 +717,45 @@ func TestHeaderContext148Outcomes(t *testing.T) {
 		cxRefuse(t, "WARM_MISS_BEFORE_CAPACITY", o, in, 2, 0, 0, nil)
 		cxEqual(t, "warm miss no header reads", s.reads, [][32]byte(nil))
 	})
-	t.Run("warm-stored-view-before-capacity", func(t *testing.T) {
-		genesis := cxMine([32]byte{}, 0, cxTarget(255))
-		limits := cxLimits()
-		limits.MaxScratchBytes = 5502
-		o, v, s := cxNew(t, limits, hcLim(), genesis)
-		p := cxSeed(t, o, v, genesis, s)
-		tr := hcTr(o, nil)
-		tr.NewSource = [32]byte{2}
-		pub, out := hcPublish(t, o, tr)
-		cxEqual(t, "source update", out != 0 || !pub.Changed || pub.Version != 3, false)
-		v.Version, v.Source = pub.Version, tr.NewSource
-		in := cxInput(v, cxMine(p.Hash, 1, cxTarget(255)), cxProof(p, HeaderContextCanonical148V1), s)
-		cxRefuse(t, "WARM_STORED_VIEW_BEFORE_CAPACITY", o, in, 3, 0, 0, nil)
-		cxEqual(t, "stale warm no header reads", s.reads, [][32]byte(nil))
-		cxEqual(t, "stale warm retained bytes", o.context.bytes, uint64(1118))
-		cxClean(t, o, false)
-	})
+	for _, pinned := range []bool{false, true} {
+		t.Run(fmt.Sprintf("warm-stored-view-before-capacity-pin-%v", pinned), func(t *testing.T) {
+			genesis := cxMine([32]byte{}, 0, cxTarget(255))
+			limits := cxLimits()
+			limits.MaxScratchBytes = 5502
+			if pinned {
+				limits.MaxBytes = 1246
+			}
+			o, v, s := cxNew(t, limits, hcLim(), genesis)
+			p := cxSeed(t, o, v, genesis, s)
+			var lease *HeaderContextLease148V1
+			if pinned {
+				var d HeaderContextDecision148V1
+				lease, d = o.PinContextV1(v, p.Hash)
+				cxDecision(t, "stale fixture pin", d, 0, 0, 0, nil)
+				cxEqual(t, "stale fixture B1246", o.context.bytes, uint64(1246))
+			}
+			tr := hcTr(o, nil)
+			tr.NewSource = [32]byte{2}
+			pub, out := hcPublish(t, o, tr)
+			cxEqual(t, "source update", out != 0 || !pub.Changed || pub.Version != 3, false)
+			v.Version, v.Source = pub.Version, tr.NewSource
+			in := cxInput(v, cxMine(p.Hash, 1, cxTarget(255)), cxProof(p, HeaderContextCanonical148V1), s)
+			cxRefuse(t, "WARM_STORED_VIEW_BEFORE_CAPACITY", o, in, 3, 0, 0, nil)
+			cxEqual(t, "stale warm no header reads", s.reads, [][32]byte(nil))
+			before, calls := cxState(o), s.calls
+			refused, d := o.PinContextV1(v, p.Hash)
+			cxDecision(t, "WARM_STORED_VIEW_BEFORE_CAPACITY pin", d, 3, 0, 0, nil)
+			cxEqual(t, "stale pin nil", refused, (*HeaderContextLease148V1)(nil))
+			cxEqual(t, "stale pin unchanged", cxState(o), before)
+			cxEqual(t, "stale pin no source", s.calls, calls)
+			if lease != nil {
+				lease.ReleaseV1()
+				lease.ReleaseV1()
+			}
+			cxEqual(t, "stale warm retained bytes", o.context.bytes, uint64(1118))
+			cxClean(t, o, false)
+		})
+	}
 	for _, tc := range []struct {
 		name     string
 		change   func(*HeaderContextInput148V1)
@@ -1250,6 +1276,252 @@ func TestHeaderContext148Configuration(t *testing.T) {
 	hcEstablish(t, o)
 	_, d := o.LookupContextV1(HeaderContextView148V1{}, hash)
 	cxDecision(t, "old constructor no context", d, 2, 0, 0, nil)
+	before := hcTake(o)
+	lease, d := o.PinContextV1(HeaderContextView148V1{}, hash)
+	cxDecision(t, "old constructor pin no context", d, 2, 0, 0, nil)
+	cxEqual(t, "old constructor pin nil", lease, (*HeaderContextLease148V1)(nil))
+	cxEqual(t, "old constructor pin unchanged", hcTake(o), before)
+	valid.MaxPins = 1
+	o, view, source := cxNew(t, valid, hcLim(), genesis)
+	p := cxSeed(t, o, view, genesis, source)
+	lease, d = o.PinContextV1(view, p.Hash)
+	cxDecision(t, "configured MaxPins1 used", d, 0, 0, 0, nil)
+	beforePin := cxState(o)
+	other, d := o.PinContextV1(view, p.Hash)
+	cxDecision(t, "configured MaxPins1 enforced", d, 5, 0, 0, nil)
+	cxEqual(t, "configured pin refusal nil", other, (*HeaderContextLease148V1)(nil))
+	cxEqual(t, "configured pin refusal unchanged", cxState(o), beforePin)
+	lease.ReleaseV1()
+}
+
+func TestHeaderContext148Pins(t *testing.T) {
+	t.Run("before-reservation", func(t *testing.T) {
+		o, p, s := cxWarm(t, []uint64{0})
+		var once sync.Once
+		s.current = func() (bool, error) {
+			once.Do(func() {
+				before := cxState(o)
+				cxEqual(t, "STAGED_BYTES initial capture", o.context.active.prospective, uint64(1118))
+				lease, d := o.PinContextV1(p.View, p.Hash)
+				cxDecision(t, "pre-reservation pin", d, 0, 0, 0, nil)
+				cxEqual(t, "pre-reservation STAGED_BYTES", o.context.active.prospective, uint64(1246))
+				lease.ReleaseV1()
+				lease.ReleaseV1()
+				cxEqual(t, "pre-reservation RELEASE_ONCE", cxState(o), before)
+			})
+			return true, nil
+		}
+		h := cxPrepare(t, "pin before reservation completes", o, cxInput(p.View, cxMine(p.Hash, 1, cxTarget(255)), cxProof(p, HeaderContextCanonical148V1), s))
+		h.AbortV1()
+		cxClean(t, o, false)
+	})
+	t.Run("external-duplicates", func(t *testing.T) {
+		l := cxLimits()
+		l.MaxPins = 2
+		genesis := cxMine([32]byte{}, 0, cxTarget(255))
+		o, v, s := cxNew(t, l, hcLim(), genesis)
+		p := cxSeed(t, o, v, genesis, s)
+		before, calls := cxState(o), s.calls
+		first, d := o.PinContextV1(v, p.Hash)
+		cxDecision(t, "external first pin", d, 0, 0, 0, nil)
+		cxEqual(t, "external lease", first != nil && first.candidate == nil, true)
+		cxEqual(t, "LEASE_BYTES", o.context.bytes, uint64(1246))
+		second, d := o.PinContextV1(v, p.Hash)
+		cxDecision(t, "external duplicate pin", d, 0, 0, 0, nil)
+		cxEqual(t, "independent leases", first != second && second != nil, true)
+		cxEqual(t, "duplicate charges", o.context.bytes != 1374 || o.context.pins != 2 || o.context.pinned[p.Hash] != 2 || o.leases != 0 || len(o.recs) != 0 || o.VersionV1() != 2, false)
+		full := cxState(o)
+		refused, d := o.PinContextV1(v, p.Hash)
+		cxDecision(t, "nondefault MaxPins quota", d, 5, 0, 0, nil)
+		cxEqual(t, "full pin nil", refused, (*HeaderContextLease148V1)(nil))
+		cxEqual(t, "full pin unchanged", cxState(o), full)
+		first.ReleaseV1()
+		sibling := cxState(o)
+		first.ReleaseV1()
+		cxEqual(t, "RELEASE_ONCE preserves sibling", cxState(o), sibling)
+		cxEqual(t, "one duplicate remains", o.context.pins != 1 || o.context.pinned[p.Hash] != 1 || o.context.bytes != 1246, false)
+		second.ReleaseV1()
+		second.ReleaseV1()
+		cxEqual(t, "external complete release", cxState(o), before)
+		cxEqual(t, "pin no source work", s.calls, calls)
+		cxEqual(t, "pin no raw reads", len(s.reads), 0)
+		missing, d := o.PinContextV1(v, [32]byte{42})
+		cxDecision(t, "pin cache absence", d, 2, 0, 0, nil)
+		cxEqual(t, "absent pin nil", missing, (*HeaderContextLease148V1)(nil))
+		cxEqual(t, "absence unchanged", cxState(o), before)
+		bad := v
+		bad.Authority, bad.Version = [32]byte{}, v.Version+1
+		malformed, d := o.PinContextV1(bad, p.Hash)
+		cxDecision(t, "pin shape before stale", d, 4, 0, 0, nil)
+		cxEqual(t, "malformed pin nil", malformed, (*HeaderContextLease148V1)(nil))
+		cxEqual(t, "malformed pin unchanged", cxState(o), before)
+	})
+	for _, bytes := range []uint64{1245, 1246} {
+		t.Run(fmt.Sprintf("bytes-%d", bytes), func(t *testing.T) {
+			l := cxLimits()
+			l.MaxBytes, l.MaxPins = bytes, 1
+			genesis := cxMine([32]byte{}, 0, cxTarget(255))
+			o, v, s := cxNew(t, l, hcLim(), genesis)
+			p := cxSeed(t, o, v, genesis, s)
+			before := cxState(o)
+			lease, d := o.PinContextV1(v, p.Hash)
+			if bytes == 1245 {
+				cxDecision(t, "LEASE_BYTES one short", d, 5, 0, 0, nil)
+				cxEqual(t, "byte refusal nil", lease, (*HeaderContextLease148V1)(nil))
+				cxEqual(t, "byte refusal unchanged", cxState(o), before)
+				return
+			}
+			cxDecision(t, "LEASE_BYTES equality", d, 0, 0, 0, nil)
+			cxEqual(t, "LEASE_BYTES exact charge", o.context.bytes, uint64(1246))
+			full := cxState(o)
+			other, decision := o.PinContextV1(v, p.Hash)
+			cxDecision(t, "MaxPins1 one over", decision, 5, 0, 0, nil)
+			cxEqual(t, "MaxPins1 nil", other, (*HeaderContextLease148V1)(nil))
+			cxEqual(t, "MaxPins1 unchanged", cxState(o), full)
+			lease.ReleaseV1()
+			cxEqual(t, "byte release restores", cxState(o), before)
+		})
+	}
+	for _, bytes := range []uint64{2530, 2531} {
+		t.Run(fmt.Sprintf("staged-%d", bytes), func(t *testing.T) {
+			l := cxLimits()
+			l.MaxBytes = bytes
+			genesis := cxMine([32]byte{}, 0, cxTarget(255))
+			o, v, s := cxNew(t, l, hcLim(), genesis)
+			root := cxSeed(t, o, v, genesis, s)
+			p, _ := cxPublish(t, o, cxInput(v, cxMine(root.Hash, 1, cxTarget(255)), cxProof(root, HeaderContextCanonical148V1), s))
+			h := cxPrepare(t, "staged reservation", o, cxInput(p.View, cxMine(p.Hash, 2, cxTarget(255)), cxProof(p, HeaderContextAdmitted148V1), s))
+			before := cxState(o)
+			cxEqual(t, "STAGED_BYTES conservative total", h.reservation.prospective, uint64(2403))
+			lease, d := o.PinContextV1(p.View, p.Hash)
+			if bytes == 2530 {
+				cxDecision(t, "STAGED_BYTES one short", d, 5, 0, 0, nil)
+				cxEqual(t, "staged refusal nil", lease, (*HeaderContextLease148V1)(nil))
+				cxEqual(t, "staged refusal unchanged", cxState(o), before)
+			} else {
+				cxDecision(t, "STAGED_BYTES equality", d, 0, 0, 0, nil)
+				cxEqual(t, "staged pin complete charges", o.context.bytes != 1853 || h.reservation.prospective != 2531 || o.context.pins != 1 || o.leases != 1, false)
+				lease.ReleaseV1()
+				lease.ReleaseV1()
+				cxEqual(t, "STAGED_BYTES release complete state", cxState(o), before)
+			}
+			cxDecision(t, "staged abort", h.AbortV1(), 0, 0, 0, nil)
+			cxEqual(t, "staged released total", o.context.bytes, uint64(1725))
+			cxClean(t, o, false)
+		})
+	}
+	t.Run("pressure-and-reserved-victim", func(t *testing.T) {
+		l := cxLimits()
+		l.MaxRecords = 1
+		genesis := cxMine([32]byte{}, 0, cxTarget(255))
+		o, v, s := cxNew(t, l, hcLim(), genesis)
+		p := cxSeed(t, o, v, genesis, s)
+		in := cxInput(v, cxMine(p.Hash, 1, cxTarget(255)), cxProof(p, HeaderContextCanonical148V1), s)
+		lease, d := o.PinContextV1(v, p.Hash)
+		cxDecision(t, "pressure pin", d, 0, 0, 0, nil)
+		cxRefuse(t, "PIN_SURVIVES", o, in, 5, 0, 0, nil)
+		copy, d := o.LookupContextV1(v, p.Hash)
+		cxDecision(t, "pinned record lookup", d, 0, 0, 0, nil)
+		cxEqual(t, "PIN_SURVIVES exact record", copy, p)
+		lease.ReleaseV1()
+		h := cxPrepare(t, "released victim reservation", o, in)
+		before := cxState(o)
+		refused, d := o.PinContextV1(v, p.Hash)
+		cxDecision(t, "RESERVED_VICTIM", d, 5, 0, 0, nil)
+		cxEqual(t, "reserved victim nil", refused, (*HeaderContextLease148V1)(nil))
+		cxEqual(t, "reserved victim unchanged", cxState(o), before)
+		h.AbortV1()
+		lease, d = o.PinContextV1(v, p.Hash)
+		cxDecision(t, "aborted victim next pin", d, 0, 0, 0, nil)
+		lease.ReleaseV1()
+		child, _ := cxPublish(t, o, in)
+		_, d = o.LookupContextV1(child.View, p.Hash)
+		cxDecision(t, "released normal eviction", d, 2, 0, 0, nil)
+		cxEqual(t, "released pressure retained bytes", o.context.bytes, uint64(1119))
+		h = cxPrepare(t, "admitted victim reserved", o, cxInput(child.View, cxMine(child.Hash, 2, cxTarget(255)), cxProof(child, HeaderContextAdmitted148V1), s))
+		before = cxState(o)
+		refused, d = o.PinContextV1(child.View, child.Hash)
+		cxDecision(t, "RESERVED_VICTIM admitted before C1", d, 5, 0, 0, nil)
+		cxEqual(t, "admitted reserved victim nil", refused, (*HeaderContextLease148V1)(nil))
+		cxEqual(t, "admitted reserved victim complete state", cxState(o), before)
+		h.AbortV1()
+	})
+	for _, refusal := range []uint8{10, 12} {
+		t.Run(fmt.Sprintf("C1-refusal-%d", refusal), func(t *testing.T) {
+			cl := hcLim()
+			cl.MaxLeases = 1
+			genesis := cxMine([32]byte{}, 0, cxTarget(255))
+			o, v, s := cxNew(t, cxLimits(), cl, genesis)
+			root := cxSeed(t, o, v, genesis, s)
+			p, _ := cxPublish(t, o, cxInput(v, cxMine(root.Hash, 1, cxTarget(255)), cxProof(root, HeaderContextCanonical148V1), s))
+			var reserved *HeaderCandidatePrepared148V1
+			var held *HeaderCandidateLease148V1
+			if refusal == 10 {
+				reserved = hcPrepOK(t, o, hcTr(o, nil, p.Hash))
+			} else {
+				var out HeaderCandidateOutcome148V1
+				held, out = o.AcquireDependencyV1(p.Hash)
+				cxEqual(t, "real lease prerequisite", uint8(out), uint8(0))
+			}
+			before := cxState(o)
+			lease, d := o.PinContextV1(p.View, p.Hash)
+			cxDecision(t, "C1 pin refusal unchanged", d, 5, 0, refusal, nil)
+			cxEqual(t, "C1 pin refusal nil", lease, (*HeaderContextLease148V1)(nil))
+			cxEqual(t, "C1 pin refusal complete rollback", cxState(o), before)
+			if reserved != nil {
+				reserved.AbortV1()
+			} else {
+				held.ReleaseV1()
+			}
+			lease, d = o.PinContextV1(p.View, p.Hash)
+			cxDecision(t, "C1 pin next operation", d, 0, 0, 0, nil)
+			cxEqual(t, "C1 next dependency", o.leases, uint64(1))
+			lease.ReleaseV1()
+			cxEqual(t, "C1 next release", o.context.bytes != 1725 || o.context.pins != 0 || o.leases != 0, false)
+		})
+	}
+	t.Run("admitted-ancestry", func(t *testing.T) {
+		o, p, s := cxWarm(t, []uint64{0, 1, 2})
+		ancestor := p.Parent
+		before := cxState(o)
+		lease, d := o.PinContextV1(p.View, p.Hash)
+		cxDecision(t, "admitted pin", d, 0, 0, 0, nil)
+		cxEqual(t, "CANDIDATE_DEPENDENCY", lease != nil && lease.candidate != nil && o.leases == 1, true)
+		lease.ReleaseV1()
+		lease.ReleaseV1()
+		cxEqual(t, "admitted RELEASE_ONCE exact state", cxState(o), before)
+		lease, d = o.PinContextV1(p.View, p.Hash)
+		cxDecision(t, "admitted second pin", d, 0, 0, 0, nil)
+		sibling, d := o.PinContextV1(p.View, p.Hash)
+		cxDecision(t, "admitted independent sibling", d, 0, 0, 0, nil)
+		lease.ReleaseV1()
+		lease.ReleaseV1()
+		cxEqual(t, "admitted RELEASE_ONCE preserves sibling", o.context.pins != 1 || o.context.pinned[p.Hash] != 1 || o.leases != 1 || o.leased[p.Hash] != 1, false)
+		lease = sibling
+		child, publication := cxPublish(t, o, cxInput(p.View, cxMine(p.Hash, 3, cxTarget(255)), cxProof(p, HeaderContextAdmitted148V1), s))
+		cxEqual(t, "CANDIDATE_DEPENDENCY later version", publication.Version, p.View.Version+1)
+		cxEqual(t, "PIN_SURVIVES exact record across publication", o.context.records[p.Hash], p)
+		for _, retired := range [][][32]byte{{ancestor}, {ancestor, p.Hash}} {
+			state := cxState(o)
+			h, out := o.PrepareV1(hcTr(o, nil, retired...))
+			cxEqual(t, "CANDIDATE_DEPENDENCY ancestor protected", uint8(out), uint8(10))
+			cxEqual(t, "protected plan nil", h, (*HeaderCandidatePrepared148V1)(nil))
+			cxEqual(t, "protected plan unchanged", cxState(o), state)
+		}
+		version := o.VersionV1()
+		lease.ReleaseV1()
+		lease.ReleaseV1()
+		cxEqual(t, "dependency release no publication", o.VersionV1(), version)
+		cxEqual(t, "dependency fully released", o.context.pins != 0 || o.leases != 0, false)
+		pub, out := hcPublish(t, o, hcTr(o, nil, ancestor, p.Hash, child.Hash))
+		cxEqual(t, "released actual retirement", uint8(out), uint8(0))
+		cxEqual(t, "released actual retirement receipt", pub, HeaderCandidatePublication148V1{Changed: true, Version: version + 1, Added: [][32]byte{}, Retired: [][32]byte{ancestor, p.Hash, child.Hash}})
+		v := child.View
+		v.Version = pub.Version
+		_, d = o.LookupContextV1(v, p.Hash)
+		cxDecision(t, "released retired context unavailable", d, 2, 0, 0, nil)
+		cxEqual(t, "released ancestry final resources", len(o.recs) != 0 || len(o.context.records) != 1 || o.context.bytes != 1118, false)
+	})
 }
 
 func TestHeaderContext148Reservations(t *testing.T) {
@@ -1288,7 +1560,9 @@ func TestHeaderContext148Reservations(t *testing.T) {
 	h = cxPrepare(t, "next reservation", o, cxInput(r.View, cxMine(r.Hash, 2, cxTarget(255)), cxProof(r, HeaderContextAdmitted148V1), s))
 	cxDecision(t, "next reservation abort", h.AbortV1(), 0, 0, 0, nil)
 	cxClean(t, o, false)
-	cxConcurrentReservation(t)
+	for _, pinned := range []bool{false, true} {
+		cxConcurrentReservation(t, pinned)
+	}
 	// More than one eligible victim proves the exact ascending-hash choice.
 	for _, wide := range []bool{false, true} {
 		l = cxLimits()
@@ -1357,7 +1631,7 @@ func TestHeaderContext148Reservations(t *testing.T) {
 	}
 }
 
-func cxConcurrentReservation(t *testing.T) {
+func cxConcurrentReservation(t *testing.T, pinned bool) {
 	o, p, s := cxWarm(t, []uint64{0, 1})
 	genesis := s.raws[p.View.Genesis]
 	a := HeaderContextAnchor148V1{Kind: HeaderContextCanonical148V1, Raw: genesis, Hash: p.View.Genesis, Work: big.NewInt(1), Provenance: [32]byte{9}}
@@ -1393,6 +1667,38 @@ func cxConcurrentReservation(t *testing.T) {
 		t.Fatal("cold reservation did not reach first read")
 	}
 	before := cxState(o)
+	if pinned {
+		removal := hcPrepOK(t, o, hcTr(o, nil, p.Hash))
+		protectedState := cxState(o)
+		refused, decision := o.PinContextV1(p.View, p.Hash)
+		cxDecision(t, "concurrent C1 Protected provisional rollback", decision, 5, 0, 10, nil)
+		cxEqual(t, "concurrent Protected pin nil", refused, (*HeaderContextLease148V1)(nil))
+		cxEqual(t, "concurrent Protected complete state", cxState(o), protectedState)
+		removal.AbortV1()
+		var held []*HeaderCandidateLease148V1
+		for n := uint64(0); n < o.limits.MaxLeases; n++ {
+			lease, out := o.AcquireDependencyV1(p.Hash)
+			cxEqual(t, "concurrent real capacity prerequisite", uint8(out), uint8(0))
+			held = append(held, lease)
+		}
+		capacityState := cxState(o)
+		refused, decision = o.PinContextV1(p.View, p.Hash)
+		cxDecision(t, "concurrent C1 Capacity provisional rollback", decision, 5, 0, 12, nil)
+		cxEqual(t, "concurrent Capacity pin nil", refused, (*HeaderContextLease148V1)(nil))
+		cxEqual(t, "concurrent Capacity complete state", cxState(o), capacityState)
+		for _, lease := range held {
+			lease.ReleaseV1()
+		}
+		cxEqual(t, "concurrent rollback next state", cxState(o), before)
+		lease, decision := o.PinContextV1(p.View, p.Hash)
+		cxDecision(t, "concurrent admitted pin", decision, 0, 0, 0, nil)
+		cxEqual(t, "concurrent CANDIDATE_DEPENDENCY", o.leases, uint64(1))
+		cxEqual(t, "concurrent current pin bytes", o.context.bytes, uint64(1853))
+		cxEqual(t, "concurrent STAGED_BYTES", o.context.active.prospective, uint64(2531))
+		lease.ReleaseV1()
+		lease.ReleaseV1()
+		cxEqual(t, "concurrent RELEASE_ONCE complete state", cxState(o), before)
+	}
 	copied, d := o.LookupContextV1(p.View, p.Hash)
 	cxDecision(t, "concurrent lookup", d, 0, 0, 0, nil)
 	cxEqual(t, "concurrent exact record", copied, p)
@@ -1591,6 +1897,8 @@ func TestHeaderContext148Publication(t *testing.T) {
 func TestHeaderContext148Lifecycle(t *testing.T) {
 	o, p, s := cxWarm(t, []uint64{0, 1})
 	old := p
+	retained, pinDecision := o.PinContextV1(p.View, p.Hash)
+	cxDecision(t, "lifecycle retained pin", pinDecision, 0, 0, 0, nil)
 	c1, _ := o.LookupV1(p.Hash)
 	c1.Provenance = [32]byte{10}
 	tr := hcTr(o, []HeaderCandidateRecord148V1{c1})
@@ -1605,6 +1913,11 @@ func TestHeaderContext148Lifecycle(t *testing.T) {
 		r, d := o.LookupContextV1(view, p.Hash)
 		cxDecision(t, "old stored View", d, 3, 0, 0, nil)
 		cxEqual(t, "stale record zero", r, HeaderContextRecord148V1{})
+		before := cxState(o)
+		lease, result := o.PinContextV1(view, p.Hash)
+		cxDecision(t, "retained pin does not refresh View", result, 3, 0, 0, nil)
+		cxEqual(t, "stale retained pin nil", lease, (*HeaderContextLease148V1)(nil))
+		cxEqual(t, "stale retained pin unchanged", cxState(o), before)
 	}
 	proof := *cxProof(p, HeaderContextAdmitted148V1)
 	proof.Provenance = [32]byte{10}
@@ -1640,53 +1953,92 @@ func TestHeaderContext148Lifecycle(t *testing.T) {
 	want.View, want.Provenance = v, [32]byte{10}
 	cxEqual(t, "REBIND_FIELDS full", r, want)
 	cxEqual(t, "rebind no version", o.VersionV1(), pub.Version)
+	retained.ReleaseV1()
+	retained.ReleaseV1()
+	cxEqual(t, "rebound pin RELEASE_ONCE", o.context.pins != 0 || o.leases != 0 || o.context.bytes != 1725, false)
 	child := cxMine(r.Hash, 2, cxTarget(255))
 	cxPublish(t, o, cxInput(v, child, cxProof(r, HeaderContextAdmitted148V1), s))
 	for _, terminal := range []string{"Abort", "Unknown", "Close"} {
-		t.Run(terminal, func(t *testing.T) {
-			o, p, s := cxWarm(t, []uint64{0, 1})
-			in := cxInput(p.View, cxMine(p.Hash, 2, cxTarget(255)), cxProof(p, HeaderContextAdmitted148V1), s)
-			h := cxPrepare(t, "terminal prepare", o, in)
-			version := o.VersionV1()
-			switch terminal {
-			case "Abort":
-				cxEqual(t, "direct C1 Abort", h.candidate.AbortV1(), HeaderCandidateOutcome148V1(0))
-			case "Unknown":
-				cxEqual(t, "direct C1 Unknown", h.candidate.UnknownV1(), HeaderCandidateOutcome148V1(0))
-			case "Close":
-				o.CloseV1()
-			}
-			calls := s.calls
-			r, pub, d := h.PublishV1()
-			outcome, candidate := uint8(8), uint8(0)
-			if terminal == "Close" {
-				outcome, candidate = 2, 1
-			}
-			cxDecision(t, "first wrapper terminal", d, outcome, 0, candidate, nil)
-			cxEqual(t, "terminal zero record", r, HeaderContextRecord148V1{})
-			cxEqual(t, "terminal zero receipt", pub, HeaderCandidatePublication148V1{})
-			cxDecision(t, "repeated terminal consumed", h.AbortV1(), 8, 0, 0, nil)
-			cxEqual(t, "consumed no callback", s.calls, calls)
-			cxClean(t, o, terminal == "Unknown")
-			cxEqual(t, "terminal retained staged payload/capability", h.reservation.record.Work != nil || h.reservation.record.LastClampedTimestamp != nil || h.reservation.victims != nil || h.reservation.source != nil, false)
-			if terminal == "Close" {
-				cxEqual(t, "CLEANUP_CLOSE state", len(o.context.records) != 0 || o.context.bytes != 512 || o.prepared == nil || o.leases != 0, false)
-			} else {
-				cxEqual(t, "terminal changed retained context/leases", len(o.context.records) != 2 || o.context.bytes != 1725 || o.leases != 0, false)
-			}
-			switch terminal {
-			case "Abort":
-				cxEqual(t, "abort version", o.VersionV1(), version)
-				next := cxPrepare(t, "CLEANUP_ABORT next", o, in)
-				next.AbortV1()
-			case "Unknown":
-				cxEqual(t, "unknown version", o.VersionV1(), version+1)
-				cxRefuse(t, "CLEANUP_UNKNOWN", o, in, 2, 0, 2, nil)
-			case "Close":
-				cxEqual(t, "closed C1 leases unchanged", o.leases, uint64(0))
-				cxRefuse(t, "closed first", o, in, 2, 0, 1, nil)
-			}
-		})
+		for _, pinned := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s-pin-%v", terminal, pinned), func(t *testing.T) {
+				o, p, s := cxWarm(t, []uint64{0, 1})
+				var lease *HeaderContextLease148V1
+				if pinned {
+					var decision HeaderContextDecision148V1
+					lease, decision = o.PinContextV1(p.View, p.Hash)
+					cxDecision(t, "terminal independent pin", decision, 0, 0, 0, nil)
+				}
+				in := cxInput(p.View, cxMine(p.Hash, 2, cxTarget(255)), cxProof(p, HeaderContextAdmitted148V1), s)
+				h := cxPrepare(t, "terminal prepare", o, in)
+				version := o.VersionV1()
+				switch terminal {
+				case "Abort":
+					cxEqual(t, "direct C1 Abort", h.candidate.AbortV1(), HeaderCandidateOutcome148V1(0))
+				case "Unknown":
+					cxEqual(t, "direct C1 Unknown", h.candidate.UnknownV1(), HeaderCandidateOutcome148V1(0))
+				case "Close":
+					o.CloseV1()
+				}
+				calls := s.calls
+				r, pub, d := h.PublishV1()
+				outcome, candidate := uint8(8), uint8(0)
+				if terminal == "Close" {
+					outcome, candidate = 2, 1
+				}
+				cxDecision(t, "first wrapper terminal", d, outcome, 0, candidate, nil)
+				cxEqual(t, "terminal zero record", r, HeaderContextRecord148V1{})
+				cxEqual(t, "terminal zero receipt", pub, HeaderCandidatePublication148V1{})
+				cxDecision(t, "repeated terminal consumed", h.AbortV1(), 8, 0, 0, nil)
+				cxEqual(t, "consumed no callback", s.calls, calls)
+				cxClean(t, o, terminal == "Unknown")
+				cxEqual(t, "terminal retained staged payload/capability", h.reservation.record.Work != nil || h.reservation.record.LastClampedTimestamp != nil || h.reservation.victims != nil || h.reservation.source != nil, false)
+				pins, leaseCount, retainedBytes := uint64(0), uint64(0), uint64(1725)
+				if pinned {
+					pins, leaseCount, retainedBytes = 1, 1, 1853
+				}
+				if terminal == "Close" {
+					cxEqual(t, "CLEANUP_CLOSE state", len(o.context.records) != 0 || o.context.bytes != 512 || o.prepared == nil || o.leases != leaseCount || o.context.pins != 0 || len(o.context.pinned) != 0, false)
+				} else {
+					cxEqual(t, "terminal changed retained context/leases", len(o.context.records) != 2 || o.context.bytes != retainedBytes || o.leases != leaseCount || o.context.pins != pins || o.context.pinned[p.Hash] != pins, false)
+				}
+				if lease != nil {
+					beforeRelease := cxState(o)
+					lease.ReleaseV1()
+					if terminal == "Close" {
+						cxEqual(t, "CLEANUP_CLOSE late release complete state", cxState(o), beforeRelease)
+					}
+					afterRelease := cxState(o)
+					lease.ReleaseV1()
+					cxEqual(t, "terminal RELEASE_ONCE", cxState(o), afterRelease)
+					if terminal != "Close" {
+						cxEqual(t, "terminal independent charge released", o.context.bytes != 1725 || o.context.pins != 0 || o.leases != 0 || len(o.context.pinned) != 0, false)
+					}
+				}
+				switch terminal {
+				case "Abort":
+					cxEqual(t, "abort version", o.VersionV1(), version)
+					next := cxPrepare(t, "CLEANUP_ABORT next", o, in)
+					next.AbortV1()
+				case "Unknown":
+					cxEqual(t, "unknown version", o.VersionV1(), version+1)
+					cxRefuse(t, "CLEANUP_UNKNOWN", o, in, 2, 0, 2, nil)
+				case "Close":
+					cxEqual(t, "closed C1 leases unchanged", o.leases, leaseCount)
+					cxRefuse(t, "closed first", o, in, 2, 0, 1, nil)
+				}
+				if terminal != "Abort" {
+					before := cxState(o)
+					refused, decision := o.PinContextV1(HeaderContextView148V1{}, p.Hash)
+					candidate := uint8(2)
+					if terminal == "Close" {
+						candidate = 1
+					}
+					cxDecision(t, "pin lifecycle before shape", decision, 2, 0, candidate, nil)
+					cxEqual(t, "terminal refused pin nil", refused, (*HeaderContextLease148V1)(nil))
+					cxEqual(t, "terminal refused pin unchanged", cxState(o), before)
+				}
+			})
+		}
 	}
 	// Real C1 contention is distinct from C2 reservation contention.
 	o, p, s = cxWarm(t, []uint64{0})
@@ -1709,6 +2061,11 @@ func TestHeaderContext148Lifecycle(t *testing.T) {
 	cxEqual(t, "unestablished constructor", err, nil)
 	_, d = o.PrepareContextV1(HeaderContextInput148V1{Source: s})
 	cxDecision(t, "NotEstablished before shape", d, 2, 0, 3, nil)
+	unestablished := cxState(o)
+	noLease, d := o.PinContextV1(HeaderContextView148V1{}, [32]byte{})
+	cxDecision(t, "pin NotEstablished before shape", d, 2, 0, 3, nil)
+	cxEqual(t, "unestablished pin nil", noLease, (*HeaderContextLease148V1)(nil))
+	cxEqual(t, "unestablished pin unchanged", cxState(o), unestablished)
 	// A contradictory C1 producer's supplied cumulative work must remain an actual Conflict.
 	o, v, s = cxNew(t, cxLimits(), hcLim(), genesis)
 	p = cxSeed(t, o, v, genesis, s)
@@ -1940,6 +2297,13 @@ func TestHeaderContext148ProofShapes(t *testing.T) {
 			cxEqual(t, "ALIAS_REBIND full independent stored record", r, want)
 			cxEqual(t, "external rebind C1 unchanged", hcTake(o), before)
 			cxEqual(t, "external rebind no ancestry read", len(s.reads), 0)
+			retainedBefore, calls := cxState(o), s.calls
+			lease, decision := o.PinContextV1(v, p.Hash)
+			cxDecision(t, "qualified external kind pin", decision, 0, 0, 0, nil)
+			cxEqual(t, "external kind no invented C1 lease", lease != nil && lease.candidate == nil && o.leases == 0, true)
+			lease.ReleaseV1()
+			cxEqual(t, "external kind pin release exact state", cxState(o), retainedBefore)
+			cxEqual(t, "external kind pin no source call", s.calls, calls)
 			h := cxPrepare(t, "positive warm kind", o, cxInput(v, cxMine(p.Hash, 1, cxTarget(255)), a, s))
 			h.AbortV1()
 		}
@@ -1961,7 +2325,7 @@ func TestHeaderContext148ProofShapes(t *testing.T) {
 			}
 		}
 	}
-	for _, owner := range []string{"lookup", "seed", "rebind"} {
+	for _, owner := range []string{"lookup", "seed", "rebind", "pin"} {
 		for _, tc := range []struct {
 			name   string
 			mutate func(*HeaderContextView148V1)
@@ -1979,6 +2343,16 @@ func TestHeaderContext148ProofShapes(t *testing.T) {
 		} {
 			t.Run(owner+"-"+tc.name, func(t *testing.T) {
 				o, p, s := cxWarm(t, []uint64{0})
+				if owner == "pin" {
+					limits := cxLimits()
+					limits.MaxPins = 1
+					var view HeaderContextView148V1
+					o, view, s = cxNew(t, limits, hcLim(), p.Raw)
+					p = cxSeed(t, o, view, p.Raw, s)
+					lease, decision := o.PinContextV1(view, p.Hash)
+					cxDecision(t, "view quota prerequisite", decision, 0, 0, 0, nil)
+					t.Cleanup(lease.ReleaseV1)
+				}
 				v := p.View
 				tc.mutate(&v)
 				before := cxState(o)
@@ -1994,6 +2368,10 @@ func TestHeaderContext148ProofShapes(t *testing.T) {
 					r, result := o.RebindContextV1(v, *cxProof(p, HeaderContextCanonical148V1), s)
 					d = result
 					cxEqual(t, "bad view rebind zero", r, HeaderContextRecord148V1{})
+				case "pin":
+					lease, result := o.PinContextV1(v, p.Hash)
+					d = result
+					cxEqual(t, "bad view pin nil", lease, (*HeaderContextLease148V1)(nil))
 				}
 				cxDecision(t, "view domain", d, tc.out, 0, 0, nil)
 				cxEqual(t, "view unchanged", cxState(o), before)
