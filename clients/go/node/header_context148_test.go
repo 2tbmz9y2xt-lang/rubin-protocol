@@ -1515,7 +1515,7 @@ func TestHeaderContext148Pins(t *testing.T) {
 		cxEqual(t, "dependency fully released", o.context.pins != 0 || o.leases != 0, false)
 		pub, out := hcPublish(t, o, hcTr(o, nil, ancestor, p.Hash, child.Hash))
 		cxEqual(t, "released actual retirement", uint8(out), uint8(0))
-		cxEqual(t, "released actual retirement receipt", pub, HeaderCandidatePublication148V1{Changed: true, Version: version+1, Added: [][32]byte{}, Retired: [][32]byte{ancestor, p.Hash, child.Hash}})
+		cxEqual(t, "released actual retirement receipt", pub, HeaderCandidatePublication148V1{Changed: true, Version: version + 1, Added: [][32]byte{}, Retired: [][32]byte{ancestor, p.Hash, child.Hash}})
 		v := child.View
 		v.Version = pub.Version
 		_, d = o.LookupContextV1(v, p.Hash)
