@@ -369,7 +369,7 @@ func TestHeaderContext148Timestamp(t *testing.T) {
 }
 
 // cxChain creates only independently chosen raw source facts; its heights are array positions plus base.
-func cxChain(base uint64, count int, first, step uint64, target [32]byte, half bool) ([][148]byte, *cxSource) {
+func cxChain(base uint64, count int, first, step uint64, target [32]byte, half bool, lastStep ...uint64) ([][148]byte, *cxSource) {
 	raws := make([][148]byte, count)
 	source := &cxSource{raws: map[[32]byte][148]byte{}}
 	parent := [32]byte{}
@@ -378,6 +378,9 @@ func cxChain(base uint64, count int, first, step uint64, target [32]byte, half b
 	}
 	for i := range raws {
 		timestamp := 121*base + first + uint64(i)*step
+		if len(lastStep) != 0 && i == count-1 {
+			timestamp = 121*base + first + uint64(i-1)*step + lastStep[0]
+		}
 		if half {
 			timestamp = first + uint64((i+1)/2)
 		}
@@ -400,20 +403,20 @@ func cxCold(v HeaderContextView148V1, raw [148]byte, a HeaderContextAnchor148V1,
 
 func TestHeaderContext148Epoch(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		first, step uint64
-		old         byte
-		half        bool
-		mode        string
+		name                  string
+		first, step, lastStep uint64
+		old                   byte
+		half                  bool
+		mode                  string
 	}{
-		{"RETARGET_DELTA", 10, 120, 255, false, "floor"},
-		{"RETARGET_PARENT_TARGET", 10, 1, 255, false, "lower"},
-		{"upper", 10, 1200, 31, false, "upper"},
-		{"limit", 10, 1200, 127, false, "limit"},
-		{"RETARGET_WIDE_DELTA", math.MaxUint64 - 6000, 1, 255, true, "lower"},
+		{"RETARGET_DELTA", 10, 120, 0, 255, false, "floor"},
+		{"RETARGET_PARENT_TARGET", 10, 1, 1, 255, false, "lower"},
+		{"upper", 10, 1200, 1200, 31, false, "upper"},
+		{"limit", 10, 1200, 1200, 127, false, "limit"},
+		{"RETARGET_WIDE_DELTA", math.MaxUint64 - 6000, 1, 1, 255, true, "lower"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raws, source := cxChain(0, 10080, tc.first, tc.step, cxTarget(tc.old), tc.half)
+			raws, source := cxChain(0, 10080, tc.first, tc.step, cxTarget(tc.old), tc.half, tc.lastStep)
 			o, v, _ := cxNew(t, cxLimits(), hcLim(), raws[0])
 			old := cxTarget(tc.old)
 			expected := new(big.Int).SetBytes(old[:])
@@ -426,8 +429,8 @@ func TestHeaderContext148Epoch(t *testing.T) {
 				maximum := cxTarget(255)
 				expected.SetBytes(maximum[:])
 			case "floor":
-				expected.Mul(expected, big.NewInt(10079))
-				expected.Div(expected, big.NewInt(10080))
+				expected.Mul(expected, big.NewInt(120*10078+1))
+				expected.Div(expected, big.NewInt(120*10080))
 			}
 			var nextTarget [32]byte
 			expected.FillBytes(nextTarget[:])
