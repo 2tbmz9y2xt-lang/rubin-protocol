@@ -59,7 +59,6 @@ type ServingEpochV1 struct {
 	store    *Store
 	request  context.Context
 	opened   time.Time
-	deadline time.Time
 	closing  bool
 	finished bool
 }
@@ -184,7 +183,6 @@ func (e *ServingEpochV1) openV1(opened time.Time) error {
 	o := e.owner
 	o.mu.Lock()
 	e.opened = opened
-	e.deadline = e.opened.Add(o.lifetime)
 	o.mu.Unlock()
 	return e.CheckV1()
 }
@@ -198,7 +196,7 @@ func (e *ServingEpochV1) CheckV1() error {
 	o := e.owner
 	o.mu.Lock()
 	finished := e.finished
-	eligible := o.current == e && e.store.servingOwner.Load() == o && !e.endedV1(time.Now())
+	eligible := o.current == e && e.store.servingOwner.Load() == o && !e.endedV1(time.Since(e.opened))
 	o.mu.Unlock()
 	if finished {
 		return servingInputV1(operationView)
@@ -212,9 +210,9 @@ func (e *ServingEpochV1) CheckV1() error {
 	return nil
 }
 
-// endedV1 is the original expiry/internal-close decision, called under mu.
-func (e *ServingEpochV1) endedV1(now time.Time) bool {
-	return e.closing || !e.deadline.IsZero() && now.After(e.deadline)
+// endedV1 compares elapsed monotonic time with the original lifetime, under mu.
+func (e *ServingEpochV1) endedV1(elapsed time.Duration) bool {
+	return e.closing || !e.opened.IsZero() && elapsed > e.owner.lifetime
 }
 
 // finishViewV1 runs after the shared View's actual abort and operation unlock,
@@ -222,7 +220,7 @@ func (e *ServingEpochV1) endedV1(now time.Time) bool {
 func (o *ServingViewOwnerV1) finishViewV1(e *ServingEpochV1, out *ServingViewOutcomeV1) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	out.eligibilityEnded = e.endedV1(time.Now())
+	out.eligibilityEnded = e.endedV1(time.Since(e.opened))
 	e.finished = true
 	if o.current == e && out.readEnd != ServingRetainedV1 {
 		o.current = nil
@@ -239,6 +237,14 @@ func (s *Store) requestServingCloseV1() *servingMutationV1 {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.markV1()
+}
+
+// contendedServingCloseV1 covers first binding after a nil initial observation.
+// An already-marked attempt must not replace a newer pending identity.
+func (s *Store) contendedServingCloseV1(initial *servingMutationV1) {
+	if initial == nil {
+		s.requestServingCloseV1()
+	}
 }
 
 // markV1 installs the latest bounded identity and ends eligibility only.

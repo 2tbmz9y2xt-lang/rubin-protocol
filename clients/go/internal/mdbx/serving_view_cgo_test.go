@@ -99,17 +99,24 @@ func servingRefusedV1(t *testing.T, o *ServingViewOwnerV1, s *Store, reservation
 
 // servingQualifiedV1 qualifies actual same-Reader APPLIED/current and STABLE/LAG roles.
 func servingQualifiedV1(t *testing.T) {
+	for _, lifetime := range []time.Duration{time.Hour, time.Duration(math.MaxInt64)} {
+		t.Run(lifetime.String(), func(t *testing.T) { servingQualifiedLifetimeV1(t, lifetime) })
+	}
+}
+
+// servingQualifiedLifetimeV1 keeps qualification and refused requests on the original clock.
+func servingQualifiedLifetimeV1(t *testing.T, lifetime time.Duration) {
 	s, _, reservations := tsNew(t)
 	current := treeRoleBuildV1(t, 1, treeRoleAppliedV1)
 	current.seedV1(t, s, reservations, false)
 	treeRoleAssuredV1(t, s, reservations, 2, nil)
-	o, err := NewServingViewOwnerV1(time.Hour)
+	o, err := NewServingViewOwnerV1(lifetime)
 	mustEnvironment(t, err)
 	var previous *ServingEpochV1
 	for range 2 {
 		out, callErr := servingCallV1(t, o, s, reservations, func(r *Reader, e *ServingEpochV1, a *OperationAccount) error {
 			mustEnvironment(t, e.CheckV1())
-			opened, deadline := e.opened, e.deadline
+			opened := e.opened
 			authority, found, authorityErr := r.ReadTreeAuthorityV1()
 			mustEnvironment(t, authorityErr)
 			if !found || authority.Authority.ActiveGenerationID != 1 || authority.LagGenerationID != 2 {
@@ -119,12 +126,18 @@ func servingQualifiedV1(t *testing.T) {
 			if early.HealthyOn(r) || !qualified.HealthyOn(r) || e == previous || r.databaseID != ([32]byte{7}) || r.format != 3 {
 				t.Fatal("same-snapshot qualification/epoch identity")
 			}
-			if e.opened != opened || e.deadline != deadline || deadline.Sub(opened) != time.Hour {
-				t.Fatal("qualification renewed the original deadline")
+			if e.opened != opened || o.lifetime != lifetime {
+				t.Fatal("qualification renewed the original opening/lifetime")
 			}
 			servingRefusedV1(t, o, s, reservations)
-			if e.deadline != deadline || e.opened != opened {
+			if o.lifetime != lifetime || e.opened != opened {
 				t.Fatal("second request renewed the occupied original epoch")
+			}
+			o.mu.Lock()
+			atBoundary := e.endedV1(lifetime)
+			o.mu.Unlock()
+			if atBoundary {
+				t.Fatal("original lifetime equality refused an admitted unit")
 			}
 			previous = e
 			return e.CheckV1()
@@ -198,10 +211,16 @@ func servingExpiryV1(t *testing.T) {
 					t.Error("expired callback was never released")
 					return nil
 				}
-				if !time.Now().After(e.deadline) || !r.usable() || r.txn == nil || reservationLive(reservations) != 13 {
+				if time.Since(e.opened) <= o.lifetime || !r.usable() || r.txn == nil || reservationLive(reservations) != 13 {
 					t.Error("expired view lost actual source/account ownership")
 				}
 				servingWantBusyV1(t, e.CheckV1(), "view")
+				o.mu.Lock()
+				occupied := o.current == e
+				o.mu.Unlock()
+				if !occupied || !r.usable() || r.txn == nil || reservationLive(reservations) != 13 {
+					t.Error("expired Check released the occupied native/account owner")
+				}
 				_, found, readErr := r.Get(readDBIsLiteral()[0], []byte{0})
 				if readErr != nil || !found {
 					t.Error("logical expiry forcibly expired the real Reader")
@@ -219,11 +238,11 @@ func servingExpiryV1(t *testing.T) {
 		t.Fatal("snapshot callback admission did not finish")
 	}
 	o.mu.Lock()
-	if e.endedV1(e.deadline) || !e.endedV1(e.deadline.Add(time.Nanosecond)) {
+	if e.endedV1(o.lifetime) || !e.endedV1(o.lifetime+time.Nanosecond) {
 		t.Error("deadline equality/strictly-later decision")
 	}
 	o.mu.Unlock()
-	timer := time.NewTimer(time.Until(e.deadline) + time.Millisecond)
+	timer := time.NewTimer(o.lifetime - time.Since(e.opened) + time.Millisecond)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
@@ -231,7 +250,10 @@ func servingExpiryV1(t *testing.T) {
 		t.Fatal("original finite deadline did not arrive")
 	}
 	servingRefusedV1(t, o, s, reservations)
-	if reservationLive(reservations) != 13 || o.current != e {
+	o.mu.Lock()
+	occupied := o.current == e
+	o.mu.Unlock()
+	if reservationLive(reservations) != 13 || !occupied {
 		t.Error("expiry released the occupied borrow")
 	}
 	releaseView()
@@ -252,6 +274,53 @@ func servingPriorityV1(t *testing.T) {
 	for _, route := range []string{"update", "tree", "close"} {
 		t.Run(route, func(t *testing.T) { servingPriorityRouteV1(t, route) })
 	}
+	t.Run("first binding", servingFirstBindingV1)
+}
+
+// servingFirstBindingV1 tests the contention effect with an actual nil observation
+// before public binding. Direct source review binds all three native adapters to
+// this effect; the narrow public preemption window is not scheduled by this test.
+func servingFirstBindingV1(t *testing.T) {
+	s, o, reservations := servingSetupV1(t)
+	initial := s.requestServingCloseV1()
+	if initial != nil {
+		t.Fatal("unbound Store unexpectedly supplied a serving identity")
+	}
+	var pending *servingMutationV1
+	out, err := servingCallV1(t, o, s, reservations, func(r *Reader, e *ServingEpochV1, _ *OperationAccount) error {
+		if s.servingOwner.Load() != o || !r.usable() || r.txn == nil {
+			t.Fatal("first binding did not open an actual native epoch")
+		}
+		if s.operations.TryLock() {
+			s.operations.Unlock()
+			t.Fatal("native Reader did not retain the operation lock")
+		}
+		s.contendedServingCloseV1(initial)
+		if o.priority == nil {
+			t.Fatal("nil initial observation lost first-bound contention priority")
+		}
+		older := o.priority
+		pending = s.requestServingCloseV1()
+		s.contendedServingCloseV1(older)
+		if o.priority != pending {
+			t.Fatal("already-marked contention replaced a newer pending identity")
+		}
+		servingWantBusyV1(t, e.CheckV1(), "view")
+		return nil
+	})
+	mustEnvironment(t, err)
+	servingWantOutcomeV1(t, out, 1, true)
+	if o.current != nil || o.priority != pending {
+		t.Fatal("actual old-view close lost the first-bound pending priority")
+	}
+	servingRefusedV1(t, o, s, reservations)
+	servingRefusedV1(t, o, s, reservations)
+	servingNativeRetryV1(t, "update", s, nil)
+	if o.priority != nil {
+		t.Fatal("actual retry failed to clear first-bound priority")
+	}
+	_, err = servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
+	mustEnvironment(t, err)
 }
 
 // servingNativeBusyV1 pins original contention tuples and zero callback effects.
@@ -634,14 +703,14 @@ func servingOptionalRouteV1(t *testing.T, route, state string) {
 	}
 	out, err := servingCallV1(t, o, s, reservations, func(r *Reader, e *ServingEpochV1, a *OperationAccount) error {
 		if state == "expired" {
-			timer := time.NewTimer(time.Until(e.deadline) + time.Millisecond)
+			timer := time.NewTimer(o.lifetime - time.Since(e.opened) + time.Millisecond)
 			defer timer.Stop()
 			select {
 			case <-timer.C:
 			case <-time.After(5 * time.Second):
 				t.Fatal("optional native row did not reach its finite deadline")
 			}
-			if !time.Now().After(e.deadline) {
+			if time.Since(e.opened) <= o.lifetime {
 				t.Fatal("expired row did not reach expiry")
 			}
 			servingWantBusyV1(t, e.CheckV1(), "view")
