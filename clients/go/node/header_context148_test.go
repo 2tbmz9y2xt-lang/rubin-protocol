@@ -1128,8 +1128,12 @@ func TestHeaderContext148Limits(t *testing.T) {
 		exact, less uint64
 		work        uint64
 	}{
-		{"MaxReads", 2, 1, 64}, {"MaxReadBytes", 296, 295, 64}, {"MaxReadWork", 2, 1, 64}, {"MaxSuffix", 1, 0, 64},
-		{"MaxScratchBytes", 6116, 6115, 64}, {"MaxScratchBytes", 5307, 5306, 1},
+		{"MaxReads", 2, 1, 64},
+		{"MaxReadBytes", 296, 295, 64},
+		{"MaxReadWork", 2, 1, 64},
+		{"MaxSuffix", 1, 0, 64},
+		{"MaxScratchBytes", 6116, 6115, 64},
+		{"MaxScratchBytes", 5307, 5306, 1},
 	} {
 		for _, fit := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s-M%d-fit%v", tc.field, tc.work, fit), func(t *testing.T) {
