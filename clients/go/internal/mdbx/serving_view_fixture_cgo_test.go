@@ -332,7 +332,9 @@ func servingFixtureBeginV1(t *testing.T) {
 // that malformed begin pair; no C wrapper or fixture behavior is added here.
 func servingFixtureBeginRetainedV1(t *testing.T) {
 	s, _, _ := servingSetupV1(t)
-	_, err := fixtureLargeFault(s, 10, 0, []byte{0}, func() { _ = s.View(func(*Reader) error { return nil }) })
+	_, err := fixtureLargeFault(s, 10, 0, []byte{0}, func() {
+		_ = s.View(func(*Reader) error { return nil })
+	})
 	mustEnvironment(t, err)
 	txn := s.txn
 	if txn == nil {
@@ -382,7 +384,9 @@ func servingFixtureTerminalEntriesV1(t *testing.T) {
 	for _, mode := range []uint32{9, 10} {
 		t.Run(fmt.Sprint(mode), func(t *testing.T) {
 			s, o, reservations := servingSetupV1(t)
-			_, err := fixtureLargeFault(s, mode, 0, []byte{0}, func() { _, _ = servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil }) })
+			_, err := fixtureLargeFault(s, mode, 0, []byte{0}, func() {
+				_, _ = servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
+			})
 			mustEnvironment(t, err)
 			terminal := s.terminal
 			truth, stage, result := s.Update(func(*Reader) (Batch, error) {
@@ -418,7 +422,7 @@ func servingFixtureSpanNativeV1(t *testing.T) {
 		for _, kind := range []string{"nil", "error", "typed nil", "wrapped", "panic", "goexit"} {
 			t.Run(fmt.Sprintf("%d/%s", mode, kind), func(t *testing.T) {
 				s, o, reservations := servingSetupV1(t)
-				var app error = errors.New("external raw result")
+				app := errors.New("external raw result")
 				if kind == "typed nil" {
 					var typed *nilPointerError
 					app = typed
@@ -434,7 +438,9 @@ func servingFixtureSpanNativeV1(t *testing.T) {
 					defer close(done)
 					defer func() { panicked = recover() }()
 					result = o.WithQuiescenceV1(context.Background(), s, func() error {
-						_, err := fixtureLargeFault(s, mode, 0, []byte{0}, func() { _ = s.View(func(*Reader) error { return nil }) })
+						_, err := fixtureLargeFault(s, mode, 0, []byte{0}, func() {
+							_ = s.View(func(*Reader) error { return nil })
+						})
 						mustEnvironment(t, err)
 						servingRefusedV1(t, o, s, reservations)
 						return servingModeV1(kind, app)

@@ -131,16 +131,16 @@ func servingLaneV1(a *OperationAccount) bool {
 // same snapshot through the actual semantic producers before any serving use.
 // Owned output needs an independent network owner and a final CheckV1.
 func (o *ServingViewOwnerV1) WithViewV1(ctx context.Context, s *Store, account *OperationAccount, use func(*Reader, *ServingEpochV1) error) (out ServingViewOutcomeV1, err error) {
-	if err = o.inputV1(ctx, s, use != nil, operationView); err != nil {
+	if err := o.inputV1(ctx, s, use != nil, operationView); err != nil {
 		return out, err
 	}
 	if !servingLaneV1(account) {
 		return out, errOperationReservationInput
 	}
-	if err = o.bindV1(s, operationView); err != nil {
+	if err := o.bindV1(s, operationView); err != nil {
 		return out, err
 	}
-	if err = ctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return out, err
 	}
 	epoch, admission := o.admitViewV1(ctx, s)
@@ -291,7 +291,7 @@ func (o *ServingViewOwnerV1) WithQuiescenceV1(ctx context.Context, s *Store, use
 	if err, completed = s.servingPreflightV1(); err != nil {
 		return err
 	}
-	if err = ctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return use()

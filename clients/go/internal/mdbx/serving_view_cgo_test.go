@@ -22,14 +22,22 @@ func TestServingViewV1(t *testing.T) {
 		name string
 		run  func(*testing.T)
 	}{
-		{"A1", servingQualifiedV1}, {"A2", servingLastUseV1},
-		{"A3", servingExpiryV1}, {"A4", servingPriorityV1},
-		{"A5", servingNewerPriorityV1}, {"A6", servingOwnedCopyV1},
-		{"A7", servingSpanV1}, {"A8", servingOptionalV1},
-		{"R1", servingAdmissionV1}, {"R2", servingNoReadV1},
-		{"R3", servingInputOrderV1}, {"R4", servingEscapeV1},
-		{"R5", servingEarlierResultV1}, {"H1", servingUnwindV1},
-		{"H2", servingReplacementV1}, {"H3", servingOwnedCopyFailureV1},
+		{"A1", servingQualifiedV1},
+		{"A2", servingLastUseV1},
+		{"A3", servingExpiryV1},
+		{"A4", servingPriorityV1},
+		{"A5", servingNewerPriorityV1},
+		{"A6", servingOwnedCopyV1},
+		{"A7", servingSpanV1},
+		{"A8", servingOptionalV1},
+		{"R1", servingAdmissionV1},
+		{"R2", servingNoReadV1},
+		{"R3", servingInputOrderV1},
+		{"R4", servingEscapeV1},
+		{"R5", servingEarlierResultV1},
+		{"H1", servingUnwindV1},
+		{"H2", servingReplacementV1},
+		{"H3", servingOwnedCopyFailureV1},
 	} {
 		t.Run(test.name, test.run)
 	}
@@ -516,7 +524,7 @@ func servingModeV1(mode string, app error) error {
 // servingSpanUnwindV1 pauses at the public effect boundary without retaining a lock.
 func servingSpanUnwindV1(t *testing.T, mode string) {
 	s, o, reservations := servingSetupV1(t)
-	var app error = errors.New("outer effect result")
+	app := errors.New("outer effect result")
 	if mode == "typed nil" {
 		var typed *nilPointerError
 		app = typed
@@ -568,7 +576,8 @@ func servingWantUnwindV1(t *testing.T, mode string, result error, panicked any, 
 			t.Fatal("callback error identity changed")
 		}
 	case "panic":
-		if returned || panicked != app {
+		recovered, ok := panicked.(error)
+		if returned || !ok || !sameError(recovered, app) {
 			t.Fatal("callback panic identity/continuation changed")
 		}
 	case "goexit":
@@ -789,12 +798,12 @@ func servingAdmissionV1(t *testing.T) {
 	cancel()
 	mustEnvironment(t, reservations.WithOperation(LaneOperation, func(a *OperationAccount) error {
 		_, err := foreign.WithViewV1(ctx, s, a, func(*Reader, *ServingEpochV1) error {
-			t.Fatal("cancelled foreign callback ran")
+			t.Fatal("canceled foreign callback ran")
 			return nil
 		})
 		servingWantInputV1(t, err, "view")
 		servingWantInputV1(t, foreign.WithQuiescenceV1(ctx, s, func() error {
-			t.Fatal("cancelled foreign span ran")
+			t.Fatal("canceled foreign span ran")
 			return nil
 		}), "update")
 		return nil
@@ -854,21 +863,28 @@ func servingInputOrderV1(t *testing.T) {
 	}
 	mustEnvironment(t, reservations.WithOperation(LaneOperation, func(a *OperationAccount) error {
 		for _, row := range []struct {
-			owner *ServingViewOwnerV1
-			store *Store
-			ctx   context.Context
-			use   func(*Reader, *ServingEpochV1) error
+			owner      *ServingViewOwnerV1
+			store      *Store
+			nilContext bool
+			use        func(*Reader, *ServingEpochV1) error
 		}{
-			{nil, nil, nil, nil}, {&ServingViewOwnerV1{}, s, ctx, callback},
-			{o, nil, ctx, callback}, {o, s, nil, callback}, {o, s, ctx, nil},
+			{nil, nil, true, nil},
+			{&ServingViewOwnerV1{}, s, false, callback},
+			{o, nil, false, callback},
+			{o, s, true, callback},
+			{o, s, false, nil},
 		} {
-			out, err := row.owner.WithViewV1(row.ctx, row.store, nil, row.use)
+			rowCtx := ctx
+			if row.nilContext {
+				rowCtx = nil
+			}
+			out, err := row.owner.WithViewV1(rowCtx, row.store, nil, row.use)
 			servingWantInputV1(t, err, "view")
 			servingWantOutcomeV1(t, out, 0, false)
 		}
 		out, err := o.WithViewV1(ctx, s, a, callback)
 		if !sameError(err, context.Canceled) {
-			t.Fatal("cancelled context result changed")
+			t.Fatal("canceled context result changed")
 		}
 		servingWantOutcomeV1(t, out, 0, false)
 		return nil
@@ -890,7 +906,7 @@ func servingInputOrderV1(t *testing.T) {
 	servingWantOutcomeV1(t, out, 1, false)
 }
 
-// servingBadAccountsV1 refuses every invalid account before already-cancelled context.
+// servingBadAccountsV1 refuses every invalid account before already-canceled context.
 func servingBadAccountsV1(t *testing.T, o *ServingViewOwnerV1, s *Store, ctx context.Context, callback func(*Reader, *ServingEpochV1) error) {
 	t.Helper()
 	reservations := reservationOwner(t, 805306368)
@@ -920,18 +936,25 @@ func servingSpanInputsV1(t *testing.T, o *ServingViewOwnerV1, s *Store, ctx cont
 		return nil
 	}
 	for _, row := range []struct {
-		owner *ServingViewOwnerV1
-		store *Store
-		ctx   context.Context
-		use   func() error
+		owner      *ServingViewOwnerV1
+		store      *Store
+		nilContext bool
+		use        func() error
 	}{
-		{nil, nil, nil, nil}, {&ServingViewOwnerV1{}, s, ctx, use},
-		{o, nil, ctx, use}, {o, s, nil, use}, {o, s, ctx, nil},
+		{nil, nil, true, nil},
+		{&ServingViewOwnerV1{}, s, false, use},
+		{o, nil, false, use},
+		{o, s, true, use},
+		{o, s, false, nil},
 	} {
-		servingWantInputV1(t, row.owner.WithQuiescenceV1(row.ctx, row.store, row.use), "update")
+		rowCtx := ctx
+		if row.nilContext {
+			rowCtx = nil
+		}
+		servingWantInputV1(t, row.owner.WithQuiescenceV1(rowCtx, row.store, row.use), "update")
 	}
 	if err := o.WithQuiescenceV1(ctx, s, use); !sameError(err, context.Canceled) || o.span != nil || o.priority != nil {
-		t.Fatal("cancelled no-effect span changed context or retained mark")
+		t.Fatal("canceled no-effect span changed context or retained mark")
 	}
 }
 
@@ -969,7 +992,7 @@ func servingEarlierResultV1(t *testing.T) {
 		out, err := o.WithViewV1(ctx, s, a, func(r *Reader, e *ServingEpochV1) error {
 			servingNativeBusyV1(t, "update", s, a)
 			if ctx.Err() != nil {
-				t.Fatal("owner cancelled caller context")
+				t.Fatal("owner canceled caller context")
 			}
 			cancel()
 			if !sameError(e.CheckV1(), context.Canceled) || !r.usable() {
