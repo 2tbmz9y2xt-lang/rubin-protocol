@@ -4069,6 +4069,595 @@ func TestTreeHeaderSlotEntryV1(t *testing.T) {
 	})
 }
 
+// tbSceneV1 owns OLD {20,90}, selected NEW {30,90} and their independent nodes.
+// The unchanged 90 child is deliberately unread by the pure fold.
+type tbSceneV1 struct {
+	s             *Store
+	path          string
+	o             *OperationReservationOwner
+	op            TreeOperationV1
+	source        *tsfProvider
+	old, next     map[string][]byte
+	kept, created []byte
+}
+
+func tbNewV1(t *testing.T) *tbSceneV1 {
+	t.Helper()
+	s, path, owner := tsNew(t)
+	p := &tsfProvider{block: TreeBlockV1{TxCount: 2, EventCount: 2}, events: []TreeEventV1{tsSpend(0x20, 0, 1, 0), tsCreate(0x30, 0, 1, 148, 11)}}
+	op := tbOperationV1(t, p)
+	tsCover(&op, p.block)
+	treeNativeSeed(t, s, 3, op.Pair.Mutations[1].Key, op.Pair.Mutations[1].Literal[:148])
+	a, b := tdUTXOKey(1, tdTxid(0x20), 0), tdUTXOKey(1, tdTxid(0x90), 0)
+	va, vb := tdFormed(tdFrame(7, 0, nil), 4, 0), tdFormed(tdFrame(8, 0, nil), 4, 0)
+	c := tdUTXOKey(1, tdTxid(0x30), 0)
+	vc := tdFormed(op.Pair.Mutations[1].Literal[148:], 5, 0)
+	old, next := map[string][]byte{}, map[string][]byte{}
+	_ = testTreeBuild(1, []testTreeEntry{tcEntry(a, va), tcEntry(b, vb)}, old)
+	_ = testTreeBuild(1, []testTreeEntry{tcEntry(c, vc), tcEntry(b, vb)}, next)
+	for name, value := range old {
+		treeNativeSeed(t, s, 8, testTreeRowKey(name), value)
+	}
+	treeNativeSeed(t, s, 1, a, va)
+	treeNativeSeed(t, s, 1, b, vb)
+	treeNativeSeed(t, s, 0, tsCounterKey(1), tsCounterLiteral(112, 2))
+	treeNativeSeed(t, s, 0, tsRootKey(1), tcBinding(t, 1, tcEndpoint(4, tdTxid(0xa0)), tcEntry(a, va), tcEntry(b, vb)))
+	return &tbSceneV1{
+		s: s, path: path, o: owner, op: op, source: p, old: old, next: next,
+		kept: testTreeNodeKey(1, 288, tcEntry(b, vb).k), created: testTreeNodeKey(1, 288, tcEntry(c, vc).k),
+	}
+}
+
+func (f *tbSceneV1) run(t *testing.T) tsResult {
+	t.Helper()
+	return tsRun(t, f.s, f.o, TreeOperation, f.op)
+}
+
+func (f *tbSceneV1) durable(t *testing.T, next bool) {
+	t.Helper()
+	f.s = tsReopen(t, f.s, f.path)
+	rows := f.old
+	if next {
+		rows = f.next
+	}
+	for _, domain := range []map[string][]byte{f.old, f.next} {
+		for name := range domain {
+			tsRead(t, f.s, TreeSchemaV1DBIs()[8], testTreeRowKey(name), rows[name])
+		}
+	}
+	var absent []byte
+	newValue := absent
+	oldValue := tdFormed(tdFrame(7, 0, nil), 4, 0)
+	if next {
+		newValue, oldValue = tdFormed(f.op.Pair.Mutations[1].Literal[148:], 5, 0), nil
+	}
+	tsRead(t, f.s, schemaDBIs[1], tdUTXOKey(1, tdTxid(0x20), 0), oldValue)
+	tsRead(t, f.s, schemaDBIs[1], tdUTXOKey(1, tdTxid(0x30), 0), newValue)
+}
+
+// TestTreeBoundedPreflightV1 separates the newly complete checker domains
+// from earlier Source and pure-fold ownership, with exact consumed lifecycle.
+func TestTreeBoundedPreflightV1(t *testing.T) {
+	for _, domain := range []string{"NEW-only", "kept"} {
+		for _, earlier := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/source%v", domain, earlier), func(t *testing.T) {
+				f := tbNewV1(t)
+				key := f.created
+				if domain == "kept" {
+					key = f.kept
+				}
+				marker := errors.New("source precedes selected checker")
+				if earlier {
+					f.source.before = func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { return marker }
+				}
+				var result tsResult
+				var counts PairReadObservation
+				drift, err := FixtureWriteSnapshotDrift(f.s, 8, key, func() {
+					var observe error
+					counts, observe = FixturePairReadObservation(f.s, nil, func() { result = f.run(t) })
+					mustEnvironment(t, observe)
+				})
+				mustEnvironment(t, err)
+				index := -1
+				if earlier {
+					index = 0
+					if any(result.err) != any(marker) {
+						t.Fatal("selected checker replaced Source", result.err)
+					}
+				} else {
+					ttMismatch(t, result.err, "OLD/write snapshot mismatch")
+				}
+				result.tuple(t, 1, 1, index)
+				if drift != 1 || counts.Writes != 0 || f.source.calls != [3]int{0, 1, 0} || reservationLive(f.o) != 0 {
+					t.Fatal("preflight order/no-write/source/account", drift, counts, f.source.calls)
+				}
+				tsConsumed(t, f.s, f.o, 1, result.err)
+			})
+		}
+	}
+	t.Run("native-checker", tbCheckerNativeV1)
+	t.Run("earlier-original-work", tbEarlierV1)
+}
+
+func tbCheckerNativeV1(t *testing.T) {
+	for _, domain := range []string{"NEW-only", "kept-reference"} {
+		f := tbNewV1(t)
+		key := f.created
+		if domain == "kept-reference" {
+			key = f.kept
+		}
+		var result tsResult
+		evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageGetEIO, 8, key, func() { result = f.run(t) })
+		mustEnvironment(t, err)
+		result.tuple(t, 1, 1, -1)
+		treeNativeError(t, result.err, "update", EngineIO, 5, "error 5", nil)
+		if evidence.Faults != 1 || evidence.Commits != 0 || evidence.Deletes != 0 || f.source.calls != [3]int{0, 1, 0} {
+			t.Fatal("checker native failure substituted or reordered", domain, result, evidence)
+		}
+		tsConsumed(t, f.s, f.o, 1, result.err)
+	}
+}
+
+func tbEarlierV1(t *testing.T) {
+	for _, stage := range []string{"Source", "finish", "resolve", "pure-fold"} {
+		f := tbNewV1(t)
+		marker := errors.New("original Source primary")
+		switch stage {
+		case "Source":
+			f.source.before = func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { return marker }
+		case "finish":
+			f.source.custom = func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error { return sink.BeginV1(f.source.block) }
+		case "resolve":
+			f.source.events[0].Outpoint.Txid = tdTxid(0x21)
+		case "pure-fold":
+			treeNativeSeed(t, f.s, 0, tsRootKey(1), []byte{0xff})
+		}
+		var result tsResult
+		evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageGetEIO, 8, f.created, func() { result = f.run(t) })
+		if err == nil || err.Error() != "selected damage fixture site was not reached exactly as armed" || evidence.Faults != 0 || evidence.Deletes != 0 || evidence.Commits != 0 {
+			t.Fatal("new checker preceded original work", stage, evidence, err)
+		}
+		result.tuple(t, 1, 1, 0)
+		if stage == "Source" {
+			if any(result.err) != any(marker) {
+				t.Fatal("original Source identity", result.err)
+			}
+		} else if stage == "finish" {
+			treeNativeError(t, result.err, "update", EngineInvalidInput, 22, "invalid tree delta", nil)
+		} else {
+			cause := error(nil)
+			if stage == "pure-fold" {
+				cause = errSchema
+			}
+			treeNativeError(t, result.err, "update", EngineIntegrity, -30796, "invalid tree native representation", cause)
+		}
+		tsConsumed(t, f.s, f.o, 1, result.err)
+	}
+}
+
+// TestTreeBoundedWriterV1 observes Pair before root and one native write per
+// streamed target. Faults pin reached-stage and fused equality independently.
+func TestTreeBoundedWriterV1(t *testing.T) {
+	for _, domain := range []string{"success", "UTXO", "counter", "node", "Pair", "root"} {
+		t.Run(domain, func(t *testing.T) {
+			f := tbNewV1(t)
+			rank, key := uint8(0), tsRootKey(1)
+			switch domain {
+			case "UTXO":
+				rank, key = 1, tdUTXOKey(1, tdTxid(0x30), 0)
+			case "counter":
+				key = tsCounterKey(1)
+			case "node":
+				rank, key = 8, f.created
+			case "Pair":
+				rank, key = 4, f.op.Pair.Mutations[1].Key
+			}
+			var result tsResult
+			scenario := SelectedDamagePutEIO
+			if domain == "success" {
+				scenario = SelectedDamageProbeOnly
+			}
+			var counts PairReadObservation
+			evidence, err := FixtureSelectedDamage(f.s, f.o, scenario, rank, key, func() {
+				var observe error
+				counts, observe = FixturePairReadObservation(f.s, nil, func() { result = f.run(t) })
+				mustEnvironment(t, observe)
+			})
+			mustEnvironment(t, err)
+			if domain == "success" {
+				result.tuple(t, 2, 3, -1)
+				mustEnvironment(t, result.err)
+				if evidence.Commits != 1 || evidence.Deletes != 5 || counts.Writes != 13 || f.source.calls != [3]int{0, 1, 0} {
+					t.Fatal("writer success/unique targets", evidence, counts)
+				}
+				f.durable(t, true)
+				return
+			}
+			result.tuple(t, 1, 2, -1)
+			treeNativeError(t, result.err, "update", EngineIO, 5, "error 5", nil)
+			if evidence.Faults != 1 || evidence.Commits != 0 {
+				t.Fatal("writer fault", evidence)
+			}
+			// One old UTXO, counter, OLD-only leaf and common branch delete.
+			// Pair inserts add no deletes; final root adds exactly one.
+			if domain == "Pair" && evidence.Deletes != 4 || domain == "root" && evidence.Deletes != 5 {
+				t.Fatal("Pair/root order or target rewritten", domain, evidence)
+			}
+			tsConsumed(t, f.s, f.o, 1, result.err)
+			f.durable(t, false)
+			tsFollowing(t, f.s, f.o)
+		})
+	}
+}
+
+// TestTreeBoundedReadbackV1 exercises complete native OLD/NEW/UNKNOWN results
+// plus source error/panic/Goexit after crossing. The native observer in
+// tbReadbackNewFalseV1 checks the account throughout regenerated comparisons.
+func TestTreeBoundedReadbackV1(t *testing.T) {
+	for _, row := range []struct {
+		name     string
+		scenario SelectedDamageScenario
+		truth    CommitTruth
+	}{
+		{"OLD", SelectedDamageCommitOld, 1},
+		{"NEW", SelectedDamageCommitNew, 2},
+		{"unreadable", SelectedDamageCommitUnreadable, 3},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f := tbNewV1(t)
+			var result tsResult
+			var counts PairReadObservation
+			var before, after uint64
+			f.source.before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+				if pos == 2 {
+					before = reservationLive(f.o)
+				}
+				return nil
+			}
+			f.source.after = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+				if pos == 2 {
+					after = reservationLive(f.o)
+				}
+				return nil
+			}
+			evidence, err := FixtureSelectedDamage(f.s, f.o, row.scenario, 0, tsRootKey(1), func() {
+				var observe error
+				counts, observe = FixturePairReadObservation(f.s, nil, func() { result = f.run(t) })
+				mustEnvironment(t, observe)
+			})
+			mustEnvironment(t, err)
+			result.tuple(t, row.truth, 3, -1)
+			ce, ok := result.err.(*CommitError)
+			if !ok || ce.Truth != row.truth || evidence.Commits != 1 || reservationLive(f.o) != 0 {
+				t.Fatal("bounded truth", result, evidence)
+			}
+			if row.name == "unreadable" {
+				if ce.ReadbackCause == nil {
+					t.Fatal("unreadable normalized to OLD")
+				}
+			} else if ce.ReadbackCause != nil || f.source.calls != [3]int{0, 1, 1} || before != 420583 || before != after {
+				t.Fatal("strict complete Source/stable account", ce.ReadbackCause, f.source.calls, before, after)
+			}
+			if row.name == "NEW" && (evidence.ReadGets == 0 || counts.Comparisons == 0) {
+				t.Fatal("strict comparisons missing", counts)
+			}
+			tsConsumed(t, f.s, f.o, row.truth, result.err)
+			if row.truth != 3 {
+				f.durable(t, row.truth == 2)
+			}
+		})
+	}
+	t.Run("complete-after-false", tbReadbackCompleteV1)
+	t.Run("NEW-false-complete-domain", tbReadbackNewFalseV1)
+	t.Run("fused-final-and-reference", tbFusedV1)
+	t.Run("source-results", tbReadbackSourceV1)
+	t.Run("retained-cleanup", tbReadbackCleanupV1)
+	t.Run("nil-primary-writer-unwind", tbWriterUnwindV1)
+}
+
+func tbReadbackCleanupV1(t *testing.T) {
+	for _, mode := range []uint32{15, 16, 19, 23} {
+		f := tbNewV1(t)
+		var result tsResult
+		_, err := fixtureLargeFault(f.s, mode, 0, tsRootKey(1), func() { result = f.run(t) })
+		mustEnvironment(t, err)
+		truth, state := CommitTruthNew, storeCLOSED
+		if mode == 19 {
+			truth = CommitTruthOld
+		}
+		if mode == 23 {
+			truth = CommitTruthUnknown
+		}
+		if mode == 15 || mode == 19 {
+			state = storePOISONEDTHREAD
+		}
+		result.tuple(t, truth, 3, -1)
+		ce, ok := result.err.(*CommitError)
+		if !ok || ce.Truth != truth || ce.ReadbackCause == nil || f.s.state != state || any(f.s.terminal) != any(result.err) || f.s.terminalTruth != truth || reservationLive(f.o) != 0 {
+			t.Fatal("selected cleanup disposition", mode, result, f.s.state)
+		}
+		treeNativeError(t, ce.Cause, "update", EngineCapacity, 28, "error 28", nil)
+		if mode == 15 || mode == 19 {
+			engine := requireEnvironmentError(t, ce.ReadbackCause, "LocalInvariant", "abort", -30416, "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread")
+			if !engine.ReopenRequired || engine.Cause != nil {
+				t.Fatal("retained cleanup identity", engine)
+			}
+		} else {
+			operation := operationAbort
+			if mode == 23 {
+				operation = operationUpdate
+			}
+			treeNativeError(t, ce.ReadbackCause, operation, EngineIO, 5, "error 5", nil)
+		}
+		calls := 0
+		accountRun(t, "selected cleanup next operation", f.o, TreeOperation, func(a *OperationAccount) {
+			next := tsInvoke(f.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return f.op, nil })
+			next.tuple(t, truth, 1, -1)
+			if calls != 0 || any(next.err) != any(result.err) {
+				t.Fatal("retained cleanup next callback")
+			}
+		})
+		if mode == 15 || mode == 19 {
+			mustEnvironment(t, fixtureLargeRelease(f.s))
+		}
+	}
+}
+
+func tbWriterUnwindV1(t *testing.T) {
+	for _, mode := range []string{"panic", "goexit"} {
+		f := tbNewV1(t)
+		value := new(int)
+		f.source.before = func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error {
+			if mode == "panic" {
+				panic(value)
+			}
+			runtime.Goexit()
+			return nil
+		}
+		var recovered any
+		returned := false
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer func() { recovered = recover() }()
+			_ = f.run(t)
+			returned = true
+		}()
+		eiAwait(t, done)
+		if returned || mode == "panic" && recovered != value || mode == "goexit" && recovered != nil || f.s.state != storeOPEN || f.s.terminal != nil || reservationLive(f.o) != 0 {
+			t.Fatal("nil-primary clean abort must stay OPEN", mode, returned, recovered, f.s.state)
+		}
+		tsFollowing(t, f.s, f.o)
+	}
+}
+
+func tbReadbackCompleteV1(t *testing.T) {
+	for _, domain := range []string{"root", "Pair-owner"} {
+		f := tbNewV1(t)
+		rank, key := uint8(0), tsRootKey(1)
+		if domain == "Pair-owner" {
+			rank, key = 7, f.op.Pair.Mutations[2].Key
+		}
+		var result tsResult
+		evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitUnreadable, rank, key, func() { result = f.run(t) })
+		mustEnvironment(t, err)
+		result.tuple(t, 3, 3, -1)
+		ce, ok := result.err.(*CommitError)
+		if !ok || ce.ReadbackCause == nil || evidence.Faults != 2 || evidence.ReadGets == 0 || f.source.calls != [3]int{0, 1, 1} {
+			t.Fatal("late domain skipped after false OLD predicate", domain, result, evidence, f.source.calls)
+		}
+		treeNativeError(t, ce.ReadbackCause, "update", EngineIO, 5, "error 5", nil)
+		tsConsumed(t, f.s, f.o, 3, result.err)
+	}
+}
+
+// tbReadbackNewFalseV1 drifts only the physical committed image. The complete
+// immutable Source remains unchanged. Strict Gets=41: resolve3, apply9,
+// walker original reads3 plus target/reference comparisons14, Pair12.
+// Strict hold is Q(159+584) + Br(288440+104*2) + H(131192) = 420583.
+func tbReadbackNewFalseV1(t *testing.T) {
+	for _, domain := range []string{"early-UTXO", "kept-reference", "Pair-owner"} {
+		f := tbNewV1(t)
+		rank, key := uint8(1), tdUTXOKey(1, tdTxid(0x30), 0)
+		switch domain {
+		case "kept-reference":
+			rank, key = 8, f.kept
+		case "Pair-owner":
+			rank, key = 7, f.op.Pair.Mutations[2].Key
+		}
+		inReadback, strictGets := false, uint64(0)
+		var sealed uint64
+		f.source.before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+			inReadback = pos == 2
+			if inReadback {
+				sealed = reservationLive(f.o)
+				if sealed != 420583 {
+					t.Error("strict account before Source", sealed, "want 420583")
+				}
+			}
+			return nil
+		}
+		var result tsResult
+		var evidence fixtureLargeEvidence
+		_, err := FixturePairReadObservation(f.s, func(site uint32) {
+			if inReadback && site == 1 {
+				strictGets++
+			}
+			if inReadback && (site == 1 || site == 2) && reservationLive(f.o) != sealed {
+				t.Error("strict account grew after Source at native comparison", site, reservationLive(f.o), sealed)
+			}
+		}, func() {
+			var fault error
+			evidence, fault = fixtureLargeFault(f.s, 3, rank, key, func() { result = f.run(t) })
+			mustEnvironment(t, fault)
+		})
+		mustEnvironment(t, err)
+		result.tuple(t, 3, 3, -1)
+		ce, ok := result.err.(*CommitError)
+		if !ok || ce.ReadbackCause != nil || evidence.drift != 1 || evidence.commits != 1 || strictGets != 41 || f.source.calls != [3]int{0, 1, 1} {
+			t.Fatal("physical false NEW skipped complete domain", domain, result, evidence, strictGets, f.source.calls)
+		}
+		tsConsumed(t, f.s, f.o, 3, result.err)
+	}
+}
+
+func tbFusedV1(t *testing.T) {
+	for _, domain := range []string{"target", "kept-reference"} {
+		f := tbNewV1(t)
+		rank, key := uint8(1), tdUTXOKey(1, tdTxid(0x30), 0)
+		if domain == "kept-reference" {
+			rank, key = 8, f.kept
+		}
+		var result tsResult
+		evidence, err := fixtureLargeFault(f.s, 13, rank, key, func() { result = f.run(t) })
+		mustEnvironment(t, err)
+		result.tuple(t, 1, 2, -1)
+		ttMismatch(t, result.err, "final update image mismatch")
+		if evidence.drift != 1 || evidence.commits != 0 || reservationLive(f.o) != 0 {
+			t.Fatal("fused/reference final", evidence)
+		}
+		tsConsumed(t, f.s, f.o, 1, result.err)
+		f.durable(t, false)
+	}
+}
+
+func tbReadbackSourceV1(t *testing.T) {
+	for _, mode := range []string{"direct", "wrapped", "panic", "goexit"} {
+		f := tbNewV1(t)
+		marker, value := errors.New("bounded readback source"), new(int)
+		primary := error(marker)
+		if mode == "wrapped" {
+			primary = fmt.Errorf("readback wrapper: %w", marker)
+		}
+		f.source.before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+			if pos != 2 {
+				return nil
+			}
+			switch mode {
+			case "panic":
+				panic(value)
+			case "goexit":
+				runtime.Goexit()
+			}
+			return primary
+		}
+		var result tsResult
+		var recovered any
+		returned := false
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer func() { recovered = recover() }()
+			_, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() { result = f.run(t) })
+			if err != nil {
+				t.Error(err)
+			}
+			returned = true
+		}()
+		eiAwait(t, done)
+		if f.source.calls != [3]int{0, 1, 1} || reservationLive(f.o) != 0 {
+			t.Fatal("readback source release", mode, f.source.calls)
+		}
+		if mode == "panic" || mode == "goexit" {
+			if returned || mode == "panic" && recovered != value || mode == "goexit" && recovered != nil {
+				t.Fatal("source unwind changed", mode, recovered)
+			}
+			if f.s.state != storeCLOSED || f.s.terminalTruth != 3 {
+				t.Fatal("readback unwind lifecycle", f.s.state, f.s.terminalTruth)
+			}
+			continue
+		}
+		result.tuple(t, 3, 3, -1)
+		ce, ok := result.err.(*CommitError)
+		if !ok || any(ce.ReadbackCause) != any(primary) || !returned || recovered != nil {
+			t.Fatal("readback source cause identity", result)
+		}
+		tsConsumed(t, f.s, f.o, 3, result.err)
+	}
+}
+
+// TestTreeBoundedFallbackV1 keeps legal adjacent ownership profiles executable.
+func TestTreeBoundedFallbackV1(t *testing.T) {
+	for _, shape := range []string{"connect", "no-index-pair", "Proof", "slot", "consulted", "stored-body"} {
+		f := tbNewV1(t)
+		switch shape {
+		case "connect":
+			f.op.Primitives[0].Kind, f.op.Primitives[0].Undo = TreeKindConnectV1, UndoWriteOrReuseV1
+		case "no-index-pair":
+			f.op.Pair.Mutations = f.op.Pair.Mutations[1:2]
+		case "Proof":
+			f.op.Proof = func(*TreeDeltaReportV1) error { return nil }
+		case "slot":
+			var header [148]byte
+			copy(header[:], f.op.Pair.Mutations[1].Literal[:148])
+			f.op.Proof = func(*TreeDeltaReportV1) error { return nil }
+			f.op.HeaderSlot = &TreeHeaderSlotV1{Hash: f.op.Primitives[0].Block, Header: header}
+		case "consulted":
+			f.op.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[0], Key: []byte{2}}}
+		case "stored-body":
+			treeNativeSeed(t, f.s, 4, f.op.Pair.Mutations[1].Key, f.op.Pair.Mutations[1].Literal)
+			f.op.Pair.Mutations = append(f.op.Pair.Mutations[:1], f.op.Pair.Mutations[2])
+			f.op.Primitives[0].Coverage.BodyKind, f.op.Primitives[0].Coverage.CurrentBody = 2, nil
+		}
+		plan := treeOwnPlanV1(f.op)
+		if treeBoundedPlanV1(&plan) {
+			t.Fatal("legal fallback selected", shape)
+		}
+		result := f.run(t)
+		result.tuple(t, 2, 3, -1)
+		mustEnvironment(t, result.err)
+		if f.source.calls != [3]int{0, 1, 0} || reservationLive(f.o) != 0 {
+			t.Fatal("fallback Source/account", shape)
+		}
+		tsFollowing(t, f.s, f.o)
+	}
+}
+
+// TestTreeBoundedIdentityV1 distinguishes unchanged present UTXOs from
+// created-then-spent absent groups through strict NEW with immutable Sources.
+func TestTreeBoundedIdentityV1(t *testing.T) {
+	for _, shape := range []string{"unchanged", "cancellation"} {
+		f := tbNewV1(t)
+		a, b := tdUTXOKey(1, tdTxid(0x20), 0), tdUTXOKey(1, tdTxid(0x90), 0)
+		va, vb := tdFormed(tdFrame(7, 0, nil), 4, 0), tdFormed(tdFrame(8, 0, nil), 4, 0)
+		if shape == "unchanged" {
+			va = tdFormed(tdFrame(1, 0, nil), 5, 0)
+			f.source.events = []TreeEventV1{tsSpend(0x20, 0, 1, 0), tsCreate(0x20, 0, 1, 148, 11)}
+			f.old = map[string][]byte{}
+			_ = testTreeBuild(1, []testTreeEntry{tcEntry(a, va), tcEntry(b, vb)}, f.old)
+			for name, value := range f.old {
+				treeNativeSeed(t, f.s, 8, testTreeRowKey(name), value)
+			}
+			treeNativeSeed(t, f.s, 1, a, va)
+			treeNativeSeed(t, f.s, 0, tsRootKey(1), tcBinding(t, 1, tcEndpoint(4, tdTxid(0xa0)), tcEntry(a, va), tcEntry(b, vb)))
+		} else {
+			f.source.events = []TreeEventV1{tsCreate(0x30, 0, 0, 148, 11), tsSpend(0x30, 0, 1, 0)}
+		}
+		var result tsResult
+		var counts PairReadObservation
+		evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() {
+			var observe error
+			counts, observe = FixturePairReadObservation(f.s, nil, func() { result = f.run(t) })
+			mustEnvironment(t, observe)
+		})
+		mustEnvironment(t, err)
+		result.tuple(t, 2, 3, -1)
+		ce, ok := result.err.(*CommitError)
+		if !ok || ce.ReadbackCause != nil || evidence.Deletes != 2 || counts.Writes != 7 || f.source.calls != [3]int{0, 1, 1} || reservationLive(f.o) != 0 {
+			t.Fatal("unchanged/cancelled identity emitted or dropped", shape, result, evidence, counts, f.source.calls)
+		}
+		tsConsumed(t, f.s, f.o, 2, result.err)
+		f.s = tsReopen(t, f.s, f.path)
+		for name, value := range f.old {
+			tsRead(t, f.s, TreeSchemaV1DBIs()[8], testTreeRowKey(name), value)
+		}
+		tsRead(t, f.s, schemaDBIs[1], a, va)
+		tsRead(t, f.s, schemaDBIs[1], b, vb)
+		tsRead(t, f.s, schemaDBIs[1], tdUTXOKey(1, tdTxid(0x30), 0), nil)
+		tsRead(t, f.s, schemaDBIs[0], tsRootKey(1), tcBinding(t, 1, f.op.Primitives[0].Endpoint, tcEntry(a, va), tcEntry(b, vb)))
+	}
+}
+
 // RUB-1733 context window rows through the public entry under native fixture faults.
 
 func ctxTreeIndexKey(gen, h uint64) []byte {

@@ -241,8 +241,8 @@ func (d *treeDeltaV1) counterResultV1(residualBytes, residualCount uint64) error
 	if !treeCounterEnvelopeV1(total, count, 1<<59) || d.afterBytes >= 1<<60 || d.parentBytes > (1<<60)-1-d.afterBytes {
 		return updateNativeInvariant("derived logical state counters exceed bounds")
 	}
-	binary.BigEndian.PutUint64(d.counter[:], total)
-	binary.BigEndian.PutUint64(d.counter[8:], count)
+	binary.BigEndian.PutUint64(d.keys.counter[:], total)
+	binary.BigEndian.PutUint64(d.keys.counter[8:], count)
 	return nil
 }
 

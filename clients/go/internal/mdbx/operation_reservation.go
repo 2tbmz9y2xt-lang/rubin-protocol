@@ -226,6 +226,34 @@ func (a *OperationAccount) WithReservation(bytes uint64, callback func() error) 
 	return a.shared.origin.withReservation(a.shared, bytes, callback)
 }
 
+// WithPhaseReservationV1 admits initial bytes before callback and releases the
+// remaining charge when callback returns, panics or calls Goexit. The bound
+// release function reduces that hold to retained exactly once and returns the
+// same result on repeated, concurrent or escaped calls. A first release after
+// the hold closes refuses input; account closure alone permits an open hold to
+// release. Invalid account/callback precedes retained > initial, then ordinary
+// full admission; every refusal leaves counters unchanged and skips callback.
+func (a *OperationAccount) WithPhaseReservationV1(initial, retained uint64, callback func(release func() error) error) error {
+	if a == nil || a.shared == nil || callback == nil {
+		return errOperationReservationInput
+	}
+	if retained > initial {
+		return errOperationReservationInput
+	}
+	return a.withHold(func(h *operationHold) error {
+		if err := h.grow(initial); err != nil {
+			return err
+		}
+		var once sync.Once
+		var result error
+		release := func() error {
+			once.Do(func() { result = h.shrink(initial - retained) })
+			return result
+		}
+		return callback(release)
+	})
+}
+
 // openV1 reports whether a was opened and its WithOperation frame has not left.
 // It changes no charge or state.
 func (a *OperationAccount) openV1() bool {

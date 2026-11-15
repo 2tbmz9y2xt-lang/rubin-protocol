@@ -597,7 +597,7 @@ func TestOperationReservationOwnerSurface(t *testing.T) {
 	if !slices.Equal(own.imports, []string{`"errors"`, `"sync"`}) {
 		t.Fatalf("surface imports: %v", own.imports)
 	}
-	if !slices.Equal(own.exports, []string{"IsOperationReservationCapacity", "LaneMaxBytes", "LaneOperation", "MaxOperationDataBytes", "MinReservationLimit", "NewOperationReservationOwner", "OperationAccount", "OperationKind", "OperationReservationOwner", "TreeLaneMaxBytes", "TreeOperation", "WithOperation", "WithReservation", "WithReservation"}) {
+	if !slices.Equal(own.exports, []string{"IsOperationReservationCapacity", "LaneMaxBytes", "LaneOperation", "MaxOperationDataBytes", "MinReservationLimit", "NewOperationReservationOwner", "OperationAccount", "OperationKind", "OperationReservationOwner", "TreeLaneMaxBytes", "TreeOperation", "WithOperation", "WithPhaseReservationV1", "WithReservation", "WithReservation"}) {
 		t.Fatalf("surface exports: %v", own.exports)
 	}
 	if len(own.fields) != 0 {
@@ -1578,4 +1578,221 @@ func TestOperationHoldOutlived(t *testing.T) {
 	close(r2)
 	holdOK(t, "H6 later second", <-d2)
 	accountMustHold(t, "H6 final", owner, a, 0)
+}
+
+func TestOperationPhaseReservationV1(t *testing.T) {
+	t.Run("admission", phaseAdmissionV1)
+	t.Run("once-and-binding", phaseOnceV1)
+	t.Run("aggregate", phaseAggregateV1)
+	t.Run("callback-identities", phaseErrorsV1)
+	t.Run("closed-account-open-hold", phaseOutlivedV1)
+	t.Run("exits", phaseExitsV1)
+}
+
+// phaseAdmissionV1 distinguishes input order, full admission and both ceilings.
+func phaseAdmissionV1(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	var closed *OperationAccount
+	accountRun(t, "phase closed", owner, TreeOperation, func(a *OperationAccount) { closed = a })
+	for _, a := range []*OperationAccount{nil, {}, closed} {
+		calls := 0
+		err := a.WithPhaseReservationV1(1, 0, func(func() error) error { calls++; return nil })
+		if any(err) != any(errOperationReservationInput) || calls != 0 || reservationLive(owner) != 0 {
+			t.Fatal("phase invalid account", err, calls)
+		}
+	}
+	for _, kind := range []OperationKind{LaneOperation, TreeOperation} {
+		accountRun(t, "phase admission", owner, kind, func(a *OperationAccount) {
+			if any(a.WithPhaseReservationV1(0, 0, nil)) != any(errOperationReservationInput) {
+				t.Fatal("nil callback")
+			}
+			calls := 0
+			callback := func(func() error) error { calls++; return nil }
+			if any(a.WithPhaseReservationV1(0, 1, callback)) != any(errOperationReservationInput) || calls != 0 {
+				t.Fatal("retained exceeds initial")
+			}
+			ceiling, _ := kind.ceiling()
+			holdOK(t, "phase admission competing hold", a.WithReservation(1, func() error {
+				if any(a.WithPhaseReservationV1(ceiling, 0, callback)) != any(errOperationReservationCapacity) || calls != 0 {
+					t.Fatal("full admission bypassed by zero retained")
+				}
+				accountMustHold(t, "phase refused unchanged", owner, a, 1)
+				return nil
+			}))
+			for _, initial := range []uint64{0, 1, ceiling} {
+				for _, retained := range []uint64{0, initial} {
+					holdOK(t, "phase admitted", a.WithPhaseReservationV1(initial, retained, func(release func() error) error {
+						accountMustHold(t, "phase initial", owner, a, initial)
+						holdOK(t, "phase release", release())
+						accountMustHold(t, "phase retained", owner, a, retained)
+						return nil
+					}))
+					accountMustHold(t, "phase final", owner, a, 0)
+				}
+			}
+		})
+	}
+	for _, limit := range []uint64{0, 805306367} {
+		o := reservationOwner(t, limit)
+		accountRun(t, "phase floor", o, TreeOperation, func(a *OperationAccount) {
+			calls := 0
+			err := a.WithPhaseReservationV1(0, 0, func(func() error) error { calls++; return nil })
+			if any(err) != any(errOperationReservationCapacity) || calls != 0 || reservationLive(o) != 0 {
+				t.Fatal("phase floor", err, calls)
+			}
+		})
+	}
+}
+
+// phaseOnceV1 checks a live sibling and exact counters under concurrent calls.
+func phaseOnceV1(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	accountRun(t, "phase bound", owner, TreeOperation, func(a *OperationAccount) {
+		accountRun(t, "phase sibling", owner, TreeOperation, func(b *OperationAccount) {
+			holdOK(t, "phase sibling hold", b.WithReservation(7, func() error {
+				var escaped func() error
+				marker := errors.New("phase callback")
+				err := a.WithPhaseReservationV1(100, 70, func(release func() error) error {
+					escaped = release
+					if accountHeld(a) != 100 || accountHeld(b) != 7 || reservationLive(owner) != 107 {
+						t.Fatal("phase full/sibling")
+					}
+					var wg sync.WaitGroup
+					results := make(chan error, 32)
+					for range 32 {
+						wg.Go(func() { results <- release() })
+					}
+					wg.Wait()
+					if accountHeld(a) != 70 || accountHeld(b) != 7 || reservationLive(owner) != 77 {
+						t.Fatal("phase duplicate refund or foreign target")
+					}
+					for range 32 {
+						holdOK(t, "phase concurrent result", <-results)
+					}
+					return marker
+				})
+				if any(err) != any(marker) || escaped() != nil || accountHeld(a) != 0 || accountHeld(b) != 7 || reservationLive(owner) != 7 {
+					t.Fatal("phase exact error/escaped success/remainder", err)
+				}
+				holdOK(t, "phase escape without release", a.WithPhaseReservationV1(19, 4, func(release func() error) error { escaped = release; return nil }))
+				first := escaped()
+				if any(first) != any(errOperationReservationInput) || any(escaped()) != any(first) || accountHeld(b) != 7 || reservationLive(owner) != 7 {
+					t.Fatal("phase stable escaped refusal", first)
+				}
+				return nil
+			}))
+		})
+	})
+}
+
+// phaseAggregateV1 distinguishes the aggregate boundary from either ceiling.
+func phaseAggregateV1(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	charges := []uint64{154611183, 154611183, 154611183, 154611183, 154611183, 32250353}
+	reservationNested(t, "phase aggregate filler", owner, charges, func() {
+		accountRun(t, "phase aggregate", owner, TreeOperation, func(a *OperationAccount) {
+			calls := 0
+			if err := a.WithPhaseReservationV1(101, 0, func(func() error) error { calls++; return nil }); any(err) != any(errOperationReservationCapacity) || calls != 0 || reservationLive(owner) != 805306268 {
+				t.Fatal("phase aggregate one byte short", err, calls)
+			}
+			holdOK(t, "phase aggregate exact", a.WithPhaseReservationV1(100, 31, func(release func() error) error {
+				if reservationLive(owner) != 805306368 || accountHeld(a) != 100 {
+					t.Fatal("phase aggregate exact")
+				}
+				holdOK(t, "phase aggregate release", release())
+				if reservationLive(owner) != 805306299 || accountHeld(a) != 31 {
+					t.Fatal("phase aggregate retained")
+				}
+				return nil
+			}))
+			if reservationLive(owner) != 805306268 || accountHeld(a) != 0 {
+				t.Fatal("phase aggregate cleanup")
+			}
+		})
+	})
+	if reservationLive(owner) != 0 {
+		t.Fatal("phase foreign filler cleanup")
+	}
+}
+
+// phaseErrorsV1 preserves nil, direct, wrapped, caused and typed-nil values.
+func phaseErrorsV1(t *testing.T) {
+	marker := errors.New("phase identity")
+	var typed *struct{ error }
+	for _, want := range []error{nil, marker, fmt.Errorf("phase wrapper: %w", marker), &struct{ error }{marker}, typed} {
+		for _, reduced := range []bool{false, true} {
+			owner := reservationOwner(t, 805306368)
+			accountRun(t, "phase callback identity", owner, TreeOperation, func(a *OperationAccount) {
+				got := a.WithPhaseReservationV1(100, 31, func(release func() error) error {
+					if reduced {
+						if err := release(); err != nil {
+							return err
+						}
+					}
+					return want
+				})
+				if any(got) != any(want) || accountHeld(a) != 0 || reservationLive(owner) != 0 {
+					t.Fatal("phase callback identity/cleanup")
+				}
+				holdOK(t, "phase callback next reservation", a.WithReservation(1, func() error { return nil }))
+			})
+		}
+	}
+}
+
+// phaseOutlivedV1 joins the holder after its account closes, retaining cleanup.
+func phaseOutlivedV1(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	ready, finish := make(chan func() error), make(chan struct{})
+	done := make(chan error, 1)
+	var a *OperationAccount
+	var release func() error
+	accountRun(t, "phase outlived", owner, TreeOperation, func(account *OperationAccount) {
+		a = account
+		go func() {
+			done <- a.WithPhaseReservationV1(100, 23, func(release func() error) error {
+				ready <- release
+				<-finish
+				return nil
+			})
+		}()
+		release = <-ready
+	})
+	defer func() {
+		close(finish)
+		holdOK(t, "phase holder joined", <-done)
+		accountMustHold(t, "phase joined cleanup", owner, a, 0)
+	}()
+	if !a.shared.closed || accountHeld(a) != 100 {
+		t.Fatal("phase account did not close with live hold")
+	}
+	holdOK(t, "phase closed account release", release())
+	accountMustHold(t, "phase closed account retained", owner, a, 23)
+	holdOK(t, "phase closed account repeat", release())
+	accountMustHold(t, "phase duplicate closed account release", owner, a, 23)
+}
+
+// phaseExitsV1 pins the original panic/Goexit and exact remainder cleanup.
+func phaseExitsV1(t *testing.T) {
+	for _, reduce := range []bool{false, true} {
+		for _, exit := range accountExits(new(int)) {
+			owner := reservationOwner(t, 805306368)
+			var release func() error
+			o := operationExit(owner, TreeOperation, func(a *OperationAccount) {
+				_ = a.WithPhaseReservationV1(97, 29, func(r func() error) error {
+					release = r
+					if reduce {
+						holdOK(t, "phase exit release", release())
+					}
+					exit.exit()
+					return nil
+				})
+			})
+			operationMustExit(t, "phase "+exit.name, o, exit)
+			accountMustHold(t, "phase exit cleanup", owner, o.account, 0)
+			if reduce && release() != nil || !reduce && any(release()) != any(errOperationReservationInput) {
+				t.Fatal("phase exit escaped result")
+			}
+		}
+	}
 }
