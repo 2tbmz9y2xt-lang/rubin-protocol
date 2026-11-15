@@ -91,6 +91,7 @@ func TestTreePrimitiveReadNativeV1(t *testing.T) {
 	t.Run("owner-pre-key", primitiveReadOwnerPrekeyV1)
 	t.Run("owner-disposable-and-targeted", primitiveReadOwnerDisposableV1)
 	t.Run("amended-point", primitiveReadPointNativeV1)
+	t.Run("fused-error-before-capacity", primitiveReadFusedErrorV1)
 	t.Run("successor", primitiveReadSuccessorNativeV1)
 	t.Run("future-seal", primitiveReadFutureNativeV1)
 	t.Run("partial-growth", primitiveReadPartialNativeV1)
@@ -104,6 +105,38 @@ func TestTreePrimitiveReadNativeV1(t *testing.T) {
 		t.Run(fmt.Sprintf("point-metadata%d", mode), func(t *testing.T) {
 			primitiveReadPointMetadataV1(t, mode, false)
 		})
+	}
+}
+
+func primitiveReadFusedErrorV1(t *testing.T) {
+	s, _ := ttStore(t)
+	key := []byte{0x85}
+	ledger := &pairReadTestLedgerV1{err: errOperationReservationCapacity}
+	var outcome updateNativeOutcome
+	var counts PairReadObservation
+	evidence, err := fixtureLargeFault(s, 34, 1, key, func() {
+		var observeErr error
+		counts, observeErr = FixturePairReadObservation(s, nil, func() {
+			outcome = fixtureTreeCommitV1(s, fixtureTreeScriptV1{ledger: ledger, write: func(section *treeSectionV1) error {
+				err := section.writerV1().emitV1(ttTarget(ttUTXO, key, "x"))
+				if section.pairReadLimit != 0 || section.pBudgetV1() != 0 {
+					t.Error("fused native error must precede window growth and P copy")
+				}
+				return err
+			}})
+		})
+		mustEnvironment(t, observeErr)
+	})
+	mustEnvironment(t, err)
+	ttOutcome(t, outcome, 1, 2)
+	treeNativeError(t, outcome.primary, "update", "IO", 5, "error 5", nil)
+	mustEnvironment(t, outcome.secondary)
+	if outcome.commitAttempted || counts != (PairReadObservation{Gets: 2, Writes: 1}) || evidence != (fixtureLargeEvidence{gets: 1, aborts: 1}) {
+		t.Fatal("fused error preserves native prefix and clean abort", outcome, counts, ledger.held, evidence)
+	}
+	equal, err := FixtureRawRowEqual(s, 1, key, nil)
+	if err != nil || !equal {
+		t.Fatal("fused error abort preserves durable OLD", err)
 	}
 }
 
