@@ -566,7 +566,7 @@ func (t *treeSectionV1) headerSlotV1(plan *treePlanV1) error {
 		return err
 	}
 	if !image.present {
-		if err = t.requireReadV1(uint64(len(header))); err != nil {
+		if err := t.requireReadV1(uint64(len(header))); err != nil {
 			return err
 		}
 		plan.pair = treeSlotInsertV1(plan.pair, ownedMutation{dbi: schemaDBIs[3], key: key, after: AfterLiteral, literal: header})

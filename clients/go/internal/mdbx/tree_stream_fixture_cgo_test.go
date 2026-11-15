@@ -119,7 +119,10 @@ func primitiveReadPairNativeV1(t *testing.T) {
 				value := bytes.Repeat([]byte{0x56}, width)
 				treeNativeSeed(t, s, 0, key, value)
 				treeNativeSeed(t, s, 0, later, []byte{7})
-				op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Error("Pair prefix reached Source"); return nil }))
+				op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error {
+					t.Error("Pair prefix reached Source")
+					return nil
+				}))
 				op.Pair = TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 1}}, Consulted: []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: later}}}
 				tsCover(&op, TreeBlockV1{TxCount: 1})
 				window := uint64(2 * width)
@@ -196,7 +199,10 @@ func primitiveReadOwnerNativeV1(t *testing.T) {
 			for _, m := range row.seed {
 				treeNativeSeed(t, s, m.DBI.Rank, m.Key, m.Literal)
 			}
-			op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Error("owner preflight reached Source"); return nil }))
+			op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error {
+				t.Error("owner preflight reached Source")
+				return nil
+			}))
 			op.Pair.Mutations = row.pair
 			var result tsResult
 			var evidence SelectedDamageEvidence
@@ -288,11 +294,11 @@ func primitiveReadPointNativeV1(t *testing.T) {
 						gets := uint64(2)
 						if planned {
 							gets = 1
-							}
+						}
 						alias := uint64(1)
 						if distinct || planned {
 							alias = 0
-							}
+						}
 						if observed.Gets != gets || observed.Comparisons != 1 || observed.Aliases != alias || ledger.held != p+need {
 							t.Fatal("complete point window/one get/alias", observed, ledger.held)
 						}
@@ -648,7 +654,10 @@ func primitiveReadOwnerDisposableV1(t *testing.T) {
 			for _, m := range row.seed {
 				treeNativeSeed(t, s, m.DBI.Rank, m.Key, m.Literal)
 			}
-			op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Error("owner prefix reached Source"); return nil }))
+			op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error {
+				t.Error("owner prefix reached Source")
+				return nil
+			}))
 			op.Pair.Mutations = row.pair
 			var result tsResult
 			var evidence SelectedDamageEvidence
@@ -672,7 +681,10 @@ func primitiveReadGoexitV1(t *testing.T) {
 	s, _, o := tsNew(t)
 	key, old := tsCounterKey(9), bytes.Repeat([]byte{0x77}, 32)
 	treeNativeSeed(t, s, 0, key, old)
-	op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Error("Goexit prefix reached Source"); return nil }))
+	op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error {
+		t.Error("Goexit prefix reached Source")
+		return nil
+	}))
 	op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 1}}
 	fired, returned := false, false
 	mustEnvironment(t, o.WithReservation(19, func() error {
@@ -784,7 +796,9 @@ func primitiveReadStagesV1(t *testing.T) {
 				s, path, o := tsNew(t)
 				marker, calls := errors.New("funded raw body Source marker"), 0
 				source := tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return marker })
-				op := tsOperation(t, tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error { return sink.BeginV1(TreeBlockV1{TxCount: 1}) }))
+				op := tsOperation(t, tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+					return sink.BeginV1(TreeBlockV1{TxCount: 1})
+				}))
 				p := op.Primitives[0]
 				p.Kind, p.Generation, p.Height, p.Block, p.Source = 2, 2, 6, tdTxid(0xb1), source
 				p.Endpoint = tcEndpoint(6, p.Block)
@@ -886,7 +900,10 @@ func treeReadClosedNativeV1(t *testing.T, primitive bool) {
 	op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 1}}}}
 	if primitive {
 		pair := op.Pair
-		op = tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Error("closed grow reached Source"); return nil }))
+		op = tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error {
+			t.Error("closed grow reached Source")
+			return nil
+		}))
 		op.Pair = pair
 	}
 	mustEnvironment(t, a.WithReservation(137, func() error {
@@ -1170,7 +1187,7 @@ func treeReadCrossedV1(t *testing.T, primitive bool) {
 				if row.name == "both-OLD-first" {
 					mustEnvironment(t, tsRun(t, s, o, TreeOperation, op).err)
 					op.Pair.Mutations, pc, p = pair.Mutations, 210, 308 // Body32 and manifest33 references; counter25 + root218.
-					tsCover(&op, meta) // Stored body, so BodyKind2 with no CurrentBody literal.
+					tsCover(&op, meta)                                  // Stored body, so BodyKind2 with no CurrentBody literal.
 				}
 				ceiling, fill, engine = 402653184, 402653184, p+419632
 				if row.name == "projection-neither" {
