@@ -1272,7 +1272,7 @@ func fixtureTreeOldV1(store *Store, run func(old treeOldV1) error) error {
 		return err
 	}
 	defer C.rubin_fixture_txn_abort(old)
-	return run(&treeAmendedV1{old: old, handles: store.dbis, p: &treeProjectionV1{}})
+	return run(&treeAmendedV1{old: old, handles: store.dbis, p: &treeProjectionV1{}, readLimit: ^uint64(0)})
 }
 
 // fixtureTreeSectionV1 runs run with a section bound to ledger; it never commits and aborts a section run left open.
@@ -1328,7 +1328,7 @@ func fixtureTreeCommitV1(store *Store, script fixtureTreeScriptV1) updateNativeO
 		return section.abortV1(err)
 	}
 	script.markV1("commit")
-	return section.commitV1(script.pair, script.consulted, script.truthV1(old, store.dbis, section.pBudgetV1()))
+	return section.commitV1(script.pair, script.consulted, script.truthV1(old, store.dbis, section.pBudgetV1(), section.pairReadLimit))
 }
 
 func (script fixtureTreeScriptV1) markV1(event string) {
@@ -1337,7 +1337,7 @@ func (script fixtureTreeScriptV1) markV1(event string) {
 	}
 }
 
-func (script fixtureTreeScriptV1) truthV1(old *C.MDBX_txn, dbis [9]C.MDBX_dbi, pBudget uint64) treeTruthV1 {
+func (script fixtureTreeScriptV1) truthV1(old *C.MDBX_txn, dbis [9]C.MDBX_dbi, pBudget, nativeLimit uint64) treeTruthV1 {
 	if script.readback == nil {
 		return nil
 	}
@@ -1349,7 +1349,7 @@ func (script fixtureTreeScriptV1) truthV1(old *C.MDBX_txn, dbis [9]C.MDBX_dbi, p
 		if script.calls != nil {
 			*script.calls++
 		}
-		readback, err := newTreeReadbackV1(old, read, dbis, &treeBudgetV1{held: held})
+		readback, err := newTreeReadbackV1(old, read, dbis, &treeBudgetV1{held: held}, nativeLimit)
 		if err != nil {
 			return CommitTruthUnknown, err
 		}

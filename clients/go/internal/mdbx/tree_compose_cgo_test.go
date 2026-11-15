@@ -20,11 +20,11 @@ import (
 // Test-owned literals for the L5a composer rows. Keys, frames, values, bindings and amounts are built here from the
 // schema layouts and the D12-E/D13-14/D14-2/D33-D37 constants, never through tree_compose_cgo.go.
 const (
-	tcStep  = 65_536 + 4_096 + 4_096 + 1_152 // W + F_fixed + C + R = 74,880
+	tcStep  = 65_536 + 4_096 + 4_096 + 1_184 // W + F_fixed + C + R = 74,912
 	tcV     = 65_560
 	tcL2    = 147_968
 	tcSr    = 131_192
-	tcBrFix = 288_408 // W + F_fixed + C + R + V + L2
+	tcBrFix = 288_440 // W + F_fixed + C + R + V + L2
 )
 
 var (
@@ -101,18 +101,20 @@ func (l *tcLedger) mark(s string) { l.log = append(l.log, s) }
 
 // tcPrim is one test primitive and its provider. act runs after the stream at a position (nil: return nil).
 type tcPrim struct {
-	prim    treePrimitiveV1
-	txCount uint32
-	events  []tdEv
-	calls   [3]int
-	ledger  *tcLedger
-	name    string
-	act     func(pos treePositionV1, old *Reader, rec *treeRecorderV1) error
-	custom  func(old *Reader, rec *treeRecorderV1) error // replaces the stream and act
+	prim     treePrimitiveV1
+	txCount  uint32
+	events   []tdEv
+	calls    [3]int
+	ledger   *tcLedger
+	name     string
+	act      func(pos treePositionV1, old *Reader, rec *treeRecorderV1) error
+	custom   func(old *Reader, rec *treeRecorderV1) error // replaces the stream and act
+	accepted bool
 }
 
 func (p *tcPrim) source(pos treePositionV1, old *Reader, rec *treeRecorderV1) error {
 	p.calls[pos]++
+	p.accepted = false
 	p.ledger.mark(fmt.Sprintf("enter %d %s", pos, p.name))
 	if pos == treeReadbackV1 && p.name == "C" {
 		p.ledger.noCharge = true
@@ -127,6 +129,7 @@ func (p *tcPrim) source(pos treePositionV1, old *Reader, rec *treeRecorderV1) er
 		err = p.act(pos, old, rec)
 	}
 	p.ledger.mark(fmt.Sprintf("return %d %s", pos, p.name))
+	p.accepted = err == nil
 	return err
 }
 
@@ -182,11 +185,13 @@ func tcBindingID(t *testing.T, id [32]byte, g uint64, ep TreeEndpointV1, entries
 // tcScene is the A1 plan: CURRENT (gen 1, height 10, Pair body B0, coinbase T0), LAG1 (gen 2, height 5, stored
 // body B1, coinbase u) and LAG2 (gen 2, height 6, stored body B2, coinbase c2 and tx 1 spending u).
 type tcScene struct {
-	store  *Store
-	path   string
-	ledger *tcLedger
-	prims  []*tcPrim
-	pair   []ownedMutation
+	store               *Store
+	path                string
+	ledger              *tcLedger
+	prims               []*tcPrim
+	pair                []ownedMutation
+	initialNative       uint64
+	beforeReserveNative uint64 // independent scripted OLD/NEW extent literal
 }
 
 func tcNew(t *testing.T, n int) *tcScene {
@@ -196,7 +201,7 @@ func tcNew(t *testing.T, n int) *tcScene {
 	treeNativeSeed(t, store, 0, tcBindingKey(2), tcBinding(t, 2, tcOldEP))
 	treeNativeSeed(t, store, 4, tcB1[:], tcFU)
 	treeNativeSeed(t, store, 4, tcB2[:], tcFC)
-	s := &tcScene{store: store, path: path, ledger: &tcLedger{}}
+	s := &tcScene{store: store, path: path, ledger: &tcLedger{}, initialNative: 11, beforeReserveNative: 418}
 	s.pair = []ownedMutation{{dbi: ttBlocks, key: tcB0[:], after: AfterLiteral, literal: tcF0}}
 	all := []*tcPrim{
 		{name: "C", prim: tcForward(treeKindConnectV1, 1, 10, tcB0), txCount: 1, events: []tdEv{tdCreate(tcT0, 0, 0, 0, uint32(len(tcF0)))}},
@@ -232,7 +237,33 @@ type tcResult struct {
 func (s *tcScene) run(hook func()) tcResult {
 	var r tcResult
 	r.truth, r.stage, r.index, r.unwind, r.err = fixtureTreeComposeV1(s.store, s.ledger, s.plan(), hook)
+	s.releaseOuterNative(r)
 	return r
+}
+
+// releaseOuterNative models only the enclosing hold omitted by this engine seam.
+// Expected windows come from the scripted body11 and ORIGINAL root209, never
+// from candidate H or the measured ledger. P/full heldR were already released.
+func (s *tcScene) releaseOuterNative(r tcResult) {
+	left := s.beforeReserveNative
+	switch {
+	case len(s.prims) == 0:
+		left = s.initialNative
+	case r.stage == 3:
+		left = 0 // successful reserve shares the complete S_r floor.
+	case r.index == 0 && !s.prims[0].accepted:
+		left = s.initialNative
+	}
+	if r.stage == 1 && r.index == -1 {
+		left = 0 // preflight failure precedes this plan's literal seal.
+	}
+	if s.ledger.held != left {
+		s.ledger.violations = append(s.ledger.violations, fmt.Sprintf("outer native remainder %d want %d", s.ledger.held, left))
+		return
+	}
+	if left != 0 {
+		s.ledger.releaseV1(left)
+	}
 }
 
 // goexitRun runs the seam in a goroutine whose provider calls runtime.Goexit; inspect runs before resumeV1.
@@ -355,6 +386,7 @@ func (s *tcScene) following(t *testing.T) ttRow {
 	}
 	key := tdTxid(0xee)
 	s.prims = nil
+	s.initialNative = 1
 	s.pair = []ownedMutation{{dbi: ttBlocks, key: key[:], after: AfterLiteral, literal: []byte{0x5a}}}
 	r := s.run(nil)
 	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
@@ -459,16 +491,16 @@ func TestTreeComposeOrderV1(t *testing.T) {
 		}
 	}
 	budgets := tcPBudgets(t)
-	if want := []uint64{0, budgets[0], budgets[1]}; fmt.Sprint(s.ledger.stepHeld) != fmt.Sprint(want) {
+	if want := []uint64{11, budgets[0] + 418, budgets[1] + 418}; fmt.Sprint(s.ledger.stepHeld) != fmt.Sprint(want) {
 		t.Fatalf("held before each step-1 charge %v, want the P budget after the previous primitive %v", s.ledger.stepHeld, want)
 	}
 	tcReleasedBefore(t, log, "L1", 1)
 	tcReleasedBefore(t, log, "L2", 1)
-	if last := tcLastCharge(log); last != fmt.Sprintf("charge %d", tcHr(2)) {
-		t.Fatalf("last charge %q, want H_r %d", last, tcHr(2))
+	if last := tcLastCharge(log); last != fmt.Sprintf("charge %d", tcHr(2)-418) {
+		t.Fatalf("last charge %q, want shared H_r delta %d", last, tcHr(2)-418)
 	}
 	s.settled(t)
-	if treeReaderBytesV1 != 216+728+128+80 || tcStep != 74_880 {
+	if treeReaderBytesV1 != 216+728+160+80 || tcStep != 74_912 {
 		t.Fatal("R literal drifted")
 	}
 	tcAllocationGuards(t, s.store)
@@ -586,7 +618,7 @@ func TestTcAllocAvgReportsNotFoundAfterTenWindows(t *testing.T) {
 	}
 }
 
-// tcAllocationGuards are the A1 bounds behind R = 216 + 728 + 128 + 80 (D33, D34, D36, D37) on a read txn of the
+// tcAllocationGuards are the A1 bounds behind R = 216 + 728 + 160 + 80 (D33, D34, D36, D37) on a read txn of the
 // committed A1 Store.
 func tcAllocationGuards(t *testing.T, store *Store) {
 	t.Helper()
@@ -602,7 +634,7 @@ func tcAllocationGuards(t *testing.T, store *Store) {
 	tcOldGuard(t, &treeSectionV1{old: old, handles: store.dbis}, &treeReadbackStateV1{old: old, handles: store.dbis})
 	marker := append(append(make([]byte, 32), 1), make([]byte, 44)...)
 	projection := &treeProjectionV1{entries: []treeEntryV1{{dbi: schemaDBIs[5], key: marker, kind: treeEntryAbsentV1}}}
-	tcSeekGuard(t, &treeAmendedV1{old: old, handles: store.dbis, p: projection}, marker)
+	tcSeekGuard(t, &treeAmendedV1{old: old, handles: store.dbis, p: projection, readLimit: ^uint64(0)}, marker)
 }
 
 // tcVisitGuard: one LargeImageBlockBodyV1 visit of CURRENT's committed body with one ReadAt into a preallocated
@@ -631,7 +663,7 @@ func tcVisitGuard(t *testing.T, reader *Reader) {
 	}
 }
 
-// tcOldGuard: each oldV1 result stored into a package-level treeOldV1 allocates at most 64 bytes (D36).
+// tcOldGuard: each oldV1 result stored into a package-level treeOldV1 allocates at most 80 bytes (D36).
 func tcOldGuard(t *testing.T, section *treeSectionV1, readback *treeReadbackStateV1) {
 	t.Helper()
 	for _, row := range []struct {
@@ -647,8 +679,8 @@ func tcOldGuard(t *testing.T, section *treeSectionV1, readback *treeReadbackStat
 			t.Fatalf("%s: no clean allocation window in %d (D36)", row.name, windows)
 		}
 		t.Logf("D36 %s oldV1 allocation %.1f bytes in %d windows", row.name, got, windows)
-		if got > 64 {
-			t.Fatalf("%s oldV1 allocates %.1f bytes, above 64 (D36)", row.name, got)
+		if got > 80 {
+			t.Fatalf("%s oldV1 allocates %.1f bytes, above 80 (D36)", row.name, got)
 		}
 	}
 }
@@ -733,8 +765,8 @@ func TestTreeComposeZeroPrimitivesV1(t *testing.T) {
 				mustEnvironment(t, r.err)
 			}
 			// tcF0 is an 11-byte NEW literal; no primitive charge is permitted.
-			if got := strings.Join(s.ledger.log, ","); got != "charge 11" {
-				t.Errorf("zero primitives ledger %q, want charge 11", got)
+			if got := strings.Join(s.ledger.log, ","); got != "charge 11,release 11" {
+				t.Errorf("zero primitives ledger %q, want charge/release 11", got)
 			}
 			rows := []ttRow{{ttBlocks, tcB0[:], tcF0}}
 			if crossed {
@@ -1221,7 +1253,7 @@ func TestTreeComposeHoldV1(t *testing.T) {
 				if !IsOperationReservationCapacity(r.err) {
 					t.Errorf("R5 err %v, want errOperationReservationCapacity", r.err)
 				}
-				if last != fmt.Sprintf("refuse %d", tcHr(2)) {
+				if last != fmt.Sprintf("refuse %d", tcHr(2)-418) {
 					t.Errorf("R5 last %q, want refuse H_r", last)
 				}
 				r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, -1)
@@ -1230,7 +1262,7 @@ func TestTreeComposeHoldV1(t *testing.T) {
 				return
 			}
 			r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
-			if last != fmt.Sprintf("charge %d", tcHr(2)) {
+			if last != fmt.Sprintf("charge %d", tcHr(2)-418) {
 				t.Errorf("last charge %q", last)
 			}
 			if row.crossed && s.prims[0].calls[treeReadbackV1] != 1 {
@@ -1312,7 +1344,7 @@ func TestTreeComposeReadbackErrorV1(t *testing.T) {
 // into commitV1, so no "charge " entry follows the H_r charge in the ledger log.
 func tcNoChargeAfterHr(t *testing.T, log []string) {
 	t.Helper()
-	at := tcIndex(t, log, fmt.Sprintf("charge %d", tcHr(2)))
+	at := tcIndex(t, log, fmt.Sprintf("charge %d", tcHr(2)-418))
 	for _, e := range log[at+1:] {
 		if strings.HasPrefix(e, "charge ") {
 			t.Errorf("%s after the H_r charge (after the commit)", e)
@@ -1451,8 +1483,8 @@ func TestTreeComposeReadbackReturnV1(t *testing.T) {
 	if tcIndex(t, log, "enter 2 C") > tcIndex(t, log, "enter 2 L1") {
 		t.Errorf("readback order %v", log)
 	}
-	if last := tcLastCharge(log); last != fmt.Sprintf("charge %d", tcHr(2)) {
-		t.Errorf("last charge %q, want H_r %d", last, tcHr(2))
+	if last := tcLastCharge(log); last != fmt.Sprintf("charge %d", tcHr(2)-418) {
+		t.Errorf("last charge %q, want shared H_r delta %d", last, tcHr(2)-418)
 	}
 	s.settled(t)
 	s.consumed(t, CommitTruthNew, r.err)
@@ -1503,7 +1535,10 @@ func tcRollback(t *testing.T, seeded bool) (*tcScene, []ttRow) {
 	} {
 		treeNativeSeed(t, store, row.dbi.Rank, row.key, row.want)
 	}
-	s := &tcScene{store: store, path: path, ledger: &tcLedger{}}
+	s := &tcScene{store: store, path: path, ledger: &tcLedger{}, beforeReserveNative: 494}
+	if seeded {
+		s.initialNative = 22 // ORIGINAL Pair body11, with two native operands.
+	}
 	s.pair = []ownedMutation{{dbi: ttBlocks, key: block[:], beforePresent: true, after: AfterAbsent}}
 	prim := treePrimitiveV1{direction: treeInverseV1, kind: treeKindRollbackNewV1, undo: treeUndoSourceDeleteV1, generation: 3, height: 8, block: block, endpoint: parent}
 	s.prims = []*tcPrim{{name: "R", prim: prim, txCount: 1, events: []tdEv{tdCreate(txid, 0, 0, 0, uint32(len(frame)))}, ledger: s.ledger}}
@@ -1589,6 +1624,7 @@ func TestTreeComposeGrowthRefusalV1(t *testing.T) {
 func TestTreeComposeWorkRefusalV1(t *testing.T) {
 	t.Run("fold", func(t *testing.T) {
 		s := tcNew(t, 3)
+		s.beforeReserveNative = 11 // L2 admission refuses before its first root read.
 		s.prims[0].act = func(pos treePositionV1, _ *Reader, _ *treeRecorderV1) error {
 			s.ledger.refuseNext = pos == treeWriterV1
 			return nil
@@ -1679,6 +1715,9 @@ func TestTreeComposeCheckedDriftV1(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			s := tcNew(t, 3)
+			if row.index == 0 {
+				s.beforeReserveNative = 11 // UTXO metadata mismatch precedes the root read.
+			}
 			r := s.run(func() { treeNativeSeed(t, s.store, 1, row.key, []byte{0x7f}) })
 			r.check(t, CommitTruthOld, row.stage, row.index)
 			if row.index == 0 && s.prims[1].calls[treeWriterV1] != 0 {
@@ -1793,14 +1832,14 @@ func TestTreeComposeNoSurvivorV1(t *testing.T) {
 	steps := 0
 	var seen []int
 	s.ledger.before = func(n uint64) {
-		if n != tcStep && n != tcHr(2) {
+		if n != tcStep && n != tcHr(2)-418 {
 			return
 		}
 		if n == tcStep {
 			steps++
 		}
 		earlier := steps - 1
-		if n == tcHr(2) {
+		if n == tcHr(2)-418 {
 			earlier = 3
 		}
 		if earlier < 1 {
@@ -1978,6 +2017,7 @@ func TestTreeComposeBindingStageV1(t *testing.T) {
 	for _, variant := range []string{"absent", "malformed", "foreign"} {
 		t.Run(variant, func(t *testing.T) {
 			s := tcNew(t, 1)
+			s.beforeReserveNative = 11 // absent binding adds no native payload window.
 			bindings, key := TreeSchemaV1DBIs()[0], tcBindingKey(1)
 			var row []byte
 			switch variant {
@@ -1990,6 +2030,7 @@ func TestTreeComposeBindingStageV1(t *testing.T) {
 			}
 			if row != nil {
 				mustEnvironment(t, fixtureSeedPrefixRawRow(s.store, bindings, key, row))
+				s.beforeReserveNative = 2 * uint64(len(row))
 			}
 			r := s.run(nil)
 			r.check(t, CommitTruthOld, UpdateStagePrewrite, 0)
@@ -2050,7 +2091,7 @@ func tcTwoLeaf(t *testing.T) (*tcScene, []byte) {
 	treeNativeSeed(t, store, 1, keyA, value)
 	treeNativeSeed(t, store, 1, keyB, value)
 	treeNativeSeed(t, store, 0, tcBindingKey(1), tcBinding(t, 1, tcOldEP, entries...))
-	s := &tcScene{store: store, path: path, ledger: &tcLedger{}}
+	s := &tcScene{store: store, path: path, ledger: &tcLedger{}, initialNative: 11, beforeReserveNative: 494}
 	s.pair = []ownedMutation{{dbi: ttBlocks, key: tcB0[:], after: AfterLiteral, literal: tcF0}}
 	s.prims = []*tcPrim{{name: "C", prim: tcForward(treeKindConnectV1, 1, 10, tcB0), txCount: 2, events: []tdEv{tdSpend(tdTxid(0xa1), 0, 1, 0)}, ledger: s.ledger}}
 	return s, testTreeNodeKey(1, 288, [36]byte(keyB[8:]))
@@ -2089,6 +2130,7 @@ func tcNetClean(t *testing.T) (*tcScene, []byte) {
 	u, fu := tdTxid(0x60), tdFrame(600, 0, nil)
 	body := append(append([]byte(nil), tcF0...), fu...)
 	s.pair[0].literal = body
+	s.initialNative = 22 // two independent11-byte frames in the future Pair literal.
 	s.prims[0].txCount = 3
 	s.prims[0].events = []tdEv{tdCreate(tcT0, 0, 0, 0, uint32(len(tcF0))), tdCreate(u, 0, 1, uint64(len(tcF0)), uint32(len(fu))), tdSpend(u, 0, 2, 0)}
 	return s, tdUTXOKey(1, u, 0)

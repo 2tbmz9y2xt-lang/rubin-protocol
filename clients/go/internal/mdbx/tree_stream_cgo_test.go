@@ -990,7 +990,18 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 		{unsafe.Sizeof(treePrimitiveV1{}), 144},
 		{unsafe.Sizeof(TreeDeltaSinkV1{}), 8},
 		{unsafe.Sizeof(treeImageV1{}), 32},
-		{unsafe.Sizeof(treeAmendedV1{}), 64},
+		{unsafe.Sizeof(updateImage{}), 24},
+		{unsafe.Sizeof(treeAmendedV1{}), 80},
+		{unsafe.Sizeof(treeReadbackStateV1{}), 120},
+		{unsafe.Sizeof(treeSectionV1{}), 168},
+		{unsafe.Sizeof(treeScopeV1{}), 288},
+		{unsafe.Sizeof(treeComposeV1{}), 112},
+		{unsafe.Sizeof(TreeOperationV1{}), 112},
+		{unsafe.Sizeof(treePlanV1{}), 152},
+		{unsafe.Sizeof(Reader{}), 216},
+		{unsafe.Sizeof(treePublicEntryV1{}), 40},
+		{unsafe.Sizeof(operationHold{}), 24},
+		{unsafe.Sizeof(treePairReadBudgetV1{}), 32},
 		{unsafe.Sizeof(treeEntryV1{}), 80},
 		{unsafe.Sizeof(TreeSourceCoverageV1{}), 136},
 		{unsafe.Sizeof(TreeRoleDeltaV1{}), 64},
@@ -1007,7 +1018,24 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	var leaves treeLeafIterV1
 	total := uint64(unsafe.Sizeof(treeRecorderV1{})) + uint64(unsafe.Sizeof(treeDeltaV1{})) + uint64(unsafe.Sizeof(treeKeysV1{})) + 2*uint64(unsafe.Sizeof(leaves)) + 32
 	control := total + 144 + 8 + 2*uint64(unsafe.Sizeof(treeScopeV1{})) + uint64(unsafe.Sizeof(TreeObservationV1{}))
-	if control > 4096 {
+	// Count logical constructed owners, conservatively including sequential
+	// phases: budget32; six updateImage records (owned constructor, seek,
+	// native key/value, expected key/value); C prefix40; two borrowed views;
+	// and the from/expectedKey slice headers. Synchronous return/parameter
+	// transport carries those owners, rather than creating independent logical
+	// owners. This is not a stack/ABI, compiler-elision or physical-memory claim.
+	// Scalar/error working cells156: amended t8; metadata err/rc24;
+	// next ok/err/equal18; value scratch/err/equal25; comparator need/err24;
+	// exposure ok/err/n25; cover available/err24; checked-size working n8.
+	// Owners: treeNextImagesV1, treeReadNextBoundedV1, treeNextEqualV1,
+	// treeNextValueEqualV1, updatePairImageEqualV1 and coverV1.
+	helper := uint64(unsafe.Sizeof(treePairReadBudgetV1{})) + 6*uint64(unsafe.Sizeof(updateImage{})) + 40 +
+		2*uint64(unsafe.Sizeof(treeImageV1{})) + 2*uint64(unsafe.Sizeof([]byte{})) + 156
+	if control != 1809 || helper != 484 || helper > 512 {
+		t.Fatal("fixed control/helper cell census", control, helper)
+	}
+	control += 168 + 112 + 120 + 16 + helper
+	if treeReaderBytesV1 != 1184 || treeStepBytesV1 != 74912 || control > 4096 {
 		t.Fatalf("enlarged control objects%d exceed4096", control)
 	}
 }
@@ -1265,8 +1293,8 @@ func TestTreeStreamPairOwnershipAndAccountingV1(t *testing.T) {
 		r := tsRun(t, s, o, TreeOperation, op)
 		r.tuple(t, 2, 3, -1)
 		mustEnvironment(t, r.err)
-		if sample != pc+74_880 {
-			t.Fatalf("PC before primitive sample%d want%d", sample, pc+74_880)
+		if sample != pc+74_912+159 {
+			t.Fatalf("PC/native159 before primitive sample%d want%d", sample, pc+74_912+159)
 		}
 		s = tsReopen(t, s, path)
 		tsRead(t, s, originalTarget.DBI, key, value)
@@ -1285,6 +1313,145 @@ func TestTreePairReadAccountV1(t *testing.T) {
 					})
 				}
 			}
+		}
+	}
+}
+
+// Primitive native windows share the real operation account and enclosing hold.
+func TestTreePrimitiveReadAccountV1(t *testing.T) {
+	t.Run("reserve-floor", primitiveReadReserveV1)
+	t.Run("late-floor-shortfall", primitiveReadLateFloorV1)
+	for _, aggregate := range []bool{false, true} {
+		for _, short := range []uint64{0, 1} {
+			t.Run(fmt.Sprintf("Pair-prefix/R%v/short%d", aggregate, short), func(t *testing.T) {
+				primitiveReadPrefixV1(t, aggregate, short)
+			})
+		}
+	}
+	for _, covered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("complete-covered%v", covered), func(t *testing.T) {
+			s, path, o := tsNew(t)
+			tsRoots(t, s, o, 1)
+			meta := TreeBlockV1{TxCount: 1}
+			op := tsOperation(t, tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error { return sink.BeginV1(meta) }))
+			if covered {
+				tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+				tsCover(&op, meta)
+			}
+			r := tsRun(t, s, o, TreeOperation, op)
+			r.tuple(t, 2, 3, -1)
+			mustEnvironment(t, r.err)
+			tsFollowing(t, s, o)
+			s = tsReopen(t, s, path)
+			body := op.Pair.Mutations[0]
+			tsRead(t, s, body.DBI, body.Key, body.Literal)
+			tsRead(t, s, TreeSchemaV1DBIs()[0], tsRootKey(1), tsRootBytes(t, op.Primitives[0].Endpoint))
+		})
+	}
+}
+
+// This prefix admits Pair OLD64, then stops at the independently owned step;
+// it establishes no committed-block claim at the deliberately exhausted account.
+func primitiveReadPrefixV1(t *testing.T, aggregate bool, short uint64) {
+	t.Helper()
+	s, path, o := tsNew(t)
+	op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Error("prefix reached Source"); return nil }))
+	mustEnvironment(t, tsRun(t, s, o, TreeOperation, TreeOperationV1{Pair: op.Pair}).err)
+	key, old := tsCounterKey(9), bytes.Repeat([]byte{0x63}, 32)
+	requireUpdateTruth(t, runNativeUpdate(t, s, []ownedMutation{{dbi: TreeSchemaV1DBIs()[0], key: key, after: 2, literal: old}}), 2, true, nil, nil)
+	op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 1}}
+	tsCover(&op, TreeBlockV1{TxCount: 1})
+	filler := uint64(402653184 - 274 - 64 + short)
+	if aggregate {
+		reservationFill(t, o, 805306368-274-64+short)
+		filler = 0
+	}
+	mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+		return a.WithReservation(137+filler, func() error {
+			before := reservationLive(o)
+			r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil })
+			index := 0
+			if short != 0 {
+				index = -1
+			}
+			r.tuple(t, 1, 1, index)
+			if !treeSameErrorV1(r.err, errOperationReservationCapacity) || reservationLive(o) != before {
+				t.Fatal("primitive Pair prefix/account cleanup", r, reservationLive(o), before)
+			}
+			tsConsumed(t, s, o, 1, r.err)
+			return nil
+		})
+	}))
+	s = tsReopen(t, s, path)
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		got, err := treeReadPointV1(r.txn, s.dbis[0], key)
+		if err != nil || !got.present || !bytes.Equal(got.value, old) {
+			t.Errorf("primitive Pair prefix durable raw OLD = (%x,%v,%v), want %x", got.value, got.present, err, old)
+		}
+		return nil
+	}))
+}
+
+func primitiveReadReserveV1(t *testing.T) {
+	for _, h := range []uint64{0, 131191, 131192, 131193} {
+		for _, short := range []uint64{0, 1} {
+			t.Run(fmt.Sprintf("H%d/short%d", h, short), func(t *testing.T) {
+				delta := uint64(289168)
+				if h < 131192 {
+					delta += 131192 - h
+				}
+				o := reservationOwner(t, 805306368)
+				mustEnvironment(t, o.WithReservation(17, func() error {
+					return o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+						filler := uint64(402653184) - h - 41 - delta + short
+						return a.WithReservation(filler, func() error {
+							return a.withHold(func(hold *operationHold) error {
+								mustEnvironment(t, hold.grow(h+41))
+								ledger := treeAccountLedgerV1{hold: hold}
+								section := &treeSectionV1{ledger: ledger, heldP: 41, pairReadLimit: h}
+								c := treeComposeV1{writer: &treeScopeV1{t: section, ledger: ledger, events: 7, plan: &treePlanV1{primitives: make([]TreePrimitiveV1, 1)}}}
+								err := c.reserveV1()
+								if short == 1 {
+									if !treeSameErrorV1(err, errOperationReservationCapacity) || section.pairReadLimit != h || c.heldR != 0 || reservationLive(o) != 17+filler+h+41 {
+										t.Fatal("refused reserve state unchanged", err)
+									}
+								} else if err != nil || section.pairReadLimit != max(h, uint64(131192)) || c.heldR != 420360 || reservationLive(o) != 402653201 {
+									t.Fatal("exact reserve delta/floor/nominal heldR", err, section.pairReadLimit, c.heldR)
+								}
+								c.releaseV1()
+								remainder := h
+								if short == 0 {
+									remainder = max(h, uint64(131192)) - 131192
+								}
+								if reservationLive(o) != 17+filler+remainder {
+									t.Fatal("P/full heldR release leaves exact outer remainder")
+								}
+								return nil
+							})
+						})
+					})
+				}))
+				if reservationLive(o) != 0 {
+					t.Fatal("enclosing hold/foreign reservation release")
+				}
+			})
+		}
+	}
+}
+
+func primitiveReadLateFloorV1(t *testing.T) {
+	for _, n := range []uint64{131191, 131192, 131193} {
+		ledger := &pairReadTestLedgerV1{}
+		section := &treeSectionV1{ledger: ledger}
+		c := treeComposeV1{writer: &treeScopeV1{t: section, ledger: ledger, plan: &treePlanV1{primitives: make([]TreePrimitiveV1, 1)}}}
+		mustEnvironment(t, c.reserveV1())
+		mustEnvironment(t, section.requireReadV1(n))
+		if ledger.held != 288440+max(n, uint64(131192)) || section.pairReadLimit != max(n, uint64(131192)) || c.heldR != 419632 {
+			t.Fatal("late floor shortfall1", n, ledger.held, section.pairReadLimit, c.heldR)
+		}
+		c.releaseV1()
+		if ledger.held != max(n, uint64(131192))-131192 {
+			t.Fatal("late native remainder exact once")
 		}
 	}
 }
@@ -2357,8 +2524,9 @@ func TestTreeProofChargeV1(t *testing.T) {
 				tsFollowing(t, s, o)
 				return
 			}
-			// Passing step 5 leaves no headroom for the first primitive step charge.
-			r.tuple(t, 1, 1, 0)
+			// Passing step 5 leaves no headroom for the native Pair preflight window.
+			r.tuple(t, 1, 1, -1)
+			tsConsumed(t, s, o, 1, r.err)
 		})
 	}
 }
@@ -2941,8 +3109,9 @@ func TestTreeHeaderSlotChargeV1(t *testing.T) {
 				tsFollowing(t, s, o)
 				return
 			}
-			// Passing step 5 leaves no headroom for the first primitive step charge.
-			r.tuple(t, 1, 1, 0)
+			// Passing step 5 leaves no headroom for the native Pair preflight window.
+			r.tuple(t, 1, 1, -1)
+			tsConsumed(t, s, o, 1, r.err)
 		})
 	}
 }
