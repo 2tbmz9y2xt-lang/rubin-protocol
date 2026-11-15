@@ -180,7 +180,7 @@ func TestPendingBody148Configuration(t *testing.T) {
 					return
 				}
 				cxEqual(t, "invalid captured body limits owner", o, (*HeaderCandidateOwner148V1)(nil))
-				if err != ErrPendingBodyConfig148V1 {
+				if reflect.ValueOf(err) != reflect.ValueOf(ErrPendingBodyConfig148V1) {
 					t.Fatalf("invalid captured body limits error: got %v want exact %v", err, ErrPendingBodyConfig148V1)
 				}
 			})
@@ -197,7 +197,7 @@ func TestPendingBody148Configuration(t *testing.T) {
 		}
 		o, err := NewHeaderCandidateBodyCustody148V1(cl, xl, PendingBodyLimits148V1{}, 7, [32]byte{91}, [32]byte{92})
 		cxEqual(t, prior+" config precedence owner", o, (*HeaderCandidateOwner148V1)(nil))
-		if err != want {
+		if reflect.ValueOf(err) != reflect.ValueOf(want) {
 			t.Fatalf("%s config precedence error: got %v want exact %v", prior, err, want)
 		}
 	}
@@ -294,8 +294,16 @@ func pbShapeRows() []pbBadShape {
 		{"zero-charge", func(b *PendingBodyBundle148V1) *PendingBodyBundle148V1 { b.RetainedBytes = 0; return b }},
 		{"below-cap", func(b *PendingBodyBundle148V1) *PendingBodyBundle148V1 { b.RetainedBytes = 7; return b }},
 		{"zero-origin", func(b *PendingBodyBundle148V1) *PendingBodyBundle148V1 { b.Origin = 0; b.Weak.origin = 0; return b }},
-		{"zero-hash", func(b *PendingBodyBundle148V1) *PendingBodyBundle148V1 { b.Hash = [32]byte{}; b.Weak.hash = b.Hash; return b }},
-		{"zero-provenance", func(b *PendingBodyBundle148V1) *PendingBodyBundle148V1 { b.Provenance = [32]byte{}; b.Weak.provenance = b.Provenance; return b }},
+		{"zero-hash", func(b *PendingBodyBundle148V1) *PendingBodyBundle148V1 {
+			b.Hash = [32]byte{}
+			b.Weak.hash = b.Hash
+			return b
+		}},
+		{"zero-provenance", func(b *PendingBodyBundle148V1) *PendingBodyBundle148V1 {
+			b.Provenance = [32]byte{}
+			b.Weak.provenance = b.Provenance
+			return b
+		}},
 		{"zero-incarnation", func(b *PendingBodyBundle148V1) *PendingBodyBundle148V1 { b.View.Incarnation = 0; return b }},
 		{"zero-version", func(b *PendingBodyBundle148V1) *PendingBodyBundle148V1 { b.View.Version = 0; return b }},
 		{"zero-source", func(b *PendingBodyBundle148V1) *PendingBodyBundle148V1 { b.View.Source = [32]byte{}; return b }},
@@ -363,12 +371,12 @@ func TestPendingBody148WeakShapes(t *testing.T) {
 
 func TestPendingBody148Bounds(t *testing.T) {
 	rows := []struct {
-		name string
-		limits PendingBodyLimits148V1
-		pins int
+		name        string
+		limits      PendingBodyLimits148V1
+		pins        int
 		charge, now uint64
-		prefill bool
-		outcome uint8
+		prefill     bool
+		outcome     uint8
 	}{
 		{"count-exact", PendingBodyLimits148V1{1, 4096, 8, 10}, 1, 8, 100, false, 0},
 		{"count-over", PendingBodyLimits148V1{1, 4096, 8, 10}, 1, 8, 100, true, 4},
@@ -463,7 +471,7 @@ func TestPendingBody148Dependencies(t *testing.T) {
 				want = 4
 			}
 			foreignBefore := pbImage(foreign.o)
-			label := "pending dependency tuple/"+kind
+			label := "pending dependency tuple/" + kind
 			if kind == "over-limit-invalid" {
 				label = "dependency bound preceded payload incorrectly"
 			}
@@ -797,7 +805,7 @@ func TestPendingBody148Lifecycle(t *testing.T) {
 
 type pbOperationResult struct {
 	bundle *PendingBodyBundle148V1
-	d PendingBodyDecision148V1
+	d      PendingBodyDecision148V1
 }
 
 // pbOrdered runs real operations in both channel-selected linearization orders.
@@ -834,7 +842,10 @@ func TestPendingBody148TerminalOrders(t *testing.T) {
 				pbDecision(t, "race prerequisite", f.o.RetainPendingBodyV1(b, 100), 0, 0)
 				q, d := f.o.RequestPendingBodyV1(&key, 100)
 				pbDecision(t, "race request", d, 0, 0)
-				take := func() pbOperationResult { bundle, result := f.o.TakePendingBodyV1(q, 109); return pbOperationResult{bundle, result} }
+				take := func() pbOperationResult {
+					bundle, result := f.o.TakePendingBodyV1(q, 109)
+					return pbOperationResult{bundle, result}
+				}
 				dispose := func() pbOperationResult {
 					if terminal == "Expire" {
 						f.o.ExpirePendingBodiesV1(110)
@@ -963,7 +974,7 @@ func TestPendingBody148CloseOrders(t *testing.T) {
 
 func TestPendingBody148FirstResult(t *testing.T) {
 	rows := []struct {
-		name string
+		name    string
 		outcome uint8
 	}{
 		{"fixed-before-dependency-excess", 2},
@@ -1165,7 +1176,10 @@ func TestPendingBody148ConcurrentTerminal(t *testing.T) {
 				pbDecision(t, "concurrent retain", f.o.RetainPendingBodyV1(b, 100), 0, 0)
 				q, d := f.o.RequestPendingBodyV1(&key, 100)
 				pbDecision(t, "concurrent request", d, 0, 0)
-				take := func() pbOperationResult { out, result := f.o.TakePendingBodyV1(q, 109); return pbOperationResult{out, result} }
+				take := func() pbOperationResult {
+					out, result := f.o.TakePendingBodyV1(q, 109)
+					return pbOperationResult{out, result}
+				}
 				dispose := func() pbOperationResult {
 					if terminal == "Expire" {
 						f.o.ExpirePendingBodiesV1(110)

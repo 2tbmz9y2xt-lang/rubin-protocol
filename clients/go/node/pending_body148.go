@@ -97,8 +97,8 @@ type pendingBodyRecord148 struct {
 }
 
 type pendingBodyState148 struct {
-	limits                    PendingBodyLimits148V1
-	records                   map[PendingBodyKey148V1]*pendingBodyRecord148
+	limits                     PendingBodyLimits148V1
+	records                    map[PendingBodyKey148V1]*pendingBodyRecord148
 	count, bytes, dependencies uint64
 }
 
