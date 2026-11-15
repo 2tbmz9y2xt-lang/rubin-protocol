@@ -2711,7 +2711,7 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 	}
 	serving := s.requestServingCloseV1()
 	if !s.operations.TryLock() {
-		s.contendedServingCloseV1(serving)
+		s.contendedServingCloseV1()
 		return CommitTruthOld, UpdateStagePrewrite, adapterError(operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
 	defer serving.completeV1()
@@ -3883,7 +3883,7 @@ func (s *Store) Close() error {
 	}
 	serving := s.requestServingCloseV1()
 	if !s.operations.TryLock() {
-		s.contendedServingCloseV1(serving)
+		s.contendedServingCloseV1()
 		return adapterError(operationClose, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
 	defer serving.completeV1()

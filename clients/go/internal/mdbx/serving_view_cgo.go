@@ -239,11 +239,17 @@ func (s *Store) requestServingCloseV1() *servingMutationV1 {
 	return o.markV1()
 }
 
-// contendedServingCloseV1 covers first binding after a nil initial observation.
-// An already-marked attempt must not replace a newer pending identity.
-func (s *Store) contendedServingCloseV1(initial *servingMutationV1) {
-	if initial == nil {
-		s.requestServingCloseV1()
+// contendedServingCloseV1 restores absent priority after binding or completion.
+// A newer pending identity remains authoritative.
+func (s *Store) contendedServingCloseV1() {
+	o := s.servingOwner.Load()
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.priority == nil {
+		o.markV1()
 	}
 }
 
@@ -275,6 +281,8 @@ func (m *servingMutationV1) completeV1() {
 // refusal to its existing storage_concurrency/OLD result. This is required only
 // at an actual semantic trigger; optional native closures must not call it.
 // No coordinator/native lock is held across use, and no effect may escape it.
+// A busy refusal leaves priority pending; the caller retries after its actual
+// resolution event. Abandoning that retry can leave serving unavailable.
 func (o *ServingViewOwnerV1) WithQuiescenceV1(ctx context.Context, s *Store, use func() error) error {
 	if err := o.inputV1(ctx, s, use != nil, operationUpdate); err != nil {
 		return err

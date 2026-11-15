@@ -285,14 +285,30 @@ func servingPriorityV1(t *testing.T) {
 	t.Run("first binding", servingFirstBindingV1)
 }
 
-// servingFirstBindingV1 tests the contention effect with an actual nil observation
-// before public binding. Direct source review binds all three native adapters to
-// this effect; the narrow public preemption window is not scheduled by this test.
+// servingFirstBindingV1 crosses initial binding and superseded native completion.
+// Direct source review binds all three adapters to the contention effect; this
+// fixture does not schedule the narrow public preemption window.
 func servingFirstBindingV1(t *testing.T) {
+	t.Run("unbound", func(t *testing.T) { servingContentionOrderV1(t, false) })
+	t.Run("superseded and cleared", func(t *testing.T) { servingContentionOrderV1(t, true) })
+}
+
+// servingContentionOrderV1 restores absent priority while preserving a newer mark.
+func servingContentionOrderV1(t *testing.T, superseded bool) {
 	s, o, reservations := servingSetupV1(t)
+	if superseded {
+		_, err := servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
+		mustEnvironment(t, err)
+	}
 	initial := s.requestServingCloseV1()
-	if initial != nil {
-		t.Fatal("unbound Store unexpectedly supplied a serving identity")
+	if (initial != nil) != superseded {
+		t.Fatal("initial mutation identity did not match binding order")
+	}
+	if superseded {
+		servingNativeRetryV1(t, "update", s, nil)
+		if o.priority != nil {
+			t.Fatal("newer native completion did not clear its own priority")
+		}
 	}
 	var pending *servingMutationV1
 	out, err := servingCallV1(t, o, s, reservations, func(r *Reader, e *ServingEpochV1, _ *OperationAccount) error {
@@ -303,13 +319,21 @@ func servingFirstBindingV1(t *testing.T) {
 			s.operations.Unlock()
 			t.Fatal("native Reader did not retain the operation lock")
 		}
-		s.contendedServingCloseV1(initial)
+		mustEnvironment(t, e.CheckV1())
+		s.contendedServingCloseV1()
 		if o.priority == nil {
-			t.Fatal("nil initial observation lost first-bound contention priority")
+			t.Fatal("native contention did not restore absent priority")
+		}
+		servingWantBusyV1(t, e.CheckV1(), "view")
+		if o.current != e || !r.usable() || r.txn == nil {
+			t.Fatal("contention released the occupied native epoch")
 		}
 		older := o.priority
 		pending = s.requestServingCloseV1()
-		s.contendedServingCloseV1(older)
+		if pending == older {
+			t.Fatal("newer native attempt reused the older priority identity")
+		}
+		s.contendedServingCloseV1()
 		if o.priority != pending {
 			t.Fatal("already-marked contention replaced a newer pending identity")
 		}
