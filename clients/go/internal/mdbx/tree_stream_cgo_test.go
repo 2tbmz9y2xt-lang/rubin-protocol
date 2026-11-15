@@ -1383,7 +1383,13 @@ func primitiveReadPrefixV1(t *testing.T, aggregate bool, short uint64) {
 		})
 	}))
 	s = tsReopen(t, s, path)
-	tsRead(t, s, TreeSchemaV1DBIs()[0], key, old)
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		got, err := treeReadPointV1(r.txn, s.dbis[0], key)
+		if err != nil || !got.present || !bytes.Equal(got.value, old) {
+			t.Errorf("primitive Pair prefix durable raw OLD = (%x,%v,%v), want %x", got.value, got.present, err, old)
+		}
+		return nil
+	}))
 }
 
 func primitiveReadReserveV1(t *testing.T) {
@@ -2518,8 +2524,9 @@ func TestTreeProofChargeV1(t *testing.T) {
 				tsFollowing(t, s, o)
 				return
 			}
-			// Passing step 5 leaves no headroom for the first primitive step charge.
-			r.tuple(t, 1, 1, 0)
+			// Passing step 5 leaves no headroom for the native Pair preflight window.
+			r.tuple(t, 1, 1, -1)
+			tsConsumed(t, s, o, 1, r.err)
 		})
 	}
 }
@@ -3102,8 +3109,9 @@ func TestTreeHeaderSlotChargeV1(t *testing.T) {
 				tsFollowing(t, s, o)
 				return
 			}
-			// Passing step 5 leaves no headroom for the first primitive step charge.
-			r.tuple(t, 1, 1, 0)
+			// Passing step 5 leaves no headroom for the native Pair preflight window.
+			r.tuple(t, 1, 1, -1)
+			tsConsumed(t, s, o, 1, r.err)
 		})
 	}
 }

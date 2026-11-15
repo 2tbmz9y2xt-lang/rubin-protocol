@@ -996,7 +996,7 @@ func TestInitial148CompleteBlockEarlierConnectErrorBeforeD(t *testing.T) {
 // TestInitial148CompleteBlockDeriveCapacityNoResult (C10) leaves room on the
 // same account for W, the source scratch and R, but not D: derived=false keeps
 // the raw capacity cause as the validation error, never a root mismatch, and
-// no result is delivered. R=135,192+48E and D=288,408+104E use the
+// no result is delivered. R=135,192+48E and D=288,440+104E use the
 // genesis source EventCount E.
 func TestInitial148CompleteBlockDeriveCapacityNoResult(t *testing.T) {
 	// The published genesis source records one event (E=1).
@@ -2034,7 +2034,7 @@ func TestInitial148CompleteBlockMixedStagesH5(t *testing.T) {
 
 // TestInitial148CompleteBlockDeriveCapacityH5 (C10 capacity, h>0) is the h=5
 // form of TestInitial148CompleteBlockDeriveCapacityNoResult: the same account
-// keeps exactly W, R=135,192+48E and D=288,408+104E free (the control is
+// keeps exactly W, R=135,192+48E and D=288,440+104E free (the control is
 // delivered), then one byte less; the refused D keeps its raw capacity cause,
 // derived=false, no observation and no result through every entry. E is the
 // EventCount the control's delivered source coverage records.
@@ -2159,7 +2159,7 @@ func TestInitial148CompleteBlockTariffOverflow(t *testing.T) {
 
 // TestInitial148CompleteBlockTariffH5 (C12 exact residual) pins the h=5 W
 // from literal counts and, on the same account pre-holding everything but W
-// plus the nested source scratch 4,824, R=135,192+48E and D=288,408+104E,
+// plus the nested source scratch 4,824, R=135,192+48E and D=288,440+104E,
 // walks every reserve boundary through each entry: one byte below the source
 // scratch, R and D each refuses with the raw capacity cause at its own charge
 // (only D's refusal is the D cause), the exact sum accepts, and W-1 refuses
@@ -2671,6 +2671,7 @@ func TestInitial148CompleteBlockStrictWitness(t *testing.T) {
 
 // Without a first-genesis demand the existing composer still fits the exact
 // W+required-state+D remainder. Adding the optional demand refuses at D.
+// This source has E=1, so D=288,440+104=288,544.
 func TestInitial148CompleteBlockNoGenesisDemandNoSpare(t *testing.T) {
 	for _, demand := range []uint64{0, 421677} {
 		w := btNew(t)
@@ -2679,7 +2680,7 @@ func TestInitial148CompleteBlockNoGenesisDemandNoSpare(t *testing.T) {
 		tariff, ok := initial148CompleteTariffV1(in)
 		logicalMDBXAssert(t, ok, "no-spare tariff")
 		icbWithAccountV1(t, w, func(a *mdbx.OperationAccount) {
-			err := a.WithReservation(402653184-tariff-135240-288512, func() error {
+			err := a.WithReservation(402653184-tariff-135240-288544, func() error {
 				out, result, _, err := icbValidateOnceV1(t, w, a, in, false)
 				if demand == 0 {
 					logicalMDBXAssert(t, err == nil && result != nil && out.required.derived, "ordinary composer took an unsolicited E: %v", err)

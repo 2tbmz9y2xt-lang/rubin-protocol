@@ -802,8 +802,9 @@ func primitiveReadStagesV1(t *testing.T) {
 				p := op.Primitives[0]
 				p.Kind, p.Generation, p.Height, p.Block, p.Source = 2, 2, 6, tdTxid(0xb1), source
 				p.Endpoint = tcEndpoint(6, p.Block)
+				key := bytes.Clone(p.Block[:])
 				value := bytes.Repeat([]byte{0x6b}, 70000)
-				treeNativeSeed(t, s, 4, p.Block[:], value)
+				treeNativeSeed(t, s, 4, key, value)
 				filler := uint64(402653184 - 74912 - 140000 + short)
 				stage, index := UpdateStage(1), 0
 				if afterWrite {
@@ -865,7 +866,7 @@ func primitiveReadStagesV1(t *testing.T) {
 				}
 				tsConsumed(t, s, o, 1, result.err)
 				s = tsReopen(t, s, path)
-				equal, err := FixtureRawRowEqual(s, 4, p.Block[:], value)
+				equal, err := FixtureRawRowEqual(s, 4, key, value)
 				if err != nil || !equal {
 					t.Fatal("native-stage refusal durable OLD body", err)
 				}
