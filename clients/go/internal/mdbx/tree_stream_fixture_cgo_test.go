@@ -2166,7 +2166,12 @@ func tsfNodeOriginRun(t *testing.T, s *Store, position TreePositionV1, probe fun
 	calls := 0
 	script := fixtureTreeScriptV1{
 		ledger: ledger, calls: &calls, held: treeScratchBytesV1 + treeNodeWorkBytesV1 + treeValueBytesV1,
-		write: func(section *treeSectionV1) error { return section.writerV1().emitV1(ttTarget(ttUTXO, ttZ, "z1")) },
+		write: func(section *treeSectionV1) error {
+			if err := section.requireReadV1(treeScratchBytesV1); err != nil {
+				return err
+			}
+			return section.writerV1().emitV1(ttTarget(ttUTXO, ttZ, "z1"))
+		},
 		readback: func(read *treeReadbackStateV1) error {
 			detected = probe(read.oldV1(), read.emitterV1(), read.budget.ledgerV1())
 			return detected
