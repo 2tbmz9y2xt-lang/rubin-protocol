@@ -133,6 +133,7 @@ type HeaderCandidateOwner148V1 struct {
 	leased      map[[32]byte]uint64
 	leases      uint64
 	context     *hctxState
+	pendingBody *pendingBodyState148
 }
 
 // HeaderCandidatePrepared148V1 is the single outstanding prepared transition; its first handle call consumes it.
@@ -186,9 +187,11 @@ func (o *HeaderCandidateOwner148V1) VersionV1() uint64 { return o.version.Load()
 func (o *HeaderCandidateOwner148V1) CloseV1() {
 	o.mu.Lock()
 	o.closed = true
+	bodies := o.closePendingBodies()
 	o.closeContext()
 	o.cond.Broadcast()
 	o.mu.Unlock()
+	o.drainPendingBodies(bodies)
 }
 
 // ProtectV1 takes a shared guard; it holds mu only briefly and never waits for another guard or for a publication that
