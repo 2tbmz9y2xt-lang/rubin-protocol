@@ -2014,10 +2014,10 @@ func TestHeaderContext148ProofShapes(t *testing.T) {
 }
 
 func TestHeaderContext148SourceBinding(t *testing.T) {
-	for _, advance := range []string{"none", "source", "close"} {
+	for _, advance := range []string{"none", "source", "close", "current-source", "current-close"} {
 		raws, s := cxChain(0, 2, 0, 1, cxTarget(255), false)
 		o, v, _ := cxNew(t, cxLimits(), hcLim(), raws[0])
-		check := func() {
+		check := func(phase string) {
 			if !o.mu.TryLock() {
 				t.Fatal("source callback under candidate mutex")
 			}
@@ -2026,23 +2026,23 @@ func TestHeaderContext148SourceBinding(t *testing.T) {
 			if guards != 0 {
 				t.Fatal("source callback under invocation C1 guard")
 			}
-		}
-		s.current = func() (bool, error) { check(); return true, nil }
-		e1 := errors.New("observed header error")
-		s.read = func(hash [32]byte, dst *[148]byte) (HeaderContextRead148V1, error) {
-			check()
-			*dst = s.raws[hash]
-			switch advance {
-			case "source":
+			switch {
+			case advance == phase+"source" && (phase == "" || s.calls == 2):
 				tr := hcTr(o, nil)
 				tr.NewSource = [32]byte{2}
 				_, out := hcPublish(t, o, tr)
 				if out != 0 {
 					t.Fatal(out)
 				}
-			case "close":
+			case advance == phase+"close" && (phase == "" || s.calls == 2):
 				o.CloseV1()
 			}
+		}
+		s.current = func() (bool, error) { check("current-"); return true, nil }
+		e1 := errors.New("observed header error")
+		s.read = func(hash [32]byte, dst *[148]byte) (HeaderContextRead148V1, error) {
+			check("")
+			*dst = s.raws[hash]
 			if advance != "none" {
 				return HeaderContextReadInconsistent148V1, e1
 			}
@@ -2059,13 +2059,13 @@ func TestHeaderContext148SourceBinding(t *testing.T) {
 			t.Fatal("changed source produced a handle")
 		}
 		out, candidate := uint8(3), uint8(0)
-		if advance == "close" {
+		if advance == "close" || advance == "current-close" {
 			out, candidate = 2, 1
 		}
-		cxDecision(t, "independent owner freshness wins status", d, out, 0, candidate, e1)
-		cxEqual(t, "stop on first observed change", len(s.reads), 1)
+		cxDecision(t, "independent owner freshness wins status", d, out, 0, candidate, map[string]error{"source": e1, "close": e1, "current-source": nil, "current-close": nil}[advance])
+		cxEqual(t, "stop on first observed change", len(s.reads), map[string]int{"source": 1, "close": 1, "current-source": 0, "current-close": 0}[advance])
 		cxClean(t, o, false)
-		if advance == "source" {
+		if advance == "source" || advance == "current-source" {
 			cxEqual(t, "independent source progress preserved", o.VersionV1(), uint64(3))
 		}
 	}
