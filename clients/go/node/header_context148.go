@@ -14,10 +14,11 @@ import (
 // ErrHeaderContextConfig148V1 rejects an invalid dormant context configuration.
 var ErrHeaderContextConfig148V1 = errors.New("header context 148: invalid configuration")
 
-// HeaderContextLimits148V1 captures the logical resource ceilings of RUB-1817.
+// HeaderContextLimits148V1 captures the dormant owner's logical resource ceilings.
 type HeaderContextLimits148V1 struct {
 	MaxRecords, MaxBytes, MaxReads, MaxReadBytes, MaxReadWork uint64
 	MaxScratchBytes, MaxSuffix, MaxWorkBytes                  uint64
+	MaxPins                                                   uint64
 }
 
 // HeaderContextView148V1 binds both candidate and separately protected source truth.
@@ -142,18 +143,21 @@ type hctxState struct {
 	limits           HeaderContextLimits148V1
 	network, genesis [32]byte
 	records          map[[32]byte]HeaderContextRecord148V1
+	pinned           map[[32]byte]uint64
+	pins             uint64
 	bytes, scratch   uint64
 	active           *hctxReservation
 }
 
 type hctxReservation struct {
-	owner   *HeaderCandidateOwner148V1
-	record  HeaderContextRecord148V1
-	source  HeaderContextSource148V1
-	victims [][32]byte
-	scratch uint64
-	done    bool
-	view    HeaderContextView148V1
+	owner       *HeaderCandidateOwner148V1
+	record      HeaderContextRecord148V1
+	source      HeaderContextSource148V1
+	victims     [][32]byte
+	scratch     uint64
+	prospective uint64
+	done        bool
+	view        HeaderContextView148V1
 }
 
 // HeaderContextPrepared148V1 owns the exact C1 plan and its C2 reservation.
@@ -162,6 +166,15 @@ type HeaderContextPrepared148V1 struct {
 	reservation *hctxReservation
 	view        HeaderContextView148V1
 	consumed    bool
+}
+
+// HeaderContextLease148V1 retains a cached record and its admitted ancestry until release.
+// It does not make an old source or candidate view current.
+type HeaderContextLease148V1 struct {
+	owner     *HeaderCandidateOwner148V1
+	hash      [32]byte
+	candidate *HeaderCandidateLease148V1
+	released  bool
 }
 
 // NewHeaderCandidateContext148V1 attaches context state to the ordinary C1 owner.
@@ -176,13 +189,14 @@ func NewHeaderCandidateContext148V1(cl HeaderCandidateLimits148V1, l HeaderConte
 	o.context = &hctxState{
 		limits: l, network: network, genesis: genesis, bytes: 512,
 		records: map[[32]byte]HeaderContextRecord148V1{},
+		pinned:  map[[32]byte]uint64{},
 	}
 	return o, nil
 }
 
 // hctxLimitsValid admits only captured finite ceilings, including fixed state.
 func hctxLimitsValid(l HeaderContextLimits148V1) bool {
-	for _, n := range [...]uint64{l.MaxRecords, l.MaxBytes, l.MaxReads, l.MaxReadBytes, l.MaxReadWork, l.MaxScratchBytes, l.MaxSuffix, l.MaxWorkBytes} {
+	for _, n := range [...]uint64{l.MaxRecords, l.MaxBytes, l.MaxPins, l.MaxReads, l.MaxReadBytes, l.MaxReadWork, l.MaxScratchBytes, l.MaxSuffix, l.MaxWorkBytes} {
 		if n == 0 || n == math.MaxUint64 {
 			return false
 		}
@@ -260,7 +274,7 @@ func (o *HeaderCandidateOwner148V1) startContext(v HeaderContextView148V1, shape
 	if o.context.active != nil {
 		return nil, hctxDecision(HeaderContextCapacity148V1)
 	}
-	r := &hctxReservation{owner: o, view: v}
+	r := &hctxReservation{owner: o, view: v, prospective: o.context.bytes}
 	o.context.active = r
 	return r, HeaderContextDecision148V1{}
 }
@@ -397,6 +411,7 @@ func (r *hctxReservation) reserveContextVictims(hash [32]byte) HeaderContextDeci
 	if !hctxCacheFits(count, total, l) {
 		return hctxDecision(HeaderContextCapacity148V1)
 	}
+	r.prospective = total
 	return HeaderContextDecision148V1{}
 }
 
@@ -404,7 +419,7 @@ func (r *hctxReservation) reserveContextVictims(hash [32]byte) HeaderContextDeci
 func hctxVictimKeys(s *hctxState, replacement [32]byte) [][32]byte {
 	keys := make([][32]byte, 0, len(s.records))
 	for h := range s.records {
-		if h != replacement {
+		if h != replacement && s.pinned[h] == 0 {
 			keys = append(keys, h)
 		}
 	}
@@ -447,6 +462,8 @@ func (o *HeaderCandidateOwner148V1) closeContext() {
 			o.finishContext(s.active)
 		}
 		clear(s.records)
+		clear(s.pinned)
+		s.pins = 0
 		s.bytes, s.scratch = 512, 0
 	}
 }
@@ -454,9 +471,101 @@ func (o *HeaderCandidateOwner148V1) closeContext() {
 // dropContext removes derived evidence and never touches C1 membership.
 func (o *HeaderCandidateOwner148V1) dropContext(hash [32]byte) {
 	s := o.context
-	if old, ok := s.records[hash]; ok {
+	if old, ok := s.records[hash]; ok && s.pinned[hash] == 0 {
 		s.bytes -= hctxCharge(old) + 64
 		delete(s.records, hash)
+	}
+}
+
+// PinContextV1 charges explicit retention without source calls or a mutation slot.
+// The caller protects and rechecks source authority through its use of the record.
+func (o *HeaderCandidateOwner148V1) PinContextV1(v HeaderContextView148V1, hash [32]byte) (*HeaderContextLease148V1, HeaderContextDecision148V1) {
+	_, release := o.ProtectV1(v.Version)
+	defer release()
+	l, admitted, d := o.reserveContextPin(v, hash)
+	if l == nil || !admitted {
+		return l, d
+	}
+	candidate, out := o.AcquireDependencyV1(hash)
+	if out == HeaderCandidateOK148V1 {
+		l.candidate = candidate
+		return l, HeaderContextDecision148V1{}
+	}
+	d = o.checkContext(v)
+	l.ReleaseV1()
+	if d.Outcome == HeaderContextOK148V1 {
+		return nil, hctxCandidate(out)
+	}
+	d.CandidateOutcome = out
+	return nil, d
+}
+
+// reserveContextPin validates and charges both retained totals before allocating; mu is held locally.
+func (o *HeaderCandidateOwner148V1) reserveContextPin(v HeaderContextView148V1, hash [32]byte) (*HeaderContextLease148V1, bool, HeaderContextDecision148V1) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if d := o.contextGate(); d.Outcome != HeaderContextOK148V1 {
+		return nil, false, d
+	}
+	if d := o.contextView(v); d.Outcome != HeaderContextOK148V1 {
+		return nil, false, d
+	}
+	s := o.context
+	r, ok := s.records[hash]
+	if !ok {
+		return nil, false, hctxDecision(HeaderContextUnavailable148V1)
+	}
+	if r.View != v {
+		return nil, false, hctxDecision(HeaderContextStale148V1)
+	}
+	if !o.pinContextFits(hash) {
+		return nil, false, hctxDecision(HeaderContextCapacity148V1)
+	}
+	s.pins++
+	s.pinned[hash]++
+	s.bytes += 128
+	if s.active != nil {
+		s.active.prospective += 128
+	}
+	return &HeaderContextLease148V1{owner: o, hash: hash}, o.recs[hash] != nil, HeaderContextDecision148V1{}
+}
+
+// pinContextFits protects current and staged bytes and reserved victims; mu is held.
+func (o *HeaderCandidateOwner148V1) pinContextFits(hash [32]byte) bool {
+	s := o.context
+	if s.pins >= s.limits.MaxPins || hctxSum(s.bytes, 128) > s.limits.MaxBytes {
+		return false
+	}
+	if s.active == nil {
+		return true
+	}
+	return !slices.Contains(s.active.victims, hash) && hctxSum(s.active.prospective, 128) <= s.limits.MaxBytes
+}
+
+// ReleaseV1 removes this lease's charges once; C1 release runs outside the shared mutex.
+// After Close the already-cleared C2 state and historical C1 lease count stay unchanged.
+func (l *HeaderContextLease148V1) ReleaseV1() {
+	o := l.owner
+	o.mu.Lock()
+	if l.released {
+		o.mu.Unlock()
+		return
+	}
+	l.released = true
+	if !o.closed {
+		s := o.context
+		s.pins--
+		if s.pinned[l.hash]--; s.pinned[l.hash] == 0 {
+			delete(s.pinned, l.hash)
+		}
+		s.bytes -= 128
+		if s.active != nil {
+			s.active.prospective -= 128
+		}
+	}
+	o.mu.Unlock()
+	if l.candidate != nil {
+		l.candidate.ReleaseV1()
 	}
 }
 
