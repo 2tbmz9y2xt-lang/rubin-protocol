@@ -936,9 +936,9 @@ func cxSourceFailures(t *testing.T, causes []error) {
 		})
 	}
 	type observation struct {
-		name, operation        string
+		name, operation         string
 		current, panics, closed bool
-		cause                  error
+		cause                   error
 	}
 	var cases []observation
 	for _, cause := range causes {
