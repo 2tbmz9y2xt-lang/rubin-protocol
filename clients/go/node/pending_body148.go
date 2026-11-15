@@ -97,9 +97,9 @@ type pendingBodyRecord148 struct {
 }
 
 type pendingBodyState148 struct {
-	limits              PendingBodyLimits148V1
-	records             map[PendingBodyKey148V1]*pendingBodyRecord148
-	bytes, dependencies uint64
+	limits                    PendingBodyLimits148V1
+	records                   map[PendingBodyKey148V1]*pendingBodyRecord148
+	count, bytes, dependencies uint64
 }
 
 // NewHeaderCandidateBodyCustody148V1 attaches dormant custody to the same C1/C2 host.
@@ -244,7 +244,7 @@ func (s *pendingBodyState148) pendingBodyFits(b *PendingBodyBundle148V1, now uin
 	n := uint64(len(b.Dependencies))
 	meta := hctxSum(256, hctxMul(8, n))
 	charge := hctxSum(b.RetainedBytes, meta)
-	if uint64(len(s.records)) >= s.limits.MaxCandidates || hctxSum(s.bytes, charge) > s.limits.MaxBytes {
+	if s.count >= s.limits.MaxCandidates || hctxSum(s.bytes, charge) > s.limits.MaxBytes {
 		return 0, 0, false
 	}
 	if hctxSum(s.dependencies, n) > s.limits.MaxDependencies || now > math.MaxUint64-s.limits.MaxLifetime {
@@ -266,7 +266,7 @@ func (o *HeaderCandidateOwner148V1) RetainPendingBodyV1(b *PendingBodyBundle148V
 		key := PendingBodyKey148V1{b.Origin, b.Hash}
 		if old := o.expirePendingBody(key, now); old != nil {
 			o.mu.Unlock()
-			drainPendingBodies(old)
+			o.drainPendingBodies(old)
 			continue
 		}
 		d = o.publishPendingBody(key, b, now)
@@ -286,24 +286,34 @@ func (o *HeaderCandidateOwner148V1) publishPendingBody(key PendingBodyKey148V1, 
 		return pendingBodyDecision(PendingBodyCapacity148V1)
 	}
 	s.records[key] = &pendingBodyRecord148{bundle: *b, charge: charge, deadline: deadline}
+	s.count++
 	s.bytes += charge
 	s.dependencies += uint64(len(b.Dependencies))
 	*b = PendingBodyBundle148V1{}
 	return PendingBodyDecision148V1{}
 }
 
-// detachPendingBody removes all live custody references and consumes its request; mu is held.
+// detachPendingBody removes the usable key/request but retains all owned budget; mu is held.
 func (o *HeaderCandidateOwner148V1) detachPendingBody(key PendingBodyKey148V1) *pendingBodyRecord148 {
 	s := o.pendingBody
 	r := s.records[key]
 	delete(s.records, key)
-	s.bytes -= r.charge
-	s.dependencies -= uint64(len(r.bundle.Dependencies))
 	if r.request != nil {
 		r.request.consumed = true
 		r.request = nil
 	}
 	return r
+}
+
+// releasePendingBodyBudget follows actual release or handoff of the cleared bundle; mu is held.
+func (o *HeaderCandidateOwner148V1) releasePendingBodyBudget(r *pendingBodyRecord148, dependencies uint64) {
+	if !o.closed {
+		s := o.pendingBody
+		s.count--
+		s.bytes -= r.charge
+		s.dependencies -= dependencies
+	}
+	r.charge = 0
 }
 
 // expirePendingBody detaches only the matching expired key without touching incoming resources.
@@ -314,9 +324,11 @@ func (o *HeaderCandidateOwner148V1) expirePendingBody(key PendingBodyKey148V1, n
 	return nil
 }
 
-// drainPendingBodies releases genuine C2/C1 handles only outside the shared mutex.
-func drainPendingBodies(r *pendingBodyRecord148) {
+// drainPendingBodies retains budget until genuine pins and all body references are released.
+// C2/C1 release runs outside mu; only the final logical deduction reacquires it.
+func (o *HeaderCandidateOwner148V1) drainPendingBodies(r *pendingBodyRecord148) {
 	for r != nil {
+		dependencies := uint64(len(r.bundle.Dependencies))
 		for _, l := range r.bundle.Dependencies {
 			l.ReleaseV1()
 		}
@@ -326,6 +338,9 @@ func drainPendingBodies(r *pendingBodyRecord148) {
 		r.bundle = PendingBodyBundle148V1{}
 		next := r.next
 		r.next = nil
+		o.mu.Lock()
+		o.releasePendingBodyBudget(r, dependencies)
+		o.mu.Unlock()
 		r = next
 	}
 }
@@ -340,7 +355,7 @@ func (o *HeaderCandidateOwner148V1) PendingBodyRetainedV1(key PendingBodyKey148V
 	expired := o.expirePendingBody(key, now)
 	present := o.pendingBody.records[key] != nil
 	o.mu.Unlock()
-	drainPendingBodies(expired)
+	o.drainPendingBodies(expired)
 	return present
 }
 
@@ -358,7 +373,7 @@ func (o *HeaderCandidateOwner148V1) RequestPendingBodyV1(key *PendingBodyKey148V
 	expired := o.expirePendingBody(*key, now)
 	request, d := o.requestPendingBody(*key)
 	o.mu.Unlock()
-	drainPendingBodies(expired)
+	o.drainPendingBodies(expired)
 	return request, d
 }
 
@@ -404,12 +419,13 @@ func (o *HeaderCandidateOwner148V1) TakePendingBodyV1(q *PendingBodyRequest148V1
 	key := PendingBodyKey148V1{q.record.bundle.Origin, q.record.bundle.Hash}
 	if expired := o.expirePendingBody(key, now); expired != nil {
 		o.mu.Unlock()
-		drainPendingBodies(expired)
+		o.drainPendingBodies(expired)
 		return nil, pendingBodyDecision(PendingBodyAbsent148V1)
 	}
 	r := o.detachPendingBody(key)
 	b := r.bundle
 	r.bundle = PendingBodyBundle148V1{}
+	o.releasePendingBodyBudget(r, uint64(len(b.Dependencies)))
 	o.mu.Unlock()
 	return &b, PendingBodyDecision148V1{}
 }
@@ -426,7 +442,7 @@ func (o *HeaderCandidateOwner148V1) ReleasePendingBodyV1(key PendingBodyKey148V1
 	}
 	r := o.detachPendingBody(key)
 	o.mu.Unlock()
-	drainPendingBodies(r)
+	o.drainPendingBodies(r)
 	return PendingBodyDecision148V1{}
 }
 
@@ -442,7 +458,7 @@ func (o *HeaderCandidateOwner148V1) ExpirePendingBodiesV1(now uint64) {
 		}
 	}
 	o.mu.Unlock()
-	drainPendingBodies(expired)
+	o.drainPendingBodies(expired)
 }
 
 // closePendingBodies detaches the finite owner under mu; Close drains after unlocking.
@@ -453,6 +469,7 @@ func (o *HeaderCandidateOwner148V1) closePendingBodies() *pendingBodyRecord148 {
 			r := o.detachPendingBody(key)
 			r.next, detached = detached, r
 		}
+		s.count, s.bytes, s.dependencies = 0, 0, 0
 	}
 	return detached
 }

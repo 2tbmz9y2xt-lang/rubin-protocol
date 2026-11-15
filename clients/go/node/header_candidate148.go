@@ -191,7 +191,7 @@ func (o *HeaderCandidateOwner148V1) CloseV1() {
 	o.closeContext()
 	o.cond.Broadcast()
 	o.mu.Unlock()
-	drainPendingBodies(bodies)
+	o.drainPendingBodies(bodies)
 }
 
 // ProtectV1 takes a shared guard; it holds mu only briefly and never waits for another guard or for a publication that

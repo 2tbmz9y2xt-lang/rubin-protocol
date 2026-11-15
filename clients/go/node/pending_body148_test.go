@@ -102,7 +102,7 @@ func pbImage(o *HeaderCandidateOwner148V1) string {
 	if s == nil {
 		return image + "/C3=nil"
 	}
-	image += fmt.Sprintf("/C3=%#v/%d/%d", s.limits, s.bytes, s.dependencies)
+	image += fmt.Sprintf("/C3=%#v/%d/%d/%d", s.limits, s.count, s.bytes, s.dependencies)
 	var records []string
 	for key, r := range s.records {
 		records = append(records, fmt.Sprintf("%#v/%p/%d/%d/request=%p:%#v/next=%p/%s", key, r, r.charge, r.deadline, r.request, r.request, r.next, pbBundleImage(&r.bundle)))
@@ -136,7 +136,7 @@ func pbEmpty(t *testing.T, o *HeaderCandidateOwner148V1, label string) {
 	t.Helper()
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	cxEqual(t, label+" terminal owner retained state", [3]uint64{uint64(len(o.pendingBody.records)), o.pendingBody.bytes, o.pendingBody.dependencies}, [3]uint64{})
+	cxEqual(t, label+" terminal owner retained state", [4]uint64{uint64(len(o.pendingBody.records)), o.pendingBody.count, o.pendingBody.bytes, o.pendingBody.dependencies}, [4]uint64{})
 }
 
 func pbSpentRequest(t *testing.T, q *PendingBodyRequest148V1) {
@@ -147,6 +147,7 @@ func pbSpentRequest(t *testing.T, q *PendingBodyRequest148V1) {
 	cxEqual(t, "terminal request retained body references", q.record.bundle, PendingBodyBundle148V1{})
 	cxEqual(t, "terminal record retained request", q.record.request, (*PendingBodyRequest148V1)(nil))
 	cxEqual(t, "terminal record retained drain link", q.record.next, (*pendingBodyRecord148)(nil))
+	cxEqual(t, "terminal record retained logical charge", q.record.charge, uint64(0))
 }
 
 func pbMoved(t *testing.T, got *PendingBodyBundle148V1, original PendingBodyBundle148V1) {
@@ -1288,4 +1289,122 @@ func TestPendingBody148ConcurrentClose(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestPendingBody148DetachedBudget(t *testing.T) {
+	for _, dimension := range []string{"count", "bytes", "dependencies"} {
+		t.Run(dimension, func(t *testing.T) {
+			limits := pbLimits()
+			switch dimension {
+			case "count":
+				limits.MaxCandidates = 1
+			case "bytes":
+				limits.MaxBytes = 272
+			case "dependencies":
+				limits.MaxDependencies = 1
+			}
+			f := pbNew(t, limits)
+			first := pbBundle(t, f, 1, 1)
+			key, original := pbKey(first), *first
+			pbDecision(t, "detach budget prerequisite", f.o.RetainPendingBodyV1(first, 100), 0, 0)
+			q, d := f.o.RequestPendingBodyV1(&key, 100)
+			pbDecision(t, "detach budget request", d, 0, 0)
+			incoming := pbBundle(t, f, 2, 2)
+			incomingKey, incomingOriginal := pbKey(incoming), *incoming
+			// This is the legitimate public terminal path's state after detach and before drain.
+			f.o.mu.Lock()
+			detached := f.o.detachPendingBody(key)
+			f.o.mu.Unlock()
+			pbMoved(t, &detached.bundle, original)
+			cxEqual(t, "detached budget stays charged", [4]uint64{uint64(len(f.o.pendingBody.records)), f.o.pendingBody.count, f.o.pendingBody.bytes, f.o.pendingBody.dependencies}, [4]uint64{0, 1, 272, 1})
+			cxEqual(t, "detached actual leases remain live", [4]bool{original.Dependencies[0].released, original.Dependencies[0].candidate.released, original.Weak.ended, original.Weak.consumed}, [4]bool{})
+			cxEqual(t, "detached actual C2/C1 charges", [3]uint64{f.o.context.bytes, f.o.context.pins, f.o.leases}, [3]uint64{1981, 2, 2})
+			detachedBefore := pbBundleImage(&detached.bundle)
+			pbRefuse(t, "pending detached budget refusal/"+dimension, f.o, incoming, 100, 4, 0)
+			cxEqual(t, "detached refusal preserves held representation", pbBundleImage(&detached.bundle), detachedBefore)
+			cxEqual(t, "detached key is not usable", f.o.PendingBodyRetainedV1(key, 100), false)
+			out, d := f.o.TakePendingBodyV1(q, 100)
+			pbDecision(t, "detached request consumed", d, 7, 0)
+			cxEqual(t, "detached request no bundle", out, (*PendingBodyBundle148V1)(nil))
+			f.o.drainPendingBodies(detached)
+			pbSpentRequest(t, q)
+			pbEmpty(t, f.o, "actual final drain")
+			cxEqual(t, "actual final drain real release", [4]bool{original.Dependencies[0].released, original.Dependencies[0].candidate.released, original.Weak.ended, original.Weak.consumed}, [4]bool{true, true, true, false})
+			cxEqual(t, "actual final drain preserves incoming real pins", [3]uint64{f.o.context.bytes, f.o.context.pins, f.o.leases}, [3]uint64{1853, 1, 1})
+			pbDecision(t, "pending final drain enables intake/"+dimension, f.o.RetainPendingBodyV1(incoming, 100), 0, 0)
+			req, d := f.o.RequestPendingBodyV1(&incomingKey, 100)
+			pbDecision(t, "handoff budget request", d, 0, 0)
+			receiver, d := f.o.TakePendingBodyV1(req, 100)
+			pbDecision(t, "handoff budget transfer", d, 0, 0)
+			pbMoved(t, receiver, incomingOriginal)
+			pbEmpty(t, f.o, "genuine handoff returns budget")
+			cxEqual(t, "handoff receiver retains actual charge", [3]uint64{f.o.context.bytes, f.o.context.pins, f.o.leases}, [3]uint64{1853, 1, 1})
+			cxEqual(t, "handoff receiver pin remains live", receiver.Dependencies[0].released, false)
+			next := pbBundle(t, f, 3, 0)
+			nextKey := pbKey(next)
+			pbDecision(t, "pending genuine handoff enables intake/"+dimension, f.o.RetainPendingBodyV1(next, 100), 0, 0)
+			pbReleaseProducer(receiver)
+			pbDecision(t, "post-handoff next cleanup", f.o.ReleasePendingBodyV1(nextKey, 3), 0, 0)
+			pbEmpty(t, f.o, "post-handoff final cleanup")
+			cxEqual(t, "post-handoff exact final real resources", [3]uint64{f.o.context.bytes, f.o.context.pins, f.o.leases}, [3]uint64{1725, 0, 0})
+		})
+	}
+}
+
+func TestPendingBody148CloseWithDetachedDrain(t *testing.T) {
+	f := pbNew(t, pbLimits())
+	b := pbBundle(t, f, 1, 1)
+	key, pin, weak := pbKey(b), b.Dependencies[0], b.Weak
+	pbDecision(t, "late drain retain", f.o.RetainPendingBodyV1(b, 100), 0, 0)
+	q, d := f.o.RequestPendingBodyV1(&key, 100)
+	pbDecision(t, "late drain request", d, 0, 0)
+	f.o.mu.Lock()
+	detached := f.o.detachPendingBody(key)
+	f.o.mu.Unlock()
+	cxEqual(t, "pre-Close detached count", f.o.pendingBody.count, uint64(1))
+	f.o.CloseV1()
+	pbEmpty(t, f.o, "Close zeroes closed-owner budget")
+	before := pbImage(f.o)
+	f.o.drainPendingBodies(detached)
+	pbSpentRequest(t, q)
+	cxEqual(t, "late drain does not underflow or repopulate", pbImage(f.o), before)
+	cxEqual(t, "late drain actual closed resource disposition", [4]bool{pin.released, pin.candidate.released, weak.ended, weak.consumed}, [4]bool{true, false, true, false})
+	cxEqual(t, "late drain closed C2/C1 semantics", [3]uint64{f.o.context.bytes, f.o.context.pins, f.o.leases}, [3]uint64{512, 0, 1})
+}
+
+func TestPendingBody148RequestCopies(t *testing.T) {
+	f := pbNew(t, pbLimits())
+	b := pbBundle(t, f, 1, 1)
+	key, original := pbKey(b), *b
+	pbDecision(t, "copied request retain", f.o.RetainPendingBodyV1(b, 100), 0, 0)
+	q, d := f.o.RequestPendingBodyV1(&key, 100)
+	pbDecision(t, "copied request original emission", d, 0, 0)
+	copyOfRequest := *q
+	copyImage := fmt.Sprintf("%#v", copyOfRequest)
+	owner, originalToken := pbImage(f.o), fmt.Sprintf("%#v", *q)
+	out, d := f.o.TakePendingBodyV1(&copyOfRequest, 100)
+	pbDecision(t, "pending request tuple/live-copy", d, 2, 0)
+	cxEqual(t, "live copied request returned bundle", out, (*PendingBodyBundle148V1)(nil))
+	cxEqual(t, "live copied request changed owner", pbImage(f.o), owner)
+	cxEqual(t, "live copied request changed original token", fmt.Sprintf("%#v", *q), originalToken)
+	cxEqual(t, "live copied request changed copy", fmt.Sprintf("%#v", copyOfRequest), copyImage)
+	receiver, d := f.o.TakePendingBodyV1(q, 100)
+	pbDecision(t, "original emitted request still takes once", d, 0, 0)
+	pbMoved(t, receiver, original)
+	pbSpentRequest(t, q)
+	owner, originalToken = pbImage(f.o), fmt.Sprintf("%#v", *q)
+	receiverImage := pbBundleImage(receiver)
+	out, d = f.o.TakePendingBodyV1(&copyOfRequest, 100)
+	pbDecision(t, "pending request tuple/copy-before-original-take", d, 2, 0)
+	cxEqual(t, "spent original copy returned bundle", out, (*PendingBodyBundle148V1)(nil))
+	cxEqual(t, "spent original copy changed owner", pbImage(f.o), owner)
+	cxEqual(t, "spent original copy changed original token", fmt.Sprintf("%#v", *q), originalToken)
+	cxEqual(t, "spent original copy changed copy", fmt.Sprintf("%#v", copyOfRequest), copyImage)
+	cxEqual(t, "spent original copy changed receiver", pbBundleImage(receiver), receiverImage)
+	again, d := f.o.TakePendingBodyV1(q, 100)
+	pbDecision(t, "original emitted request cannot take twice", d, 7, 0)
+	cxEqual(t, "original emitted request no second bundle", again, (*PendingBodyBundle148V1)(nil))
+	pbReleaseProducer(receiver)
+	pbEmpty(t, f.o, "copied request final owner")
+	cxEqual(t, "copied request final actual resources", [3]uint64{f.o.context.bytes, f.o.context.pins, f.o.leases}, [3]uint64{1725, 0, 0})
 }
