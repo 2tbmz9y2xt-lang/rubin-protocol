@@ -76,11 +76,7 @@ func cxHash(raw [148]byte) [32]byte {
 
 // cxMine constructs supported raw inputs; expected context arithmetic never uses C2 helpers.
 func cxMine(parent [32]byte, timestamp uint64, target [32]byte) [148]byte {
-	var raw [148]byte
-	binary.LittleEndian.PutUint32(raw[:4], 1)
-	copy(raw[4:36], parent[:])
-	binary.LittleEndian.PutUint64(raw[68:76], timestamp)
-	copy(raw[76:108], target[:])
+	raw := consensus.EncodeInitial148Header(consensus.Initial148Header{Version: 1, PrevBlockHash: parent, Timestamp: timestamp, Target: target})
 	for nonce := uint64(0); ; nonce++ {
 		binary.LittleEndian.PutUint64(raw[140:], nonce)
 		hash := cxHash(raw)
@@ -328,6 +324,10 @@ func TestHeaderContext148Timestamp(t *testing.T) {
 				kind = HeaderContextCanonical148V1
 			}
 			median := uint64(10 + 10*((k-1)/2))
+			old := cxInput(p.View, cxMine(p.Hash, median, cxTarget(255)), cxProof(p, kind), source)
+			cxRefuse(t, "MTP_FLOOR", o, old, 6, 5, 0, nil)
+			old.Raw = cxMine(p.Hash, median+7201, cxTarget(255))
+			cxRefuse(t, "MTP_CEILING", o, old, 6, 6, 0, nil)
 			in := cxInput(p.View, cxMine(p.Hash, median+1, cxTarget(255)), cxProof(p, kind), source)
 			r, pub := cxPublish(t, o, in)
 			v := p.View
@@ -340,13 +340,6 @@ func TestHeaderContext148Timestamp(t *testing.T) {
 			}
 			want.LastClampedTimestamp = new(big.Int).SetUint64(max(times[k-1]+1, median+1))
 			cxEqual(t, "MTP_EVEN complete lower-median extension", r, want)
-			old := cxInput(p.View, cxMine(p.Hash, median, cxTarget(255)), cxProof(p, kind), source)
-			// A fresh owner isolates the floor from the publication's stale view.
-			o2, p2, s2 := cxWarm(t, times)
-			old.View, old.WarmParent, old.Source = p2.View, cxProof(p2, kind), s2
-			cxRefuse(t, "MTP_FLOOR", o2, old, 6, 5, 0, nil)
-			old.Raw = cxMine(p2.Hash, median+7201, cxTarget(255))
-			cxRefuse(t, "MTP_CEILING", o2, old, 6, 6, 0, nil)
 		})
 	}
 	o, p, source := cxWarm(t, []uint64{10, 20})
@@ -1081,18 +1074,19 @@ func cxSourceFailures(t *testing.T) {
 func TestHeaderContext148Limits(t *testing.T) {
 	genesis := cxMine([32]byte{}, 0, cxTarget(255))
 	for _, tc := range []struct {
-		name           string
-		bytes, scratch uint64
-		out            uint8
+		name                 string
+		bytes, scratch, work uint64
+		out                  uint8
 	}{
-		{"retained exact", 1190, 8 << 20, 0},
-		{"retained one less", 1189, 8 << 20, 5},
-		{"seed scratch exact", 1 << 20, 5058, 0},
-		{"seed scratch one less", 1 << 20, 5057, 5},
+		{"retained exact", 1190, 8 << 20, 64, 0},
+		{"retained one less", 1189, 8 << 20, 64, 5},
+		{"seed scratch exact", 1 << 20, 5058, 64, 0},
+		{"seed scratch one less", 1 << 20, 5057, 64, 5},
+		{"seed product overflow", math.MaxUint64 - 1, math.MaxUint64 - 1, 1 << 60, 5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := cxLimits()
-			l.MaxBytes, l.MaxScratchBytes = tc.bytes, tc.scratch
+			l.MaxBytes, l.MaxScratchBytes, l.MaxWorkBytes = tc.bytes, tc.scratch, tc.work
 			o, v, s := cxNew(t, l, hcLim(), genesis)
 			before := cxState(o)
 			cxDecision(t, "LOGICAL_BYTES/SCRATCH_EXACT", o.SeedGenesisContextV1(v, genesis, [32]byte{9}, s), tc.out, 0, 0, nil)
@@ -1103,6 +1097,7 @@ func TestHeaderContext148Limits(t *testing.T) {
 				cxEqual(t, "record exact count", len(o.context.records), 1)
 			}
 			cxClean(t, o, false)
+			cxEqual(t, "seed no header reads", len(s.reads), 0)
 		})
 	}
 	for _, limit := range []uint64{5502, 5503, 6300, 6301} {
@@ -1290,14 +1285,13 @@ func TestHeaderContext148Reservations(t *testing.T) {
 	cxEqual(t, "busy no source call", s.calls, calls)
 	cxEqual(t, "busy reservation state unchanged", cxState(o), busyState)
 	cxEqual(t, "victim no C1 lease", o.leases, uint64(0))
-	h.AbortV1()
+	r, pub, d := h.PublishV1()
+	cxDecision(t, "original reservation publishes after contention", d, 0, 0, 0, nil)
 	cxClean(t, o, false)
-	restored, d := o.LookupContextV1(v, p.Hash)
-	cxDecision(t, "victim restored after abort", d, 0, 0, 0, nil)
-	cxEqual(t, "abort preserved parent", restored, p)
-	r, pub := cxPublish(t, o, in)
-	_, d = o.LookupContextV1(r.View, p.Hash)
+	cxEqual(t, "original reservation receipt", pub, HeaderCandidatePublication148V1{Changed: true, Version: 3, Added: [][32]byte{r.Hash}})
+	missing, d := o.LookupContextV1(r.View, p.Hash)
 	cxDecision(t, "CACHE_VERSION cache miss", d, 2, 0, 0, nil)
+	cxEqual(t, "evicted genesis zero payload", missing, HeaderContextRecord148V1{})
 	if pub.Version != 3 || len(o.recs) != 1 || len(o.context.records) != 1 {
 		t.Fatalf("cache eviction changed admitted semantics: %+v", pub)
 	}
@@ -1306,6 +1300,10 @@ func TestHeaderContext148Reservations(t *testing.T) {
 	want.RawTimestamps, want.RawCount, want.EpochCount = [11]uint64{1, 0}, 2, 2
 	want.LastClampedTimestamp = big.NewInt(1)
 	cxEqual(t, "immutable child after parent eviction", r, want)
+	h, d = o.PrepareContextV1(cxInput(r.View, cxMine(r.Hash, 2, cxTarget(255)), cxProof(r, HeaderContextAdmitted148V1), s))
+	cxDecision(t, "next reservation", d, 0, 0, 0, nil)
+	cxDecision(t, "next reservation abort", h.AbortV1(), 0, 0, 0, nil)
+	cxClean(t, o, false)
 	cxConcurrentReservation(t)
 	// More than one eligible victim proves the exact ascending-hash choice.
 	l = cxLimits()
@@ -1333,9 +1331,10 @@ func TestHeaderContext148Reservations(t *testing.T) {
 	oldVersion := o.VersionV1()
 	h.AbortV1()
 	cxClean(t, o, false)
-	for _, hash := range keys {
-		_, d = o.LookupContextV1(b.View, hash)
+	for _, record := range []HeaderContextRecord148V1{root, a, b} {
+		restored, d := o.LookupContextV1(b.View, record.Hash)
 		cxDecision(t, "abort evicted nothing", d, 0, 0, 0, nil)
+		cxEqual(t, "abort preserved complete record", restored, record)
 	}
 	r, _ = cxPublish(t, o, in)
 	_, d = o.LookupContextV1(r.View, keys[0])

@@ -27,17 +27,17 @@ type HeaderContextView148V1 struct {
 
 // HeaderContextRecord148V1 is independent immutable evidence after handoff.
 type HeaderContextRecord148V1 struct {
-	Raw                                       [148]byte
-	Hash, Parent                              [32]byte
-	Height                                    uint64
-	Work                                      *big.Int
-	Provenance                                [32]byte
-	View                                      HeaderContextView148V1
-	RawTimestamps                             [11]uint64
-	RawCount                                  uint8
+	Raw                                      [148]byte
+	Hash, Parent                             [32]byte
+	Height                                   uint64
+	Work                                     *big.Int
+	Provenance                               [32]byte
+	View                                     HeaderContextView148V1
+	RawTimestamps                            [11]uint64
+	RawCount                                 uint8
 	EpochStart, EpochCount, FirstRawTimestamp uint64
-	LastClampedTimestamp                      *big.Int
-	CurrentTarget                             [32]byte
+	LastClampedTimestamp                     *big.Int
+	CurrentTarget                            [32]byte
 }
 
 // HeaderContextTip148V1 is the source's exact committed tip, not a received tip.
