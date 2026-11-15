@@ -32,6 +32,13 @@ type TreeBlockV1 struct {
 // TreeSourceCoverageV1 binds an already qualified complete immutable source.
 // BodyKind 1 borrows the same complete body backing as the expected-absent Pair
 // literal; BodyKind 2 uses the protected stored body and requires CurrentBody nil.
+// BodyKind 3 borrows nonempty CurrentBody without a rank-4 Pair mutation at Block.
+// It writes no body row and binds CurrentBody at writer and readback, referring
+// the absent row in both images. A present ORIGINAL OLD row refuses at body
+// binding with StateMismatch -30779 "tree held body row present", consuming the
+// Store without writing. CurrentBody stays immutable through completion and
+// must not alias Pair backing changed after its owned copy; no reference remains
+// after return.
 // All primitives are covered or all omit Coverage. Qualification of the body,
 // header, hashes, work and Generated belongs to the caller, through cleanup.
 type TreeSourceCoverageV1 struct {

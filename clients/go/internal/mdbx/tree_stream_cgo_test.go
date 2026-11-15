@@ -2002,6 +2002,250 @@ func tsCoveredDelta(t *testing.T, height uint64, tag byte, meta TreeBlockV1, eve
 	return op
 }
 
+// tsHeldV1 preserves the covered source and removes only its body target.
+func tsHeldV1(op *TreeOperationV1) {
+	for i := range op.Primitives {
+		op.Primitives[i].Coverage.BodyKind = 3
+	}
+	op.Pair.Mutations = slices.DeleteFunc(op.Pair.Mutations, func(m Mutation) bool { return m.DBI.Rank == 4 })
+}
+
+// The literal input product pins admission independently of the classifier.
+func TestTreeHeldBodyAdmissionV1(t *testing.T) {
+	for _, kind := range []uint8{0, 1, 2, 3, 4, 255} {
+		for body := 0; body < 3; body++ {
+			for mutation := 0; mutation < 4; mutation++ {
+				for old := 0; old < 3; old++ {
+					t.Run(fmt.Sprintf("kind%d/body%d/mutation%d/OLD%d", kind, body, mutation, old), func(t *testing.T) {
+						tsHeldAdmissionV1(t, kind, body, mutation, old)
+					})
+				}
+			}
+		}
+	}
+	for kind := 5; kind < 255; kind++ {
+		t.Run(fmt.Sprintf("forbidden%d", kind), func(t *testing.T) { tsHeldAdmissionV1(t, uint8(kind), 2, 0, 0) })
+	}
+}
+
+// body: nil/empty/nonempty; mutation: none/absent-literal/present-literal/delete;
+// OLD: absent/identical/different. Non-target preconditions stay qualified.
+func tsHeldAdmissionV1(t *testing.T, kind uint8, body, mutation, old int) {
+	t.Helper()
+	s, path, o := tsNew(t)
+	calls, marker := 0, errors.New("admitted held corpus source")
+	op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return marker }))
+	tsCover(&op, TreeBlockV1{TxCount: 1})
+	m := op.Pair.Mutations[0]
+	held := m.Literal
+	var before []byte
+	if old != 0 {
+		before = bytes.Clone(held)
+		if old == 2 {
+			before[148] ^= 1
+		}
+		seed := m
+		seed.Literal = before
+		mustEnvironment(t, tsRun(t, s, o, TreeOperation, TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{seed}}}).err)
+	}
+	c := op.Primitives[0].Coverage
+	c.BodyKind = kind
+	switch body {
+	case 0:
+		c.CurrentBody = nil
+	case 1:
+		c.CurrentBody = []byte{}
+	}
+	op.Pair.Mutations = nil
+	if mutation != 0 {
+		m.BeforePresent = mutation >= 2
+		if mutation == 3 {
+			m.AfterKind, m.Literal = 1, nil
+		}
+		op.Pair.Mutations = []Mutation{m}
+	}
+	admitted := kind == 1 && body == 2 && mutation == 1 || kind == 2 && body == 0 && (mutation == 0 || mutation == 3) || kind == 3 && body == 2 && mutation == 0
+	r := tsRun(t, s, o, TreeOperation, op)
+	if !admitted {
+		tsRefusal(t, r, false)
+		if calls != 0 || s.state != storeOPEN || reservationLive(o) != 0 {
+			t.Fatal("admission invoked Source, charged or consumed Store", calls, s.state)
+		}
+		tsFollowing(t, s, o)
+	} else {
+		r.tuple(t, 1, 1, 0)
+		switch {
+		case kind == 3 && old != 0:
+			tsHeldPresentV1(t, r.err)
+		case kind == 2 && old == 0:
+			treeNativeIntegrity(t, r.err, "update", nil)
+		default:
+			if any(r.err) != any(marker) || calls != 1 {
+				t.Fatal("admitted source/error identity", r, calls)
+			}
+		}
+		if (kind == 3 && old != 0 || kind == 2 && old == 0) && calls != 0 {
+			t.Fatal("body refusal invoked Source")
+		}
+		tsConsumed(t, s, o, 1, r.err)
+	}
+	// Mutating the borrowed slice only after return cannot change either image.
+	clear(held)
+	tsRead(t, tsReopen(t, s, path), TreeSchemaV1DBIs()[4], m.Key, before)
+}
+
+func tsHeldPresentV1(t *testing.T, err error) {
+	t.Helper()
+	treeNativeError(t, err, "update", "StateMismatch", -30779, "tree held body row present", nil)
+	engine, ok := directTestEngineError(err)
+	if !ok || engine.Cause != nil || engine.ReopenRequired || engine.TreeObservation != nil {
+		t.Fatal("held presence error has extra context", err)
+	}
+}
+
+func TestTreeHeldBodyMixedCoverageV1(t *testing.T) {
+	for _, first := range []bool{false, true} {
+		t.Run(fmt.Sprint(first), func(t *testing.T) {
+			tsRejected(t, TreeOperation, func(t *testing.T) TreeOperationV1 {
+				op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Fatal("mixed Source"); return nil }))
+				tsCover(&op, TreeBlockV1{TxCount: 1})
+				tsHeldV1(&op)
+				p := op.Primitives[0]
+				p.Kind, p.Generation = 6, 2
+				c := *p.Coverage
+				c.Generation = 2
+				p.Coverage = &c
+				op.Primitives = append(op.Primitives, p)
+				index := 0
+				if first {
+					index = 1
+				}
+				op.Primitives[index].Coverage = nil
+				return op
+			}, false)
+		})
+	}
+}
+
+// tsHeldDumpV1 snapshots every durable row, including nodes and auxiliary rows.
+func tsHeldDumpV1(t *testing.T, s *Store) map[string]string {
+	t.Helper()
+	rows := map[string]string{}
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		for rank := range r.dbis {
+			for from := []byte{0}; ; {
+				key, value, ok, err := treeReadNextV1(r.txn, r.dbis[rank], from)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					break
+				}
+				rows[fmt.Sprintf("%d/%x", rank, key)] = string(value.value)
+				from = append(bytes.Clone(key), 0)
+			}
+		}
+		return nil
+	}))
+	return rows
+}
+
+func TestTreeHeldBodyOracleV1(t *testing.T) {
+	var reports [2]TreeDeltaReportV1
+	var images [2]map[string]string
+	for i := 0; i < 2; i++ {
+		base := tsProofNew(t)
+		op, _ := tsProofForward(t)
+		held := op.Primitives[0].Coverage.CurrentBody
+		if i == 1 {
+			tsHeldV1(&op)
+		}
+		proofs := 0
+		op.Proof = func(r *TreeDeltaReportV1) error {
+			proofs++
+			if len(r.Undo) != 0 {
+				start := uintptr(unsafe.Pointer(&r.Undo[0]))
+				end := start + uintptr(len(r.Undo))*unsafe.Sizeof(r.Undo[0])
+				lo := uintptr(unsafe.Pointer(&held[0]))
+				if start < lo+uintptr(len(held)) && lo < end {
+					t.Fatal("report overlaps held body")
+				}
+			}
+			reports[i] = *r
+			reports[i].Undo = slices.Clone(r.Undo)
+			return nil
+		}
+		r := tsRun(t, base.s, base.o, TreeOperation, op)
+		r.tuple(t, 2, 3, -1)
+		mustEnvironment(t, r.err)
+		if proofs != 1 {
+			t.Fatal("Proof calls", proofs)
+		}
+		block := op.Primitives[0].Block
+		wantBody := bytes.Clone(held)
+		if i == 1 {
+			wantBody = nil
+		}
+		clear(held)
+		s := tsReopen(t, base.s, base.path)
+		tsRead(t, s, TreeSchemaV1DBIs()[4], block[:], wantBody)
+		images[i] = tsHeldDumpV1(t, s)
+		delete(images[i], fmt.Sprintf("4/%x", block))
+	}
+	if !reflect.DeepEqual(reports[0], reports[1]) || !reflect.DeepEqual(images[0], images[1]) {
+		t.Fatal("held NEW differs from independent kind-1 oracle", reports)
+	}
+}
+
+// Same immutable body backing drives two generations in one public operation.
+func tsHeldPairV1(t *testing.T) TreeOperationV1 {
+	t.Helper()
+	op := tsCoveredDelta(t, 5, 0x67, TreeBlockV1{TxCount: 1, EventCount: 1}, []TreeEventV1{tsCreate(0x55, 0, 0, 148, 11)}, tdFrame(55, 0, nil))
+	op.Primitives[0].Kind, op.Primitives[0].Undo = 3, 2
+	tsHeldV1(&op)
+	p := op.Primitives[0]
+	p.Kind, p.Generation = 6, 2
+	c := *p.Coverage
+	c.Generation = 2
+	p.Coverage = &c
+	op.Primitives = append(op.Primitives, p)
+	return op
+}
+
+func TestTreeHeldBodyPairV1(t *testing.T) {
+	s, path, o := tsNew(t)
+	tsRoots(t, s, o, 1, 2)
+	for _, g := range []uint64{1, 2} {
+		tsSeedCounter(t, s, o, g, false, make([]byte, 16))
+	}
+	op := tsHeldPairV1(t)
+	a, b := op.Primitives[0].Coverage.CurrentBody, op.Primitives[1].Coverage.CurrentBody
+	if &a[0] != &b[0] {
+		t.Fatal("pair fixture does not share held backing")
+	}
+	r := tsRun(t, s, o, TreeOperation, op)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	clear(a)
+	s = tsReopen(t, s, path)
+	for _, p := range op.Primitives {
+		key := tdUTXOKey(p.Generation, tdTxid(0x55), 0)
+		value := tdFormed(tdFrame(55, 0, nil), 5, 1)
+		tsRead(t, s, TreeSchemaV1DBIs()[1], key, value)
+		tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(p.Generation), tsCounterLiteral(56, 1))
+		var route [36]byte
+		copy(route[:], key[8:])
+		top := testTreeBuild(p.Generation, []testTreeEntry{{route, value}}, map[string][]byte{})
+		binding := testTreeOldBinding(&top, p.Endpoint)
+		binding.DatabaseID = [32]byte{7}
+		root, err := binding.Encode()
+		mustEnvironment(t, err)
+		tsRead(t, s, TreeSchemaV1DBIs()[0], tsRootKey(p.Generation), root)
+		tsRead(t, s, TreeSchemaV1DBIs()[4], p.Block[:], nil)
+		tsRead(t, s, TreeSchemaV1DBIs()[5], tdManifestKey(p.Block), nil)
+	}
+}
+
 func tsCreate(tx byte, vout, txIndex uint32, offset uint64, length uint32) TreeEventV1 {
 	return TreeEventV1{Kind: 2, Outpoint: TreeOutpointV1{Txid: tdTxid(tx), Vout: vout}, TxIndex: txIndex, FrameOffset: offset, FrameLength: length}
 }
@@ -3266,6 +3510,7 @@ func TestTreeBoundedProfileV1(t *testing.T) {
 		{"nil-coverage", func(o *TreeOperationV1) { o.Primitives[0].Coverage = nil }, false},
 		{"header116", func(o *TreeOperationV1) { o.Primitives[0].Coverage.HeaderBytes = 116 }, false},
 		{"body2", func(o *TreeOperationV1) { o.Primitives[0].Coverage.BodyKind = 2 }, false},
+		{"body3", func(o *TreeOperationV1) { tsHeldV1(o) }, false},
 		{"proof", func(o *TreeOperationV1) { o.Proof = func(*TreeDeltaReportV1) error { return nil } }, false},
 		{"slot", func(o *TreeOperationV1) { o.HeaderSlot = &TreeHeaderSlotV1{} }, false},
 		{"context", func(o *TreeOperationV1) { o.Pair.ContextConsulted = &CanonicalContextWindowV1{Count: 1} }, false},

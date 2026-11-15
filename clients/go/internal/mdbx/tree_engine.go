@@ -60,7 +60,8 @@ type treePrimitiveV1 struct {
 
 // treeBodyV1 is primitive j's body binding (D6-5, D14-4). pair = true iff the Pair holds a mutation of blocks-v1[Block]:
 // bytes = that Pair literal, or for a Pair delete the ORIGINAL OLD row from treeStoredBodyV1; the row is a Pair target and
-// is never referred. pair = false: the ORIGINAL OLD blocks-v1 row from treeStoredBodyV1, referred by applyV1.
+// is never referred. pair = false: the ORIGINAL OLD body or borrowed held bytes;
+// applyV1 refers blocks-v1[Block], including its absence for a held body.
 type treeBodyV1 struct {
 	bytes []byte
 	pair  bool
