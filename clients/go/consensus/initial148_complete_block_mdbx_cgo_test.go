@@ -61,55 +61,448 @@ func icbWithAccountV1(t *testing.T, w *btWorld, use func(*mdbx.OperationAccount)
 
 func TestInitial148CompleteBlockTariffLiteral(t *testing.T) {
 	in := icbInputV1()
-	// 16,777,216 + 8,192*200 + 16,384*0 + 128*0 + 1,024*2 + 2*10 + 8*1 + 0.
+	// W'(200,36) plus r=2, a=10 and p=1; no distinct genesis backing.
 	w, ok := initial148CompleteTariffV1(in)
-	logicalMDBXAssert(t, ok && w == 18_417_692, "W literal: %d/%v", w, ok)
+	logicalMDBXAssert(t, ok && w == 21_105_737, "W literal: %d/%v", w, ok)
 	in.CapRegistry = &validatedLogicalStateCapRegistry{rows: make([]validatedLogicalStateCapRegistryRow, 3)}
 	in.Height, in.ParentTimestamps, in.PublishedGenesis = 0, nil, make([]byte, 200)
 	w, ok = initial148CompleteTariffV1(in)
 	// Distinct published backing adds g=200; c=3 adds 384; p=0.
-	logicalMDBXAssert(t, ok && w == 18_417_692-8+384+200, "W distinct genesis literal: %d/%v", w, ok)
+	logicalMDBXAssert(t, ok && w == 21_106_313, "W distinct genesis literal: %d/%v", w, ok)
 	in.PublishedGenesis = in.Raw
 	w, ok = initial148CompleteTariffV1(in)
-	logicalMDBXAssert(t, ok && w == 18_417_692-8+384, "W same backing literal: %d/%v", w, ok)
+	logicalMDBXAssert(t, ok && w == 21_106_113, "W same backing literal: %d/%v", w, ok)
 	in.Rotation = &boundSpendSurfaceWithDeployment{boundSpendSurface: icbFrozenV1(0), descriptors: make([]SimplicityDeploymentDescriptor, 2), have: true}
 	w, ok = initial148CompleteTariffV1(in)
 	// d=2 concrete descriptors add 2*16,384.
-	logicalMDBXAssert(t, ok && w == 18_417_692-8+384+32_768, "W descriptor literal: %d/%v", w, ok)
+	logicalMDBXAssert(t, ok && w == 21_138_881, "W descriptor literal: %d/%v", w, ok)
 }
 
-// TestInitial148CompleteBlockTariffCensus (C12) checks the census arithmetic
-// and typed-size inequalities that close the W formula, independently of
-// initial148CompleteTariffV1.
+// TestInitial148CompleteBlockTariffCensus pins the independently inventoried
+// logical owner sizes on go1.27.4; changed sizes reopen the W' census.
 func TestInitial148CompleteBlockTariffCensus(t *testing.T) {
-	// The linear rows sum to the 8,192*n coefficient.
-	rows := []uint64{1, 127, 512, 4096, 512, 512, 2432}
-	var sum uint64
-	for _, r := range rows {
-		sum += r
+	rows := []struct {
+		name      string
+		got, want uintptr
+	}{
+		{"Outpoint", unsafe.Sizeof(Outpoint{}), 36},
+		{"UtxoEntry", unsafe.Sizeof(UtxoEntry{}), 48},
+		{"logicalStateDelete", unsafe.Sizeof(logicalStateDelete{}), 40},
+		{"logicalStatePut", unsafe.Sizeof(logicalStatePut{}), 88},
+		{"logicalTouchedState", unsafe.Sizeof(logicalTouchedState{}), 88},
+		{"sigCheckTask", unsafe.Sizeof(sigCheckTask{}), 152},
+		{"TxError", unsafe.Sizeof(TxError{}), 40},
+		{"Tx", unsafe.Sizeof(Tx{}), 136},
+		{"TxInput", unsafe.Sizeof(TxInput{}), 64},
+		{"TxOutput", unsafe.Sizeof(TxOutput{}), 40},
+		{"WitnessItem", unsafe.Sizeof(WitnessItem{}), 56},
+		{"nonCoinbaseApplyContext", unsafe.Sizeof(nonCoinbaseApplyContext{}), 424},
+		{"nonCoinbaseResolvedInput", unsafe.Sizeof(nonCoinbaseResolvedInput{}), 112},
+		{"SighashV1PrehashCache", unsafe.Sizeof(SighashV1PrehashCache{}), 144},
+		{"VaultCovenant", unsafe.Sizeof(VaultCovenant{}), 88},
+		{"MultisigCovenant", unsafe.Sizeof(MultisigCovenant{}), 32},
+		{"SimplicityTxContext", unsafe.Sizeof(SimplicityTxContext{}), 480},
+		{"SimplicityTxContextIOView", unsafe.Sizeof(SimplicityTxContextIOView{}), 16},
+		{"descriptor source", unsafe.Sizeof(simplicityTxContextDescriptorSource{}), 32},
+		{"self source", unsafe.Sizeof(simplicityTxContextSelfSource{}), 72},
+		{"group entry", unsafe.Sizeof(SimplicityTxContextGroupEntry{}), 32},
+		{"self view", unsafe.Sizeof(SimplicityTxContextSelfView{}), 104},
+		{"same-CMR view", unsafe.Sizeof(SimplicityTxContextSameCMRView{}), 80},
+		{"frame", unsafe.Sizeof(initial148CompleteBlockFrameV1{}), 872},
+		{"result", unsafe.Sizeof(initial148CompleteBlockResultV1{}), 624},
+		{"connect work", unsafe.Sizeof(blockInputViewConnectWork{}), 192},
+		{"connect result", unsafe.Sizeof(connectBlockInputViewResult{}), 64},
+		{"spent source", unsafe.Sizeof(blockSpentInputSource{}), 80},
+		{"queue", unsafe.Sizeof(SigCheckQueue{}), 56},
+		{"view state", unsafe.Sizeof(blockInputViewState{}), 40},
 	}
-	logicalMDBXAssert(t, sum == 8192, "linear census rows sum %d", sum)
-	// tx_parse.go: input = prev_txid 32 + prev_vout 4 + script_sig CompactSize 1 + sequence 4;
-	// output = value 8 + covenant_type 2 + covenant_data CompactSize 1.
-	const minInput, minOutput = 32 + 4 + 1 + 4, 8 + 2 + 1
-	logicalMDBXAssert(t, minInput == 41 && minOutput == 11, "minimum wire sizes %d/%d", minInput, minOutput)
-	// Two 65,536-byte covenant copies per minimum input fit the 4,096 row with
-	// the 256-byte per-input metadata allowance.
-	logicalMDBXAssert(t, 2*65_536/minInput < 3197 && 3197+256 <= 4096, "covenant row")
-	// At most n/41 inputs + n/11 outputs; two candidate maps at 256 bytes per
-	// entry fit the 512 row: 2*256*(n/41 + n/11) < 512*n, i.e.
-	// 2*256*(11+41) < 512*41*11.
-	logicalMDBXAssert(t, 2*256*(minOutput+minInput) < 512*minInput*minOutput, "candidate map row")
-	// The typed map entry and queued task fit their 256-byte logical charges.
-	entry := unsafe.Sizeof(Outpoint{}) + unsafe.Sizeof(UtxoEntry{})
-	task := unsafe.Sizeof(sigCheckTask{})
-	logicalMDBXAssert(t, entry <= 256 && task <= 256, "typed sizes entry=%d task=%d", entry, task)
-	// block_steps_1_12.go: blockStepsDA allocates one step12DARecord per
-	// non-zero TxKind transaction (blockStepsPass.account), so at most n
-	// records, each within the census's 64-byte typed size.
-	logicalMDBXAssert(t, unsafe.Sizeof(step12DARecord{}) <= 64, "DA record size %d", unsafe.Sizeof(step12DARecord{}))
-	// The fixed allowance covers the pinned Simplicity live memory and frame.
-	logicalMDBXAssert(t, 1_048_576+65_536 < 16_777_216, "fixed allowance")
+	for _, row := range rows {
+		logicalMDBXAssert(t, row.got == row.want, "census %s size=%d want=%d", row.name, row.got, row.want)
+	}
+	logicalMDBXAssert(t, unsafe.Sizeof(step12DARecord{}) == 56, "DA record size")
+}
+
+// TestInitial148CompleteBlockTariffMetadata lists every simultaneous current-
+// transaction metadata owner independently of the production tariff.
+func TestInitial148CompleteBlockTariffMetadata(t *testing.T) {
+	rows := []struct {
+		site      string
+		got, want uint64
+	}{
+		{"utxo_basic.go context", 424, 424},
+		{"utxo_basic_stages.go resolved", 112 * 1024, 114688},
+		{"utxo_basic_stages.go witnesses", 56 * 1024, 57344},
+		{"utxo_basic.go resolvedEntries", 48 * 1024, 49152},
+		{"utxo_basic_stages.go locks/descriptor", 34*1024 + 2 + 9 + 65536, 100363},
+		{"sighash.go cache/maps/DA/preimage", 144 + 85*1024 + 180 + 65536 + 36*1024 + 4*1024 + 256, 194116},
+		{"vault.go and utxo_basic.go parses", 88 + 12*32 + 1024*32 + 1024*56 + 32 + 12*32, 91000},
+		{"simplicity_txcontext.go context", 480 + 120*1024 + 48*1024 + 131*2048 + 2*2048*32 + 512*1024, 1096160},
+		{"simplicity_txcontext.go host views", 80 + 8*(32+65503) + 8*(32+512) + 104 + 65503, 594319},
+		{"simplicity/program.go evaluator", 1048576, 1048576},
+		{"utxo_basic.go unique outpoints", 85 * 1024, 87040},
+		{"tx_parse.go current Tx", 136 + 1024*(64+40+56) + 200, 164176},
+		{"runtime/maps one growth", 3 * 1024 * 85, 261120},
+		{"sig_verify_batch.go task growth constant", 192 * 152, 29184},
+		{"connect_block_inmem.go CMR/cap", 32*1024 + 94*1024, 129024},
+		{"header copies/MTP", 148 + 152 + 88, 388},
+	}
+	var total uint64
+	for _, row := range rows {
+		logicalMDBXAssert(t, row.got == row.want, "metadata %s=%d want=%d", row.site, row.got, row.want)
+		total += row.got
+	}
+	logicalMDBXAssert(t, total == 4_017_074 && total < 4_194_304, "metadata sum=%d", total)
+}
+
+func TestInitial148CompleteBlockTariffMargins(t *testing.T) {
+	rows := []struct {
+		name  string
+		holds bool
+	}{
+		{"created cap", 16*44 >= 690},
+		{"spent cap", 16*41 >= 362},
+		{"created connect", 6*44 >= 200+33+24},
+		{"spent connect", 6*41 >= 96+24},
+		{"task", 4*512 >= 9*152+4*(40+31+8)},
+		{"cap crossover", 14*84958 >= 44*27032},
+		{"cap below crossover", 690*84958/44+27032 < 4194304},
+		{"steps metadata", 2*164176+2*2064 < 4194304},
+		{"DA records", 56 < 60},
+		{"default witness", 1+3+2592+3+4627+1 == 7227},
+		{"fixed owners", 872+624+192+64+80+56+40+168 == 2096 && 2096 <= 2456},
+		{"cap constant", 192*(40+88)+2456 == 27032},
+	}
+	for _, row := range rows {
+		logicalMDBXAssert(t, row.holds, "census inequality %s", row.name)
+	}
+}
+
+func TestInitial148CompleteBlockBodyTariffLiteral(t *testing.T) {
+	rows := [][3]uint64{
+		{0, 7227, 20971520},
+		{149, 7227, 20971669},
+		{150, 7227, 20971677},
+		{1000, 7227, 23599917},
+		{42133, 7227, 155527829},
+		{17000157, 7227, 305777373},
+		{30000000, 7227, 293314725},
+		{68000157, 7227, 161789093},
+		{1000, 36, 23611693},
+		{1000, 0, 23599917},
+		{42133, 0, 155525269},
+	}
+	for _, row := range rows {
+		t.Run(fmt.Sprintf("n_%d_m_%d", row[0], row[1]), func(t *testing.T) {
+			got, ok := initial148CompleteBodyTariffV1(row[0], row[1])
+			logicalMDBXAssert(t, ok && got == row[2], "body n=%d m=%d W=%d/%v want=%d", row[0], row[1], got, ok, row[2])
+		})
+	}
+}
+
+func TestInitial148CompleteBlockMinimumWitness(t *testing.T) {
+	for _, base := range []struct {
+		name   string
+		params SuiteParams
+		want   uint64
+	}{{"default", SuiteParams{SuiteID: 1, PubkeyLen: 2592, SigLen: 4627}, 7227}, {"test", SuiteParams{SuiteID: 2, PubkeyLen: 11, SigLen: 21}, 36}} {
+		t.Run(base.name, func(t *testing.T) {
+			for _, extra := range []struct {
+				name   string
+				params SuiteParams
+			}{
+				{"negativePubkey", SuiteParams{SuiteID: 3, PubkeyLen: -1}},
+				{"negativeSig", SuiteParams{SuiteID: 3, SigLen: -1}},
+				{"bothnegative", SuiteParams{SuiteID: 3, PubkeyLen: -1, SigLen: -1}},
+			} {
+				t.Run(extra.name, func(t *testing.T) {
+					registry := NewSuiteRegistryFromParams([]SuiteParams{base.params, extra.params})
+					got, ok := initial148MinimumWitnessV1(registry)
+					logicalMDBXAssert(t, ok && got == base.want, "minimum %+v extra=%+v: %d/%v", base.params, extra.params, got, ok)
+				})
+			}
+		})
+	}
+	for _, row := range []struct {
+		name     string
+		registry *SuiteRegistry
+		want     uint64
+	}{
+		{"eligible/default", DefaultSuiteRegistry(), 7227},
+		{"eligible/test", icbRegistryV1(), 36},
+		{"eligible/zero", NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: 3}}), 4},
+		{"eligible/mixedZero", NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: 1, PubkeyLen: 2592, SigLen: 4627}, {SuiteID: 3}}), 4},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			got, ok := initial148MinimumWitnessV1(row.registry)
+			logicalMDBXAssert(t, ok && got == row.want, "eligible minimum=%d/%v want=%d", got, ok, row.want)
+		})
+	}
+	maximum := int(^uint(0) >> 1)
+	_, ok := initial148MinimumWitnessV1(NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: 3, PubkeyLen: maximum, SigLen: maximum}}))
+	logicalMDBXAssert(t, !ok, "witness sum overflow admitted")
+}
+
+func TestInitial148CompleteBlockMinimumWitnessIneligible(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		params []SuiteParams
+	}{
+		{"empty", nil},
+		{"negativePubkey", []SuiteParams{{SuiteID: 3, PubkeyLen: -1}}},
+		{"negativeSig", []SuiteParams{{SuiteID: 3, SigLen: -1}}},
+		{"bothnegative", []SuiteParams{{SuiteID: 3, PubkeyLen: -1, SigLen: -1}}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			got, ok := initial148MinimumWitnessV1(NewSuiteRegistryFromParams(row.params))
+			logicalMDBXAssert(t, ok && got == 0, "ineligible %+v minimum=%d/%v", row.params, got, ok)
+			w, funded := initial148CompleteBodyTariffV1(42133, got)
+			logicalMDBXAssert(t, funded && w == 155525269, "ineligible queue charge=%d/%v", w, funded)
+		})
+	}
+}
+
+// TestInitial148CompleteBlockTariffFit independently derives b and E for
+// every admitted Raw length. R', D, maxima and margins are contract literals.
+func TestInitial148CompleteBlockTariffFit(t *testing.T) {
+	var maxima, at [3]uint64
+	for n := uint64(0); n <= 68_000_157; n++ {
+		var b uint64
+		if n > 149 {
+			b = min(n-149, uint64(17_000_000), (68_000_157-n)/3)
+		}
+		e := min(uint64(414_634), b/41)
+		w, ok := initial148CompleteBodyTariffV1(n, 7227)
+		ordinary := w + 135192 + 48*e + 288408 + 104*e
+		if !ok || ordinary+n > 402653184 {
+			t.Fatalf("fit n=%d E=%d W=%d/%v total=%d", n, e, w, ok, ordinary+n)
+		}
+		for i, value := range [3]uint64{w, ordinary, ordinary + n} {
+			if value > maxima[i] {
+				maxima[i], at[i] = value, n
+			}
+		}
+	}
+	logicalMDBXAssert(t, maxima == [3]uint64{305777373, 369225341, 386225498}, "fit maxima=%v", maxima)
+	logicalMDBXAssert(t, at == [3]uint64{17000157, 17000157, 17000157}, "fit maxima positions=%v", at)
+	logicalMDBXAssert(t, 402653184-maxima[1] == 33427843 && 402653184-maxima[2] == 16427686, "fit margins")
+}
+
+// icbMaximumInputV1 supplies store-domain maximum rows. Their invalid suite
+// must win at S4 input 0 after all R1 clones, before covenant-length checking.
+func icbMaximumInputV1(t *testing.T, w *btWorld) initial148CompleteBlockInputV1 {
+	t.Helper()
+	seed, _, _ := icbSeedV1(t, w, validP2PKCovenantData(), 5)
+	value := btValue(btFrame(1, COV_TYPE_P2PK, bytes.Repeat([]byte{3}, 65536)), 4, false)
+	logicalMDBXAssert(t, len(value)+36 == 65596, "maximum StateEntryBytes=%d", len(value)+36)
+	tx := inputViewTx(1)
+	rows := make([]mdbx.Mutation, 1024)
+	for i := range rows {
+		op := Outpoint{Txid: [32]byte{0x83}, Vout: uint32(i)}
+		rows[i] = btMutation(1, btUTXOKey(1, op), value)
+		tx.Inputs = append(tx.Inputs, TxInput{PrevTxid: op.Txid, PrevVout: op.Vout})
+		tx.Witness = append(tx.Witness, WitnessItem{SuiteID: 2, Signature: []byte{SIGHASH_ALL}})
+	}
+	w.pair(t, rows...)
+	spend := icbSignedRawV1(t, tx)
+	commit := initial148BlockWitnessCommit(t, spend)
+	cb := coinbaseTxWithOutputs(5, []testOutput{{value: 1, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}, {covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}})
+	in := icbInputV1()
+	in.Raw = initial148BlockFrame(t, [][]byte{cb, spend}, func(h *initial148BlockHead) { h.parent = seed.Block })
+	in.Height, in.ParentHash, in.ExpectedTarget = 5, seed.Block, POW_LIMIT
+	in.Parent, in.ParentTimestamps = seed.Endpoint, slices.Repeat([]uint64{blockStepsMedian}, 5)
+	in.Rotation, in.Registry, in.AlreadyGenerated = icbFrozenV1(5), DefaultSuiteRegistry(), Uint128{Lo: icbGenerated5V1}
+	hash, err := Initial148BlockHash(in.Raw[:148])
+	logicalMDBXAssert(t, err == nil, "maximum block hash: %v", err)
+	in.Endpoint = mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointAppliedV1, Height: 5, BlockHash: hash, CumulativeChainwork: [40]byte{39: 100}}
+	return in
+}
+
+func TestInitial148CompleteBlockMaximumInput(t *testing.T) {
+	w := btNew(t)
+	in := icbMaximumInputV1(t, w)
+	for _, workers := range []int{-1, 1, 4} {
+		for _, short := range []uint64{0, 1} {
+			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+				free := icbW5V1(len(in.Raw)) + 184440 - short // R'(1026) = 135192+48*1026
+				logicalMDBXAssert(t, account.WithReservation(icbLaneV1-free, func() error {
+					out, delivered, err := icbDiscardRunV1(w, account, in, workers)
+					if short == 0 {
+						assertTxErrCodeMsg(t, err, "TX_ERR_SIG_ALG_INVALID", "CORE_P2PK suite not in native spend set")
+					} else {
+						var txErr *TxError
+						logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(err) && !errors.As(err, &txErr), "workers=%d R'-1: %v", workers, err)
+					}
+					logicalMDBXAssert(t, out.attempted && !delivered && out.required == (initial148RootReadOutcomeV1{}), "workers=%d short=%d outcome=%+v", workers, short, out)
+					return nil
+				}) == nil, "maximum input pre-hold")
+			})
+		}
+		icbAssertMaximumR1V1(t, w, in, workers)
+	}
+}
+
+// icbAssertMaximumR1V1 observes the existing scope before its release; the
+// public composer test above owns admission, error selection and no-result.
+func icbAssertMaximumR1V1(t *testing.T, w *btWorld, in initial148CompleteBlockInputV1, workers int) {
+	t.Helper()
+	icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+		tariff := icbW5V1(len(in.Raw))
+		logicalMDBXAssert(t, account.WithReservation(icbLaneV1-tariff-184440, func() error {
+			return account.WithReservation(tariff, func() error {
+				return w.s.View(func(reader *mdbx.Reader) error {
+					frame := initial148CompleteBlockFrameV1{input: in, account: account, parallel: workers >= 0, workers: workers}
+					summary, header, err := initial148CompleteStepsV1(in)
+					logicalMDBXAssert(t, err == nil, "maximum steps: %v", err)
+					generated := in.AlreadyGenerated
+					effect, err := prepareBlockTreeEffectV1(&frame.source, reader, account, frame.treeRequestV1(summary.BlockHash, &generated))
+					logicalMDBXAssert(t, err == nil && frame.source.coverage.BlockMeta.EventCount == 1026, "maximum event count: %v/%d", err, frame.source.coverage.BlockMeta.EventCount)
+					request := initial148RequiredRequestV1{Source: frame.source, Primitive: effect.Primitive, Parent: in.Parent}
+					err = withInitial148RequiredStateV1(reader, account, request, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
+						result := initial148CompleteBlockResultV1{summary: summary, effect: effect}
+						selected := frame.candidateV1(view, derive, header.UtxoRoot, generated, &result)
+						assertTxErrCodeMsg(t, selected, "TX_ERR_SIG_ALG_INVALID", "CORE_P2PK suite not in native spend set")
+						scope := view.(*initial148RequiredScopeV1)
+						logicalMDBXAssert(t, scope.calls == 1024 && len(scope.keys) == 1024 && len(scope.lengths) == 1024, "incomplete maximum R1: %d/%d/%d", scope.calls, len(scope.keys), len(scope.lengths))
+						for i, length := range scope.lengths {
+							logicalMDBXAssert(t, length == 65596 && scope.keys[i] == (mdbx.TreeOutpointV1{Txid: [32]byte{0x83}, Vout: uint32(i)}), "R1 input=%d key=%v length=%d", i, scope.keys[i], length)
+						}
+						return selected
+					})
+					assertTxErrCodeMsg(t, err, "TX_ERR_SIG_ALG_INVALID", "CORE_P2PK suite not in native spend set")
+					return nil
+				})
+			})
+		}) == nil, "maximum R1 pre-hold")
+	})
+}
+
+type icbReleaseOwnerV1 struct {
+	value any
+	paths []string
+}
+
+// icbReleaseFramesV1 lists both frame-owned and independently result-owned
+// paths in full; repeated ownership paths are intentionally separate rows.
+func icbReleaseFramesV1() []icbReleaseOwnerV1 {
+	return []icbReleaseOwnerV1{
+		{initial148CompleteBlockFrameV1{}, []string{
+			"input.Raw:bytes", "input.PublishedGenesis:bytes", "input.Rotation:consensus.RotationProvider",
+			"outcome.validationErr:error", "outcome.required.cause:error",
+			"source.Raw:bytes", "source.coverage.CurrentBody:bytes",
+			"result.transition.spentInputs.current.DaCommitCore.BatchSig:bytes",
+			"result.transition.spentInputs.current.Inputs[].ScriptSig:bytes",
+			"result.transition.spentInputs.current.Outputs[].CovenantData:bytes",
+			"result.transition.spentInputs.current.Witness[].Pubkey:bytes",
+			"result.transition.spentInputs.current.Witness[].Signature:bytes",
+			"result.transition.spentInputs.current.DaPayload:bytes",
+			"result.transition.spentInputs.raw:bytes",
+			"result.transition.createdUtxos{value}:entry", "result.transition.createdUtxos{value}.CovenantData:bytes",
+			"result.effect.Primitive.Source:mdbx.TreeSourceV1", "result.effect.Primitive.Coverage.CurrentBody:bytes",
+			"result.effect.Index[].Key:bytes", "result.effect.Index[].Literal:bytes", "result.effect.Index[].RefKey:bytes",
+			"result.effect.CurrentBody.Key:bytes", "result.effect.CurrentBody.Literal:bytes", "result.effect.CurrentBody.RefKey:bytes",
+		}},
+		{initial148CompleteBlockResultV1{}, []string{
+			"transition.spentInputs.current.DaCommitCore.BatchSig:bytes",
+			"transition.spentInputs.current.Inputs[].ScriptSig:bytes",
+			"transition.spentInputs.current.Outputs[].CovenantData:bytes",
+			"transition.spentInputs.current.Witness[].Pubkey:bytes",
+			"transition.spentInputs.current.Witness[].Signature:bytes",
+			"transition.spentInputs.current.DaPayload:bytes", "transition.spentInputs.raw:bytes",
+			"transition.createdUtxos{value}:entry", "transition.createdUtxos{value}.CovenantData:bytes",
+			"effect.Primitive.Source:mdbx.TreeSourceV1", "effect.Primitive.Coverage.CurrentBody:bytes",
+			"effect.Index[].Key:bytes", "effect.Index[].Literal:bytes", "effect.Index[].RefKey:bytes",
+			"effect.CurrentBody.Key:bytes", "effect.CurrentBody.Literal:bytes", "effect.CurrentBody.RefKey:bytes",
+		}},
+	}
+}
+
+// TestInitial148CompleteBlockReleaseCensus pins every retained value-bearing
+// field path, including repeated types under different owners. Entries belong
+// only to created maps, including their charged covenant backing; other bytes
+// belong to frozen body/effect fields or signature-task copies.
+func TestInitial148CompleteBlockReleaseCensus(t *testing.T) {
+	owners := append(icbReleaseFramesV1(), []icbReleaseOwnerV1{
+		{connectBlockInputViewResult{}, []string{
+			"spentInputs.current.DaCommitCore.BatchSig:bytes", "spentInputs.current.Inputs[].ScriptSig:bytes",
+			"spentInputs.current.Outputs[].CovenantData:bytes", "spentInputs.current.Witness[].Pubkey:bytes",
+			"spentInputs.current.Witness[].Signature:bytes", "spentInputs.current.DaPayload:bytes", "spentInputs.raw:bytes",
+			"createdUtxos{value}:entry", "createdUtxos{value}.CovenantData:bytes",
+		}},
+		{blockSpentInputSource{}, []string{
+			"raw:bytes", "current.DaCommitCore.BatchSig:bytes", "current.Inputs[].ScriptSig:bytes",
+			"current.Outputs[].CovenantData:bytes", "current.Witness[].Pubkey:bytes",
+			"current.Witness[].Signature:bytes", "current.DaPayload:bytes",
+		}},
+		{blockInputViewConnectWork{}, []string{
+			"raw:bytes", "created{value}:entry", "created{value}.CovenantData:bytes", "coinbaseError:error",
+			"validation.rotation:consensus.RotationProvider", "validation.inputView.view:consensus.logicalStateView",
+			"validation.sigQueue.tasks[].pubkey:bytes", "validation.sigQueue.tasks[].sig:bytes",
+			"validation.sigQueue.tasks[].errOnFail:error", "validation.sigQueue.tasks[].err:error",
+			"validation.sigQueue.tasks[].panicValue:interface {}",
+		}},
+		{blockInputViewState{}, []string{"view:consensus.logicalStateView"}},
+		{SigCheckQueue{}, []string{"tasks[].pubkey:bytes", "tasks[].sig:bytes", "tasks[].errOnFail:error", "tasks[].err:error", "tasks[].panicValue:interface {}"}},
+		{sigCheckTask{}, []string{"pubkey:bytes", "sig:bytes", "errOnFail:error", "err:error", "panicValue:interface {}"}},
+	}...)
+	for _, owner := range owners {
+		var got []string
+		icbRetainedPathsV1(t, reflect.TypeOf(owner.value), "", make(map[reflect.Type]bool), &got)
+		slices.Sort(got)
+		slices.Sort(owner.paths)
+		logicalMDBXAssert(t, slices.Equal(got, owner.paths), "%T retained paths=%v want=%v", owner.value, got, owner.paths)
+	}
+}
+
+// icbRetainedLeafV1 records exact interface types rather than a permissive
+// interface wildcard; a forbidden transaction owner always fails immediately.
+func icbRetainedLeafV1(t *testing.T, typ reflect.Type, path string, got *[]string) bool {
+	t.Helper()
+	switch typ {
+	case reflect.TypeFor[nonCoinbaseApplyContext](), reflect.TypeFor[nonCoinbaseResolvedInput](), reflect.TypeFor[SimplicityTxContext]():
+		t.Fatalf("run-wide transaction owner at %s: %v", path, typ)
+	case reflect.TypeFor[UtxoEntry]():
+		*got = append(*got, path+":entry")
+	case reflect.TypeFor[[]byte]():
+		*got = append(*got, path+":bytes")
+		return true
+	}
+	switch typ.Kind() {
+	case reflect.Interface, reflect.Func, reflect.Chan:
+		*got = append(*got, path+":"+typ.String())
+		return true
+	default:
+		return false
+	}
+}
+
+// icbRetainedPathsV1 uses a recursion-stack guard, never a global visited set:
+// every independently retained path to the same static type is inspected.
+func icbRetainedPathsV1(t *testing.T, typ reflect.Type, path string, stack map[reflect.Type]bool, got *[]string) {
+	t.Helper()
+	if icbRetainedLeafV1(t, typ, path, got) {
+		return
+	}
+	if stack[typ] {
+		t.Fatalf("unlisted recursive owner at %s: %v", path, typ)
+	}
+	stack[typ] = true
+	defer delete(stack, typ)
+	switch typ.Kind() {
+	case reflect.Pointer:
+		icbRetainedPathsV1(t, typ.Elem(), path, stack, got)
+	case reflect.Slice, reflect.Array:
+		icbRetainedPathsV1(t, typ.Elem(), path+"[]", stack, got)
+	case reflect.Map:
+		icbRetainedPathsV1(t, typ.Key(), path+"{key}", stack, got)
+		icbRetainedPathsV1(t, typ.Elem(), path+"{value}", stack, got)
+	case reflect.Struct:
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			icbRetainedPathsV1(t, field.Type, strings.TrimPrefix(path+"."+field.Name, "."), stack, got)
+		}
+	default:
+		return
+	}
 }
 
 func TestInitial148CompleteBlockLocalRefusalOrder(t *testing.T) {
@@ -193,8 +586,8 @@ func TestInitial148CompleteBlockReservationBoundary(t *testing.T) {
 	w := btNew(t)
 	in := icbInputV1()
 	// Contract W for icbInputV1 (n=200, d=0, c=0, r=2, a=10, p=1, g=0):
-	// 16,777,216 + 8,192*200 + 1,024*2 + 2*10 + 8*1 = 18,417,692.
-	const tariff = uint64(18_417_692)
+	// W'(200,36) + 1,024*2 + 2*10 + 8*1 = 21,105,737.
+	const tariff = uint64(21_105_737)
 	for _, spare := range []uint64{0, 1} {
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			// TREE_LANE_MAX=402,653,184 is the TreeOperation account ceiling.
@@ -1686,11 +2079,14 @@ func TestInitial148CompleteBlockDeriveCapacityH5(t *testing.T) {
 // icbLaneV1 is TREE_LANE_MAX=402,653,184, the TreeOperation account ceiling.
 const icbLaneV1 = 402_653_184
 
-// icbW5V1 is the RUB-1654 W of an h=5 fixture input from literal counts:
+// icbW5V1 is the W' of an h=5 fixture input from independent literal bounds:
 // n=len(Raw); d=0, c=0 (inactive empty cap registry); DefaultSuiteRegistry
 // has r=1 suite named "ML-DSA-87" (a=9); p=min(5,11)=5 parent timestamps; g=0.
 func icbW5V1(n int) uint64 {
-	return 16_777_216 + 8_192*uint64(n) + 16_384*0 + 128*0 + 1_024*1 + 2*9 + 8*5 + 0
+	b := min(17_000_000, max(0, n-149), (68_000_157-n)/3)
+	i, s := min(1_024, b/41), max(0, n-149)/7_227
+	connect := 131_072*i + 4_194_304 + 6*b + max(0, n-149) + 512*s
+	return uint64(16_777_216 + n + max(connect, 16*b) + 1_024 + 18 + 40)
 }
 
 // icbHoldsExactlyV1 reports whether the account holds exactly held bytes:
@@ -1714,29 +2110,34 @@ func icbHugeLenV1(n int) []SimplicityDeploymentDescriptor {
 }
 
 // TestInitial148CompleteBlockTariffOverflow (C12 overflow) drives the checked
-// uint64 recipe on icbInputV1 (fixed part 18,417,692, d the only varied
-// count) across multiplication overflow (16,384*2^50 = 2^64), addition carry
+// uint64 recipe on icbInputV1 (fixed part 21,105,737 for descriptor rows)
+// across multiplication overflow (16,384*2^50 = 2^64), addition carry
 // (16,384*(2^50-2^10) = 2^64-2^24, plus 2^24), the int64 domain bound and its
-// largest admitted value. The refusals return the local invariant failure
-// before W and never invoke run.
+// largest admitted value, and minimum-witness overflow. The refusals return
+// the local invariant failure before W and never invoke run.
 func TestInitial148CompleteBlockTariffOverflow(t *testing.T) {
-	const fixed = 18_417_692
+	const fixed = 21_105_737
 	const largest = (1<<63 - 1 - fixed) / 16_384
 	cases := []struct {
-		name string
-		d    int
-		ok   bool
-		w    uint64
+		name     string
+		d        int
+		ok       bool
+		w        uint64
+		registry *SuiteRegistry
 	}{
-		{"multiplication-overflow", 1 << 50, false, 0},
-		{"addition-carry", 1<<50 - 1<<10, false, 0},
-		{"above-int64", 1 << 49, false, 0},
-		{"largest-admitted", largest, true, fixed + 16_384*largest},
-		{"one-above-largest", largest + 1, false, 0},
+		{"multiplication-overflow", 1 << 50, false, 0, nil},
+		{"addition-carry", 1<<50 - 1<<10, false, 0, nil},
+		{"above-int64", 1 << 49, false, 0, nil},
+		{"largest-admitted", largest, true, fixed + 16_384*largest, nil},
+		{"one-above-largest", largest + 1, false, 0, nil},
+		{"minimum-witness-overflow", 0, false, 0, NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: SUITE_ID_ML_DSA_87, PubkeyLen: int(^uint(0) >> 1), SigLen: int(^uint(0) >> 1)}})},
 	}
 	w := btNew(t)
 	for _, c := range cases {
 		in := icbInputV1()
+		if c.registry != nil {
+			in.Registry = c.registry
+		}
 		in.Rotation = &boundSpendSurfaceWithDeployment{boundSpendSurface: icbFrozenV1(1), descriptors: icbHugeLenV1(c.d), have: true}
 		got, ok := initial148CompleteTariffV1(in)
 		logicalMDBXAssert(t, ok == c.ok && (!c.ok || got == c.w), "%s: W=%d ok=%v want %d/%v", c.name, got, ok, c.w, c.ok)
@@ -1751,7 +2152,7 @@ func TestInitial148CompleteBlockTariffOverflow(t *testing.T) {
 			})
 			var failure *logicalStateFailure
 			local := errors.As(err, &failure) && failure.kind == logicalStateFailureLocalInvariant
-			logicalMDBXAssert(t, local && !called && out == (initial148CompleteBlockOutcomeV1{}) && icbHoldsExactlyV1(account, 0), "%s entry: err=%v called=%v out=%+v", c.name, err, called, out)
+			logicalMDBXAssert(t, local && failure.Error() == "complete initial148 reservation exceeds integer domain" && !called && out == (initial148CompleteBlockOutcomeV1{}) && icbHoldsExactlyV1(account, 0), "%s entry: err=%v called=%v out=%+v", c.name, err, called, out)
 		})
 	}
 }
@@ -2078,8 +2479,8 @@ func icbRunGrowthOrderV1(t *testing.T, in initial148CompleteBlockInputV1, tc icb
 }
 
 // TestInitial148CompleteBlockCandidateGrowthOrder is candidate-boundary
-// ordering and disposal evidence for the valid funded census. It is not a
-// public-wrapper result: that wrapper's resource ceiling cannot admit this body.
+// ordering and disposal evidence with a supplied view and derive callback.
+// Its local context does not establish public admission or source bindings.
 func TestInitial148CompleteBlockCandidateGrowthOrder(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	rows := logicalGrowthParents(p2pkCovenantDataForPubkey(kp.PubkeyBytes()))

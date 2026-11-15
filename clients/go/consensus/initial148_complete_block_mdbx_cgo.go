@@ -156,12 +156,19 @@ func initial148CompleteTargetContextV1(input initial148CompleteBlockInputV1) boo
 	return input.ExpectedTarget != ([32]byte{}) && bytes.Compare(input.ExpectedTarget[:], POW_LIMIT[:]) <= 0
 }
 
-// initial148CompleteTariffV1 is the RUB-1654 W recipe:
-// 16,777,216 + 8,192n + 16,384d + 128c + 1,024r + 2a + 8p + g, checked in uint64.
+// initial148CompleteTariffV1 reserves the RUB-1907 W' census: Raw, distinct
+// genesis backing, frozen configuration and the larger connect/cap phase.
 func initial148CompleteTariffV1(input initial148CompleteBlockInputV1) (uint64, bool) {
+	m, ok := initial148MinimumWitnessV1(input.Registry)
+	if !ok {
+		return 0, false
+	}
+	total, ok := initial148CompleteBodyTariffV1(uint64(len(input.Raw)), m)
+	if !ok {
+		return 0, false
+	}
 	r, a := initial148RegistryCountsV1(input.Registry)
 	terms := [...][2]uint64{
-		{8192, uint64(len(input.Raw))},
 		{16384, initial148DescriptorCountV1(input.Rotation)},
 		{128, uint64(len(input.CapRegistry.rows))},
 		{1024, r},
@@ -169,7 +176,12 @@ func initial148CompleteTariffV1(input initial148CompleteBlockInputV1) (uint64, b
 		{8, uint64(len(input.ParentTimestamps))},
 		{1, initial148DistinctGenesisBytesV1(input.Raw, input.PublishedGenesis)},
 	}
-	total := uint64(16_777_216)
+	total, ok = initial148TariffSumV1(total, terms[:])
+	return total, ok && total <= math.MaxInt64
+}
+
+// initial148TariffSumV1 checks every product and sum before it enters W'.
+func initial148TariffSumV1(total uint64, terms [][2]uint64) (uint64, bool) {
 	for _, term := range terms {
 		hi, product := bits.Mul64(term[0], term[1])
 		sum, carry := bits.Add64(total, product, 0)
@@ -178,7 +190,54 @@ func initial148CompleteTariffV1(input initial148CompleteBlockInputV1) (uint64, b
 		}
 		total = sum
 	}
-	return total, total <= math.MaxInt64
+	return total, true
+}
+
+// initial148CompleteBodyTariffV1 is the pure (Raw bytes, minimum witness) W'
+// recipe before configuration and distinct published-genesis backing. Zero m
+// means that no registered suite can produce a signature task.
+func initial148CompleteBodyTariffV1(n, m uint64) (uint64, bool) {
+	if n > 68_000_157 {
+		return 0, false
+	}
+	var b, w, s uint64
+	if n > 149 {
+		w = n - 149
+		b = min(17_000_000, w, (68_000_157-n)/3)
+	}
+	if m != 0 {
+		s = w / m
+	}
+	terms := [...][2]uint64{{131_072, min(1_024, b/41)}, {1, 4_194_304}, {6, b}, {1, w}, {512, s}}
+	connect, ok := initial148TariffSumV1(0, terms[:])
+	if !ok {
+		return 0, false
+	}
+	// b <= 17,000,000, so 16*b and 16,777,216+n cannot overflow.
+	phase := [...][2]uint64{{1, max(connect, 16*b)}}
+	return initial148TariffSumV1(16_777_216+n, phase[:])
+}
+
+// initial148MinimumWitnessV1 counts the suite byte, both CompactSizes and
+// SigLen+1. Negative lengths admit no task; zero means no eligible suite.
+func initial148MinimumWitnessV1(registry *SuiteRegistry) (uint64, bool) {
+	var minimum uint64
+	for _, params := range registry.suites {
+		if params.PubkeyLen < 0 || params.SigLen < 0 {
+			continue
+		}
+		// Nonnegative int lengths are at most MaxInt64; widen before +1.
+		pub, sig := uint64(params.PubkeyLen), uint64(params.SigLen)+1
+		terms := [...][2]uint64{{1, pub}, {1, sig}, {1, compactSizeLen(pub)}, {1, compactSizeLen(sig)}}
+		size, ok := initial148TariffSumV1(1, terms[:])
+		if !ok {
+			return 0, false
+		}
+		if minimum == 0 || size < minimum {
+			minimum = size
+		}
+	}
+	return minimum, true
 }
 
 func initial148RegistryCountsV1(registry *SuiteRegistry) (uint64, uint64) {

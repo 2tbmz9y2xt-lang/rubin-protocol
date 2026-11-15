@@ -255,7 +255,7 @@ func TestInitial148FirstGenesisValidatedEffectEquality(t *testing.T) {
 						if got != nil {
 							validated, transition = got.effect, got.transition
 						}
-						logicalMDBXAssert(t, icbHoldsExactlyV1(a, 158365814), "E or required scope survived validation before engine")
+						logicalMDBXAssert(t, icbHoldsExactlyV1(a, 160513459), "E or required scope survived validation before engine")
 						return got, e
 					}
 					truth, stage, index, e := w.s.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
@@ -542,7 +542,7 @@ func TestInitial148FirstGenesisReservationBoundaries(t *testing.T) {
 		residual uint64
 		begins   uint64
 		mutate   string
-	}{{"B-one-short", 158365813, 0, ""}, {"B-exact", 158365814, 1, ""}, {"E-one-short", 158922730, 1, ""}, {"D-one-short", 159211242, 1, ""}, {"identity-before-B", 158365813, 0, "identity"}, {"zero-context-before-B", 158365813, 0, "context"}} {
+	}{{"B-one-short", 160513458, 0, ""}, {"B-exact", 160513459, 1, ""}, {"E-one-short", 161070375, 1, ""}, {"D-one-short", 161358887, 1, ""}, {"identity-before-B", 160513458, 0, "identity"}, {"zero-context-before-B", 160513458, 0, "context"}} {
 		t.Run(row.name, func(t *testing.T) {
 			w := fgNew(t, [32]byte{7}, 1, 2)
 			before := w.image(t)
@@ -583,7 +583,7 @@ func TestInitial148FirstGenesisBorrowedLifetime(t *testing.T) {
 	before := w.image(t)
 	var out Initial148FirstGenesisOutcomeV1
 	var evidence mdbx.SelectedDamageEvidence
-	fgHeld(t, w.owner, 805306368-174807592, func() {
+	fgHeld(t, w.owner, 805306368-176955237, func() {
 		var err error
 		evidence, err = mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageCommitNew, 0, nil, func() { out = w.call() })
 		logicalMDBXAssert(t, err == nil, "borrowed lifetime fixture: %v", err)
@@ -787,7 +787,7 @@ func TestInitial148FirstGenesisFullValidationAndRelease(t *testing.T) {
 			input, published := bytes.Clone(w.raw), bytes.Clone(w.genesis.Published)
 			var out Initial148FirstGenesisOutcomeV1
 			if name == "coinbase-before-E" {
-				fgHeld(t, w.owner, 805306368-158922730, func() { out = w.call() })
+				fgHeld(t, w.owner, 805306368-161070375, func() { out = w.call() })
 			} else {
 				out = w.call()
 			}

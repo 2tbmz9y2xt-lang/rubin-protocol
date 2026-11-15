@@ -1597,6 +1597,83 @@ func testTxIDOf(t *testing.T, tx *Tx) [32]byte {
 	return testTxID(t, raw)
 }
 
+// TestConnectBlockInputViewQueuedMapIdentity distinguishes the block-private
+// in-place interval from the nil-view interval's caller-owned snapshot.
+func TestConnectBlockInputViewQueuedMapIdentity(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	op := Outpoint{Txid: hashWithPrefix(0x69)}
+	pre := map[Outpoint]UtxoEntry{op: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()), CreationHeight: 1}}
+	for _, withView := range []bool{true, false} {
+		inputViewQueuedMapChain(t, pre, op, kp, withView)
+	}
+}
+
+func inputViewQueuedMapChain(t *testing.T, pre map[Outpoint]UtxoEntry, op Outpoint, kp *MLDSA87Keypair, withView bool) {
+	t.Helper()
+	work, before := copyUtxoMap(pre), copyUtxoMap(pre)
+	var view *blockInputViewState
+	if withView {
+		work = make(map[Outpoint]UtxoEntry)
+		view = &blockInputViewState{view: inputViewNew(pre), spent: make(map[Outpoint]uint32), height: 100, txIndex: 1}
+	}
+	queue := NewSigCheckQueue(1)
+	for nonce := uint64(1); nonce <= 2; nonce++ {
+		entries := pre
+		if nonce == 2 {
+			entries = work // the second transaction spends the first's output
+		}
+		work, op = inputViewQueuedMapStep(t, nonCoinbaseApplyWorkInput{tx: inputViewSignedTx(t, nonce, entries, kp, op), utxoSet: work, height: 100, inputView: view}, queue, nonce)
+	}
+	if err := queue.Flush(); err != nil || queue.Len() != 0 || !reflect.DeepEqual(pre, before) {
+		t.Fatalf("view=%v flush=%v retained=%d or view rows changed", withView, err, queue.Len())
+	}
+}
+
+func inputViewQueuedMapStep(t *testing.T, input nonCoinbaseApplyWorkInput, queue *SigCheckQueue, nonce uint64) (map[Outpoint]UtxoEntry, Outpoint) {
+	t.Helper()
+	input.txid = testTxIDOf(t, input.tx)
+	before := copyUtxoMap(input.utxoSet)
+	next, fee, err := applyNonCoinbaseTxWorkInputQ(input, queue)
+	if err != nil || fee != (Uint128{Lo: 10}) {
+		t.Fatalf("nonce=%d apply=%v fee=%v", nonce, err, fee)
+	}
+	withView := input.inputView != nil
+	if same := reflect.ValueOf(next).Pointer() == reflect.ValueOf(input.utxoSet).Pointer(); same != withView {
+		t.Fatalf("view=%v nonce=%d map identity same=%v", withView, nonce, same)
+	}
+	if !withView && !reflect.DeepEqual(input.utxoSet, before) {
+		t.Fatal("nil-view interval changed its input map")
+	}
+	created := Outpoint{Txid: input.txid}
+	want := UtxoEntry{Value: 100 - 10*nonce, CovenantType: COV_TYPE_P2PK, CovenantData: input.tx.Outputs[0].CovenantData, CreationHeight: 100}
+	if !reflect.DeepEqual(next, map[Outpoint]UtxoEntry{created: want}) {
+		t.Fatalf("view=%v nonce=%d delta=%v want=%v", withView, nonce, next, want)
+	}
+	return next, created
+}
+
+func TestConnectBlockInputViewQueuedMapStageError(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	op := Outpoint{Txid: hashWithPrefix(0x6a)}
+	pre := map[Outpoint]UtxoEntry{op: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes())}}
+	for _, withView := range []bool{false, true} {
+		work := copyUtxoMap(pre)
+		before := copyUtxoMap(work)
+		tx := inputViewSignedTx(t, 1, pre, kp, op)
+		tx.Outputs[0].CovenantData = tx.Outputs[0].CovenantData[:32]
+		var view *blockInputViewState
+		if withView {
+			view = &blockInputViewState{view: inputViewNew(pre), spent: make(map[Outpoint]uint32), height: 100, txIndex: 1}
+		}
+		queue := NewSigCheckQueue(1)
+		next, fee, err := applyNonCoinbaseTxWorkInputQ(nonCoinbaseApplyWorkInput{tx: tx, txid: testTxIDOf(t, tx), utxoSet: work, height: 100, inputView: view}, queue)
+		assertInputViewTxError(t, err, "TX_ERR_COVENANT_TYPE_INVALID", "invalid CORE_P2PK covenant_data length")
+		if next != nil || fee != (Uint128{}) || queue.Len() != 0 || !reflect.DeepEqual(work, before) {
+			t.Fatalf("view=%v rejected interval result=%v fee=%v retained=%d state=%v", withView, next, fee, queue.Len(), work)
+		}
+	}
+}
+
 func TestConnectBlockInputViewQueuedEarlierSignatureWins(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	pre := make(map[Outpoint]UtxoEntry)
