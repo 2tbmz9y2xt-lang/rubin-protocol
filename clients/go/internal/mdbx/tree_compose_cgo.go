@@ -69,7 +69,7 @@ type treeScopeV1 struct {
 	bounded     bool
 	enclosing   bool // selected checker and regeneration own index -1
 	frozen      [2]*treeDeltaV1 // separately charged per-role owners; never a projection
-	observations [2]TreeObservationV1
+	lagObservation TreeObservationV1
 	storedBody  treeBodyV1
 	bodyHeld    uint64 // one protected stored backing; numeric grant survives crossing
 }
@@ -267,12 +267,11 @@ func (e *treeScopeV1) bindCoverageV1(j int, prim *treePrimitiveV1) {
 		return
 	}
 	e.rec.coverage = *coverage
-	e.observation = TreeObservationV1{DatabaseID: coverage.DatabaseID, Generation: prim.generation, Block: prim.block, Height: prim.height, Primitive: j, Position: TreePositionV1(e.position)}
 	e.rec.observation = &e.observation
-	if e.bounded {
-		e.observations[j] = e.observation
-		e.rec.observation = &e.observations[j]
+	if e.bounded && j != 0 {
+		e.rec.observation = &e.lagObservation
 	}
+	*e.rec.observation = TreeObservationV1{DatabaseID: coverage.DatabaseID, Generation: prim.generation, Block: prim.block, Height: prim.height, Primitive: j, Position: TreePositionV1(e.position)}
 }
 
 // retireStepV1 retires writer work before strict readback allocates its own.

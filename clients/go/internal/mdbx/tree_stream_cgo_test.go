@@ -994,7 +994,7 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 		{unsafe.Sizeof(treeAmendedV1{}), 80},
 		{unsafe.Sizeof(treeReadbackStateV1{}), 128},
 		{unsafe.Sizeof(treeSectionV1{}), 168},
-		{unsafe.Sizeof(treeScopeV1{}), 648},
+		{unsafe.Sizeof(treeScopeV1{}), 504},
 		{unsafe.Sizeof(treeComposeV1{}), 112},
 		{unsafe.Sizeof(TreeOperationV1{}), 112},
 		{unsafe.Sizeof(treePlanV1{}), 152},
@@ -1031,7 +1031,7 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	// treeNextValueEqualV1, updatePairImageEqualV1 and coverV1.
 	helper := uint64(unsafe.Sizeof(treePairReadBudgetV1{})) + 6*uint64(unsafe.Sizeof(updateImage{})) + 40 +
 		2*uint64(unsafe.Sizeof(treeImageV1{})) + 2*uint64(unsafe.Sizeof([]byte{})) + 156
-	if control != 2545 || helper != 484 || helper > 512 {
+	if control != 2257 || helper != 484 || helper > 512 {
 		t.Fatal("fixed control/helper cell census", control, helper)
 	}
 	control += 168 + 112 + 128 + 16 + helper
@@ -1045,7 +1045,7 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	// ledger interface and fixed defer/size scalars. U itself is a separate hold.
 	loan := uint64(unsafe.Sizeof(treeImageV1{})) + 2*uint64(unsafe.Sizeof(error(nil))) + uint64(unsafe.Sizeof(treeLedgerV1(nil))) + 16
 	control += loan
-	if loan != 96 || control != 3949 {
+	if loan != 96 || control != 3661 || control-2709 > 1024 {
 		t.Fatal("selected fixed control increment", control)
 	}
 	// A replay pair retains a second recorder/delta/key/iterator set under its

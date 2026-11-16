@@ -4688,6 +4688,10 @@ func trLifecycleV1(t *testing.T, position TreePositionV1, role int, mode string,
 			if provider.sink.WindowV1() != nil {
 				t.Fatal("Source sink remains active", j)
 			}
+			rec := provider.sink.recorder
+			if rec.charged && (!rec.released || rec.descs != nil || rec.value != nil) {
+				t.Fatal("charged frozen recorder survived outer account cleanup", j, rec.released)
+			}
 		}
 	}
 	trLifecycleResultV1(t, f, position, role, mode, cleanup, primary, result)
