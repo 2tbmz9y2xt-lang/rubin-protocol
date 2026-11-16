@@ -957,7 +957,9 @@ func (e treeBoundedEmitterV1) referV1(dbi DBI, key []byte) error {
 }
 
 // treeBoundedReadbackEmitterV1 folds both predicates immediately under the
-// immutable native seal and the existing local Br+Sr budget, never retaining P.
+// immutable native seal and local B+B_r+S_r budget, never retaining P. B is
+// writer.bodyHeld's stored-body grant retained through crossing for sequential
+// strict passes.
 type treeBoundedReadbackEmitterV1 struct{ readback *treeReadbackStateV1 }
 
 // emitV1 completes both comparisons even after either accumulated predicate is

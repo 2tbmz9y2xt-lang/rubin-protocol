@@ -785,7 +785,9 @@ func (c *treeComposeV1) unwoundV1(completed *bool, e *treeScopeV1, read *C.MDBX_
 	c.index = -1
 }
 
-// readbackV1 replays every primitive at the readback position inside budget = P + S_r + B_r (D13-15), then verdictV1.
+// readbackV1 replays every primitive with budget P + S_r + B_r + B (D13-15),
+// then verdictV1. B is writer.bodyHeld's stored-body grant, retained through
+// crossing for sequential strict passes; P remains accounted on fallback.
 func (c *treeComposeV1) readbackV1(e *treeScopeV1, read *C.MDBX_txn) (CommitTruth, error) {
 	budget := treeBudgetV1{held: c.writer.t.pBudgetV1() + c.heldR + c.writer.bodyHeld}
 	rb, err := newTreeReadbackV1(e.old, read, e.s.dbis, &budget, c.writer.t.pairReadLimit)
