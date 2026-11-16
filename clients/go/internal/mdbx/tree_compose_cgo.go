@@ -10,6 +10,7 @@ import "C"
 import (
 	"bytes"
 	"encoding/binary"
+	"sort"
 )
 
 // ---- tree_compose_cgo.go (owner L5a) ----
@@ -67,6 +68,10 @@ type treeScopeV1 struct {
 	delta       *treeDeltaV1 // selected frozen writer descriptors through reserve/write
 	bounded     bool
 	enclosing   bool // selected checker and regeneration own index -1
+	frozen      [2]*treeDeltaV1 // separately charged per-role owners; never a projection
+	observations [2]TreeObservationV1
+	storedBody  treeBodyV1
+	bodyHeld    uint64 // one protected stored backing; numeric grant survives crossing
 }
 
 // treeComposeV1 is the frame-held state of one updateTreeLockedV1 call: the captured outcome and index (D17 item 3)
@@ -106,7 +111,27 @@ func (e *treeScopeV1) slotV1() {
 	if e.rec != nil {
 		e.rec.expireV1()
 		e.rec.releaseV1()
+		e.rec.window, e.rec.body, e.rec.coverage.CurrentBody = nil, treeBodyV1{}, nil
 		e.rec = nil
+	}
+	for j := range e.frozen {
+		e.retireFrozenV1(j)
+	}
+	e.storedBody = treeBodyV1{}
+	if e.bodyHeld != 0 {
+		e.ledger.releaseV1(e.bodyHeld)
+		e.bodyHeld = 0
+	}
+}
+
+// retireFrozenV1 releases one frozen descriptor/window/control owner once.
+func (e *treeScopeV1) retireFrozenV1(j int) {
+	if d := e.frozen[j]; d != nil {
+		d.rec.releaseV1()
+		d.rec.window, d.rec.body, d.rec.coverage.CurrentBody = nil, treeBodyV1{}, nil
+		d.original = nil
+		e.frozen[j] = nil
+		e.ledger.releaseV1(treeStepBytesV1)
 	}
 }
 
@@ -162,7 +187,24 @@ func (e *treeScopeV1) bodyV1(p *TreePrimitiveV1) (treeBodyV1, error) {
 	}
 	body, err := treeStoredBodyV1(e.checkedV1(), block)
 	body.pair = mutation != nil
+	if err == nil && e.bounded && p.Coverage.BodyKind == 2 {
+		return e.retainBodyV1(body)
+	}
 	return body, err
+}
+
+// retainBodyV1 funds the protected body before it outlives the initial read.
+func (e *treeScopeV1) retainBodyV1(body treeBodyV1) (treeBodyV1, error) {
+	if e.bodyHeld != 0 {
+		body.bytes = e.storedBody.bytes
+		return body, nil
+	}
+	n := uint64(len(body.bytes))
+	if err := e.ledger.chargeV1(n); err != nil {
+		return treeBodyV1{}, err
+	}
+	e.storedBody, e.bodyHeld = body, n
+	return body, nil
 }
 
 func (e *treeScopeV1) checkedV1() treeOldV1 {
@@ -189,6 +231,7 @@ func (e *treeScopeV1) emitterV1() treeEmitterV1 {
 // stepV1 runs primitive j (I-SEQ steps 1-8). A nil error with e.unwind.kind != 0 is a recovered provider panic.
 func (e *treeScopeV1) stepV1(j int) error {
 	e.j = j
+	e.enclosing = false
 	err := e.ledger.chargeV1(treeStepBytesV1)
 	if err != nil {
 		return err
@@ -200,11 +243,7 @@ func (e *treeScopeV1) stepV1(j int) error {
 		return err
 	}
 	e.rec = newTreeRecorderV1(e.position, prim, body, make([]byte, treeWindowBytesV1), e.ledger)
-	if coverage := e.plan.primitives[j].Coverage; coverage != nil {
-		e.rec.coverage = *coverage
-		e.observation = TreeObservationV1{DatabaseID: coverage.DatabaseID, Generation: prim.generation, Block: prim.block, Height: prim.height, Primitive: j, Position: TreePositionV1(e.position)}
-		e.rec.observation = &e.observation
-	}
+	e.bindCoverageV1(j, &prim)
 	err = e.invokeV1()
 	if err != nil || e.unwind.kind != 0 {
 		return err
@@ -218,6 +257,22 @@ func (e *treeScopeV1) stepV1(j int) error {
 	}
 	e.retireStepV1()
 	return nil
+}
+
+// bindCoverageV1 keeps each frozen role's diagnostic and mode independently.
+func (e *treeScopeV1) bindCoverageV1(j int, prim *treePrimitiveV1) {
+	e.rec.referenceOnly = e.bounded && prim.kind != treeKindDirectApplyV1
+	coverage := e.plan.primitives[j].Coverage
+	if coverage == nil {
+		return
+	}
+	e.rec.coverage = *coverage
+	e.observation = TreeObservationV1{DatabaseID: coverage.DatabaseID, Generation: prim.generation, Block: prim.block, Height: prim.height, Primitive: j, Position: TreePositionV1(e.position)}
+	e.rec.observation = &e.observation
+	if e.bounded {
+		e.observations[j] = e.observation
+		e.rec.observation = &e.observations[j]
+	}
 }
 
 // retireStepV1 retires writer work before strict readback allocates its own.
@@ -246,6 +301,7 @@ func (e *treeScopeV1) deltaV1(prim *treePrimitiveV1) error {
 		}
 	}
 	if e.bounded {
+		d.original = e.uncheckedV1()
 		return e.boundedDeltaV1(d, prim)
 	}
 	err = d.applyV1(e.emitterV1())
@@ -256,18 +312,15 @@ func (e *treeScopeV1) deltaV1(prim *treePrimitiveV1) error {
 	return treeEmitNodesV1(e.uncheckedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.emitterV1(), e.ledger, e.rec.observation)
 }
 
-// boundedDeltaV1 preserves source/finish/resolve/pure-fold precedence, then
-// checks the complete domain or immediately folds both strict predicates.
+// boundedDeltaV1 freezes the writer prefix for later complete checking, or
+// immediately folds both complete strict predicates at the readback position.
 func (e *treeScopeV1) boundedDeltaV1(d *treeDeltaV1, prim *treePrimitiveV1) error {
-	e.enclosing = true
-	var emit treeEmitterV1
-	if e.rb != nil {
-		emit = treeBoundedReadbackEmitterV1{e.rb}
-	} else {
+	if e.rb == nil {
 		e.delta = d
-		emit = treeBoundedEmitterV1{section: e.t}
+		return nil
 	}
-	return e.regenerateV1(d, prim, emit)
+	e.enclosing = true
+	return e.regenerateV1(d, prim, treeBoundedReadbackEmitterV1{e.rb})
 }
 
 // regenerateV1 consumes the frozen original-event delta and one paired walker.
@@ -276,7 +329,7 @@ func (e *treeScopeV1) regenerateV1(d *treeDeltaV1, prim *treePrimitiveV1, emit t
 	if err != nil {
 		return err
 	}
-	return treeEmitNodesV1(e.uncheckedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), emit, e.ledger, e.rec.observation)
+	return treeEmitNodesV1(e.uncheckedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), emit, e.ledger, d.rec.observation)
 }
 
 // reportV1 captures primitive j's report values at the writer from its applied derivation: the role's first
@@ -346,6 +399,10 @@ func (e *treeScopeV1) loopV1() (bool, error) {
 		err := e.stepV1(j)
 		if err != nil || e.unwind.kind != 0 {
 			return true, err
+		}
+		if e.delta != nil {
+			e.frozen[j] = e.delta
+			e.rec, e.delta, e.held = nil, nil, false
 		}
 	}
 	return false, nil
@@ -512,18 +569,71 @@ func (c *treeComposeV1) holdV1() error {
 // Pair is emitted by the root callback, so the final root is never rewritten.
 func (c *treeComposeV1) boundedHoldV1() error {
 	w := c.writer
-	err := c.reserveV1()
+	w.enclosing = true
+	if w.dirtyConsultedV1() {
+		return updateInvalidBatch()
+	}
+	err := w.boundedCheckV1()
 	if err != nil {
 		return err
 	}
-	prim := treeAdmittedPrimitiveV1(&w.plan.primitives[0])
-	emit := treeBoundedEmitterV1{section: w.t, pair: w.plan.pair, writing: true}
-	err = w.regenerateV1(w.delta, &prim, emit)
+	err = c.reserveV1()
 	if err != nil {
 		return err
 	}
-	w.retireStepV1()
+	for j := range w.plan.primitives {
+		prim := treeAdmittedPrimitiveV1(&w.plan.primitives[j])
+		emit := treeBoundedEmitterV1{section: w.t, writing: true}
+		if j == len(w.plan.primitives)-1 {
+			emit.pair = w.plan.pair
+		}
+		if err := w.regenerateV1(w.frozen[j], &prim, emit); err != nil {
+			return err
+		}
+		w.retireFrozenV1(j)
+	}
+	w.storedBody = treeBodyV1{}
+	if w.plan.context.Count != 0 {
+		return w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted, contextTreeScopeV1(w.plan.context))
+	}
 	return w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted)
+}
+
+// dirtyConsultedV1 consumes no payload and builds no target list.
+func (e *treeScopeV1) dirtyConsultedV1() bool {
+	for _, d := range e.frozen {
+		if d == nil {
+			continue
+		}
+		for i := 0; i < len(d.rec.descs); {
+			g := &d.rec.descs[i]
+			i = int(g.last) + 1
+			if g.flags&treeDescDirtyV1 != 0 && e.consultedUTXOV1(d.utxoKeyV1(g)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// consultedUTXOV1 binary-searches the already admitted ordered observations.
+func (e *treeScopeV1) consultedUTXOV1(key []byte) bool {
+	rows := e.plan.consulted
+	i := sort.Search(len(rows), func(i int) bool {
+		return rows[i].dbi.Rank > 1 || rows[i].dbi.Rank == 1 && bytes.Compare(rows[i].key, key) >= 0
+	})
+	return i < len(rows) && rows[i].dbi.Rank == 1 && bytes.Equal(rows[i].key, key)
+}
+
+// boundedCheckV1 checks both complete frozen contributions before any write.
+func (e *treeScopeV1) boundedCheckV1() error {
+	for j := range e.plan.primitives {
+		prim := treeAdmittedPrimitiveV1(&e.plan.primitives[j])
+		if err := e.regenerateV1(e.frozen[j], &prim, treeBoundedEmitterV1{section: e.t}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *treeComposeV1) coveredHoldV1() error {
@@ -678,7 +788,7 @@ func (c *treeComposeV1) unwoundV1(completed *bool, e *treeScopeV1, read *C.MDBX_
 
 // readbackV1 replays every primitive at the readback position inside budget = P + S_r + B_r (D13-15), then verdictV1.
 func (c *treeComposeV1) readbackV1(e *treeScopeV1, read *C.MDBX_txn) (CommitTruth, error) {
-	budget := treeBudgetV1{held: c.writer.t.pBudgetV1() + c.heldR}
+	budget := treeBudgetV1{held: c.writer.t.pBudgetV1() + c.heldR + c.writer.bodyHeld}
 	rb, err := newTreeReadbackV1(e.old, read, e.s.dbis, &budget, c.writer.t.pairReadLimit)
 	if err != nil {
 		return CommitTruthUnknown, err

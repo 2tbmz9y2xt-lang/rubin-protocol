@@ -39,7 +39,8 @@ const (
 // treeDescV1 is one admitted event, copied by value (G5). After finishV1 the array is in (UTXO key, seq) order;
 // pos of the descriptor at index s is the sorted index of the event with arrival sequence s; group and last are
 // the sorted indices of its group's first and last event; img is the image resolveV1 borrowed for a group-first
-// descriptor (forward: logical OLD value; inverse: the retained undo entry value).
+// descriptor (forward fallback: logical OLD value; inverse: retained undo entry).
+// Selected forward replay keeps no img and reopens ORIGINAL OLD synchronously.
 type treeDescV1 struct {
 	txid                                   [32]byte
 	img                                    []byte
@@ -77,6 +78,7 @@ type treeRecorderV1 struct {
 	coverage                       TreeSourceCoverageV1
 	observation                    *TreeObservationV1
 	rootReadOnly                   bool // D observes records without consuming R counters.
+	referenceOnly                  bool // selected replay reopens ORIGINAL OLD instead of retaining spent values
 }
 
 func newTreeRecorderV1(position treePositionV1, prim treePrimitiveV1, body treeBodyV1, window []byte, ledger treeLedgerV1) *treeRecorderV1 {
@@ -234,7 +236,8 @@ func treeUndoValueOKV1(key, value []byte) bool {
 // effect (D8-3) then the group's UTXO effect (target if net-dirty, else referV1); inverse, the group's UTXO effect then,
 // for a SPEND, that input's undo-entry effect; after the last event the manifest effect. Unchanged family rows are
 // referred (D13-5, D13-6).
-// applyV1 and leavesV1 read nothing. applyV1 copies no OLD or entry value: each emitted value is the body span, a value
+// leavesV1 reads nothing. Selected forward applyV1 reopens only missing-family
+// original entries under one synchronous U loan. applyV1 copies no OLD or entry value: each emitted value is the body span, a value
 // formed in V, the regenerated manifest/counter or an image resolveV1 obtained, passed as after.value. Each image is
 // consumed before any emitV1 or referV1 of its own identity in this primitive (D20). Each leaves nextV1 writes newValue
 // into V: the formed body value, or, for an inverse group with newPresent true, a copy of the entry image resolveV1
@@ -248,6 +251,7 @@ type treeDeltaV1 struct {
 	parentBytes, parentCount uint64
 	beforeBytes, beforeCount uint64
 	afterBytes, afterCount   uint64
+	original                 treeOldV1 // protected ORIGINAL OLD for synchronous missing-family emission
 }
 
 // treeKeysV1 is the key scratch K (D28, G10): every key and from L1 passes to treeOldV1 or treeEmitterV1,
@@ -404,7 +408,7 @@ func (d *treeDeltaV1) applyV1(emit treeEmitterV1) error {
 func (d *treeDeltaV1) applyGroupV1(emit treeEmitterV1, g *treeDescV1) error {
 	spend := g.kind == treeSpendV1
 	if spend && d.forwardV1() {
-		err := d.familyRowV1(emit, d.entryKeyV1(g), g.img)
+		err := d.forwardFamilyV1(emit, g)
 		if err != nil {
 			return err
 		}
@@ -414,6 +418,25 @@ func (d *treeDeltaV1) applyGroupV1(emit treeEmitterV1, g *treeDescV1) error {
 		return err
 	}
 	return d.familyRowV1(emit, d.entryKeyV1(g), nil)
+}
+
+// forwardFamilyV1 borrows one original value only for a missing-family write.
+func (d *treeDeltaV1) forwardFamilyV1(emit treeEmitterV1, g *treeDescV1) error {
+	if !d.rec.referenceOnly || d.familyEffectV1() != treeEffectPresentV1 {
+		return d.familyRowV1(emit, d.entryKeyV1(g), g.img)
+	}
+	image, err := d.original.getV1(schemaDBIs[1], d.utxoKeyV1(g))
+	if err != nil {
+		return err
+	}
+	if !image.present || !treeUTXOValueOKV1(image.value) {
+		return treeIntegrity(operationUpdate, errSchema)
+	}
+	if err := d.rec.ledger.chargeV1(treeValueBytesV1); err != nil {
+		return err
+	}
+	defer d.rec.ledger.releaseV1(treeValueBytesV1)
+	return d.familyRowV1(emit, d.entryKeyV1(g), image.value)
 }
 
 // familyRowV1 emits one own-family row's effect; value is the present-target value (forward entry or manifest).

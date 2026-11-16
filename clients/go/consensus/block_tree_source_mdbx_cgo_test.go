@@ -318,6 +318,119 @@ func btPrepare(t *testing.T, w *btWorld, request blockTreeRequestV1) (*blockTree
 	return &source, effect, result
 }
 
+// The real producer joins independently prepared CURRENT, LAG and F3 Sources
+// under one account/protected OLD. No production replay dispatch is introduced.
+func TestBlockTreeReplayBoundedV1(t *testing.T) {
+	for _, kind := range []uint8{1, 2, 3} {
+		t.Run(fmt.Sprintf("body%d", kind), func(t *testing.T) { btReplayBoundedV1(t, kind) })
+	}
+}
+
+func btReplayBoundedV1(t *testing.T, kind uint8) {
+	t.Helper()
+	w := btNew(t)
+	parent := mdbx.TreeEndpointV1{Kind: 1, Height: 5, BlockHash: [32]byte{0x09}, CumulativeChainwork: [40]byte{39: 5}}
+	root := mdbx.RootBindingV1{DatabaseID: [32]byte{7}, CommitmentVersion: 1, Endpoint: parent, RootDigest: sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")), Assurance: mdbx.TreeAssuranceV1{Kind: 1}}
+	encoded, err := root.Encode()
+	logicalMDBXAssert(t, err == nil, "parent encoding: %v", err)
+	for _, g := range []uint64{1, 2} {
+		m := btMutation(0, btMeta(0x11, g), encoded)
+		m.BeforePresent = true
+		w.pair(t, m)
+	}
+	tx := btTransaction(7, 0, nil, [][]byte{btFrame(7, 0, []byte{0x07})}, nil, []byte{0}, nil)
+	raw := btBody(148, 7, parent.BlockHash, tx)
+	request := btRequest(raw, 6)
+	request.Kind, request.Undo, request.BodyKind = mdbx.TreeKindReplayNextV1, mdbx.UndoTransientV1, kind
+	if kind == 2 {
+		w.pair(t, btMutation(3, request.Block[:], raw[:148]), btMutation(4, request.Block[:], raw))
+		request.Raw = nil
+	}
+	var result btResult
+	var observed [2]*btObserved
+	err = w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+		return a.WithReservation(2<<20, func() error {
+			result.truth, result.stage, result.index, result.err = w.s.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+				return btReplayPlanV1(t, r, a, request, raw, parent, &observed)
+			})
+			return nil
+		})
+	})
+	logicalMDBXAssert(t, err == nil, "replay account: %v", err)
+	result.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, result.err == nil, "native replay: %v", result.err)
+	for j, source := range observed {
+		logicalMDBXAssert(t, source.calls == [3]int{0, 1, 0}, "role%d source count: %v", j, source.calls)
+		if kind != 2 {
+			logicalMDBXAssert(t, &source.source.Raw[0] == &raw[0], "role%d did not retain original shared Raw", j)
+		}
+	}
+	state := map[Outpoint]UtxoEntry{{Txid: tx.id, Vout: 0}: btEntry(7, 0, []byte{7}, 6, true)}
+	for _, g := range []uint64{1, 2} {
+		btState(t, w, g, request.Endpoint, state)
+		r := request
+		r.Generation, r.Raw = g, raw
+		btIndexes(t, w, r, true)
+	}
+	var wantBody []byte
+	if kind != 3 {
+		wantBody = raw
+	}
+	w.read(t, 4, request.Block[:], wantBody)
+	btReservationsReleased(t, w.owner)
+}
+
+func btReplayPlanV1(t *testing.T, r *mdbx.Reader, a *mdbx.OperationAccount, request blockTreeRequestV1, raw []byte, parent mdbx.TreeEndpointV1, observed *[2]*btObserved) (mdbx.TreeOperationV1, error) {
+	t.Helper()
+	var op mdbx.TreeOperationV1
+	for j := range 2 {
+		req := request
+		if j == 1 {
+			req.Generation, req.Kind = 2, mdbx.TreeKindLagForwardV1
+		}
+		source := new(blockTreeSourceV1)
+		effect, err := prepareBlockTreeEffectV1(source, r, a, req)
+		if err != nil {
+			return op, err
+		}
+		logicalMDBXAssert(t, effect.Primitive.Coverage.BlockMeta == (mdbx.TreeBlockV1{TxCount: 1, EventCount: 1}), "production role%d metadata: %+v", j, effect.Primitive.Coverage.BlockMeta)
+		observed[j] = &btObserved{t: t, source: source}
+		effect.Primitive.Source = observed[j]
+		op.Primitives = append(op.Primitives, effect.Primitive)
+		op.Pair.Mutations = append(op.Pair.Mutations, effect.Index[:]...)
+		if j == 0 && effect.CurrentBody.AfterKind != 0 {
+			op.Pair.Mutations = append(op.Pair.Mutations, effect.CurrentBody)
+		}
+	}
+	if request.BodyKind != 2 {
+		op.Pair.Mutations = append(op.Pair.Mutations, btMutation(3, request.Block[:], raw[:148]))
+	}
+	btSort(op.Pair.Mutations)
+	if err := btReplayF3V1(t, r, a, request, raw, parent); err != nil {
+		return mdbx.TreeOperationV1{}, err
+	}
+	return op, nil
+}
+
+func btReplayF3V1(t *testing.T, r *mdbx.Reader, a *mdbx.OperationAccount, request blockTreeRequestV1, raw []byte, parent mdbx.TreeEndpointV1) error {
+	t.Helper()
+	request.Generation, request.Kind, request.Undo = 2, mdbx.TreeKindDirectApplyV1, mdbx.UndoTransientV1
+	request.BodyKind, request.Raw = 1, raw
+	var source blockTreeSourceV1
+	effect, err := prepareBlockTreeEffectV1(&source, r, a, request)
+	if err != nil {
+		return err
+	}
+	root, err := r.DeriveTreeRootV1(a, mdbx.TreeRootReadV1{Primitive: effect.Primitive, Parent: parent, Inputs: nil})
+	if err != nil {
+		return err
+	}
+	tx := btTransaction(7, 0, nil, [][]byte{btFrame(7, 0, []byte{0x07})}, nil, []byte{0}, nil)
+	want := canonicalUTXORoot(map[Outpoint]UtxoEntry{{Txid: tx.id, Vout: 0}: btEntry(7, 0, []byte{7}, 6, true)})
+	logicalMDBXAssert(t, root == want && &source.Raw[0] == &raw[0], "independent F3 root/borrowed Raw: %x/%x", root, want)
+	return nil
+}
+
 func TestBlockTreeSourceV1(t *testing.T) {
 	t.Run("shape", btShape)
 	t.Run("compact", btCompactCases)

@@ -3598,6 +3598,1351 @@ func TestTreeProofAfterFreezeDriftV1(t *testing.T) {
 	tsConsumed(t, s.s, s.o, 1, r.err)
 }
 
+// trSceneV1 reuses the native provider/fault surface with two independent
+// same-block Sources. It does not compose any future production replay step.
+func trSceneV1(t *testing.T) *tsfScene {
+	t.Helper()
+	s, path, owner := tsNew(t)
+	meta := TreeBlockV1{TxCount: 1, EventCount: 1}
+	providers := []*tsfProvider{
+		{block: meta, events: []TreeEventV1{tsCreate(0x31, 0, 0, 148, 11)}},
+		{block: meta, events: []TreeEventV1{tsCreate(0x31, 0, 0, 148, 11)}},
+	}
+	op := trOperationV1(t, providers[0], 2)
+	op.Primitives[1].Source = providers[1]
+	tsRoots(t, s, owner, 1, 2)
+	for _, g := range []uint64{1, 2} {
+		tsSeedCounter(t, s, owner, g, false, make([]byte, 16))
+	}
+	return &tsfScene{s: s, path: path, o: owner, op: op, p: providers}
+}
+
+// All six priority controls reach the actual selected public path. NEW-only
+// node drift is invisible to pure fold and distinguishes the enclosing checker.
+func TestTreeReplayBoundedPreflightV1(t *testing.T) {
+	for _, name := range []string{
+		"lag-new-node-checker", "current-node-drift-lag-source", "current-node-drift-success",
+		"dirty-consulted-before-node", "dirty-consulted-consumer", "dirty-consulted-lag-source", "legal-reference-consulted",
+	} {
+		t.Run(name, func(t *testing.T) { trPreflightV1(t, name) })
+	}
+	for _, role := range []int{0, 1} {
+		for _, phase := range []string{"finish", "resolve", "fold"} {
+			t.Run(fmt.Sprintf("role%d/%s", role, phase), func(t *testing.T) { trPrefixFailureV1(t, role, phase) })
+		}
+		for _, domain := range []string{"UTXO", "root", "counter"} {
+			t.Run(fmt.Sprintf("OLD-write/role%d/%s", role, domain), func(t *testing.T) { trOldDriftV1(t, role, domain) })
+		}
+	}
+}
+
+func trOldDriftV1(t *testing.T, role int, domain string) {
+	t.Helper()
+	f := trSceneV1(t)
+	g := uint64(role+1)
+	rank, key := uint8(0), tsCounterKey(g)
+	switch domain {
+	case "UTXO":
+		rank, key = 1, tdUTXOKey(g, tdTxid(0x31), 0)
+	case "root":
+		key = tsRootKey(g)
+	}
+	var result tsResult
+	var counts PairReadObservation
+	var native SelectedDamageEvidence
+	n, err := FixtureWriteSnapshotDrift(f.s, rank, key, func() {
+		var armErr error
+		native, armErr = FixtureSelectedDamage(f.s, f.o, SelectedDamageProbeOnly, 0, nil, func() {
+			var observe error
+			counts, observe = FixturePairReadObservation(f.s, nil, func() { result = f.run(t) })
+			mustEnvironment(t, observe)
+		})
+		mustEnvironment(t, armErr)
+	})
+	result.tuple(t, 1, 1, role)
+	treeNativeError(t, result.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+	if result.err.(*EngineError).TreeObservation != nil || n != 1 || counts.Writes != 0 || native.Commits != 0 {
+		t.Fatal("OLD/write source-owned drift tuple/effects", domain, result, n, counts, native)
+	}
+	mustEnvironment(t, err)
+	for j, provider := range f.p {
+		want := 1
+		if j > role {
+			want = 0
+		}
+		if provider.calls != [3]int{0, want, 0} {
+			t.Fatal("OLD drift source priority", domain, j, provider.calls)
+		}
+	}
+	tsConsumed(t, f.s, f.o, 1, result.err)
+	f.s = tsReopen(t, f.s, f.path)
+	tsFollowing(t, f.s, f.o)
+}
+
+func trPrefixFailureV1(t *testing.T, role int, phase string) {
+	t.Helper()
+	f := trSceneV1(t)
+	switch phase {
+	case "finish":
+		f.p[role].events = nil // Begin promises one event; finish owns the refusal.
+	case "resolve":
+		treeNativeSeed(t, f.s, 0, tsCounterKey(uint64(role+1)), []byte{1})
+	case "fold":
+		treeNativeSeed(t, f.s, 0, tsRootKey(uint64(role+1)), []byte{1})
+	}
+	var result tsResult
+	evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageProbeOnly, 0, nil, func() { result = f.run(t) })
+	mustEnvironment(t, err)
+	result.tuple(t, 1, 1, role)
+	if phase == "finish" {
+		treeNativeError(t, result.err, "update", "InvalidInput", 22, "invalid tree delta", nil)
+	} else {
+		treeNativeIntegrity(t, result.err, "update", errSchema)
+		engine := result.err.(*EngineError)
+		if o := engine.TreeObservation; o != nil && (o.Primitive != role || o.Generation != uint64(role+1) || o.Position != 1) {
+			t.Fatal("source-prefix observation lost owning role", o)
+		}
+	}
+	if evidence.Deletes != 0 || evidence.Commits != 0 {
+		t.Fatal("source-prefix failure reached physical contribution", evidence)
+	}
+	for j, provider := range f.p {
+		want := 1
+		if j > role {
+			want = 0
+		}
+		if provider.calls != [3]int{0, want, 0} {
+			t.Fatal("source-prefix result did not suppress later Source", phase, j, provider.calls)
+		}
+	}
+	tsConsumed(t, f.s, f.o, 1, result.err)
+}
+
+func trPreflightV1(t *testing.T, name string) {
+	t.Helper()
+	f := trSceneV1(t)
+	marker := errors.New("LAG source owns this result")
+	laterSource := strings.HasSuffix(name, "lag-source")
+	if laterSource {
+		f.p[1].before = func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { return marker }
+	}
+	conflict := strings.HasPrefix(name, "dirty-consulted")
+	if conflict {
+		f.op.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[1], Key: tdUTXOKey(1, tdTxid(0x31), 0)}}
+	}
+	if name == "legal-reference-consulted" {
+		// This group's CREATE followed by SPEND has absent/absent presence;
+		// the Consulted identity must remain a legal unchanged reference.
+		for j, provider := range f.p {
+			provider.block = TreeBlockV1{TxCount: 2, EventCount: 2}
+			provider.events = []TreeEventV1{tsCreate(0x31, 0, 0, 148, 11), tsSpend(0x31, 0, 1, 0)}
+			f.op.Primitives[j].Coverage.BlockMeta = provider.block
+		}
+		f.op.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[1], Key: tdUTXOKey(1, tdTxid(0x31), 0)}}
+	}
+	var result tsResult
+	var counts PairReadObservation
+	var native SelectedDamageEvidence
+	run := func() {
+		var err error
+		native, err = FixtureSelectedDamage(f.s, f.o, SelectedDamageProbeOnly, 0, nil, func() {
+			var observe error
+			counts, observe = FixturePairReadObservation(f.s, nil, func() { result = f.run(t) })
+			mustEnvironment(t, observe)
+		})
+		mustEnvironment(t, err)
+	}
+	drift := name == "lag-new-node-checker" || strings.HasPrefix(name, "current-node-drift") || name == "dirty-consulted-before-node"
+	if drift {
+		g := uint64(1)
+		if name == "lag-new-node-checker" {
+			g = 2
+		}
+		key := testTreeNodeKey(g, 288, tcEntry(tdUTXOKey(g, tdTxid(0x31), 0), nil).k)
+		n, err := FixtureWriteSnapshotDrift(f.s, 8, key, run)
+		mustEnvironment(t, err)
+		if n != 1 {
+			t.Fatal("node drift control did not install", n)
+		}
+	} else {
+		run()
+	}
+	trPreflightResultV1(t, f, name, marker, result, counts, native.Commits)
+}
+
+func trPreflightResultV1(t *testing.T, f *tsfScene, name string, marker error, result tsResult, counts PairReadObservation, commits uint64) {
+	t.Helper()
+	if name == "legal-reference-consulted" {
+		result.tuple(t, 2, 3, -1)
+		mustEnvironment(t, result.err)
+		if counts.Writes == 0 || commits != 1 {
+			t.Fatal("legal cancellation did not reach pair/root writes")
+		}
+	} else {
+		index := -1
+		switch {
+		case strings.HasSuffix(name, "lag-source"):
+			index = 1
+			if any(result.err) != any(marker) {
+				t.Fatal("LAG source marker replaced by later enclosing check", result.err)
+			}
+		case strings.HasPrefix(name, "dirty-consulted"):
+			treeNativeError(t, result.err, "update", "InvalidInput", 22, "invalid Update Batch", nil)
+		default:
+			treeNativeError(t, result.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+		}
+		result.tuple(t, 1, 1, index)
+		if engine, ok := result.err.(*EngineError); ok && engine.TreeObservation != nil {
+			t.Fatal("enclosing refusal fabricated tree observation", engine.TreeObservation)
+		}
+		if counts.Writes != 0 || commits != 0 {
+			t.Fatal("physical contribution preceded complete preflight", counts)
+		}
+		tsConsumed(t, f.s, f.o, 1, result.err)
+	}
+	for j, provider := range f.p {
+		if provider.calls != [3]int{0, 1, 0} {
+			t.Fatal("complete source prefixes were reordered or repeated", j, provider.calls)
+		}
+		tsExpiredReader(t, provider.reader)
+		if provider.sink.WindowV1() != nil {
+			t.Fatal("source sink lifetime survived prefix", j)
+		}
+	}
+	if reservationLive(f.o) != 0 {
+		t.Fatal("frozen role/temporary charge survived cleanup")
+	}
+	f.s = tsReopen(t, f.s, f.path)
+	tsFollowing(t, f.s, f.o)
+}
+
+// The existing Source sink exposes the real frozen recorder to this internal
+// architecture observation; no production testing API is introduced.
+func TestTreeReplayBoundedOrderV1(t *testing.T) {
+	f := trSceneV1(t)
+	var first *treeRecorderV1
+	var firstObservation *TreeObservationV1
+	var order []int
+	for j, provider := range f.p {
+		provider.after = func(pos TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+			order = append(order, j)
+			if j == 0 {
+				first, firstObservation = sink.recorder, sink.recorder.observation
+				return nil
+			}
+			if first.released || len(first.descs) != 1 || firstObservation == sink.recorder.observation {
+				t.Fatal("CURRENT retired or observation aliased before LAG freeze")
+			}
+			for index, rec := range []*treeRecorderV1{first, sink.recorder} {
+				want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: uint64(index+1), Block: f.op.Primitives[index].Block, Height: 5, Primitive: index, Position: pos}
+				if *rec.observation != want {
+					t.Fatalf("role-observation%d = %+v want %+v", index, *rec.observation, want)
+				}
+			}
+			return nil
+		}
+	}
+	var result tsResult
+	var counts PairReadObservation
+	counts, err := FixturePairReadObservation(f.s, nil, func() { result = f.run(t) })
+	for _, provider := range f.p {
+		if provider.calls != [3]int{0, 1, 0} {
+			t.Fatal("physical regeneration called Source", provider.calls)
+		}
+	}
+	if !slices.Equal(order, []int{0, 1}) || !first.released || counts.Writes != 17 {
+		t.Fatal("source/retirement/one-Pair write count", order, first.released, counts)
+	}
+	mustEnvironment(t, err)
+	result.tuple(t, 2, 3, -1)
+	mustEnvironment(t, result.err)
+}
+
+// Undo entries bind independent original values and original input order;
+// CURRENT alone and paired LAG must produce exactly the same global family.
+func TestTreeReplayBoundedUndoV1(t *testing.T) {
+	for _, roles := range []int{1, 2} {
+		for _, undo := range []TreeUndoEffectV1{1, 2, 3, 4} {
+			for _, existing := range []bool{false, true} {
+				if !existing && undo >= 3 {
+					continue
+				}
+				for _, crossed := range []bool{false, true} {
+					t.Run(fmt.Sprintf("roles%d/undo%d/existing%v/crossed%v", roles, undo, existing, crossed), func(t *testing.T) {
+						trUndoResultV1(t, roles, undo, existing, crossed)
+					})
+				}
+			}
+		}
+	}
+	t.Run("cancel-and-unchanged", trUndoUnchangedV1)
+}
+
+func trUndoUnchangedV1(t *testing.T) {
+	f := trSceneV1(t)
+	f.op.Primitives[0].Undo = UndoWriteOrReuseV1
+	value := tdFormed(f.op.Primitives[0].Coverage.CurrentBody[148:], 5, 0)
+	for j, p := range f.op.Primitives {
+		f.p[j].block = TreeBlockV1{TxCount: 2, EventCount: 4}
+		f.p[j].events = []TreeEventV1{tsCreate(0x31, 0, 0, 148, 11), tsSpend(0x20, 0, 1, 0), tsSpend(0x31, 0, 1, 1), tsCreate(0x20, 0, 1, 148, 11)}
+		p.Coverage.BlockMeta = f.p[j].block
+		key := tdUTXOKey(p.Generation, tdTxid(0x20), 0)
+		treeNativeSeed(t, f.s, 1, key, value)
+		entry := tcEntry(key, value)
+		rows := map[string][]byte{}
+		_ = testTreeBuild(p.Generation, []testTreeEntry{entry}, rows)
+		for name, row := range rows {
+			treeNativeSeed(t, f.s, 8, testTreeRowKey(name), row)
+		}
+		treeNativeSeed(t, f.s, 0, tsRootKey(p.Generation), tcBinding(t, p.Generation, tcEndpoint(4, tdTxid(0xa0)), entry))
+		treeNativeSeed(t, f.s, 0, tsCounterKey(p.Generation), tsCounterLiteral(56, 1))
+	}
+	f.op.Pair.Consulted = []ConsultedRow{
+		{DBI: schemaDBIs[1], Key: tdUTXOKey(1, tdTxid(0x20), 0)},
+		{DBI: schemaDBIs[1], Key: tdUTXOKey(1, tdTxid(0x31), 0)},
+	}
+	var frozen *treeRecorderV1
+	f.p[0].after = func(pos TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+		if pos == 1 {
+			frozen = sink.recorder
+		}
+		return nil
+	}
+	f.p[1].before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+		if pos == 1 && (frozen == nil || frozen.released || len(frozen.descs) != 4) {
+			t.Fatal("cancel-and-unchanged frozen original events were dropped")
+		}
+		return nil
+	}
+	var result tsResult
+	_, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() { result = f.run(t) })
+	mustEnvironment(t, err)
+	result.tuple(t, 2, 3, -1)
+	ce, ok := result.err.(*CommitError)
+	if !ok || ce.ReadbackCause != nil {
+		t.Fatal("cancellation/unchanged groups lost strict complete NEW", result.err)
+	}
+	f.s = tsReopen(t, f.s, f.path)
+	block := f.op.Primitives[0].Block
+	tsRead(t, f.s, schemaDBIs[5], tdManifestKey(block), tdManifest(5, [16]byte{}, 2, 1))
+	tsRead(t, f.s, schemaDBIs[5], tdEntryKey(block, tdTxid(0x20), 1, 0, 0), value)
+	tsRead(t, f.s, schemaDBIs[5], tdEntryKey(block, tdTxid(0x31), 1, 1, 0), nil)
+	for _, p := range f.op.Primitives {
+		key := tdUTXOKey(p.Generation, tdTxid(0x20), 0)
+		tsRead(t, f.s, schemaDBIs[1], key, value)
+		tsRead(t, f.s, schemaDBIs[1], tdUTXOKey(p.Generation, tdTxid(0x31), 0), nil)
+		tsRead(t, f.s, schemaDBIs[0], tsCounterKey(p.Generation), tsCounterLiteral(56, 1))
+		tsRead(t, f.s, schemaDBIs[0], tsRootKey(p.Generation), tcBinding(t, p.Generation, p.Endpoint, tcEntry(key, value)))
+	}
+	tsFollowing(t, f.s, f.o)
+}
+
+func trUndoResultV1(t *testing.T, roles int, undo TreeUndoEffectV1, existing, crossed bool) {
+	t.Helper()
+	f := trSceneV1(t)
+	f.op.Primitives = f.op.Primitives[:roles]
+	if roles == 1 {
+		rows := f.op.Pair.Mutations[:0]
+		for _, m := range f.op.Pair.Mutations {
+			if (m.DBI.Rank == 2 || m.DBI.Rank == 7) && binary.BigEndian.Uint64(m.Key) == 2 {
+				continue
+			}
+			rows = append(rows, m)
+		}
+		f.op.Pair.Mutations = rows
+	}
+	meta := TreeBlockV1{TxCount: 2, EventCount: 3}
+	for j := range roles {
+		f.p[j].block = meta
+		f.p[j].events = []TreeEventV1{tsSpend(0x20, 0, 1, 0), tsSpend(0x21, 0, 1, 1), tsCreate(0x31, 0, 1, 148, 11)}
+		f.op.Primitives[j].Coverage.BlockMeta = meta
+		g := uint64(j+1)
+		var entries []testTreeEntry
+		for i, tag := range []byte{0x20, 0x21} {
+			value := tdFormed(tdFrame(uint64(7+i), 0, []byte{tag}), 4, 0)
+			key := tdUTXOKey(g, tdTxid(tag), 0)
+			entries = append(entries, tcEntry(key, value))
+			treeNativeSeed(t, f.s, 1, key, value)
+		}
+		rows := map[string][]byte{}
+		_ = testTreeBuild(g, entries, rows)
+		for name, value := range rows {
+			treeNativeSeed(t, f.s, 8, testTreeRowKey(name), value)
+		}
+		treeNativeSeed(t, f.s, 0, tsRootKey(g), tcBinding(t, g, tcEndpoint(4, tdTxid(0xa0)), entries...))
+		treeNativeSeed(t, f.s, 0, tsCounterKey(g), tsCounterLiteral(114, 2))
+	}
+	f.op.Primitives[0].Undo = undo
+	block := f.op.Primitives[0].Block
+	manifest := tdManifest(5, [16]byte{}, 2, 2)
+	values := [][]byte{tdFormed(tdFrame(7, 0, []byte{0x20}), 4, 0), tdFormed(tdFrame(8, 0, []byte{0x21}), 4, 0)}
+	if existing {
+		treeNativeSeed(t, f.s, 5, tdManifestKey(block), manifest)
+		for i, tag := range []byte{0x20, 0x21} {
+			treeNativeSeed(t, f.s, 5, tdEntryKey(block, tdTxid(tag), 1, uint32(i), 0), values[i])
+		}
+	}
+	var result tsResult
+	if crossed {
+		evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() { result = f.run(t) })
+		mustEnvironment(t, err)
+		ce, ok := result.err.(*CommitError)
+		if !ok || ce.Truth != 2 || ce.ReadbackCause != nil || evidence.Commits != 1 {
+			t.Fatal("protected ORIGINAL OLD must supply missing undo after crossed NEW", result, evidence)
+		}
+		treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+		tsConsumed(t, f.s, f.o, 2, result.err)
+	} else {
+		result = f.run(t)
+		mustEnvironment(t, result.err)
+	}
+	result.tuple(t, 2, 3, -1)
+	f.s = tsReopen(t, f.s, f.path)
+	keep := undo == 1 || undo == 3 || undo == 2 && existing
+	if !keep {
+		manifest = nil
+	}
+	tsRead(t, f.s, schemaDBIs[5], tdManifestKey(block), manifest)
+	for i, tag := range []byte{0x20, 0x21} {
+		var want []byte
+		if keep {
+			want = values[i]
+		}
+		tsRead(t, f.s, schemaDBIs[5], tdEntryKey(block, tdTxid(tag), 1, uint32(i), 0), want)
+		for g := uint64(1); g <= uint64(roles); g++ {
+			tsRead(t, f.s, schemaDBIs[1], tdUTXOKey(g, tdTxid(tag), 0), nil)
+		}
+	}
+	for j, p := range f.op.Primitives {
+		readback := 0
+		if crossed {
+			readback = 1
+		}
+		if f.p[j].calls != [3]int{0, 1, readback} {
+			t.Fatal("undo regeneration reinvoked Source", j, f.p[j].calls)
+		}
+		value := tdFormed(p.Coverage.CurrentBody[148:], 5, 0)
+		tsRead(t, f.s, schemaDBIs[1], tdUTXOKey(p.Generation, tdTxid(0x31), 0), value)
+		tsRead(t, f.s, schemaDBIs[0], tsRootKey(p.Generation), tcBinding(t, p.Generation, p.Endpoint, tcEntry(tdUTXOKey(p.Generation, tdTxid(0x31), 0), value)))
+	}
+	tsFollowing(t, f.s, f.o)
+}
+
+// A single protected body is retained under B across both frozen writer roles
+// and sequential strict roles; equality of independent caller copies is separate.
+func TestTreeReplayBoundedBodyV1(t *testing.T) {
+	for _, kind := range []uint8{1, 2, 3} {
+		for _, deleteBody := range []bool{false, true} {
+			if deleteBody && kind != 2 {
+				continue
+			}
+			t.Run(fmt.Sprintf("body%d/delete%v", kind, deleteBody), func(t *testing.T) {
+				f := trSceneV1(t)
+				raw := trBodyV1(&f.op, kind, deleteBody)
+				original := &raw[0]
+				if kind == 2 {
+					treeNativeSeed(t, f.s, 4, f.op.Primitives[0].Block[:], raw)
+				}
+				var backing [3][2]*byte
+				for j, provider := range f.p {
+					provider.after = func(pos TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+						backing[pos][j] = &sink.recorder.body.bytes[0]
+						if !sink.recorder.referenceOnly || sink.recorder.rootReadOnly {
+							t.Fatal("writer/readback replay mode")
+						}
+						return nil
+						}
+				}
+				var result tsResult
+				evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() { result = f.run(t) })
+				mustEnvironment(t, err)
+				result.tuple(t, 2, 3, -1)
+				ce, ok := result.err.(*CommitError)
+				if !ok || ce.ReadbackCause != nil || evidence.Commits != 1 {
+					t.Fatal("shared body strict NEW", result.err, evidence)
+				}
+				for _, pos := range []int{1, 2} {
+					if backing[pos][0] == nil || backing[pos][0] != backing[pos][1] {
+						t.Fatal("roles did not share actual immutable backing", kind, pos, backing)
+					}
+					if (backing[pos][0] == original) != (kind == 3) {
+						t.Fatal("Raw/clone/protected-native backing identity", kind, pos)
+					}
+				}
+				if backing[1][0] != backing[2][0] || reservationLive(f.o) != 0 {
+					t.Fatal("body last-use/grant lifetime", backing)
+				}
+			})
+		}
+	}
+	t.Run("owned-Pair-original-buffers", func(t *testing.T) {
+		f := trSceneV1(t)
+		want := make([]Mutation, len(f.op.Pair.Mutations))
+		for i, m := range f.op.Pair.Mutations {
+			want[i] = m
+			want[i].Key, want[i].Literal = bytes.Clone(m.Key), bytes.Clone(m.Literal)
+		}
+		f.p[0].before = func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error {
+			for _, m := range f.op.Pair.Mutations {
+				clear(m.Key)
+				if m.DBI.Rank != 4 {
+					clear(m.Literal)
+				}
+			}
+			return nil
+		}
+		result := f.run(t)
+		result.tuple(t, 2, 3, -1)
+		mustEnvironment(t, result.err)
+		for _, m := range want {
+			tsRead(t, f.s, m.DBI, m.Key, m.Literal)
+		}
+		if f.p[1].calls != [3]int{0, 1, 0} {
+			t.Fatal("LAG Source changed with independently owned original Pair buffers")
+		}
+	})
+}
+
+// The exact fixture peak simultaneously includes both A_j, future Br and the
+// additional physical L. Removing any of these owners changes the minus-one row.
+func TestTreeReplayBoundedFundingV1(t *testing.T) {
+	for _, body := range []struct {
+		kind uint8
+		delete bool
+		q, b uint64
+	}{
+		{1, false, 1167, 0}, {2, false, 848, 159},
+		{2, true, 1008, 159}, {3, false, 848, 0},
+	} {
+		for _, short := range []uint64{0, 1} {
+			t.Run(fmt.Sprintf("body%d/delete%v/short%d", body.kind, body.delete, short), func(t *testing.T) {
+				f := trSceneV1(t)
+				raw := trBodyV1(&f.op, body.kind, body.delete)
+				if body.kind == 2 {
+					treeNativeSeed(t, f.s, 4, f.op.Primitives[0].Block[:], raw)
+				}
+				peak := body.q+body.b+2*(74912+65560+104)+131192+288544+147968
+				var result tsResult
+				mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					return a.WithReservation(402653184-peak+short, func() error {
+						baseline := reservationLive(f.o)
+						result = tsInvoke(f.s, a, func(*Reader) (TreeOperationV1, error) { return f.op, nil })
+						if reservationLive(f.o) != baseline {
+							t.Fatal("both-frozen/body/native owner leaked")
+						}
+						return nil
+					})
+				}))
+				if short == 0 {
+					result.tuple(t, 2, 3, -1)
+					mustEnvironment(t, result.err)
+				} else {
+					result.tuple(t, 1, 2, -1)
+					if any(result.err) != any(errOperationReservationCapacity) {
+						t.Fatal("physical L minus-one capacity identity", result.err)
+					}
+					tsConsumed(t, f.s, f.o, 1, result.err)
+				}
+				for _, p := range f.p {
+					if p.calls != [3]int{0, 1, 0} {
+						t.Fatal("both frozen Sources required", p.calls)
+					}
+				}
+				f.s = tsReopen(t, f.s, f.path)
+				for _, p := range f.op.Primitives {
+					var want []byte
+					if short == 0 {
+						want = tdFormed(raw[148:], 5, 1)
+					}
+					tsRead(t, f.s, schemaDBIs[1], tdUTXOKey(p.Generation, tdTxid(0x31), 0), want)
+				}
+				tsFollowing(t, f.s, f.o)
+			})
+		}
+	}
+	for _, owner := range []string{"CURRENT-step", "CURRENT-descriptor", "LAG-step", "LAG-descriptor", "future-readback"} {
+		for _, short := range []uint64{0, 1} {
+			t.Run(fmt.Sprintf("%s/short%d", owner, short), func(t *testing.T) { trFundingOwnerV1(t, owner, short) })
+		}
+	}
+}
+
+func trFundingOwnerV1(t *testing.T, owner string, short uint64) {
+	t.Helper()
+	f := trSceneV1(t)
+	plan := treeOwnPlanV1(f.op)
+	ledger := &tcLedger{}
+	steps, descriptors := 0, 0
+	reached := false
+	ledger.before = func(n uint64) {
+		if reached {
+			ledger.limit = 0
+			return
+		}
+		if n == 74912 {
+			steps++
+		}
+		if n == 65664 {
+			descriptors++
+		}
+		match := owner == "CURRENT-step" && n == 74912 && steps == 1 ||
+			owner == "CURRENT-descriptor" && n == 65664 && descriptors == 1 ||
+			owner == "LAG-step" && n == 74912 && steps == 2 ||
+			owner == "LAG-descriptor" && n == 65664 && descriptors == 2 ||
+			owner == "future-readback" && n > 288544 && n <= 419736
+		if !match {
+			return
+		}
+		reached = true
+		if owner == "LAG-descriptor" && ledger.held < 140576+74912 {
+			t.Error("both-frozen CURRENT owner absent at LAG descriptor acquisition", ledger.held)
+		}
+		if owner == "future-readback" && ledger.held+n != 700888 {
+			t.Error("future reserve excludes a frozen A_j or Sr/Br", ledger.held, n)
+		}
+		ledger.limit = ledger.held+n-short
+	}
+	var result tsResult
+	var unwind treeUnwindV1
+	var counts PairReadObservation
+	counts, err := FixturePairReadObservation(f.s, nil, func() {
+		result.truth, result.stage, result.index, unwind, result.err = fixtureTreeComposeV1(f.s, ledger, &plan, nil)
+	})
+	mustEnvironment(t, err)
+	// The existing engine seam omits the public operation hold. Its only
+	// remainder is H: initial Pair literal159, then two ORIGINAL root133 spans.
+	outer := uint64(0)
+	if short != 0 {
+		outer = 266
+		if strings.HasPrefix(owner, "CURRENT") {
+			outer = 159
+		}
+	}
+	if ledger.held != outer {
+		t.Fatal("frozen owners did not retire independently of outer native H", owner, ledger.held, outer)
+	}
+	if outer != 0 {
+		ledger.releaseV1(outer)
+	}
+	if !reached || unwind.kind != 0 || ledger.held != 0 || len(ledger.violations) != 0 {
+		t.Fatal("capacity owner was unreachable or retained a hold", owner, reached, ledger.held, ledger.violations)
+	}
+	if short == 0 {
+		result.tuple(t, 2, 3, -1)
+		mustEnvironment(t, result.err)
+		return
+	}
+	index := 0
+	if strings.HasPrefix(owner, "LAG") {
+		index = 1
+	}
+	if owner == "future-readback" {
+		index = -1
+	}
+	result.tuple(t, 1, 1, index)
+	if any(result.err) != any(errOperationReservationCapacity) || counts.Writes != 0 {
+		t.Fatal("capacity owner lost identity or wrote before reserve", owner, result, counts)
+	}
+	tsConsumed(t, f.s, f.o, 1, result.err)
+}
+
+// Strict equality must finish both role folds, then the complete auxiliary
+// domains, even when an earlier OLD or NEW predicate has already become false.
+func TestTreeReplayBoundedReadbackV1(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		scenario SelectedDamageScenario
+		truth CommitTruth
+	}{
+		{"OLD", SelectedDamageCommitOld, 1}, {"NEW", SelectedDamageCommitNew, 2},
+		{"unreadable", SelectedDamageCommitUnreadable, 3},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f := trSceneV1(t)
+			var samples []uint64
+			for _, provider := range f.p {
+				provider.before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+					if pos == 2 {
+						samples = append(samples, reservationLive(f.o))
+					}
+					return nil
+				}
+			}
+			var result tsResult
+			evidence, err := FixtureSelectedDamage(f.s, f.o, row.scenario, 0, tsRootKey(2), func() { result = f.run(t) })
+			result.tuple(t, row.truth, 3, -1)
+			ce, ok := result.err.(*CommitError)
+			if !ok || ce.Truth != row.truth || evidence.Commits != 1 {
+				t.Fatal("complete pair strict truth", result, evidence)
+			}
+			treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+			if row.name == "unreadable" {
+				treeNativeError(t, ce.ReadbackCause, "update", "IO", 5, "error 5", nil)
+			} else {
+				if ce.ReadbackCause != nil || !slices.Equal(samples, []uint64{420903, 420903}) {
+					t.Fatal("readback cannot grow account or skip LAG", ce.ReadbackCause, samples)
+				}
+				for _, p := range f.p {
+					if p.calls != [3]int{0, 1, 1} {
+						t.Fatal("both strict Sources required", p.calls)
+					}
+				}
+			}
+			mustEnvironment(t, err)
+			tsConsumed(t, f.s, f.o, row.truth, result.err)
+		})
+	}
+	for _, domain := range []string{"LAG-root", "Consulted", "context"} {
+		t.Run("false-then-unreadable/"+domain, func(t *testing.T) { trReadbackLateV1(t, domain) })
+	}
+	t.Run("both-complete-OLD-first", trReadbackOldFirstV1)
+	t.Run("native-mixed-CURRENT-new-LAG-old", trReadbackMixedV1)
+	t.Run("neither-complete", func(t *testing.T) {
+		f := trSceneV1(t)
+		var result tsResult
+		evidence, err := fixtureLargeFault(f.s, 3, 0, tsCounterKey(2), func() { result = f.run(t) })
+		result.tuple(t, 3, 3, -1)
+		ce, ok := result.err.(*CommitError)
+		if !ok || ce.ReadbackCause != nil || evidence.drift != 1 || evidence.commits != 1 {
+			t.Fatal("complete predicates distinguish known neither from unavailable", result, evidence)
+		}
+		treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+		mustEnvironment(t, err)
+		for _, provider := range f.p {
+			if provider.calls != [3]int{0, 1, 1} {
+				t.Fatal("known neither skipped a role", provider.calls)
+			}
+		}
+		tsConsumed(t, f.s, f.o, 3, result.err)
+	})
+}
+
+// The existing native commit seam constructs a complete mixed physical image.
+// Its real strict snapshot invokes the production replay scope loop/verdict;
+// no test supplies the equality predicates or a requested truth result.
+func trReadbackMixedV1(t *testing.T) {
+	t.Helper()
+	f := trSceneV1(t)
+	plan := treeOwnPlanV1(f.op)
+	ledger := &tcLedger{}
+	var composer *treeComposeV1
+	script := fixtureTreeScriptV1{ledger: ledger, pair: plan.pair, held: 419736}
+	script.write = func(section *treeSectionV1) error {
+		section.covered = true
+		if err := section.pairPreflightV1(plan.pair, plan.consulted); err != nil {
+			return err
+		}
+		w := newTreeScopeV1(f.s, section.old, &plan, treeWriterV1, ledger)
+		w.t = section
+		composer = &treeComposeV1{writer: w}
+		defer w.slotV1()
+		if stopped, err := w.loopV1(); stopped {
+			return err
+		}
+		if w.dirtyConsultedV1() {
+			t.Fatal("mixed fixture unexpectedly conflicts")
+		}
+		if err := w.boundedCheckV1(); err != nil {
+			return err
+		}
+		if err := composer.reserveV1(); err != nil {
+			return err
+		}
+		current := treeAdmittedPrimitiveV1(&plan.primitives[0])
+		// Deliberately commit CURRENT and the complete Pair, leaving every
+		// generation-2 UTXO/node/root/counter at its literal ORIGINAL OLD.
+		return w.regenerateV1(w.frozen[0], &current, treeBoundedEmitterV1{section: section, pair: plan.pair, writing: true})
+	}
+	script.readback = func(rb *treeReadbackStateV1) error {
+		rb.bounded, rb.oldImage, rb.newImage = true, true, true
+		e := newTreeScopeV1(f.s, rb.old, &plan, treeReadbackV1, rb.budget.ledgerV1())
+		e.rb = rb
+		defer e.slotV1()
+		_, err := e.loopV1()
+		return err
+	}
+	var outcome updateNativeOutcome
+	evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() {
+		outcome = fixtureTreeCommitV1(f.s, script)
+	})
+	ce := ttCommitError(t, outcome, 3)
+	if ce.ReadbackCause != nil || outcome.secondary != nil || outcome.retainedRead != nil || outcome.retainedWrite != nil || evidence.Commits != 1 {
+		t.Fatal("known mixed complete image cause/handle disposition", outcome, ce, evidence)
+	}
+	treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+	mustEnvironment(t, err)
+	if composer == nil {
+		t.Fatal("mixed native contribution was not reached")
+	}
+	composer.releaseV1()
+	if ledger.held != 0 || len(ledger.violations) != 0 {
+		t.Fatal("mixed native fixture resource retirement", ledger.held, ledger.violations)
+	}
+	for _, provider := range f.p {
+		if provider.calls != [3]int{0, 1, 1} {
+			t.Fatal("mixed image strict evaluation skipped a role", provider.calls)
+		}
+	}
+	raw := f.op.Primitives[0].Coverage.CurrentBody
+	trPairRowsV1(t, f.s, f.op.Primitives[0], raw, 1)
+	tsRead(t, f.s, schemaDBIs[0], tsRootKey(2), tsRootBytes(t, TreeEndpointV1{}))
+	tsRead(t, f.s, schemaDBIs[0], tsCounterKey(2), make([]byte, 16))
+	tsRead(t, f.s, schemaDBIs[1], tdUTXOKey(2, tdTxid(0x31), 0), nil)
+	key := testTreeNodeKey(2, 288, tcEntry(tdUTXOKey(2, tdTxid(0x31), 0), nil).k)
+	tsRead(t, f.s, TreeSchemaV1DBIs()[8], key, nil)
+	for _, m := range f.op.Pair.Mutations {
+		tsRead(t, f.s, m.DBI, m.Key, m.Literal)
+	}
+	tsFollowing(t, f.s, f.o)
+}
+
+func trReadbackOldFirstV1(t *testing.T) {
+	t.Helper()
+	f := trSceneV1(t)
+	raw := trBodyV1(&f.op, 2, false)
+	treeNativeSeed(t, f.s, 4, f.op.Primitives[0].Block[:], raw)
+	for j, p := range f.op.Primitives {
+		f.p[j].block, f.p[j].events = TreeBlockV1{TxCount: 1}, nil
+		p.Coverage.BlockMeta = f.p[j].block
+		treeNativeSeed(t, f.s, 0, tsRootKey(p.Generation), tcBinding(t, p.Generation, p.Endpoint))
+	}
+	for i := range f.op.Pair.Mutations {
+		m := &f.op.Pair.Mutations[i]
+		treeNativeSeed(t, f.s, m.DBI.Rank, m.Key, m.Literal)
+		m.BeforePresent = true
+	}
+	var result tsResult
+	evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() { result = f.run(t) })
+	result.tuple(t, 1, 3, -1)
+	ce, ok := result.err.(*CommitError)
+	if !ok || ce.Truth != 1 || ce.ReadbackCause != nil || evidence.Commits != 1 {
+		t.Fatal("complete OLD must win over also-complete NEW", result, evidence)
+	}
+	treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+	mustEnvironment(t, err)
+	for _, provider := range f.p {
+		if provider.calls != [3]int{0, 1, 1} {
+			t.Fatal("OLD-first selected without both complete role predicates", provider.calls)
+		}
+	}
+	tsConsumed(t, f.s, f.o, 1, result.err)
+}
+
+func trReadbackLateV1(t *testing.T, domain string) {
+	t.Helper()
+	f := trSceneV1(t)
+	rank, key := uint8(0), tsRootKey(2)
+	if domain == "Consulted" {
+		f.op.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[0], Key: []byte{2}}}
+		key = []byte{2}
+	}
+	if domain == "context" {
+		ctxTreeSeed(t, f.s, 7, 100, 2, nil, nil)
+		f.op.Pair.ContextConsulted = &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 2}
+		rank, key = 2, binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, 7), 101)
+	}
+	var result tsResult
+	evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitUnreadable, rank, key, func() { result = f.run(t) })
+	result.tuple(t, 3, 3, -1)
+	ce, ok := result.err.(*CommitError)
+	if !ok || evidence.Faults != 2 || evidence.Commits != 1 {
+		t.Fatal("late unavailable domain was skipped after false predicate", result, evidence)
+	}
+	treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+	treeNativeError(t, ce.ReadbackCause, "update", "IO", 5, "error 5", nil)
+	for _, p := range f.p {
+		if p.calls != [3]int{0, 1, 1} {
+			t.Fatal("late domain requires both strict Sources", domain, p.calls)
+		}
+	}
+	mustEnvironment(t, err)
+	tsConsumed(t, f.s, f.o, 3, result.err)
+}
+
+func TestTreeReplayBoundedAuxiliaryV1(t *testing.T) {
+	for _, count := range []uint32{0, 1, 10080} {
+		f := trSceneV1(t)
+		trAuthorityV1(t, f)
+		raw := trBodyV1(&f.op, 2, false)
+		treeNativeSeed(t, f.s, 4, f.op.Primitives[0].Block[:], raw)
+		ctxTreeSeed(t, f.s, 8, 100, 1, nil, nil)
+		header := ctxTreeHeader(t, 8, 100)
+		hash := sha3.Sum256(header)
+		ownerKey, keyErr := CanonicalOwnerKey(8, hash)
+		mustEnvironment(t, keyErr)
+		f.op.Pair.Consulted = []ConsultedRow{
+			{DBI: schemaDBIs[0], Key: []byte{0}},
+			{DBI: schemaDBIs[1], Key: tdUTXOKey(8, tdTxid(0x88), 0)},
+			{DBI: schemaDBIs[2], Key: ctxTreeIndexKey(8, 100)},
+			{DBI: schemaDBIs[3], Key: hash[:]},
+			{DBI: schemaDBIs[4], Key: f.op.Primitives[0].Block[:]},
+			{DBI: schemaDBIs[7], Key: ownerKey},
+		}
+		if count != 0 {
+			ctxTreeSeed(t, f.s, 7, 100, int(count), nil, nil)
+			f.op.Pair.ContextConsulted = &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: count}
+		}
+		var result tsResult
+		if count != 0 {
+			_, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() { result = f.run(t) })
+			ce, ok := result.err.(*CommitError)
+			if !ok || ce.ReadbackCause != nil {
+				t.Fatal("complete consulted/context strict NEW", count, result.err)
+			}
+			treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+			mustEnvironment(t, err)
+			f.s = tsReopen(t, f.s, f.path)
+		} else {
+			result = f.run(t)
+			mustEnvironment(t, result.err)
+		}
+		result.tuple(t, 2, 3, -1)
+		tsRead(t, f.s, schemaDBIs[0], []byte{2}, f.op.Pair.Mutations[0].Literal)
+		tsFollowing(t, f.s, f.o)
+	}
+	for _, domain := range []string{"Consulted", "context"} {
+		t.Run("final-last-domain/"+domain, func(t *testing.T) {
+			f := trSceneV1(t)
+			rank, key := uint8(0), []byte{2}
+			if domain == "context" {
+				ctxTreeSeed(t, f.s, 7, 100, 2, nil, nil)
+				f.op.Pair.ContextConsulted = &CanonicalContextWindowV1{Generation: 7, FirstHeight: 100, Count: 2}
+				rank, key = 2, ctxTreeIndexKey(7, 101)
+			} else {
+				f.op.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[0], Key: key}}
+			}
+			var result tsResult
+			evidence, err := fixtureLargeFault(f.s, 13, rank, key, func() { result = f.run(t) })
+			mustEnvironment(t, err)
+			result.tuple(t, 1, 2, -1)
+			treeNativeError(t, result.err, "update", "StateMismatch", -30779, "final update image mismatch", nil)
+			if evidence.drift != 1 || evidence.commits != 0 {
+				t.Fatal("enclosing final auxiliary domain was skipped", evidence)
+			}
+			tsConsumed(t, f.s, f.o, 1, result.err)
+			f.s = tsReopen(t, f.s, f.path)
+			tsFollowing(t, f.s, f.o)
+		})
+	}
+}
+
+func trAuthorityV1(t *testing.T, f *tsfScene) {
+	t.Helper()
+	for _, m := range tsEntry(t).Pair.Mutations {
+		if m.DBI.Rank == 0 && bytes.Equal(m.Key, []byte{2}) {
+			m.BeforePresent = true
+			f.op.Pair.Mutations = append(f.op.Pair.Mutations, m)
+		}
+	}
+	slices.SortFunc(f.op.Pair.Mutations, func(a, b Mutation) int { return treeMutationCmpV1(a, treeRowKeyV1{rank: b.DBI.Rank, key: b.Key}) })
+}
+
+// Each literal Source outcome is crossed with each real cleanup disposition at
+// both Source positions and roles; next-call state is part of the observation.
+func TestTreeReplayBoundedLifecycleV1(t *testing.T) {
+	for _, position := range []TreePositionV1{1, 2} {
+		for _, role := range []int{0, 1} {
+			for _, mode := range []string{"nil", "direct", "wrapped", "caused", "typed-nil", "panic", "goexit"} {
+				for _, cleanup := range []uint32{0, 9, 10} {
+					t.Run(fmt.Sprintf("position%d/role%d/%s/cleanup%d", position, role, mode, cleanup), func(t *testing.T) {
+						trLifecycleV1(t, position, role, mode, cleanup, 1)
+					})
+				}
+			}
+		}
+	}
+	for _, position := range []TreePositionV1{1, 2} {
+		for _, mode := range []string{"direct", "panic", "goexit"} {
+			for _, cleanup := range []uint32{0, 9, 10} {
+				t.Run(fmt.Sprintf("stored-body/position%d/LAG/%s/cleanup%d", position, mode, cleanup), func(t *testing.T) {
+					trLifecycleV1(t, position, 1, mode, cleanup, 2)
+				})
+			}
+		}
+	}
+}
+
+func trLifecycleV1(t *testing.T, position TreePositionV1, role int, mode string, cleanup uint32, body uint8) {
+	t.Helper()
+	f := trSceneV1(t)
+	if body == 2 {
+		raw := trBodyV1(&f.op, 2, false)
+		treeNativeSeed(t, f.s, 4, f.op.Primitives[0].Block[:], raw)
+	}
+	marker, panicValue := errors.New("replay Source marker"), new(int)
+	primary := error(marker)
+	switch mode {
+	case "wrapped":
+		primary = fmt.Errorf("exact replay wrapper: %w", marker)
+	case "caused":
+		primary = &EngineError{Class: "IO", Operation: "get", Code: 5, Diagnostic: "existing replay cause", Cause: marker}
+	case "typed-nil":
+		var typed *nilPointerError
+		primary = typed
+	case "nil", "panic", "goexit":
+		primary = nil
+	}
+	f.p[role].before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+		if pos != position {
+			return nil
+		}
+		switch mode {
+		case "direct", "wrapped", "caused", "typed-nil":
+			return primary
+		case "panic":
+			panic(panicValue)
+		case "goexit":
+			runtime.Goexit()
+		}
+		return nil
+	}
+	var result tsResult
+	var recovered any
+	returned := false
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { recovered = recover() }()
+		invoke := func() { result = f.run(t); returned = true }
+		if position == 1 && cleanup == 0 {
+			invoke()
+			return
+		}
+		if position == 2 && cleanup == 0 {
+			_, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), invoke)
+			if err != nil {
+				t.Error(err)
+			}
+			return
+		}
+		nativeMode := cleanup
+		if position == 2 {
+			nativeMode = 16
+			if cleanup == 10 {
+				nativeMode = 15
+			}
+		}
+		_, err := fixtureLargeFault(f.s, nativeMode, 0, tsRootKey(1), invoke)
+		if err != nil {
+			t.Error(err)
+		}
+	}()
+	eiAwait(t, done)
+	unwound := mode == "panic" || mode == "goexit"
+	if returned == unwound || mode == "panic" && recovered != panicValue || mode != "panic" && recovered != nil {
+		t.Fatal("Source return/error/panic/Goexit disposition", returned, recovered)
+	}
+	if reservationLive(f.o) != 0 {
+		t.Fatal("frozen slots/step/temporary loan retained after Source result")
+	}
+	for j, provider := range f.p {
+		writer, readback := 1, 0
+		if position == 1 && mode != "nil" && j > role {
+			writer = 0
+		}
+		if position == 2 && (mode == "nil" || j <= role) {
+			readback = 1
+		}
+		if provider.calls != [3]int{0, writer, readback} {
+			t.Fatal("Source prefix suppression/position", j, provider.calls)
+		}
+		if writer != 0 {
+			tsExpiredReader(t, provider.reader)
+			if provider.sink.WindowV1() != nil {
+				t.Fatal("Source sink remains active", j)
+			}
+		}
+	}
+	trLifecycleResultV1(t, f, position, role, mode, cleanup, primary, result)
+}
+
+func trLifecycleResultV1(t *testing.T, f *tsfScene, position TreePositionV1, role int, mode string, cleanup uint32, primary error, result tsResult) {
+	t.Helper()
+	application := mode != "nil" && mode != "panic" && mode != "goexit"
+	if mode == "nil" {
+		result.tuple(t, 2, 3, -1)
+		if position == 1 && cleanup == 0 {
+			mustEnvironment(t, result.err)
+		} else {
+			ce, ok := result.err.(*CommitError)
+			if !ok || ce.Truth != 2 {
+				t.Fatal("nil Source complete NEW infrastructure tuple", result.err)
+			}
+			if position == 1 {
+				if ce.ReadbackCause != nil {
+					t.Fatal("OLD abort cleanup fabricated readback cause", ce.ReadbackCause)
+				}
+				tsHeldCausesV1(t, ce.Cause, nil, cleanup)
+			}
+		}
+	}
+	if application {
+		if position == 1 {
+			result.tuple(t, 1, 1, role)
+			if cleanup == 0 && any(result.err) != any(primary) {
+				t.Fatal("Source primary identity/wrapper changed", result.err)
+			}
+		} else {
+			result.tuple(t, 3, 3, -1)
+			ce, ok := result.err.(*CommitError)
+			if !ok {
+				t.Fatal("strict Source primary missing", result.err)
+			}
+			treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+		}
+	}
+	if position == 1 && cleanup == 0 && !application {
+		if f.s.state != storeOPEN || f.s.terminal != nil {
+			t.Fatal("clean nil-primary Source unwind must leave OPEN", f.s.state)
+		}
+		tsFollowing(t, f.s, f.o)
+		return
+	}
+	if position == 1 && mode != "nil" {
+		tsHeldCausesV1(t, f.s.terminal, primary, cleanup)
+	}
+	if position == 2 {
+		ce, ok := f.s.terminal.(*CommitError)
+		if !ok {
+			t.Fatal("strict terminal error lost initiating cause", f.s.terminal)
+		}
+		nativeMode := uint32(12)
+		if cleanup == 9 {
+			nativeMode = 16
+		}
+		if cleanup == 10 {
+			nativeMode = 15
+		}
+		tsHeldCausesV1(t, ce.ReadbackCause, primary, nativeMode)
+		treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+	}
+	state := storeCLOSED
+	if cleanup == 10 {
+		state = storePOISONEDTHREAD
+	}
+	if f.s.state != state || f.s.terminal == nil {
+		t.Fatal("Source/native cleanup state", f.s.state, state, f.s.terminal)
+	}
+	wantTruth := CommitTruthOld
+	if mode == "nil" {
+		wantTruth = CommitTruthNew
+	} else if position == 2 {
+		wantTruth = CommitTruthUnknown
+	}
+	if f.s.terminalTruth != wantTruth {
+		t.Fatal("native cleanup changed complete operation truth", f.s.terminalTruth, wantTruth)
+	}
+	calls := 0
+	accountRun(t, "replay Source next operation", f.o, TreeOperation, func(a *OperationAccount) {
+		next := tsInvoke(f.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return f.op, nil })
+		if calls != 0 || any(next.err) != any(f.s.terminal) || next.truth != f.s.terminalTruth || next.stage != 1 || next.index != -1 {
+			t.Fatal("Source cleanup did not reach Store/next operation", next)
+		}
+	})
+	if cleanup == 10 {
+		if f.s.txn == nil {
+			t.Fatal("retained native cleanup lost handle")
+		}
+		mustEnvironment(t, fixtureLargeRelease(f.s))
+	}
+}
+
+// This is a codec/store representation fixture, not a Section-25 valid-block
+// maximum. Its quota is fixed from independently known fixture row widths.
+func TestTreeReplayBoundedStressV1(t *testing.T) {
+	const groups = 1024
+	const events = 2 * groups
+	for _, projection := range []bool{false, true} {
+		t.Run(fmt.Sprintf("projection%v", projection), func(t *testing.T) {
+			f := trSceneV1(t)
+			raw := trStressSeedV1(t, f, groups)
+			if projection {
+				f.op.Proof = func(*TreeDeltaReportV1) error { return nil }
+			}
+			// Q=5*128+2*168+32+n; each A=140472+104E;
+			// H of these fixed rows is below Sr (all node values <=140).
+			q := uint64(1008+len(raw))
+			quota := q+2*(74912+65560+104*events)+131192+(288440+104*events)+147968
+			var result tsResult
+			mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return a.WithReservation(402653184-quota, func() error {
+					result = tsInvoke(f.s, a, func(*Reader) (TreeOperationV1, error) { return f.op, nil })
+					return nil
+				})
+			}))
+			if projection {
+				if any(result.err) != any(errOperationReservationCapacity) || result.truth != 1 {
+					t.Fatal("full-P regression control must refuse the native envelope", result)
+				}
+			} else {
+				result.tuple(t, 2, 3, -1)
+				mustEnvironment(t, result.err)
+			}
+			f.s = tsReopen(t, f.s, f.path)
+			for _, p := range f.op.Primitives {
+				entries := trStressEntriesV1(p.Generation, groups, !projection, raw)
+				rows := map[string][]byte{}
+				_ = testTreeBuild(p.Generation, entries, rows)
+				for name, value := range rows {
+					tsRead(t, f.s, TreeSchemaV1DBIs()[8], testTreeRowKey(name), value)
+				}
+				for i := range groups {
+					old, next := trStressKeyV1(i, false), trStressKeyV1(i, true)
+					wantOld, wantNext := tdFormed(tdFrame(7, 0, nil), 4, 0), []byte(nil)
+					if !projection {
+						wantOld, wantNext = nil, tdFormed(raw[148+11*i:148+11*(i+1)], 5, 0)
+					}
+					tsRead(t, f.s, schemaDBIs[1], tdUTXOKey(p.Generation, old, uint32(i)), wantOld)
+					tsRead(t, f.s, schemaDBIs[1], tdUTXOKey(p.Generation, next, uint32(i)), wantNext)
+				}
+				if !projection {
+					tsRead(t, f.s, schemaDBIs[0], tsRootKey(p.Generation), tcBinding(t, p.Generation, p.Endpoint, entries...))
+				}
+			}
+			tsFollowing(t, f.s, f.o)
+		})
+	}
+}
+
+func trStressKeyV1(i int, next bool) [32]byte {
+	var literal [9]byte
+	binary.BigEndian.PutUint64(literal[:8], uint64(i))
+	if next {
+		literal[8] = 1
+	}
+	return sha3.Sum256(literal[:])
+}
+
+func trStressEntriesV1(g uint64, n int, next bool, raw []byte) []testTreeEntry {
+	entries := make([]testTreeEntry, n)
+	for i := range n {
+		value := tdFormed(tdFrame(7, 0, nil), 4, 0)
+		if next {
+			value = tdFormed(raw[148+11*i:148+11*(i+1)], 5, 0)
+		}
+		entries[i] = tcEntry(tdUTXOKey(g, trStressKeyV1(i, next), uint32(i)), value)
+	}
+	slices.SortFunc(entries, func(a, b testTreeEntry) int { return bytes.Compare(a.k[:], b.k[:]) })
+	return entries
+}
+
+func trStressSeedV1(t *testing.T, f *tsfScene, n int) []byte {
+	t.Helper()
+	var raw []byte
+	for i := range f.op.Pair.Mutations {
+		m := &f.op.Pair.Mutations[i]
+		if m.DBI.Rank == 4 {
+			raw = append(bytes.Clone(m.Literal[:148]), bytes.Repeat(tdFrame(1, 0, nil), n)...)
+			m.Literal = raw
+		}
+	}
+	var events []TreeEventV1
+	for i := range n {
+		events = append(events, TreeEventV1{Kind: 1, Outpoint: TreeOutpointV1{Txid: trStressKeyV1(i, false), Vout: uint32(i)}, TxIndex: 1, InputIndex: uint32(i)})
+	}
+	for i := range n {
+		events = append(events, TreeEventV1{Kind: 2, Outpoint: TreeOutpointV1{Txid: trStressKeyV1(i, true), Vout: uint32(i)}, TxIndex: 1, FrameOffset: uint64(148+11*i), FrameLength: 11})
+	}
+	for j, p := range f.op.Primitives {
+		f.p[j].block, f.p[j].events = TreeBlockV1{TxCount: 2, EventCount: uint32(2*n)}, events
+		p.Coverage.CurrentBody, p.Coverage.BlockMeta = raw, f.p[j].block
+		entries := trStressEntriesV1(p.Generation, n, false, raw)
+		rows := map[string][]byte{}
+		_ = testTreeBuild(p.Generation, entries, rows)
+		for name, value := range rows {
+			treeNativeSeed(t, f.s, 8, testTreeRowKey(name), value)
+		}
+		for _, e := range entries {
+			treeNativeSeed(t, f.s, 1, append(binary.BigEndian.AppendUint64(nil, p.Generation), e.k[:]...), e.v)
+		}
+		treeNativeSeed(t, f.s, 0, tsCounterKey(p.Generation), tsCounterLiteral(uint64(56*n), uint64(n)))
+		treeNativeSeed(t, f.s, 0, tsRootKey(p.Generation), tcBinding(t, p.Generation, tcEndpoint(4, tdTxid(0xa0)), entries...))
+	}
+	return raw
+}
+
+func TestTreeReplayBoundedModeIsolationV1(t *testing.T) {
+	for _, shape := range []string{"independent-held", "Proof", "slot", "LAG-WriteOrReuse"} {
+		t.Run("fallback/"+shape, func(t *testing.T) {
+			f := trSceneV1(t)
+			proofs := 0
+			switch shape {
+			case "independent-held":
+				raw := trBodyV1(&f.op, 3, false)
+				f.op.Primitives[1].Coverage.CurrentBody = bytes.Clone(raw)
+			case "Proof", "slot":
+				f.op.Proof = func(*TreeDeltaReportV1) error { proofs++; return nil }
+				if shape == "slot" {
+					var header [148]byte
+					copy(header[:], f.op.Primitives[0].Coverage.CurrentBody)
+					f.op.HeaderSlot = &TreeHeaderSlotV1{Hash: f.op.Primitives[0].Block, Header: header}
+				}
+			case "LAG-WriteOrReuse":
+				f.op.Primitives[1].Undo = UndoWriteOrReuseV1
+			}
+			plan := treeOwnPlanV1(f.op)
+			if treeBoundedPlanV1(&plan) {
+				t.Fatal("legal excluded ownership profile selected", shape)
+			}
+			for _, provider := range f.p {
+				provider.after = func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+					if sink.recorder.referenceOnly {
+						t.Fatal("full-P fallback acquired selected replay mode")
+					}
+					return nil
+				}
+			}
+			result := f.run(t)
+			result.tuple(t, 2, 3, -1)
+			mustEnvironment(t, result.err)
+			if (proofs == 1) != (shape == "Proof" || shape == "slot") {
+				t.Fatal("fallback Proof cardinality", shape, proofs)
+			}
+			tsFollowing(t, f.s, f.o)
+		})
+	}
+	f := trSceneV1(t)
+	parent := tcEndpoint(4, tdTxid(0xa0))
+	treeNativeSeed(t, f.s, 0, tsRootKey(1), tcBinding(t, 1, parent))
+	p := f.op.Primitives[0]
+	p.Kind, p.Undo = TreeKindDirectApplyV1, UndoTransientV1
+	called := 0
+	p.Source = tsSource(func(pos TreePositionV1, r *Reader, sink *TreeDeltaSinkV1) error {
+		called++
+		if !sink.recorder.rootReadOnly || sink.recorder.referenceOnly {
+			t.Fatal("F3 rootReadOnly acquired replay reference-only mode")
+		}
+		return f.p[0].TreeDeltaV1(pos, r, sink)
+	})
+	accountRun(t, "separate F3 root derivation", f.o, TreeOperation, func(a *OperationAccount) {
+		mustEnvironment(t, f.s.View(func(r *Reader) error {
+			root, err := r.DeriveTreeRootV1(a, TreeRootReadV1{Primitive: p, Parent: parent})
+			value := tdFormed(p.Coverage.CurrentBody[148:], 5, 1)
+			want := testTreeBuild(1, []testTreeEntry{tcEntry(tdUTXOKey(1, tdTxid(0x31), 0), value)}, map[string][]byte{})
+			if err != nil || root != want.digest || called != 1 {
+				t.Fatal("F3 independent root/source observation", root, want.digest, called, err)
+			}
+			return nil
+		}))
+	})
+	c, old := tdAllocCase(5)
+	r, d := c.delta(t, treeWriterV1, &tdLedger{})
+	defer r.releaseV1()
+	if r.referenceOnly || r.rootReadOnly {
+		t.Fatal("inverse recorder acquired selected replay mode")
+	}
+	tdOK(t, d.resolveV1(old))
+	retained := 0
+	for _, g := range r.descs {
+		if g.img != nil {
+			retained++
+		}
+	}
+	if retained == 0 {
+		t.Fatal("inverse original undo images unexpectedly retired")
+	}
+}
+
 // N5: a Proof panic or Goexit takes the writer unwind with index -1, no write,
 // a released account and an OPEN Store.
 func TestTreeProofUnwindV1(t *testing.T) {

@@ -265,12 +265,182 @@ func TestTreeDeltaGrammarV1(t *testing.T) {
 	}
 }
 
+// The retained-owner check has a distinct resource contract: successful final
+// rows alone cannot reveal a block-wide retained ORIGINAL OLD payload array.
+func TestTreeReplayBoundedOldReferencesV1(t *testing.T) {
+	for _, undo := range []uint8{1, 2, 3, 4} {
+		for _, position := range []treePositionV1{1, 2} {
+			c, old := tdAllocCase(undo)
+			ledger := &tdLedger{}
+			r, d := c.delta(t, position, ledger)
+			r.referenceOnly, d.original = true, old
+			tdOK(t, d.resolveV1(old))
+			for _, descriptor := range r.descs {
+				if descriptor.img != nil {
+					t.Fatalf("undo%d/position%d retains original payload", undo, position)
+				}
+			}
+			emit := &testTreeEmit{log: &testTreeLog{}}
+			tdOK(t, d.applyV1(emit))
+			if undo == 1 {
+				for i, want := range [][]byte{
+					tdFormed(tdFrame(10, 0, []byte{1, 2, 3}), 2, 0),
+					tdFormed(tdFrame(11, 0, nil), 2, 0),
+				} {
+					found := false
+					for j, target := range emit.targets {
+						key := tdEntryKey(c.block, tdTxid([]byte{0x0a, 0x0d}[i]), 1, uint32(i), 0)
+						if target == fmt.Sprintf("5:%x:true", key) {
+							found = bytes.Equal(emit.values[j], want)
+						}
+					}
+					if !found {
+						t.Fatalf("original undo entry%d byte/order binding missing: %v", i, emit.targets)
+					}
+				}
+			}
+			r.releaseV1()
+			if ledger.used != 0 {
+				t.Fatal("descriptor/value/loan retirement", ledger.logged())
+			}
+		}
+	}
+	t.Run("maximum-codec-value", func(t *testing.T) {
+		c, old := tdAllocCase(1)
+		large := tdFormed(tdFrame(10, 0, bytes.Repeat([]byte{0x39}, 65536)), 2, 0)
+		if len(large) != 65560 {
+			t.Fatal("independent maximum codec literal width", len(large))
+		}
+		for i := range old.rows {
+			if old.rows[i].rank == 1 && bytes.Equal(old.rows[i].key, tdUTXOKey(9, tdTxid(0x0a), 0)) {
+				old.rows[i].value = large
+			}
+		}
+		r, d := c.delta(t, treeWriterV1, &tdLedger{})
+		defer r.releaseV1()
+		r.referenceOnly, d.original = true, old
+		tdOK(t, d.resolveV1(old))
+		for _, descriptor := range r.descs {
+			if descriptor.img != nil {
+				t.Fatal("maximum stored value survived reference-only freeze")
+			}
+		}
+		emit := &testTreeEmit{log: &testTreeLog{}}
+		tdOK(t, d.applyV1(emit))
+		want := fmt.Sprintf("5:%x:true", tdEntryKey(c.block, tdTxid(0x0a), 1, 0, 0))
+		found := false
+		for i, target := range emit.targets {
+			if target == want {
+				found = bytes.Equal(emit.values[i], large)
+			}
+		}
+		if !found {
+			t.Fatal("maximum codec original undo was absent or truncated")
+		}
+	})
+}
+
+// The U loan is separately observable at its real family consumer, after the
+// original schema result and before any simultaneous family/native operands.
+func TestTreeReplayBoundedFundingLoanV1(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		for _, short := range []uint64{0, 1} {
+			undo := uint8(1)
+			if existing {
+				undo = 3
+			}
+			c, old := tdAllocCase(undo)
+			ledger := &tdLedger{}
+			r, d := c.delta(t, treeWriterV1, ledger)
+			watched := &trLoanOldV1{tdMemOld: old, t: t, ledger: ledger, baseline: ledger.used}
+			r.referenceOnly, d.original = true, watched
+			ledger.limit = ledger.used + 65560 - short
+			err := d.resolveV1(watched)
+			if !existing && err == nil {
+				emit := &trLoanEmitterV1{t: t, ledger: ledger, baseline: r.charge}
+				err = d.applyV1(emit)
+				if short == 0 && emit.entries != 2 {
+					t.Fatal("missing-family loan consumer not reached twice", emit.entries)
+				}
+			}
+			if short == 0 {
+				tdOK(t, err)
+			} else if any(err) != any(errOperationReservationCapacity) {
+				t.Fatal("U-minus-one did not refuse at original value loan", err)
+			}
+			if existing && short == 0 && watched.entries != 2 {
+				t.Fatal("existing-family loan consumer not reached twice", watched.entries)
+			}
+			r.releaseV1()
+			if ledger.used != 0 {
+				t.Fatal("U returned more than once or retained", ledger.logged())
+			}
+		}
+	}
+	t.Run("schema-before-loan", func(t *testing.T) {
+		c, old := tdAllocCase(3)
+		ledger := &tdLedger{}
+		r, d := c.delta(t, treeWriterV1, ledger)
+		defer r.releaseV1()
+		r.referenceOnly, d.original = true, old
+		for i := range old.rows {
+			if old.rows[i].rank == 1 && bytes.Equal(old.rows[i].key, tdUTXOKey(9, tdTxid(0x0a), 0)) {
+				old.rows[i].value = []byte{1}
+			}
+		}
+		ledger.limit = ledger.used // any U acquisition would refuse.
+		treeNativeIntegrity(t, d.resolveV1(old), "update", errSchema)
+		if ledger.logged() != "charge 65976" {
+			t.Fatal("schema result did not precede additional U acquisition", ledger.logged())
+		}
+	})
+}
+
+// These test-local adapters observe the existing OLD/emitter boundaries. The
+// owned resource invariant cannot be inferred from the final byte image alone.
+type trLoanOldV1 struct {
+	*tdMemOld
+	t *testing.T
+	ledger *tdLedger
+	baseline uint64
+	entries int
+}
+
+func (o *trLoanOldV1) nextV1(dbi DBI, from []byte) ([]byte, treeImageV1, bool, error) {
+	key, image, ok, err := o.tdMemOld.nextV1(dbi, from)
+	if ok && dbi.Rank == 5 && len(key) == 77 {
+		o.entries++
+		if o.ledger.used != o.baseline+65560 {
+			o.t.Fatal("old-value-loan retired before family comparison", o.ledger.used, o.baseline)
+		}
+	}
+	return key, image, ok, err
+}
+
+type trLoanEmitterV1 struct {
+	tdCountEmitter
+	t *testing.T
+	ledger *tdLedger
+	baseline uint64
+	entries int
+}
+
+func (e *trLoanEmitterV1) emitV1(target treeTargetV1) error {
+	if target.dbi.Rank == 5 && len(target.key) == 77 && target.after.present {
+		e.entries++
+		if e.ledger.used != e.baseline+65560 {
+			e.t.Fatal("old-value-loan retired before expected/native family consumer", e.ledger.used, e.baseline)
+		}
+	}
+	return e.tdCountEmitter.emitV1(target)
+}
+
 // A2, M9, M10: one charge of D_j + V before allocation at both positions; the constructor charges nothing.
 func TestTreeDeltaChargeV1(t *testing.T) {
 	if tdSize > 128 {
 		t.Fatalf("descriptor size %d > 128", tdSize)
 	}
-	for _, count := range []uint32{0, 1, 1000} {
+	for _, count := range []uint32{0, 1, 1000, 414634} {
 		want := uint64(count)*tdSize + tdV
 		ledger := &tdLedger{}
 		r := tdGrammar().recorder(treeWriterV1, ledger)
@@ -290,6 +460,14 @@ func TestTreeDeltaChargeV1(t *testing.T) {
 		}
 		if budget.used != 5+want || ledger.logged() != fmt.Sprintf("charge %d", want) {
 			t.Fatalf("count %d: budget used %d", count, budget.used)
+		}
+		if cap(r.descs) != int(count) || cap(rb.descs) != int(count) {
+			t.Fatal("exact-capacity descriptor owner exceeds the admitted event envelope", count)
+		}
+		r.releaseV1()
+		rb.releaseV1()
+		if ledger.used != 0 || budget.used != 5 {
+			t.Fatal("descriptor boundary holds did not return to their independent baselines", count)
 		}
 	}
 }
