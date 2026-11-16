@@ -19,12 +19,13 @@ type rpStore struct {
 	reader  *mdbx.Reader
 	account *mdbx.OperationAccount
 	inspect func(mdbx.TreeOperationV1)
+	native  btResult
 }
 
 func (s *rpStore) UpdateTreeV1(a *mdbx.OperationAccount, build func(*mdbx.Reader) (mdbx.TreeOperationV1, error)) (mdbx.CommitTruth, mdbx.UpdateStage, int, error) {
 	s.calls++
 	s.account = a
-	return s.store.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+	s.native.truth, s.native.stage, s.native.index, s.native.err = s.store.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
 		s.reader = r
 		op, err := build(r)
 		if err == nil && s.inspect != nil {
@@ -32,6 +33,7 @@ func (s *rpStore) UpdateTreeV1(a *mdbx.OperationAccount, build func(*mdbx.Reader
 		}
 		return op, err
 	})
+	return s.native.truth, s.native.stage, s.native.index, s.native.err
 }
 
 type rpCase struct {
@@ -127,7 +129,8 @@ func (c *rpCase) run(t *testing.T, alter func(replayPairPrepareCurrentV1) replay
 				prepare = alter(prepare)
 			}
 			got = applyReplayPairV1(&c.store, a, c.request, prepare, inputs)
-			logicalMDBXAssert(t, c.store.account == a, "composer must use the original operation account")
+			logicalMDBXAssert(t, c.store.account == a && c.store.calls == 1, "exactly one native call on one account")
+			logicalMDBXAssert(t, got.Truth == c.store.native.truth && got.Stage == c.store.native.stage && got.Index == c.store.native.index && any(got.Err) == any(c.store.native.err), "composer preserves exact captured native product")
 			return got.Err
 		})
 		logicalMDBXAssert(t, any(runErr) == any(got.Err), "complete/native error identity: %v/%v", runErr, got.Err)

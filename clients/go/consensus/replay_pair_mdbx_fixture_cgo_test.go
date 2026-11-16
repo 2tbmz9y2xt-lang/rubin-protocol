@@ -75,7 +75,8 @@ func rpfRun(t *testing.T, c *rpCase, keys []mdbx.TreeOutpointV1, alter func(repl
 				inputs := rpfKeys(t, c, a, keys)
 				if lag != nil { inputs = lag(inputs) }
 				got = applyReplayPairV1(&c.store, a, c.request, prepare, inputs)
-				logicalMDBXAssert(t, c.store.account == a, "same account through CURRENT/F3/native")
+				logicalMDBXAssert(t, c.store.account == a && c.store.calls == 1, "exactly one native call on one account")
+				logicalMDBXAssert(t, got.Truth == c.store.native.truth && got.Stage == c.store.native.stage && got.Index == c.store.native.index && any(got.Err) == any(c.store.native.err), "composer preserves exact captured native product")
 				return got.Err
 			}
 			if filler != 0 { return a.WithReservation(filler, invoke) }
@@ -275,12 +276,29 @@ func TestReplayPairLagFailure(t *testing.T) {
 			if name == "counter-absent" || name == "counter-malformed" { wantIndex = 1 }
 			logicalMDBXAssert(t, got.Index == wantIndex, "native LAG index: got%d want%d", got.Index, wantIndex)
 			var engine *mdbx.EngineError
-			logicalMDBXAssert(t, errors.As(got.Err, &engine) && engine.Cause == nil && !engine.ReopenRequired, "unchanged native engine cause: %T/%v", got.Err, got.Err)
+			logicalMDBXAssert(t, errors.As(got.Err, &engine) && got.Err == engine && !engine.ReopenRequired, "unchanged native engine cause: %T/%v", got.Err, got.Err)
+			malformed := name == "counter-malformed" || name == "root-malformed" || name == "node-malformed"
+			if malformed {
+				logicalMDBXAssert(t, engine.Cause != nil && engine.Cause.Error() == "invalid MDBX SchemaV2 bytes", "malformed LAG preserves exact schema cause: %+v", engine)
+			} else {
+				logicalMDBXAssert(t, engine.Cause == nil, "absence/plainGet has no schema cause: %+v", engine)
+			}
+			if malformed {
+				logicalMDBXAssert(t, engine.Cause != nil && engine.Cause.Error() == "invalid MDBX SchemaV2 bytes", "malformed LAG preserves exact schema cause: %+v", engine)
+			} else {
+				logicalMDBXAssert(t, engine.Cause == nil, "absent/plainGet LAG preserves nil cause: %+v", engine)
+			}
 			if name == "plainGet" {
-				logicalMDBXAssert(t, fixtureErr == nil && evidence.Faults == 1 && engine.TreeObservation == nil && engine.Class == "IO" && engine.Code == 5 && got.Err == engine && got.Role == "LAG", "plainGet roleLAG without observation: %+v", engine)
+				logicalMDBXAssert(t, fixtureErr == nil && evidence.Faults == 1 && engine.TreeObservation == nil && engine.Operation == "get" && engine.Class == "IO" && engine.Code == 5 && engine.Diagnostic == "error 5" && got.Role == "LAG", "plainGet roleLAG without observation: %+v", engine)
 			} else {
 				logicalMDBXAssert(t, fixtureErr != nil && fixtureErr.Error() == "selected damage fixture site was not reached exactly as armed" && evidence.Faults == 0 && engine.TreeObservation != nil && engine.TreeObservation.Generation == 2 && got.Role == "LAG", "no put attempt/LAG observation: %+v/%v", engine, fixtureErr)
-				if wantIndex == -1 { logicalMDBXAssert(t, engine.TreeObservation.Primitive == 0, "F3 observation0 is not native callback index or role") }
+				logicalMDBXAssert(t, engine.Operation == "update" && engine.Class == "Integrity" && engine.Code == -30796 && engine.Diagnostic == "invalid tree native representation", "exact LAG native integrity tuple: %+v", engine)
+				kind, primitive := mdbx.TreeObservationKindV1(1), wantIndex
+				if malformed { kind = 2 }
+				if primitive == -1 { primitive = 0 }
+				want := mdbx.TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 2, Block: c.in.Endpoint.BlockHash, Height: c.in.Height, Primitive: primitive, Position: 1, Rank: rank, KeyLength: uint8(len(key)), Kind: kind, OriginalImage: true, OriginalReference: true}
+				copy(want.Key[:], key)
+				logicalMDBXAssert(t, *engine.TreeObservation == want, "exact LAG owning observation: got%+v want%+v", engine.TreeObservation, want)
 			}
 			btfCached(t, w.btWorld, btResult{truth: got.Truth, stage: got.Stage, index: got.Index, err: got.Err})
 			w.reopen(t)
