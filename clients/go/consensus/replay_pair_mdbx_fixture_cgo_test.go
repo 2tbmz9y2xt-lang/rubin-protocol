@@ -283,11 +283,6 @@ func TestReplayPairLagFailure(t *testing.T) {
 			} else {
 				logicalMDBXAssert(t, engine.Cause == nil, "absence/plainGet has no schema cause: %+v", engine)
 			}
-			if malformed {
-				logicalMDBXAssert(t, engine.Cause != nil && engine.Cause.Error() == "invalid MDBX SchemaV2 bytes", "malformed LAG preserves exact schema cause: %+v", engine)
-			} else {
-				logicalMDBXAssert(t, engine.Cause == nil, "absent/plainGet LAG preserves nil cause: %+v", engine)
-			}
 			if name == "plainGet" {
 				logicalMDBXAssert(t, fixtureErr == nil && evidence.Faults == 1 && engine.TreeObservation == nil && engine.Operation == "get" && engine.Class == "IO" && engine.Code == 5 && engine.Diagnostic == "error 5" && got.Role == "LAG", "plainGet roleLAG without observation: %+v", engine)
 			} else {
