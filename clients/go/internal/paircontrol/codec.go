@@ -307,6 +307,9 @@ func (c *wireV1) h1(v *H1BindingV1) {
 	c.number(&v.OwnerEpoch)
 	c.fixed(v.OwnerIntent[:])
 	c.number(&v.ObservedPSequence)
+	if v.OwnerEpoch > v.ObservedPSequence {
+		c.err = errShapeV1
+	}
 	c.field(&d.Error, 1024)
 	c.field(&d.Source, 1024)
 	c.field(&d.Trigger, 1024)
@@ -415,9 +418,12 @@ func replayLAGV1(v *IntentV1) bool {
 	}
 }
 
-// h1ShapeV1 compares original admission leaves to the exact OLD/destination data.
+// h1ShapeV1 binds the original admission to this intent and exact OLD/destination data.
 func h1ShapeV1(v *IntentV1) bool {
 	if !h1ModeV1(v) {
+		return false
+	}
+	if v.H1Binding.OwnerIntent != v.ID {
 		return false
 	}
 	old, e1 := EncodeDatabaseLocationV1(v.Old.Database)

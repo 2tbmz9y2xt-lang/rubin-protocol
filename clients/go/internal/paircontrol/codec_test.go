@@ -204,6 +204,9 @@ func assertRecord(t *testing.T, v RecordV1, valid bool) {
 		if !exactShapeError(encErr) || !exactShapeError(decErr) {
 			t.Fatalf("exact unwrapped refusal: encode %v decode %v", encErr, decErr)
 		}
+		if encErr.Error() != "paircontrol: invalid closed value" || decErr.Error() != "paircontrol: invalid closed value" {
+			t.Fatal("shape refusal diagnostic changed")
+		}
 		return
 	}
 	require(t, encErr)
@@ -656,6 +659,27 @@ func TestEveryReferenceOwner(t *testing.T) {
 }
 
 func TestIdentityRootAndH1Domains(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		epoch, seen uint64
+		valid       bool
+	}{
+		{"epoch_equal", 2, 2, true},
+		{"epoch_older", 1, 2, true},
+		{"epoch_max_equal", ^uint64(0), ^uint64(0), true},
+		{"epoch_newer", 3, 2, false},
+		{"observation_zero", 2, 0, false},
+		{"epoch_max_newer", ^uint64(0), ^uint64(0) - 1, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			v, i := selected(), h1Value()
+			v.Intent = &i
+			h := i.H1Binding
+			h.OwnerEpoch, h.ObservedPSequence = test.epoch, test.seen
+			binary.BigEndian.PutUint64(h.Admission.Ownership, test.epoch)
+			assertRecord(t, v, test.valid)
+		})
+	}
 	for _, n := range []int{0, 1, 17, 255, 256, 767, 768, 769} {
 		v := selected()
 		v.Identity.DatabaseRoot = strings.Repeat("x", n)
@@ -739,6 +763,19 @@ func TestWireDiscriminatorsAndPresence(t *testing.T) {
 }
 
 func TestCanonicalLeafPositions(t *testing.T) {
+	for _, form := range []uint8{1, 2} {
+		t.Run(fmt.Sprintf("delegated_alias_form%d", form), func(t *testing.T) {
+			v, i := selected(), h1Value()
+			v.Intent = &i
+			i.Old.Database.Form, i.Old.Database.Location = form, "D17"
+			if form == 1 {
+				i.Old.Database.Location = "/db/D17"
+			}
+			*v.Selected = *i.Old
+			i.H1Binding.Admission.Old = leafBytes(i.Old.Database)
+			assertRecord(t, v, true)
+		})
+	}
 	for _, position := range []string{"selected", "retired", "old", "destination"} {
 		for _, n := range []int{0, 1, 17, 255, 256, 767, 768, 769} {
 			v, i := selected(), replacement()
@@ -799,6 +836,24 @@ func TestCanonicalLeafPositions(t *testing.T) {
 }
 
 func TestNestedPointersAndLegalIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		outer, inner byte
+		valid        bool
+	}{
+		{"consistent_new_intent", 0x45, 0x45, true},
+		{"inner_intent_mismatch", 0x44, 0x45, false},
+		{"outer_intent_mismatch", 0x45, 0x44, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			v, i := selected(), h1Value()
+			v.Intent = &i
+			i.ID = [32]byte{test.outer}
+			i.H1Binding.OwnerIntent = [32]byte{test.inner}
+			copy(i.H1Binding.Admission.Ownership[8:], i.H1Binding.OwnerIntent[:])
+			assertRecord(t, v, test.valid)
+		})
+	}
 	t.Run("distinct_numeric_fields", func(t *testing.T) {
 		v, i := selected(), h1Value()
 		v.Intent = &i
