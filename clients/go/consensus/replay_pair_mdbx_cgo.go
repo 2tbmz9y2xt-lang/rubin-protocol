@@ -21,9 +21,9 @@ type replayPairStoreV1 interface {
 // Returning rows transfers the operation-local Mutations slice for assembly;
 // its Key/Literal bytes and all other Pair backing remain borrowed immutable.
 type replayPairRowsV1 struct {
-	Pair                          mdbx.TreePairV1
-	Undo                          mdbx.TreeUndoEffectV1
-	BodyKind                      uint8
+	Pair                           mdbx.TreePairV1
+	Undo                           mdbx.TreeUndoEffectV1
+	BodyKind                       uint8
 	CurrentCanonical, CurrentOwner bool
 	LagCanonical, LagOwner         bool
 }

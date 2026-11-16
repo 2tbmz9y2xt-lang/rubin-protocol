@@ -123,19 +123,19 @@ func (c *rpCase) run(t *testing.T, alter func(replayPairPrepareCurrentV1) replay
 	var got replayPairOutcomeV1
 	err := c.w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
 		return a.WithReservation(8388608, func() error {
-		out, runErr := withInitial148CompleteBlockV1(a, c.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
-			prepare := c.prepare(t, validate)
-			if alter != nil {
-				prepare = alter(prepare)
-			}
-			got = applyReplayPairV1(&c.store, a, c.request, prepare, inputs)
-			logicalMDBXAssert(t, c.store.account == a && c.store.calls == 1, "exactly one native call on one account")
-			logicalMDBXAssert(t, got.Truth == c.store.native.truth && got.Stage == c.store.native.stage && got.Index == c.store.native.index && any(got.Err) == any(c.store.native.err), "composer preserves exact captured native product")
-			return got.Err
-		})
-		logicalMDBXAssert(t, any(runErr) == any(got.Err), "complete/native error identity: %v/%v", runErr, got.Err)
-		c.validation = out
-		return nil
+			out, runErr := withInitial148CompleteBlockV1(a, c.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+				prepare := c.prepare(t, validate)
+				if alter != nil {
+					prepare = alter(prepare)
+				}
+				got = applyReplayPairV1(&c.store, a, c.request, prepare, inputs)
+				logicalMDBXAssert(t, c.store.account == a && c.store.calls == 1, "exactly one native call on one account")
+				logicalMDBXAssert(t, got.Truth == c.store.native.truth && got.Stage == c.store.native.stage && got.Index == c.store.native.index && any(got.Err) == any(c.store.native.err), "composer preserves exact captured native product")
+				return got.Err
+			})
+			logicalMDBXAssert(t, any(runErr) == any(got.Err), "complete/native error identity: %v/%v", runErr, got.Err)
+			c.validation = out
+			return nil
 		})
 	})
 	logicalMDBXAssert(t, err == nil && c.store.calls == 1, "exactly one native call on one account: %v/%d", err, c.store.calls)
@@ -280,7 +280,9 @@ func TestReplayPairCurrentOnly(t *testing.T) {
 	for _, target := range []uint64{1, 15119} {
 		t.Run(fmt.Sprint(target), func(t *testing.T) {
 			undo := mdbx.UndoTransientV1
-			if target == 1 { undo = mdbx.UndoWriteOrReuseV1 }
+			if target == 1 {
+				undo = mdbx.UndoWriteOrReuseV1
+			}
 			c := rpNew(t, target, 1, undo)
 			c.store.inspect = func(op mdbx.TreeOperationV1) { rpAssertPlan(t, c, op, 1) }
 			got := c.run(t, nil, nil)
@@ -288,7 +290,9 @@ func TestReplayPairCurrentOnly(t *testing.T) {
 			logicalMDBXAssert(t, c.lag == 0, "CURRENT-only invoked LAG")
 			rpGenesisState(t, c, false)
 			var want []byte
-			if target == 1 { want = btManifest(btRequest(c.in.Raw, 0), 1, 0) }
+			if target == 1 {
+				want = btManifest(btRequest(c.in.Raw, 0), 1, 0)
+			}
 			c.w.read(t, 5, append(bytes.Clone(c.in.Endpoint.BlockHash[:]), 0), want)
 		})
 	}
@@ -305,23 +309,40 @@ func TestReplayPairCurrentRefusal(t *testing.T) {
 			before := bytes.Clone(c.in.Raw)
 			var want error
 			alter := func(prepare replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
-				if name == "nil-callback" { return nil }
+				if name == "nil-callback" {
+					return nil
+				}
 				return func(r *mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
 					switch name {
-					case "nil-result": return nil, replayPairRowsV1{}, nil
-					case "direct": want = primary; return nil, replayPairRowsV1{}, want
-					case "wrapped": want = wrapped; return nil, replayPairRowsV1{}, want
-					case "typed-nil": var typed *rpTypedError; want = typed; return nil, replayPairRowsV1{}, want
+					case "nil-result":
+						return nil, replayPairRowsV1{}, nil
+					case "direct":
+						want = primary
+						return nil, replayPairRowsV1{}, want
+					case "wrapped":
+						want = wrapped
+						return nil, replayPairRowsV1{}, want
+					case "typed-nil":
+						var typed *rpTypedError
+						want = typed
+						return nil, replayPairRowsV1{}, want
 					}
 					result, rows, err := prepare(r)
-					if name == "F2-source" { rows.BodyKind = 0 }
+					if name == "F2-source" {
+						rows.BodyKind = 0
+					}
 					return result, rows, err
 				}
 			}
-			if name == "validation" { c.in.Raw = bytes.Clone(c.in.Raw); c.in.Raw[len(c.in.Raw)-1] = 1 }
+			if name == "validation" {
+				c.in.Raw = bytes.Clone(c.in.Raw)
+				c.in.Raw[len(c.in.Raw)-1] = 1
+			}
 			got := c.run(t, alter, c.inputs)
 			logicalMDBXAssert(t, got.Err != nil && got.Truth == 1 && got.Stage == 1 && got.Index == -1 && got.Role == "CURRENT" && c.lag == 0, "CURRENT refusal must suppress every LAG stage: %+v calls%d", got, c.lag)
-			if want != nil { logicalMDBXAssert(t, any(got.Err) == any(want), "CURRENT cause identity") }
+			if want != nil {
+				logicalMDBXAssert(t, any(got.Err) == any(want), "CURRENT cause identity")
+			}
 			if name == "nil-callback" || name == "nil-result" || name == "F2-source" {
 				var local *logicalStateFailure
 				logicalMDBXAssert(t, errors.As(got.Err, &local), "typed local CURRENT refusal: %T", got.Err)
@@ -354,29 +375,49 @@ func TestReplayPairLagInputs(t *testing.T) {
 	for _, name := range []string{"nil", "zero", "one-nil", "one-empty", "repeat", "caller-error", "first-error", "shape", "plain-error", "wrapped-error", "typed-nil"} {
 		t.Run(name, func(t *testing.T) {
 			c := rpNew(t, 15840, 1, mdbx.UndoTransientV1)
-			var primary error = errors.New("LAG input stage")
-			if name == "wrapped-error" { primary = fmt.Errorf("wrapped LAG: %w", primary) }
-			if name == "typed-nil" { var typed *rpTypedError; primary = typed }
+			primary := error(errors.New("LAG input stage"))
+			if name == "wrapped-error" {
+				primary = fmt.Errorf("wrapped LAG: %w", primary)
+			}
+			if name == "typed-nil" {
+				var typed *rpTypedError
+				primary = typed
+			}
 			var first error
 			inputs := replayPairWithLagInputsV1(func(r *mdbx.Reader, result *initial148CompleteBlockResultV1, use func([]mdbx.TreeOutpointV1) error) error {
 				c.lag++
 				logicalMDBXAssert(t, r == c.store.reader && result == c.result, "same callback Reader/live result")
 				switch name {
-				case "zero": return nil
-				case "plain-error", "wrapped-error", "typed-nil": return primary
-				case "one-empty": return use([]mdbx.TreeOutpointV1{})
+				case "zero":
+					return nil
+				case "plain-error", "wrapped-error", "typed-nil":
+					return primary
+				case "one-empty":
+					return use([]mdbx.TreeOutpointV1{})
 				case "shape", "first-error":
 					first = use([]mdbx.TreeOutpointV1{{Txid: [32]byte{1}}})
-					if name == "first-error" { _ = use(nil); return primary }
+					if name == "first-error" {
+						_ = use(nil)
+						return primary
+					}
 					return first
 				}
 				first = use(nil)
-				if first != nil { return first }
-				if name == "repeat" { _ = use(nil); return nil }
-				if name == "caller-error" { return primary }
+				if first != nil {
+					return first
+				}
+				if name == "repeat" {
+					_ = use(nil)
+					return nil
+				}
+				if name == "caller-error" {
+					return primary
+				}
 				return nil
 			})
-			if name == "nil" { inputs = nil }
+			if name == "nil" {
+				inputs = nil
+			}
 			got := c.run(t, nil, inputs)
 			if name == "one-nil" || name == "one-empty" {
 				rpTuple(t, got, 2, 3, -1, nil, "")
@@ -387,8 +428,12 @@ func TestReplayPairLagInputs(t *testing.T) {
 			if name == "plain-error" || name == "wrapped-error" || name == "typed-nil" || name == "caller-error" {
 				logicalMDBXAssert(t, any(got.Err) == any(primary), "LAG callback direct/wrapped/typed-nil cause identity")
 			}
-			if name == "first-error" || name == "shape" { logicalMDBXAssert(t, any(got.Err) == any(first), "first Derive error identity/priority") }
-			if name == "caller-error" || name == "plain-error" { logicalMDBXAssert(t, got.Err == primary, "plain caller error identity/no observation role") }
+			if name == "first-error" || name == "shape" {
+				logicalMDBXAssert(t, any(got.Err) == any(first), "first Derive error identity/priority")
+			}
+			if name == "caller-error" || name == "plain-error" {
+				logicalMDBXAssert(t, any(got.Err) == any(primary), "plain caller error identity/no observation role")
+			}
 			if name == "nil" || name == "zero" || name == "repeat" {
 				var local *logicalStateFailure
 				logicalMDBXAssert(t, errors.As(got.Err, &local), "sticky typed LAG use-count refusal: %T", got.Err)
@@ -403,7 +448,7 @@ func TestReplayPairLagInputs(t *testing.T) {
 // TestReplayPairBoundaries supplies independent literal bounds, including the
 // 32-bit maximum. Native coherent boundary corpus lives in the tagged fixture.
 func TestReplayPairBoundaries(t *testing.T) {
-	for _, row := range []struct { target, bound uint64 }{{15120, 0}, {15839, 0}, {15840, 720}, {0xffffffff, 4294951920}} {
+	for _, row := range []struct{ target, bound uint64 }{{15120, 0}, {15839, 0}, {15840, 720}, {0xffffffff, 4294951920}} {
 		logicalMDBXAssert(t, replayPairAppliesV1(row.target, row.bound), "pair at literal b(%d)=%d", row.target, row.bound)
 		logicalMDBXAssert(t, !replayPairAppliesV1(row.target, row.bound+1), "no pair above literal b(%d)=%d", row.target, row.bound)
 	}
@@ -439,4 +484,3 @@ func TestReplayPairNativeShape(t *testing.T) {
 	btState(t, c.w, 1, mdbx.TreeEndpointV1{}, map[Outpoint]UtxoEntry{})
 	btState(t, c.w, 2, mdbx.TreeEndpointV1{}, map[Outpoint]UtxoEntry{})
 }
-

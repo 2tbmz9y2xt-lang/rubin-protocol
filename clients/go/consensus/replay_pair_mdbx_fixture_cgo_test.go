@@ -20,7 +20,9 @@ func rpfCase(t *testing.T, f *icbReplayFamilyV1, body uint8, paired bool) (*rpCa
 	t.Helper()
 	w := icbReplayWorldV1(t, f)
 	profile := mdbx.StorageProfileArchiveV1
-	if body == 3 { profile = mdbx.StorageProfilePrunedV1 }
+	if body == 3 {
+		profile = mdbx.StorageProfilePrunedV1
+	}
 	a := icbReplayAuthorityV1(t, w, f, profile)
 	if !paired {
 		a.Authority.Replay.Target.TipHeight = 15119
@@ -46,16 +48,22 @@ func rpfKeys(t *testing.T, c *rpCase, a *mdbx.OperationAccount, expected []mdbx.
 			for item, have := spent.next(); have; item, have = spent.next() {
 				op := item.outpoint
 				_, present, err := r.Get(mdbx.TreeSchemaV1DBIs()[1], btUTXOKey(2, op))
-				if err != nil { return err }
+				if err != nil {
+					return err
+				}
 				logicalMDBXAssert(t, present, "F3 protected LAG key must exist: %+v", op)
 				keys = append(keys, mdbx.TreeOutpointV1{Txid: op.Txid, Vout: op.Vout})
 			}
 			slices.SortFunc(keys, func(a, b mdbx.TreeOutpointV1) int {
-				if n := bytes.Compare(a.Txid[:], b.Txid[:]); n != 0 { return n }
+				if n := bytes.Compare(a.Txid[:], b.Txid[:]); n != 0 {
+					return n
+				}
 				return int(a.Vout) - int(b.Vout)
 			})
 			logicalMDBXAssert(t, len(keys) == cap(keys) && slices.Equal(keys, expected), "exact-capacity qualified LAG key census")
-			if len(keys) != 0 { logicalMDBXAssert(t, &keys[0] != &expected[0], "F3 key backing cannot alias oracle") }
+			if len(keys) != 0 {
+				logicalMDBXAssert(t, &keys[0] != &expected[0], "F3 key backing cannot alias oracle")
+			}
 			return use(keys)
 		})
 	}
@@ -68,23 +76,29 @@ func rpfRun(t *testing.T, c *rpCase, keys []mdbx.TreeOutpointV1, alter func(repl
 	var got replayPairOutcomeV1
 	err := c.w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
 		return a.WithReservation(8388608, func() error {
-		out, runErr := withInitial148CompleteBlockV1(a, c.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
-			invoke := func() error {
-				prepare := rpStoredRows(t, c, false)(c.prepare(t, validate))
-				if alter != nil { prepare = alter(prepare) }
-				inputs := rpfKeys(t, c, a, keys)
-				if lag != nil { inputs = lag(inputs) }
-				got = applyReplayPairV1(&c.store, a, c.request, prepare, inputs)
-				logicalMDBXAssert(t, c.store.account == a && c.store.calls == 1, "exactly one native call on one account")
-				logicalMDBXAssert(t, got.Truth == c.store.native.truth && got.Stage == c.store.native.stage && got.Index == c.store.native.index && any(got.Err) == any(c.store.native.err), "composer preserves exact captured native product")
-				return got.Err
-			}
-			if filler != 0 { return a.WithReservation(filler, invoke) }
-			return invoke()
-		})
-		logicalMDBXAssert(t, any(runErr) == any(got.Err), "complete/native identity: %v/%v", runErr, got.Err)
-		c.validation = out
-		return nil
+			out, runErr := withInitial148CompleteBlockV1(a, c.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+				invoke := func() error {
+					prepare := rpStoredRows(t, c, false)(c.prepare(t, validate))
+					if alter != nil {
+						prepare = alter(prepare)
+					}
+					inputs := rpfKeys(t, c, a, keys)
+					if lag != nil {
+						inputs = lag(inputs)
+					}
+					got = applyReplayPairV1(&c.store, a, c.request, prepare, inputs)
+					logicalMDBXAssert(t, c.store.account == a && c.store.calls == 1, "exactly one native call on one account")
+					logicalMDBXAssert(t, got.Truth == c.store.native.truth && got.Stage == c.store.native.stage && got.Index == c.store.native.index && any(got.Err) == any(c.store.native.err), "composer preserves exact captured native product")
+					return got.Err
+				}
+				if filler != 0 {
+					return a.WithReservation(filler, invoke)
+				}
+				return invoke()
+			})
+			logicalMDBXAssert(t, any(runErr) == any(got.Err), "complete/native identity: %v/%v", runErr, got.Err)
+			c.validation = out
+			return nil
 		})
 	})
 	logicalMDBXAssert(t, err == nil && c.store.calls == 1, "single native call/account: %v/%d", err, c.store.calls)
@@ -97,12 +111,17 @@ func rpfRun(t *testing.T, c *rpCase, keys []mdbx.TreeOutpointV1, alter func(repl
 // not cover production composition. No production seam is added.
 func TestReplayPairNativeBodies(t *testing.T) {
 	f := icbReplayVaultBlockV1(t, 200, 1)
-	for _, row := range []struct { body uint8; paired bool }{{1, true}, {2, true}, {3, true}, {2, false}} {
+	for _, row := range []struct {
+		body   uint8
+		paired bool
+	}{{1, true}, {2, true}, {3, true}, {2, false}} {
 		t.Run(fmt.Sprintf("body%d/pair%v", row.body, row.paired), func(t *testing.T) {
 			c, w := rpfCase(t, f, row.body, row.paired)
 			before, raw := icbReplayLagImageV1(t, w), bytes.Clone(c.in.Raw)
 			count := 1
-			if row.paired { count = 2 }
+			if row.paired {
+				count = 2
+			}
 			c.store.inspect = func(op mdbx.TreeOperationV1) {
 				rpAssertPlan(t, c, op, count)
 				logicalMDBXAssert(t, mdbx.FixtureReservationLive(w.owner) == icbMV1(uint64(len(c.in.Raw)))+8388608, "F3 key/grant retires before native; complete M/source hold remains")
@@ -113,10 +132,16 @@ func TestReplayPairNativeBodies(t *testing.T) {
 			logicalMDBXAssert(t, bytes.Equal(c.in.Raw, raw) && c.current == 1 && c.lag == count-1, "immutable Raw/single stage invocation")
 			w.reopen(t)
 			icbReplayStateV1(t, w, 1, f.block, f.inputs)
-			if row.paired { icbReplayStateV1(t, w, 2, f.block, f.inputs) } else { icbReplayWantLagImageV1(t, w, before) }
+			if row.paired {
+				icbReplayStateV1(t, w, 2, f.block, f.inputs)
+			} else {
+				icbReplayWantLagImageV1(t, w, before)
+			}
 			icbReplayCursorV1(t, w, f.block.in.Endpoint)
 			for _, g := range []uint64{1, 2} {
-				if g == 2 && !row.paired { continue }
+				if g == 2 && !row.paired {
+					continue
+				}
 				r := btRequest(c.in.Raw, c.in.Height)
 				r.Generation, r.Endpoint = g, c.in.Endpoint
 				btIndexes(t, w.btWorld, r, true)
@@ -142,7 +167,9 @@ func TestReplayPairHeightFive(t *testing.T) {
 	for _, profile := range []mdbx.StorageProfileV1{1, 2} {
 		t.Run(fmt.Sprint(profile), func(t *testing.T) {
 			body := uint8(1)
-			if profile == 1 { body = 3 }
+			if profile == 1 {
+				body = 3
+			}
 			c, w := rpfCase(t, &f, body, true)
 			c.request.Authority.Authority.Replay.TargetProfile = profile
 			w.seedAuthority(t, c.request.Authority)
@@ -151,7 +178,9 @@ func TestReplayPairHeightFive(t *testing.T) {
 				return func(r *mdbx.Reader, result *initial148CompleteBlockResultV1, use func([]mdbx.TreeOutpointV1) error) error {
 					return base(r, result, func(keys []mdbx.TreeOutpointV1) error {
 						logicalMDBXAssert(t, len(keys) == 0 && result.effect.Primitive.Coverage.BlockMeta.EventCount == 0, "E0 nil/empty key domain")
-						if profile == 1 { return use(nil) }
+						if profile == 1 {
+							return use(nil)
+						}
 						return use(keys)
 					})
 				}
@@ -159,7 +188,9 @@ func TestReplayPairHeightFive(t *testing.T) {
 			got := rpfRun(t, c, nil, nil, lag, 0)
 			rpTuple(t, got, 2, 3, -1, nil, "")
 			w.reopen(t)
-			for _, g := range []uint64{1, 2} { icbReplayStateV1(t, w, g, f.block, nil) }
+			for _, g := range []uint64{1, 2} {
+				icbReplayStateV1(t, w, g, f.block, nil)
+			}
 			icbReplayCursorV1(t, w, f.block.in.Endpoint)
 			icbReplayFollowingV1(t, w)
 		})
@@ -175,13 +206,19 @@ func TestReplayPairNativeBoundaries(t *testing.T) {
 			c, w := rpfCase(t, f, 1, true)
 			before := icbReplayLagImageV1(t, w)
 			count := 1
-			if h == 720 { count = 2 }
+			if h == 720 {
+				count = 2
+			}
 			c.store.inspect = func(op mdbx.TreeOperationV1) { rpAssertPlan(t, c, op, count) }
 			got := rpfRun(t, c, f.inputs, nil, nil, 0)
 			logicalMDBXAssert(t, got.Truth == 2 && got.Err == nil && c.lag == count-1, "real h%d pair boundary: %+v", h, got)
 			w.reopen(t)
 			icbReplayStateV1(t, w, 1, f.block, f.inputs)
-			if count == 2 { icbReplayStateV1(t, w, 2, f.block, f.inputs) } else { icbReplayWantLagImageV1(t, w, before) }
+			if count == 2 {
+				icbReplayStateV1(t, w, 2, f.block, f.inputs)
+			} else {
+				icbReplayWantLagImageV1(t, w, before)
+			}
 			icbReplayCursorV1(t, w, c.in.Endpoint)
 		})
 	}
@@ -191,7 +228,12 @@ func TestReplayPairNativeBoundaries(t *testing.T) {
 // the real composer, including both roles and the one cursor on strict reopen.
 func TestReplayPairCrossing(t *testing.T) {
 	f := icbReplayVaultBlockV1(t, 200, 1)
-	for _, row := range []struct { name string; scenario mdbx.SelectedDamageScenario; truth mdbx.CommitTruth; mixed bool }{
+	for _, row := range []struct {
+		name     string
+		scenario mdbx.SelectedDamageScenario
+		truth    mdbx.CommitTruth
+		mixed    bool
+	}{
 		{"OLD", mdbx.SelectedDamageCommitOld, 1, false},
 		{"NEW", mdbx.SelectedDamageCommitNew, 2, false},
 		{"UNKNOWN-unreadable", mdbx.SelectedDamageCommitUnreadable, 3, false},
@@ -204,15 +246,25 @@ func TestReplayPairCrossing(t *testing.T) {
 			var driftErr error
 			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, row.scenario, 0, btMeta(0x11, 2), func() {
 				run := func() { got = rpfRun(t, c, f.inputs, nil, nil, 0) }
-				if row.mixed { drift, driftErr = mdbx.FixtureCleanupReadbackDrift(w.s, 4, c.in.Endpoint.BlockHash[:], run) } else { run() }
+				if row.mixed {
+					drift, driftErr = mdbx.FixtureCleanupReadbackDrift(w.s, 4, c.in.Endpoint.BlockHash[:], run)
+				} else {
+					run()
+				}
 			})
 			logicalMDBXAssert(t, err == nil && driftErr == nil && evidence.BeginRead == 1 && (drift == 1) == row.mixed, "strict crossing readback: %+v/%d/%v/%v", evidence, drift, err, driftErr)
 			icbReplayCrossedV1(t, w, btResult{truth: got.Truth, stage: got.Stage, index: got.Index, err: got.Err}, row.truth, row.scenario == mdbx.SelectedDamageCommitUnreadable)
 			w.reopen(t)
-			if row.mixed { w.seed(t, 4, c.in.Endpoint.BlockHash[:], c.in.Raw) }
+			if row.mixed {
+				w.seed(t, 4, c.in.Endpoint.BlockHash[:], c.in.Raw)
+			}
 			block, spent := f.block, f.inputs
-			if row.truth == 1 { block, spent = f.prefix[len(f.prefix)-1], nil }
-			for _, g := range []uint64{1, 2} { icbReplayStateV1(t, w, g, block, spent) }
+			if row.truth == 1 {
+				block, spent = f.prefix[len(f.prefix)-1], nil
+			}
+			for _, g := range []uint64{1, 2} {
+				icbReplayStateV1(t, w, g, block, spent)
+			}
 			icbReplayCursorV1(t, w, block.in.Endpoint)
 			icbReplayFollowingV1(t, w)
 		})
@@ -232,20 +284,26 @@ func TestReplayPairLagFailure(t *testing.T) {
 			rank, key := uint8(0), btMeta(0x10, 2)
 			value := []byte{0xff}
 			switch name {
-			case "counter-absent": value = nil
-			case "root-absent": key, value = btMeta(0x11, 2), nil
-			case "root-malformed": key = btMeta(0x11, 2)
+			case "counter-absent":
+				value = nil
+			case "root-absent":
+				key, value = btMeta(0x11, 2), nil
+			case "root-malformed":
+				key = btMeta(0x11, 2)
 			case "node-malformed":
 				err := w.s.View(func(r *mdbx.Reader) error {
 					root, _, err := r.ReadTreeRootBindingV1(2)
-					if err != nil { return err }
+					if err != nil {
+						return err
+					}
 					logicalMDBXAssert(t, root.Top.Node != nil, "existing LAG root node")
 					key, err = mdbx.TreeNodeKey(2, *root.Top.Node)
 					return err
 				})
 				logicalMDBXAssert(t, err == nil, "LAG node key: %v", err)
 				rank = 8
-			case "plainGet": rank, key = 1, btUTXOKey(2, Outpoint{Txid: f.inputs[0].Txid, Vout: f.inputs[0].Vout})
+			case "plainGet":
+				rank, key = 1, btUTXOKey(2, Outpoint{Txid: f.inputs[0].Txid, Vout: f.inputs[0].Vout})
 			}
 			if name != "plainGet" {
 				w.seed(t, rank, key, value)
@@ -255,7 +313,9 @@ func TestReplayPairLagFailure(t *testing.T) {
 						oldLag[i].value, found = bytes.Clone(value), true
 					}
 				}
-				if !found { oldLag = append(oldLag, btfRow{rank, bytes.Clone(key), bytes.Clone(value)}) }
+				if !found {
+					oldLag = append(oldLag, btfRow{rank, bytes.Clone(key), bytes.Clone(value)})
+				}
 			}
 			var got replayPairOutcomeV1
 			var evidence mdbx.SelectedDamageEvidence
@@ -273,7 +333,9 @@ func TestReplayPairLagFailure(t *testing.T) {
 			logicalMDBXAssert(t, err == nil && counts.Writes == 0 && evidence.Deletes == 0 && evidence.Commits == 0 && got.Truth == 1 && got.Stage == 1, "LAG raw tuple/zero effects: %+v/%+v/%+v/%v", got, counts, evidence, err)
 			logicalMDBXAssert(t, c.validation.attempted && c.validation.validationErr == nil && c.current == 1, "LAG refusal preserves successful CURRENT verdict")
 			wantIndex := -1
-			if name == "counter-absent" || name == "counter-malformed" { wantIndex = 1 }
+			if name == "counter-absent" || name == "counter-malformed" {
+				wantIndex = 1
+			}
 			logicalMDBXAssert(t, got.Index == wantIndex, "native LAG index: got%d want%d", got.Index, wantIndex)
 			var engine *mdbx.EngineError
 			logicalMDBXAssert(t, errors.As(got.Err, &engine) && got.Err == engine && !engine.ReopenRequired, "unchanged native engine cause: %T/%v", got.Err, got.Err)
@@ -289,8 +351,12 @@ func TestReplayPairLagFailure(t *testing.T) {
 				logicalMDBXAssert(t, fixtureErr != nil && fixtureErr.Error() == "selected damage fixture site was not reached exactly as armed" && evidence.Faults == 0 && engine.TreeObservation != nil && engine.TreeObservation.Generation == 2 && got.Role == "LAG", "no put attempt/LAG observation: %+v/%v", engine, fixtureErr)
 				logicalMDBXAssert(t, engine.Operation == "update" && engine.Class == "Integrity" && engine.Code == -30796 && engine.Diagnostic == "invalid tree native representation", "exact LAG native integrity tuple: %+v", engine)
 				kind, primitive := mdbx.TreeObservationKindV1(1), wantIndex
-				if malformed { kind = 2 }
-				if primitive == -1 { primitive = 0 }
+				if malformed {
+					kind = 2
+				}
+				if primitive == -1 {
+					primitive = 0
+				}
 				want := mdbx.TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 2, Block: c.in.Endpoint.BlockHash, Height: c.in.Height, Primitive: primitive, Position: 1, Rank: rank, KeyLength: uint8(len(key)), Kind: kind, OriginalImage: true, OriginalReference: true}
 				copy(want.Key[:], key)
 				logicalMDBXAssert(t, *engine.TreeObservation == want, "exact LAG owning observation: got%+v want%+v", engine.TreeObservation, want)
@@ -335,10 +401,16 @@ func TestReplayPairSourceOrder(t *testing.T) {
 	for _, name := range []string{"CURRENT-F2", "LAG-source", "F3-source"} {
 		t.Run(name, func(t *testing.T) {
 			body := uint8(1)
-			if name == "F3-source" { body = 2 }
+			if name == "F3-source" {
+				body = 2
+			}
 			c := rpNew(t, 15840, body, mdbx.UndoTransientV1)
-			if name == "LAG-source" { c.request.Authority.TargetLagGenerationID = 0 }
-			if name == "F3-source" { c.request.Raw = nil }
+			if name == "LAG-source" {
+				c.request.Authority.TargetLagGenerationID = 0
+			}
+			if name == "F3-source" {
+				c.request.Raw = nil
+			}
 			alter := rpStoredRows(t, c, false)
 			if name == "CURRENT-F2" {
 				alter = func(prepare replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
@@ -350,10 +422,15 @@ func TestReplayPairSourceOrder(t *testing.T) {
 				}
 			}
 			later := errors.New("later LAG grant must not run")
-			got := c.run(t, alter, func(*mdbx.Reader, *initial148CompleteBlockResultV1, func([]mdbx.TreeOutpointV1) error) error { c.lag++; return later })
+			got := c.run(t, alter, func(*mdbx.Reader, *initial148CompleteBlockResultV1, func([]mdbx.TreeOutpointV1) error) error {
+				c.lag++
+				return later
+			})
 			var local *logicalStateFailure
 			role := "LAG"
-			if name == "CURRENT-F2" { role = "CURRENT" }
+			if name == "CURRENT-F2" {
+				role = "CURRENT"
+			}
 			logicalMDBXAssert(t, c.lag == 0 && errors.As(got.Err, &local) && got.Err != later && got.Role == role && got.Index == -1 && got.Truth == 1 && got.Stage == 1, "earlier source must suppress later key/grant/Get stage: %+v calls%d", got, c.lag)
 			rpFollowing(t, c.w)
 		})
@@ -381,18 +458,25 @@ func TestReplayPairRepeatUse(t *testing.T) {
 					first := use(keys)
 					inFirst = false
 					logicalMDBXAssert(t, first == nil, "first LAG derive succeeds: %v", first)
-					if repeated { useErr = use(keys); return nil }
+					if repeated {
+						useErr = use(keys)
+						return nil
+					}
 					// End baseline at the same callback position, before admission.
 					return stop
 				})
 			}
 		}
 		counts, err := mdbx.FixturePairReadObservation(w.s, func(site uint32) {
-			if inFirst && site == 1 { firstGets++ }
+			if inFirst && site == 1 {
+				firstGets++
+			}
 		}, func() {
 			got = rpfRun(t, c, nil, nil, lag, 0)
 		})
-		if repeated { logicalMDBXAssert(t, counts.Gets == baseline, "second use must refuse before second Derive: reads%d baseline%d", counts.Gets, baseline) }
+		if repeated {
+			logicalMDBXAssert(t, counts.Gets == baseline, "second use must refuse before second Derive: reads%d baseline%d", counts.Gets, baseline)
+		}
 		logicalMDBXAssert(t, err == nil, "repeat-use observation: %v", err)
 		logicalMDBXAssert(t, firstGets > 0, "first F3 use must read protected nonzero-height LAG OLD, got%d reads", firstGets)
 		if !repeated {
@@ -428,7 +512,7 @@ func TestReplayPairExactFit(t *testing.T) {
 	for _, extra := range []uint64{0, 1} {
 		c, w := rpfCase(t, &f, 1, true)
 		old := icbReplayLagImageV1(t, w)
-		filler := uint64(402653184)-peak+extra
+		filler := uint64(402653184) - peak + extra
 		c.store.inspect = func(op mdbx.TreeOperationV1) {
 			rpAssertPlan(t, c, op, 2)
 			logicalMDBXAssert(t, mdbx.FixtureReservationLive(c.w.owner) == icbMV1(uint64(len(c.in.Raw)))+8388608+filler, "A13 composer has no internal margin")
@@ -439,7 +523,9 @@ func TestReplayPairExactFit(t *testing.T) {
 		if extra == 0 {
 			rpTuple(t, got, 2, 3, -1, nil, "")
 			logicalMDBXAssert(t, maxHeld == 402653184, "exact fit must attain legal ceiling, got%d", maxHeld)
-			for _, g := range []uint64{1, 2} { icbReplayStateV1(t, w, g, f.block, nil) }
+			for _, g := range []uint64{1, 2} {
+				icbReplayStateV1(t, w, g, f.block, nil)
+			}
 		} else {
 			logicalMDBXAssert(t, got.Truth == 1 && got.Stage == 1 && mdbx.IsOperationReservationCapacity(got.Err), "one-byte filler increment must refuse owning acquisition: %+v", got)
 			icbReplayWantLagImageV1(t, w, old)
@@ -491,7 +577,9 @@ func TestReplayPairEndpointUnequal(t *testing.T) {
 	btIndexes(t, w.btWorld, parent, true)
 	w.read(t, 3, parent.Block[:], parent.Raw[:148])
 	alternate := make(map[Outpoint]UtxoEntry, len(f.old)+1)
-	for key, row := range f.old { alternate[key] = row }
+	for key, row := range f.old {
+		alternate[key] = row
+	}
 	extra := btTransaction(999, 0, nil, [][]byte{btFrame(1, 0, []byte{99})}, nil, []byte{0}, nil)
 	alternate[Outpoint{Txid: extra.id}] = btEntry(1, 0, []byte{99}, c.in.Parent.Height, true)
 	raw := btBody(148, 99, f.prefix[len(f.prefix)-1].in.Parent.BlockHash, extra)
@@ -514,7 +602,13 @@ func TestReplayPairEndpointUnequal(t *testing.T) {
 	btIndexes(t, w.btWorld, req, true)
 	w.read(t, 7, parentOwner, nil)
 	var binding mdbx.RootBindingV1
-	err := w.s.View(func(r *mdbx.Reader) error { var present bool; var err error; binding, present, err = r.ReadTreeRootBindingV1(2); logicalMDBXAssert(t, err == nil && present && binding.RootDigest == root && binding.DatabaseID == ([32]byte{7}) && binding.CommitmentVersion == 1 && binding.Assurance.Kind == 1, "native alternative root: %+v/%v", binding, err); return err })
+	err := w.s.View(func(r *mdbx.Reader) error {
+		var present bool
+		var err error
+		binding, present, err = r.ReadTreeRootBindingV1(2)
+		logicalMDBXAssert(t, err == nil && present && binding.RootDigest == root && binding.DatabaseID == ([32]byte{7}) && binding.CommitmentVersion == 1 && binding.Assurance.Kind == 1, "native alternative root: %+v/%v", binding, err)
+		return err
+	})
 	logicalMDBXAssert(t, err == nil, "alternative root read: %v", err)
 	// Restore the qualified parent index/owner and root endpoint atomically.
 	// The native alternate UTXO/node/digest image remains internally coherent.
@@ -538,7 +632,9 @@ func TestReplayPairEndpointUnequal(t *testing.T) {
 	alternateState.in.Endpoint = c.in.Parent
 	icbReplayStateV1(t, w, 2, alternateState, nil)
 	final := make(map[Outpoint]UtxoEntry, len(f.block.rows)+1)
-	for key, row := range f.block.rows { final[key] = row }
+	for key, row := range f.block.rows {
+		final[key] = row
+	}
 	final[Outpoint{Txid: extra.id}] = alternate[Outpoint{Txid: extra.id}]
 	derived := canonicalUTXORoot(final)
 	old := icbReplayLagImageV1(t, w)
@@ -565,7 +661,9 @@ func TestReplayPairBorrowIsolation(t *testing.T) {
 	alter := func(prepare replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
 		return func(r *mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
 			result, rows, err := prepare(r)
-			if err == nil { clear(result.transition.createdUtxos) }
+			if err == nil {
+				clear(result.transition.createdUtxos)
+			}
 			return result, rows, err
 		}
 	}
@@ -580,7 +678,9 @@ func TestReplayPairBorrowIsolation(t *testing.T) {
 			observed.before = func(mdbx.TreePositionV1, *mdbx.Reader, *mdbx.TreeDeltaSinkV1) error {
 				if !mutated {
 					// Replacing descriptors does not mutate their borrowed payloads.
-					for j := range borrowed { borrowed[j] = mdbx.Mutation{} }
+					for j := range borrowed {
+						borrowed[j] = mdbx.Mutation{}
+					}
 					mutated = true
 				}
 				return nil
@@ -592,7 +692,9 @@ func TestReplayPairBorrowIsolation(t *testing.T) {
 	_, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageCommitNew, 0, btMeta(0x11, 1), func() { got = rpfRun(t, c, f.inputs, alter, nil, 0) })
 	logicalMDBXAssert(t, err == nil && got.Truth == 2 && mutated && bytes.Equal(c.in.Raw, before), "borrowed immutable source survives independent Pair/current-image changes: %+v/%v", got, err)
 	w.reopen(t)
-	for _, g := range []uint64{1, 2} { icbReplayStateV1(t, w, g, f.block, f.inputs) }
+	for _, g := range []uint64{1, 2} {
+		icbReplayStateV1(t, w, g, f.block, f.inputs)
+	}
 }
 
 // TestReplayPairCallbackUnwind checks the new stage boundary's application
@@ -606,20 +708,37 @@ func TestReplayPairCallbackUnwind(t *testing.T) {
 				calls := 0
 				invoke := func() error {
 					calls++
-					if mode == "panic" { panic(primary) }
-					if mode == "Goexit" { runtime.Goexit() }
+					if mode == "panic" {
+						panic(primary)
+					}
+					if mode == "Goexit" {
+						runtime.Goexit()
+					}
 					return primary
 				}
 				alter := func(prepare replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
-					if stage != "CURRENT" { return prepare }
-					return func(*mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) { return nil, replayPairRowsV1{}, invoke() }
+					if stage != "CURRENT" {
+						return prepare
+					}
+					return func(*mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+						return nil, replayPairRowsV1{}, invoke()
+					}
 				}
 				inputs := replayPairWithLagInputsV1(c.inputs)
-				if stage == "LAG" { inputs = func(*mdbx.Reader, *initial148CompleteBlockResultV1, func([]mdbx.TreeOutpointV1) error) error { return invoke() } }
+				if stage == "LAG" {
+					inputs = func(*mdbx.Reader, *initial148CompleteBlockResultV1, func([]mdbx.TreeOutpointV1) error) error {
+						return invoke()
+					}
+				}
 				done := make(chan any, 1)
 				go func() {
 					var recovered any
-					defer func() { if p := recover(); p != nil { recovered = p }; done <- recovered }()
+					defer func() {
+						if p := recover(); p != nil {
+							recovered = p
+						}
+						done <- recovered
+					}()
 					got := c.run(t, alter, inputs)
 					rpTuple(t, got, 1, 1, -1, primary, stage)
 				}()
@@ -649,7 +768,11 @@ func TestReplayPairNativeCurrentRole(t *testing.T) {
 // 74912+65560+104*E, and its walk owns 147968: CURRENT's peak fits only the
 // second row, while retaining both roles exceeds it. No lane ceiling changes.
 func TestReplayPairNativeCapacity(t *testing.T) {
-	for _, row := range []struct { headroom uint64; index int; role string }{{2200000, 0, "CURRENT"}, {2450000, 1, "LAG"}} {
+	for _, row := range []struct {
+		headroom uint64
+		index    int
+		role     string
+	}{{2200000, 0, "CURRENT"}, {2450000, 1, "LAG"}} {
 		t.Run(row.role, func(t *testing.T) {
 			c := rpNew(t, 15840, 1, mdbx.UndoTransientV1)
 			var got replayPairOutcomeV1
@@ -657,17 +780,22 @@ func TestReplayPairNativeCapacity(t *testing.T) {
 			var held chan error
 			err := c.w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
 				defer func() {
-					if finish != nil { close(finish); logicalMDBXAssert(t, <-held == nil, "native-capacity test hold retires") }
+					if finish != nil {
+						close(finish)
+						logicalMDBXAssert(t, <-held == nil, "native-capacity test hold retires")
+					}
 				}()
 				_, runErr := withInitial148CompleteBlockV1(a, c.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
 					c.store.inspect = func(op mdbx.TreeOperationV1) {
 						rpAssertPlan(t, c, op, 2)
 						ready := make(chan error, 1)
 						finish, held = make(chan struct{}), make(chan error, 1)
-						filler := uint64(402653184)-mdbx.FixtureReservationLive(c.w.owner)-row.headroom
+						filler := uint64(402653184) - mdbx.FixtureReservationLive(c.w.owner) - row.headroom
 						go func() {
 							err := a.WithReservation(filler, func() error { ready <- nil; <-finish; return nil })
-							if err != nil { ready <- err }
+							if err != nil {
+								ready <- err
+							}
 							held <- err
 						}()
 						logicalMDBXAssert(t, <-ready == nil, "pre-native test filler acquisition")
@@ -713,22 +841,34 @@ func TestReplayPairCallbackDisposition(t *testing.T) {
 				c := rpNew(t, 15840, 1, mdbx.UndoTransientV1)
 				primary := errors.New("composer callback application cause")
 				alter := func(prepare replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
-					if stage != "CURRENT" { return prepare }
-					return func(*mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) { return nil, replayPairRowsV1{}, primary }
+					if stage != "CURRENT" {
+						return prepare
+					}
+					return func(*mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+						return nil, replayPairRowsV1{}, primary
+					}
 				}
 				inputs := replayPairWithLagInputsV1(c.inputs)
-				if stage == "LAG" { inputs = func(*mdbx.Reader, *initial148CompleteBlockResultV1, func([]mdbx.TreeOutpointV1) error) error { return primary } }
+				if stage == "LAG" {
+					inputs = func(*mdbx.Reader, *initial148CompleteBlockResultV1, func([]mdbx.TreeOutpointV1) error) error {
+						return primary
+					}
+				}
 				var got replayPairOutcomeV1
 				state, _, err := mdbx.FixtureStartupCleanup(c.w.s, mode, false, func() { got = c.run(t, alter, inputs) })
 				want := "CLOSED"
-				if mode == 10 { want = "POISONED_THREAD" }
+				if mode == 10 {
+					want = "POISONED_THREAD"
+				}
 				logicalMDBXAssert(t, err == nil && state == want && got.Truth == 1 && got.Stage == 1 && got.Index == -1 && got.Role == stage && errors.Is(got.Err, primary), "callback raw role/actual consumed or retained state: %+v/%s/%v", got, state, err)
 				btfAbortResult(t, got.Err, mode, primary)
 				btfCached(t, c.w, btResult{truth: got.Truth, stage: got.Stage, index: got.Index, err: got.Err})
 				value, present, expired := c.store.reader.Get(mdbx.TreeSchemaV1DBIs()[0], []byte{2})
 				logicalMDBXAssert(t, value == nil && !present, "expired callback Reader cannot return data")
 				btfEngine(t, expired, "get", "InvalidInput", 22, "Reader is not active")
-				if mode == 10 { logicalMDBXAssert(t, mdbx.FixtureStartupRelease(c.w.s) == nil, "release retained native fixture handle") }
+				if mode == 10 {
+					logicalMDBXAssert(t, mdbx.FixtureStartupRelease(c.w.s) == nil, "release retained native fixture handle")
+				}
 			})
 		}
 	}
@@ -746,7 +886,11 @@ func TestReplayPairKeyShape(t *testing.T) {
 				return func(r *mdbx.Reader, result *initial148CompleteBlockResultV1, use func([]mdbx.TreeOutpointV1) error) error {
 					return base(r, result, func(keys []mdbx.TreeOutpointV1) error {
 						logicalMDBXAssert(t, len(keys) >= 2, "distinct qualified keys for shape witness")
-						if shape == "duplicate" { keys[1] = keys[0] } else { keys[0], keys[1] = keys[1], keys[0] }
+						if shape == "duplicate" {
+							keys[1] = keys[0]
+						} else {
+							keys[0], keys[1] = keys[1], keys[0]
+						}
 						return use(keys)
 					})
 				}
