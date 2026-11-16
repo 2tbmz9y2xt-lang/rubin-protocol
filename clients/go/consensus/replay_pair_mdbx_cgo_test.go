@@ -375,7 +375,7 @@ func TestReplayPairLagInputs(t *testing.T) {
 	for _, name := range []string{"nil", "zero", "one-nil", "one-empty", "repeat", "caller-error", "first-error", "shape", "plain-error", "wrapped-error", "typed-nil"} {
 		t.Run(name, func(t *testing.T) {
 			c := rpNew(t, 15840, 1, mdbx.UndoTransientV1)
-			primary := error(errors.New("LAG input stage"))
+			primary := errors.New("LAG input stage")
 			if name == "wrapped-error" {
 				primary = fmt.Errorf("wrapped LAG: %w", primary)
 			}
