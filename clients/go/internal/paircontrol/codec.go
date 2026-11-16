@@ -53,9 +53,9 @@ type RetirementV1 struct {
 // H1BindingV1 preserves the complete original semantic admission and its P observation.
 type H1BindingV1 struct {
 	OwnerEpoch, ObservedPSequence uint64
-	OwnerIntent                  [32]byte
-	Diagnosis                    policycontrol.Diagnosis
-	Admission                    policycontrol.Admission
+	OwnerIntent                   [32]byte
+	Diagnosis                     policycontrol.Diagnosis
+	Admission                     policycontrol.Admission
 }
 
 // IntentV1 is one exact replacement request; origins 1/2/3 mean ECONOMY/RETAINED_OLD/H1.
@@ -203,7 +203,9 @@ func (c *wireV1) field(v *[]byte, limit int) {
 		return
 	}
 	var b [2]byte
-	binary.BigEndian.PutUint16(b[:], uint16(len(*v)))
+	var width uint16
+	width, c.err = fieldWidthV1(len(*v))
+	binary.BigEndian.PutUint16(b[:], width)
 	c.fixed(b[:])
 	if c.err != nil {
 		return
@@ -226,6 +228,14 @@ func (c *wireV1) field(v *[]byte, limit int) {
 // fieldSizeV1 owns the nonempty bounded field domain before narrowing or allocation.
 func fieldSizeV1(n, limit int) bool {
 	return n > 0 && n <= limit
+}
+
+// fieldWidthV1 checks only the representation bound before narrowing a field length.
+func fieldWidthV1(n int) (uint16, error) {
+	if n < 0 || n > 65535 {
+		return 0, errShapeV1
+	}
+	return uint16(n), nil
 }
 
 // location walks a bounded leaf using the form-specific length ceiling.

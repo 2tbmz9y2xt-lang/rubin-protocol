@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -19,6 +20,16 @@ func require(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+// exactShapeError excludes every errors.Is adapter, leaving only sentinel identity.
+func exactShapeError(err error) bool {
+	switch err.(type) {
+	case interface{ Is(error) bool }, interface{ Unwrap() error }, interface{ Unwrap() []error }:
+		return false
+	}
+	return errors.Is(err, errShapeV1)
+}
+
 func identity() IdentityV1 {
 	return IdentityV1{Identity: policycontrol.Identity{
 		InstallationID: [32]byte{0x11}, ChainID: [32]byte{0x22},
@@ -27,8 +38,10 @@ func identity() IdentityV1 {
 }
 
 func originalPair() PairBindingV1 {
-	return PairBindingV1{Database: DatabaseLocationV1{Form: 1, Location: "/old", DatabaseID: [32]byte{0x55}},
-		CurrentGeneration: 17, LagGeneration: 19, AuthoritySequence: 23}
+	return PairBindingV1{
+		Database:          DatabaseLocationV1{Form: 1, Location: "/old", DatabaseID: [32]byte{0x55}},
+		CurrentGeneration: 17, LagGeneration: 19, AuthoritySequence: 23,
+	}
 }
 
 func reference() ReferenceV1 {
@@ -37,9 +50,11 @@ func reference() ReferenceV1 {
 
 func replacement() IntentV1 {
 	old, ref := originalPair(), reference()
-	return IntentV1{ID: [32]byte{0x44}, Origin: 1, Source: 1, LAG: 1,
+	return IntentV1{
+		ID: [32]byte{0x44}, Origin: 1, Source: 1, LAG: 1,
 		Destination: DatabaseLocationV1{Form: 2, Location: "D17", DatabaseID: [32]byte{0x77}},
-		Old: &old, SourceRef: ref, ComparandRef: &ReferenceV1{OwnerID: [32]byte{0x88}, Opaque: []byte("compare")}}
+		Old:         &old, SourceRef: ref, ComparandRef: &ReferenceV1{OwnerID: [32]byte{0x88}, Opaque: []byte("compare")},
+	}
 }
 
 func selected() RecordV1 {
@@ -124,6 +139,7 @@ func pairBytes(b []byte, v PairBindingV1) []byte {
 func refBytes(b []byte, v ReferenceV1) []byte {
 	return fieldBytes(append(b, v.OwnerID[:]...), v.Opaque)
 }
+
 func TestLiteralFixtureAnchor(t *testing.T) {
 	// Independently hand-pinned complete first-install image, including every zero.
 	const image = "52424e4f555401001100000000000000000000000000000000000000000000000000000000000000220000000000000000000000000000000000000000000000000000000000000033000000000000000000000000000000000000000000000000000000000000000100032f646200000000000000000100"
@@ -136,15 +152,16 @@ func TestLiteralFixtureAnchor(t *testing.T) {
 	}
 }
 
-
 func h1Value() IntentV1 {
 	i := replacement()
 	i.Origin = 3
 	owner := binary.BigEndian.AppendUint64(nil, 2)
 	owner = append(owner, i.ID[:]...)
-	i.H1Binding = &H1BindingV1{OwnerEpoch: 2, OwnerIntent: i.ID, ObservedPSequence: 2,
+	i.H1Binding = &H1BindingV1{
+		OwnerEpoch: 2, OwnerIntent: i.ID, ObservedPSequence: 2,
 		Diagnosis: policycontrol.Diagnosis{Height: 17, Hash: [32]byte{0x99}, Error: []byte("integrity"), Source: []byte("current"), Trigger: []byte("startup")},
-		Admission: policycontrol.Admission{Old: leafBytes(i.Old.Database), Destination: leafBytes(i.Destination), Source: 1, Profile: 1, Ownership: owner}}
+		Admission: policycontrol.Admission{Old: leafBytes(i.Old.Database), Destination: leafBytes(i.Destination), Source: 1, Profile: 1, Ownership: owner},
+	}
 	return i
 }
 
@@ -188,7 +205,7 @@ func assertRecord(t *testing.T, v RecordV1, valid bool) {
 		t.Fatal("codec replaced a supplied nested pointer")
 	}
 	if !valid {
-		if encErr != errShapeV1 || decErr != errShapeV1 {
+		if !exactShapeError(encErr) || !exactShapeError(decErr) {
 			t.Fatalf("exact unwrapped refusal: encode %v decode %v", encErr, decErr)
 		}
 		return
@@ -209,7 +226,7 @@ func assertRecord(t *testing.T, v RecordV1, valid bool) {
 func refuseImage(t *testing.T, b []byte) {
 	t.Helper()
 	before := append([]byte(nil), b...)
-	if _, err := decodeV1(b); err != errShapeV1 {
+	if _, err := decodeV1(b); !exactShapeError(err) {
 		t.Fatalf("exact malformed-image refusal: %v", err)
 	}
 	if !bytes.Equal(before, b) {
@@ -269,12 +286,20 @@ func TestLocationLiteralCorpus(t *testing.T) {
 		}
 	}
 	for _, v := range []DatabaseLocationV1{
-		{0, "/old", [32]byte{1}}, {3, "/old", [32]byte{1}}, {0, "", [32]byte{}},
-		{1, "/old", [32]byte{}}, {1, "old", [32]byte{1}},
+		{0, "/old", [32]byte{1}},
+		{3, "/old", [32]byte{1}},
+		{0, "", [32]byte{}},
+		{1, "/old", [32]byte{}},
+		{1, "old", [32]byte{1}},
 		{2, "D17", [32]byte{}},
-		{1, "/a/../b", [32]byte{1}}, {1, "/a//b", [32]byte{1}}, {1, "/a\x00b", [32]byte{1}},
-		{2, ".", [32]byte{1}}, {2, "..", [32]byte{1}}, {2, "a/b", [32]byte{1}},
-		{2, "a\\b", [32]byte{1}}, {2, "a\x00b", [32]byte{1}},
+		{1, "/a/../b", [32]byte{1}},
+		{1, "/a//b", [32]byte{1}},
+		{1, "/a\x00b", [32]byte{1}},
+		{2, ".", [32]byte{1}},
+		{2, "..", [32]byte{1}},
+		{2, "a/b", [32]byte{1}},
+		{2, "a\\b", [32]byte{1}},
+		{2, "a\x00b", [32]byte{1}},
 	} {
 		checkLeaf(t, v, false)
 	}
@@ -290,7 +315,7 @@ func checkLeaf(t *testing.T, v DatabaseLocationV1, valid bool) {
 		t.Fatal("leaf input mutated")
 	}
 	if !valid {
-		if err != errShapeV1 || decErr != errShapeV1 {
+		if !exactShapeError(err) || !exactShapeError(decErr) {
 			t.Fatalf("exact leaf refusal: %v / %v", err, decErr)
 		}
 		return
@@ -302,14 +327,14 @@ func checkLeaf(t *testing.T, v DatabaseLocationV1, valid bool) {
 	}
 	for at := 0; at < len(want); at++ {
 		input := append([]byte(nil), want[:at]...)
-		if _, err := DecodeDatabaseLocationV1(input); err != errShapeV1 {
+		if _, err := DecodeDatabaseLocationV1(input); !exactShapeError(err) {
 			t.Fatalf("leaf truncation %d accepted", at)
 		}
 		if !bytes.Equal(input, want[:at]) {
 			t.Fatal("truncated leaf input mutated")
 		}
 	}
-	if _, err := DecodeDatabaseLocationV1(append(want, 0)); err != errShapeV1 {
+	if _, err := DecodeDatabaseLocationV1(append(want, 0)); !exactShapeError(err) {
 		t.Fatal("leaf trailing byte accepted")
 	}
 	input[3] ^= 1
@@ -342,7 +367,7 @@ func TestH1OwnershipLiteral(t *testing.T) {
 		epoch uint64
 		id    [32]byte
 	}{{0, [32]byte{1}}, {1, [32]byte{}}} {
-		if _, err := EncodeH1OwnershipV1(v.epoch, v.id); err != errShapeV1 {
+		if _, err := EncodeH1OwnershipV1(v.epoch, v.id); !exactShapeError(err) {
 			t.Fatal("zero ownership component accepted")
 		}
 	}
@@ -712,7 +737,7 @@ func TestWireDiscriminatorsAndPresence(t *testing.T) {
 		refuseImage(t, b)
 	}
 	refuseImage(t, make([]byte, 16385))
-	if _, err := DecodeDatabaseLocationV1(make([]byte, 804)); err != errShapeV1 {
+	if _, err := DecodeDatabaseLocationV1(make([]byte, 804)); !exactShapeError(err) {
 		t.Fatal("oversized leaf accepted")
 	}
 }
@@ -817,7 +842,7 @@ func TestDecodeTotalBoundBeforeAllocation(t *testing.T) {
 	b = append(b, make([]byte, 16385-len(b))...)
 	before := append([]byte(nil), b...)
 	allocations := testing.AllocsPerRun(1, func() {
-		if _, err := decodeV1(b); err != errShapeV1 {
+		if _, err := decodeV1(b); !exactShapeError(err) {
 			t.Fatal("oversized complete-prefix image accepted")
 		}
 	})
@@ -843,7 +868,7 @@ func TestAdmissionFieldBoundsBeforeAllocation(t *testing.T) {
 		long := fixtureBytes(over)
 		measure := func(b []byte) float64 {
 			return testing.AllocsPerRun(1, func() {
-				if _, err := decodeV1(b); err != errShapeV1 {
+				if _, err := decodeV1(b); !exactShapeError(err) {
 					t.Fatal("invalid bounded field accepted")
 				}
 			})
