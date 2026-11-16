@@ -994,7 +994,7 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 		{unsafe.Sizeof(treeAmendedV1{}), 80},
 		{unsafe.Sizeof(treeReadbackStateV1{}), 128},
 		{unsafe.Sizeof(treeSectionV1{}), 168},
-		{unsafe.Sizeof(treeScopeV1{}), 304},
+		{unsafe.Sizeof(treeScopeV1{}), 504},
 		{unsafe.Sizeof(treeComposeV1{}), 112},
 		{unsafe.Sizeof(TreeOperationV1{}), 112},
 		{unsafe.Sizeof(treePlanV1{}), 152},
@@ -1031,7 +1031,7 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	// treeNextValueEqualV1, updatePairImageEqualV1 and coverV1.
 	helper := uint64(unsafe.Sizeof(treePairReadBudgetV1{})) + 6*uint64(unsafe.Sizeof(updateImage{})) + 40 +
 		2*uint64(unsafe.Sizeof(treeImageV1{})) + 2*uint64(unsafe.Sizeof([]byte{})) + 156
-	if control != 1841 || helper != 484 || helper > 512 {
+	if control != 2257 || helper != 484 || helper > 512 {
 		t.Fatal("fixed control/helper cell census", control, helper)
 	}
 	control += 168 + 112 + 128 + 16 + helper
@@ -1041,8 +1041,17 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	if unsafe.Sizeof(treeBoundedEmitterV1{}) != 40 || unsafe.Sizeof(treeBoundedReadbackEmitterV1{}) != 8 || unsafe.Sizeof(treeTargetV1{}) != 80 {
 		t.Fatal("selected fixed owner census")
 	}
-	if control != 3149 || control-2709 > 1024 {
+	// Selected U-loan control: one borrowed image, two error transports, one
+	// ledger interface and fixed defer/size scalars. U itself is a separate hold.
+	loan := uint64(unsafe.Sizeof(treeImageV1{})) + 2*uint64(unsafe.Sizeof(error(nil))) + uint64(unsafe.Sizeof(treeLedgerV1(nil))) + 16
+	control += loan
+	if loan != 96 || control != 3661 || control-2709 > 1024 {
 		t.Fatal("selected fixed control increment", control)
+	}
+	// A replay pair retains a second recorder/delta/key/iterator set under its
+	// second existing C hold; the fixed scope includes both observation slots.
+	if pairControl := control + total; pairControl > 2*4096 {
+		t.Fatal("two frozen control owners exceed their two step holds", pairControl)
 	}
 	if treeReaderBytesV1 != 1184 || treeStepBytesV1 != 74912 || control > 4096 {
 		t.Fatalf("enlarged control objects%d exceed4096", control)
@@ -3554,7 +3563,7 @@ func TestTreeBoundedProfileV1(t *testing.T) {
 		op := tbOperationV1(t, source)
 		op.Primitives[0].Kind = kind
 		plan := treeOwnPlanV1(op)
-		if treeBoundedPlanV1(&plan) != (kind == 1) {
+		if treeBoundedPlanV1(&plan) != (kind == 1 || kind == 3) {
 			t.Fatal("selected Kind closed domain", kind)
 		}
 	}
@@ -3631,6 +3640,334 @@ func TestTreeBoundedFundingV1(t *testing.T) {
 		tsRead(t, s, schemaDBIs[1], tdUTXOKey(1, tdTxid(0x31), 0), want)
 		tsFollowing(t, s, owner)
 	}
+}
+
+// trOperationV1 extends the existing independent native codec fixture with a
+// same-block LAG role; both coverages borrow exactly one original body backing.
+func trOperationV1(t *testing.T, source TreeSourceV1, roles int) TreeOperationV1 {
+	t.Helper()
+	op := tbOperationV1(t, source)
+	op.Primitives[0].Kind = TreeKindReplayNextV1
+	if roles == 1 {
+		return op
+	}
+	p := op.Primitives[0]
+	p.Kind, p.Generation = TreeKindLagForwardV1, 2
+	c := *p.Coverage
+	c.Generation = 2
+	p.Coverage = &c
+	op.Primitives = append(op.Primitives, p)
+	k, err := HeightKey(2, p.Height)
+	mustEnvironment(t, err)
+	owner, err := CanonicalOwnerKey(2, p.Block)
+	mustEnvironment(t, err)
+	op.Pair.Mutations = append(op.Pair.Mutations,
+		Mutation{DBI: schemaDBIs[2], Key: k, AfterKind: AfterLiteral, Literal: ChainValue(p.Block, [32]byte{}, p.Endpoint.CumulativeChainwork)},
+		Mutation{DBI: schemaDBIs[7], Key: owner, AfterKind: AfterLiteral, Literal: CanonicalOwnerValue(p.Height)})
+	slices.SortFunc(op.Pair.Mutations, func(a, b Mutation) int { return treeMutationCmpV1(a, treeRowKeyV1{rank: b.DBI.Rank, key: b.Key}) })
+	return op
+}
+
+// trBodyV1 changes only the codec fixture's admitted body ownership recipe.
+func trBodyV1(op *TreeOperationV1, kind uint8, deleteBody bool) []byte {
+	var body []byte
+	rows := op.Pair.Mutations[:0]
+	for _, m := range op.Pair.Mutations {
+		if m.DBI.Rank != 4 {
+			rows = append(rows, m)
+			continue
+		}
+		body = m.Literal
+		if kind == 1 {
+			rows = append(rows, m)
+		}
+		if kind == 2 && deleteBody {
+			m.BeforePresent, m.AfterKind, m.Literal = true, AfterAbsent, nil
+			rows = append(rows, m)
+		}
+	}
+	op.Pair.Mutations = rows
+	for i := range op.Primitives {
+		op.Primitives[i].Coverage.BodyKind = kind
+		op.Primitives[i].Coverage.CurrentBody = body
+		if kind == 2 {
+			op.Primitives[i].Coverage.CurrentBody = nil
+		}
+	}
+	return body
+}
+
+// The private selector is an independent resource capability contract: these
+// legal excluded profiles must keep their existing full-projection fallback.
+func TestTreeReplayBoundedProfileV1(t *testing.T) {
+	source := tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { return nil })
+	t.Run("inventory", func(t *testing.T) {
+		op := trOperationV1(t, source, 2)
+		plan := treeOwnPlanV1(op)
+		plan.inventory = &entryInventoryStateV1{}
+		if treeBoundedPlanV1(&plan) {
+			t.Fatal("replay inventory ownership selected")
+		}
+	})
+	for _, roles := range []int{1, 2} {
+		for _, kind := range []uint8{1, 2, 3} {
+			for _, undo := range []TreeUndoEffectV1{1, 2, 3, 4} {
+				op := trOperationV1(t, source, roles)
+				trBodyV1(&op, kind, false)
+				op.Primitives[0].Undo = undo
+				plan := treeOwnPlanV1(op)
+				if !treeBoundedPlanV1(&plan) {
+					t.Fatalf("excluded admitted replay roles%d/body%d/undo%d", roles, kind, undo)
+				}
+			}
+		}
+	}
+	rows := []struct {
+		name string
+		edit func(*TreeOperationV1)
+	}{
+		{"proof", func(o *TreeOperationV1) { o.Proof = func(*TreeDeltaReportV1) error { return nil } }},
+		{"slot", func(o *TreeOperationV1) { o.HeaderSlot = &TreeHeaderSlotV1{} }},
+		{"prepaid", func(o *TreeOperationV1) { o.Pair.PrepaidReadBytes = 1 }},
+		{"rank8-consulted", func(o *TreeOperationV1) {
+			o.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[8], Key: make([]byte, 46)}}
+		}},
+		{"undo-consulted", func(o *TreeOperationV1) {
+			o.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[5], Key: make([]byte, 33)}}
+		}},
+		{"pending-consulted", func(o *TreeOperationV1) {
+			o.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[6], Key: make([]byte, 32)}}
+		}},
+		{"other-body-consulted", func(o *TreeOperationV1) {
+			o.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[4], Key: bytes.Repeat([]byte{0x99}, 32)}}
+		}},
+		{"current-direction", func(o *TreeOperationV1) { o.Primitives[0].Direction = 2 }},
+		{"current-kind0", func(o *TreeOperationV1) { o.Primitives[0].Kind = 0 }},
+		{"current-undo0", func(o *TreeOperationV1) { o.Primitives[0].Undo = 0 }},
+		{"current-undo5", func(o *TreeOperationV1) { o.Primitives[0].Undo = 5 }},
+		{"current-header116", func(o *TreeOperationV1) { o.Primitives[0].Coverage.HeaderBytes = 116 }},
+		{"current-header0", func(o *TreeOperationV1) { o.Primitives[0].Coverage.HeaderBytes = 0 }},
+		{"current-header149", func(o *TreeOperationV1) { o.Primitives[0].Coverage.HeaderBytes = 149 }},
+		{"current-coverage-generation", func(o *TreeOperationV1) { o.Primitives[0].Coverage.Generation++ }},
+		{"current-coverage-block", func(o *TreeOperationV1) { o.Primitives[0].Coverage.Block[0]++ }},
+		{"current-coverage-height", func(o *TreeOperationV1) { o.Primitives[0].Coverage.Height++ }},
+		{"current-nil-coverage", func(o *TreeOperationV1) { o.Primitives[0].Coverage = nil }},
+		{"current-body0", func(o *TreeOperationV1) { o.Primitives[0].Coverage.BodyKind = 0 }},
+		{"current-body4", func(o *TreeOperationV1) { o.Primitives[0].Coverage.BodyKind = 4 }},
+		{"current-body1-nil", func(o *TreeOperationV1) { o.Primitives[0].Coverage.CurrentBody = nil }},
+		{"current-body2-extra-Raw", func(o *TreeOperationV1) { o.Primitives[0].Coverage.BodyKind = 2 }},
+		{"current-body3-empty", func(o *TreeOperationV1) { trBodyV1(o, 3, false); o.Primitives[0].Coverage.CurrentBody = []byte{} }},
+		{"different-generation-required", func(o *TreeOperationV1) { o.Primitives[1].Generation = 1 }},
+		{"lag-kind", func(o *TreeOperationV1) { o.Primitives[1].Kind = TreeKindReplayNextV1 }},
+		{"lag-undo", func(o *TreeOperationV1) { o.Primitives[1].Undo = UndoWriteOrReuseV1 }},
+		{"lag-direction", func(o *TreeOperationV1) { o.Primitives[1].Direction = TreeInverseV1 }},
+		{"lag-block", func(o *TreeOperationV1) { o.Primitives[1].Block[0]++ }},
+		{"lag-height", func(o *TreeOperationV1) { o.Primitives[1].Height++ }},
+		{"lag-endpoint", func(o *TreeOperationV1) { o.Primitives[1].Endpoint.CumulativeChainwork[0]++ }},
+		{"lag-database", func(o *TreeOperationV1) { o.Primitives[1].Coverage.DatabaseID[0]++ }},
+		{"lag-meta", func(o *TreeOperationV1) { o.Primitives[1].Coverage.BlockMeta.EventCount++ }},
+		{"lag-body-kind", func(o *TreeOperationV1) {
+			o.Primitives[1].Coverage.BodyKind = 2
+			o.Primitives[1].Coverage.CurrentBody = nil
+		}},
+		{"lag-header", func(o *TreeOperationV1) { o.Primitives[1].Coverage.HeaderBytes = 116 }},
+		{"lag-header0", func(o *TreeOperationV1) { o.Primitives[1].Coverage.HeaderBytes = 0 }},
+		{"lag-header149", func(o *TreeOperationV1) { o.Primitives[1].Coverage.HeaderBytes = 149 }},
+		{"lag-body0", func(o *TreeOperationV1) { o.Primitives[1].Coverage.BodyKind = 0 }},
+		{"lag-body4", func(o *TreeOperationV1) { o.Primitives[1].Coverage.BodyKind = 4 }},
+		{"lag-coverage-generation", func(o *TreeOperationV1) { o.Primitives[1].Coverage.Generation++ }},
+		{"lag-coverage-block", func(o *TreeOperationV1) { o.Primitives[1].Coverage.Block[0]++ }},
+		{"lag-coverage-height", func(o *TreeOperationV1) { o.Primitives[1].Coverage.Height++ }},
+		{"lag-nil-coverage", func(o *TreeOperationV1) { o.Primitives[1].Coverage = nil }},
+		{"missing-current-index", func(o *TreeOperationV1) { o.Pair.Mutations = o.Pair.Mutations[1:] }},
+		{"missing-current-owner", func(o *TreeOperationV1) { o.Pair.Mutations = append(o.Pair.Mutations[:3], o.Pair.Mutations[4:]...) }},
+		{"missing-lag-index", func(o *TreeOperationV1) { o.Pair.Mutations = append(o.Pair.Mutations[:1], o.Pair.Mutations[2:]...) }},
+		{"missing-lag-owner", func(o *TreeOperationV1) { o.Pair.Mutations = o.Pair.Mutations[:len(o.Pair.Mutations)-1] }},
+		{"missing-body1-target", func(o *TreeOperationV1) { o.Pair.Mutations = append(o.Pair.Mutations[:2], o.Pair.Mutations[3:]...) }},
+		{"body3-extra-target", func(o *TreeOperationV1) {
+			for j := range o.Primitives {
+				o.Primitives[j].Coverage.BodyKind = 3
+			}
+		}},
+		{"body2-literal-conflict", func(o *TreeOperationV1) {
+			for j := range o.Primitives {
+				o.Primitives[j].Coverage.BodyKind = 2
+				o.Primitives[j].Coverage.CurrentBody = nil
+			}
+		}},
+		{"extra-target", func(o *TreeOperationV1) { o.Pair.Mutations = append(o.Pair.Mutations, tsTarget(99)) }},
+		{"held-independent-copy", func(o *TreeOperationV1) {
+			trBodyV1(o, 3, false)
+			o.Primitives[1].Coverage.CurrentBody = bytes.Clone(o.Primitives[0].Coverage.CurrentBody)
+		}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			op := trOperationV1(t, source, 2)
+			row.edit(&op)
+			plan := treeOwnPlanV1(op)
+			if treeBoundedPlanV1(&plan) {
+				t.Fatal("excluded shape selected")
+			}
+		})
+	}
+	for _, role := range []int{0, 1} {
+		for undo := TreeUndoEffectV1(0); undo <= 7; undo++ {
+			op := trOperationV1(t, source, 2)
+			op.Primitives[role].Undo = undo
+			plan := treeOwnPlanV1(op)
+			want := undo >= 1 && undo <= 4
+			if role == 1 {
+				want = undo == 2
+			}
+			if treeBoundedPlanV1(&plan) != want {
+				t.Fatal("role-specific undo capability domain", role, undo, want)
+			}
+		}
+		for kind := TreePrimitiveKindV1(0); kind <= 10; kind++ {
+			op := trOperationV1(t, source, 2)
+			op.Primitives[role].Kind = kind
+			plan := treeOwnPlanV1(op)
+			want := kind == 3
+			if role == 1 {
+				want = kind == 6
+			}
+			if treeBoundedPlanV1(&plan) != want {
+				t.Fatal("role-specific kind capability domain", role, kind, want)
+			}
+		}
+	}
+	for _, rank := range []uint8{0, 1, 2, 3, 4, 7} {
+		op := trOperationV1(t, source, 2)
+		trBodyV1(&op, 3, false)
+		key := []byte{2}
+		switch rank {
+		case 1:
+			key = tdUTXOKey(7, tdTxid(0x77), 0)
+		case 2:
+			key = binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, 7), 1)
+		case 3:
+			key = bytes.Repeat([]byte{0x77}, 32)
+		case 4:
+			key = op.Primitives[0].Block[:]
+		case 7:
+			key = append(binary.BigEndian.AppendUint64(nil, 7), op.Primitives[0].Block[:]...)
+		}
+		op.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[rank], Key: key}}
+		plan := treeOwnPlanV1(op)
+		if !treeBoundedPlanV1(&plan) {
+			t.Fatal("finite consulted family excluded", rank)
+		}
+	}
+}
+
+// Pair results are checked from independent tree rows/binding construction,
+// including the empty root callback and complete same-block body effects.
+func TestTreeReplayBoundedPairV1(t *testing.T) {
+	for _, roles := range []int{1, 2} {
+		for _, body := range []uint8{1, 2, 3} {
+			for _, events := range []uint32{0, 1} {
+				for _, deleteBody := range []bool{false, true} {
+					if deleteBody && body != 2 {
+						continue
+					}
+					t.Run(fmt.Sprintf("roles%d/body%d/events%d/delete%v", roles, body, events, deleteBody), func(t *testing.T) {
+						trPairResultV1(t, roles, body, events, deleteBody)
+					})
+				}
+			}
+		}
+	}
+}
+
+func trPairResultV1(t *testing.T, roles int, kind uint8, events uint32, deleteBody bool) {
+	t.Helper()
+	s, path, owner := tsNew(t)
+	var calls [3]int
+	meta := TreeBlockV1{TxCount: 1, EventCount: events}
+	var readers []*Reader
+	var sinks []*TreeDeltaSinkV1
+	source := tsSource(func(pos TreePositionV1, r *Reader, sink *TreeDeltaSinkV1) error {
+		calls[pos]++
+		readers, sinks = append(readers, r), append(sinks, sink)
+		if err := sink.BeginV1(meta); err != nil {
+			return err
+		}
+		if events == 0 {
+			return nil
+		}
+		return sink.EventV1(tsCreate(0x31, 0, 0, 148, 11))
+	})
+	op := trOperationV1(t, source, roles)
+	for j := range op.Primitives {
+		op.Primitives[j].Coverage.BlockMeta = meta
+		tsRoots(t, s, owner, uint64(j+1))
+		tsSeedCounter(t, s, owner, uint64(j+1), false, make([]byte, 16))
+	}
+	raw := trBodyV1(&op, kind, deleteBody)
+	if kind == 2 {
+		r := tsRun(t, s, owner, TreeOperation, TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: schemaDBIs[4], Key: op.Primitives[0].Block[:], AfterKind: AfterLiteral, Literal: raw}}}})
+		mustEnvironment(t, r.err)
+	}
+	r := tsRun(t, s, owner, TreeOperation, op)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	if calls != [3]int{0, roles, 0} {
+		t.Fatal("Source reinvoked during physical regeneration", calls)
+	}
+	for j := range readers {
+		tsExpiredReader(t, readers[j])
+		if sinks[j].WindowV1() != nil {
+			t.Fatal("retired Source window remains available")
+		}
+	}
+	s = tsReopen(t, s, path)
+	for j, p := range op.Primitives {
+		trPairRowsV1(t, s, p, raw, events)
+		if p.Generation != uint64(j+1) {
+			t.Fatal("fixture generation")
+		}
+	}
+	wantBody := raw
+	if kind == 3 || deleteBody {
+		wantBody = nil
+	}
+	tsRead(t, s, schemaDBIs[4], op.Primitives[0].Block[:], wantBody)
+	for _, m := range op.Pair.Mutations {
+		if m.DBI.Rank != 4 {
+			tsRead(t, s, m.DBI, m.Key, m.Literal)
+		}
+	}
+	tsFollowing(t, s, owner)
+}
+
+func trPairRowsV1(t *testing.T, s *Store, p TreePrimitiveV1, raw []byte, events uint32) {
+	t.Helper()
+	var value []byte
+	var top *testTreeNode
+	rows := map[string][]byte{}
+	if events != 0 {
+		value = tdFormed(raw[148:], p.Height, 1)
+		var key [36]byte
+		copy(key[:32], bytes.Repeat([]byte{0x31}, 32))
+		node := testTreeBuild(p.Generation, []testTreeEntry{{key, value}}, rows)
+		top = &node
+	}
+	for name, row := range rows {
+		tsRead(t, s, TreeSchemaV1DBIs()[8], testTreeRowKey(name), row)
+	}
+	binding := testTreeOldBinding(top, p.Endpoint)
+	binding.DatabaseID = [32]byte{7}
+	encoded, err := binding.Encode()
+	mustEnvironment(t, err)
+	tsRead(t, s, schemaDBIs[0], tsRootKey(p.Generation), encoded)
+	count := make([]byte, 16)
+	if events != 0 {
+		binary.BigEndian.PutUint64(count, 36+uint64(len(value)))
+		binary.BigEndian.PutUint64(count[8:], 1)
+	}
+	tsRead(t, s, schemaDBIs[0], tsCounterKey(p.Generation), count)
+	tsRead(t, s, schemaDBIs[1], tdUTXOKey(p.Generation, tdTxid(0x31), 0), value)
 }
 
 // RUB-1733 context window rows. Expected widths (104 index, 148 header) and the 10080 cap come from

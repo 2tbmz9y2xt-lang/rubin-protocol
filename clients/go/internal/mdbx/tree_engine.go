@@ -189,7 +189,7 @@ type treeTargetV1 struct {
 }
 
 // treeEmitterV1 receives j's targets and references.
-// The selected single forward/direct/transient covered profile consumes each
+// The selected ordinary and same-block replay covered profiles consume each
 // target/reference immediately without P. Its complete nonmutating checker
 // precedes reservation; its writer uses protected ORIGINAL physical presence,
 // fused equality and Pair-before-root order; strict readback folds both complete

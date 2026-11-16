@@ -350,12 +350,27 @@ func (d *treeDeltaV1) resolveGroupV1(old treeOldV1, g *treeDescV1) error {
 	}
 	g.img = image.value
 	d.markDirtyV1(g, image)
-	if g.kind == treeSpendV1 && d.family {
-		if err := d.entryV1(old, g, image.value); err != nil {
-			return err
-		}
+	if d.rec.referenceOnly {
+		g.img = nil
+	}
+	if err := d.checkedEntryV1(old, g, image.value); err != nil {
+		return err
 	}
 	return d.counterGroupV1(g)
+}
+
+// checkedEntryV1 lends U only after the initial OLD validation has succeeded.
+func (d *treeDeltaV1) checkedEntryV1(old treeOldV1, g *treeDescV1, value []byte) error {
+	if g.kind != treeSpendV1 || !d.family {
+		return nil
+	}
+	if d.rec.referenceOnly {
+		if err := d.rec.ledger.chargeV1(treeValueBytesV1); err != nil {
+			return err
+		}
+		defer d.rec.ledger.releaseV1(treeValueBytesV1)
+	}
+	return d.entryV1(old, g, value)
 }
 
 func (d *treeDeltaV1) counterBeforeV1(image treeImageV1) error {

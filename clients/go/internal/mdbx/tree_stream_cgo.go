@@ -847,9 +847,12 @@ func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
 	return plan
 }
 
-// treeBoundedPlanV1 recognizes only the admitted ordinary owned-plan shape.
+// treeBoundedPlanV1 recognizes the admitted ordinary and replay owned shapes.
 // It grants no caller capability and every other legal shape keeps P fallback.
 func treeBoundedPlanV1(plan *treePlanV1) bool {
+	if treeReplayBoundedPlanV1(plan) {
+		return true
+	}
 	if len(plan.primitives) != 1 || !treeBoundedAuxV1(plan) {
 		return false
 	}
@@ -866,6 +869,179 @@ func treeBoundedPlanV1(plan *treePlanV1) bool {
 		domains |= domain
 	}
 	return domains|8 == 15
+}
+
+// treeReplayBoundedPlanV1 selects only the admitted same-block replay roles.
+func treeReplayBoundedPlanV1(plan *treePlanV1) bool {
+	if len(plan.primitives) < 1 || len(plan.primitives) > 2 {
+		return false
+	}
+	if !treeReplayAuxV1(plan) {
+		return false
+	}
+	p := &plan.primitives[0]
+	if !treeReplayPrimitiveV1(p, false) {
+		return false
+	}
+	if len(plan.primitives) == 2 && !treeReplaySiblingV1(p, &plan.primitives[1]) {
+		return false
+	}
+	return treeReplayConsultedV1(plan, p) && treeReplayPairsV1(plan)
+}
+
+// treeReplayAuxV1 excludes the separate hook, inventory and credit owners.
+func treeReplayAuxV1(plan *treePlanV1) bool {
+	return plan.proof == nil && plan.slot == nil && plan.inventory == nil && plan.prepaidReadBytes == 0
+}
+
+// treeReplayConsultedV1 keeps the finite metadata/UTXO/index/header/body/owner domain.
+func treeReplayConsultedV1(plan *treePlanV1, p *TreePrimitiveV1) bool {
+	for _, row := range plan.consulted {
+		if !treeReplayConsultedRowV1(row, p.Block) {
+			return false
+		}
+	}
+	return true
+}
+
+func treeReplayConsultedRowV1(row ownedConsulted, block [32]byte) bool {
+	switch row.dbi.Rank {
+	case 0, 1, 2, 3, 7:
+		return true
+	case 4:
+		return bytes.Equal(row.key, block[:])
+	}
+	return false
+}
+
+// treeReplayPrimitiveV1 preserves the closed kind/undo/body discriminator set.
+func treeReplayPrimitiveV1(p *TreePrimitiveV1, lag bool) bool {
+	if p.Direction != TreeForwardV1 || p.Coverage == nil || p.Coverage.HeaderBytes != 148 {
+		return false
+	}
+	c := p.Coverage
+	if !treeReplayCoverageV1(c, *p) {
+		return false
+	}
+	return treeReplayRoleV1(p, lag)
+}
+
+// treeReplayRoleV1 owns the selected CURRENT/LAG kind and undo pairing.
+func treeReplayRoleV1(p *TreePrimitiveV1, lag bool) bool {
+	if lag {
+		return p.Kind == TreeKindLagForwardV1 && p.Undo == UndoTransientV1
+	}
+	return p.Kind == TreeKindReplayNextV1 && p.Undo >= UndoWriteOrReuseV1 && p.Undo <= UndoCompareDeleteV1
+}
+
+// treeReplayCoverageV1 binds every admitted coverage field before selection.
+func treeReplayCoverageV1(c *TreeSourceCoverageV1, p TreePrimitiveV1) bool {
+	if !treeCoverageIdentityV1(c, p, c.DatabaseID) || !treeCoverageMetaV1(c) {
+		return false
+	}
+	switch c.BodyKind {
+	case 1, 3:
+		return len(c.CurrentBody) != 0
+	case 2:
+		return c.CurrentBody == nil
+	}
+	return false
+}
+
+// treeReplaySiblingV1 requires identity of the immutable caller body backing.
+func treeReplaySiblingV1(p, lag *TreePrimitiveV1) bool {
+	if !treeReplayPrimitiveV1(lag, true) || lag.Generation == p.Generation {
+		return false
+	}
+	a, b := p.Coverage, lag.Coverage
+	if !treeReplayIdentityV1(p, lag) || len(a.CurrentBody) != len(b.CurrentBody) {
+		return false
+	}
+	return a.BodyKind == 2 || &a.CurrentBody[0] == &b.CurrentBody[0]
+}
+
+// treeReplayIdentityV1 binds the independent role and complete-source fields.
+func treeReplayIdentityV1(p, lag *TreePrimitiveV1) bool {
+	a, b := p.Coverage, lag.Coverage
+	return p.Block == lag.Block && p.Height == lag.Height && p.Endpoint == lag.Endpoint &&
+		a.DatabaseID == b.DatabaseID && a.BodyKind == b.BodyKind && a.BlockMeta == b.BlockMeta
+}
+
+// treeReplayPairsV1 counts only role-owned index/owner and shared auxiliary rows.
+func treeReplayPairsV1(plan *treePlanV1) bool {
+	var domains [2]uint8
+	var shared uint8
+	for i := range plan.pair {
+		if !treeReplayPairRowV1(plan, &plan.pair[i], &domains, &shared) {
+			return false
+		}
+	}
+	for j := range plan.primitives {
+		if domains[j] != 3 {
+			return false
+		}
+	}
+	return plan.primitives[0].Coverage.BodyKind != 1 || shared&4 != 0
+}
+
+// treeReplayPairRowV1 assigns one admitted row to exactly one role/shared slot.
+func treeReplayPairRowV1(plan *treePlanV1, m *ownedMutation, domains *[2]uint8, shared *uint8) bool {
+	if m.dbi.Rank == 2 || m.dbi.Rank == 7 {
+		return treeReplayRolePairV1(plan, m, domains)
+	}
+	domain := treeReplayAuxPairV1(m, &plan.primitives[0])
+	if domain == 0 || *shared&domain != 0 {
+		return false
+	}
+	*shared |= domain
+	return true
+}
+
+// treeReplayRolePairV1 binds an index/owner to its one matching generation.
+func treeReplayRolePairV1(plan *treePlanV1, m *ownedMutation, domains *[2]uint8) bool {
+	for j := range plan.primitives {
+		domain := treeBoundedPairV1(m, &plan.primitives[j])
+		if domain != 0 && domains[j]&domain == 0 {
+			domains[j] |= domain
+			return true
+		}
+	}
+	return false
+}
+
+// treeReplayAuxPairV1 admits only the shared body/header and authority envelope.
+func treeReplayAuxPairV1(m *ownedMutation, p *TreePrimitiveV1) uint8 {
+	switch m.dbi.Rank {
+	case 0:
+		if bytes.Equal(m.key, []byte{2}) && m.after == AfterLiteral {
+			return 16
+		}
+	case 3:
+		if m.after == AfterLiteral {
+			return treeBoundedHeaderV1(m, p)
+		}
+	case 4:
+		return treeReplayBodyPairV1(m, p)
+	}
+	return 0
+}
+
+// treeReplayBodyPairV1 preserves the absent-literal/stored-delete payload law.
+func treeReplayBodyPairV1(m *ownedMutation, p *TreePrimitiveV1) uint8 {
+	if !bytes.Equal(m.key, p.Block[:]) {
+		return 0
+	}
+	switch p.Coverage.BodyKind {
+	case 1:
+		if m.after == AfterLiteral && !m.beforePresent {
+			return treeBoundedBodyV1(m, p)
+		}
+	case 2:
+		if m.after == AfterAbsent && m.beforePresent {
+			return 4
+		}
+	}
+	return 0
 }
 
 // treeBoundedAuxV1 excludes every auxiliary ownership domain from streaming.
