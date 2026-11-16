@@ -916,6 +916,7 @@ func joinErrors(errs ...error) error {
 
 type Store struct {
 	operations    sync.RWMutex
+	servingOwner  atomic.Pointer[ServingViewOwnerV1]
 	self          *Store
 	env           *C.MDBX_env
 	writer        *filelock.Handle
@@ -2708,9 +2709,13 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 	if callback == nil {
 		return CommitTruthOld, UpdateStagePrewrite, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Update callback", nil)
 	}
+	serving := s.requestServingCloseV1()
+	defer serving.completeV1()
 	if !s.operations.TryLock() {
+		s.contendedServingCloseV1()
 		return CommitTruthOld, UpdateStagePrewrite, adapterError(operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
+	defer s.notifyServingCompletionV1()
 	defer s.operations.Unlock()
 	stateErr, _ := s.observationStateError(operationUpdate)
 	if stateErr != nil {
@@ -2770,7 +2775,7 @@ func (s *Store) View(callback func(*Reader) error) (err error) {
 	}
 	err, _ = s.viewWithStartupCompletion(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 		return StartupCanonicalNotCompleteV1, callback(r)
-	}, false)
+	}, false, nil)
 	return err
 }
 
@@ -2791,13 +2796,14 @@ func (s *Store) StartupVerifyCanonicalV1(check func(*Reader) (StartupCanonicalCo
 	if check == nil {
 		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil startup canonical callback", nil), false
 	}
-	return s.viewWithStartupCompletion(check, true)
+	return s.viewWithStartupCompletion(check, true, nil)
 }
 
-func (s *Store) viewWithStartupCompletion(callback func(*Reader) (StartupCanonicalCompletionV1, error), startup bool) (err error, cachedTerminal bool) {
+func (s *Store) viewWithStartupCompletion(callback func(*Reader) (StartupCanonicalCompletionV1, error), startup bool, observed *ServingViewOutcomeV1) (err error, cachedTerminal bool) {
 	if !s.operations.TryLock() {
 		return adapterError(operationView, EngineConcurrency, codeBusy, "store operation in progress", nil), false
 	}
+	defer s.notifyServingCompletionV1()
 	defer s.operations.Unlock()
 	stateErr, cached := s.observationStateError(operationView)
 	if stateErr != nil {
@@ -2806,10 +2812,13 @@ func (s *Store) viewWithStartupCompletion(callback func(*Reader) (StartupCanonic
 	if startup && s.canonicalOwnerVerified {
 		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "canonical owner index is already verified", nil), false
 	}
+	servingOpeningV1(observed)
 	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_RDONLY)
 	beginErr := nativePointerResultError(operationView, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
 	if beginErr != nil {
-		return s.failedReadBegin(begun.txn, beginErr), false
+		err = s.failedReadBegin(begun.txn, beginErr)
+		s.observeServingReadV1(observed, begun.txn != nil)
+		return err, false
 	}
 	reader := newReader(begun.txn, s.dbis)
 	reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config
@@ -2823,6 +2832,7 @@ func (s *Store) viewWithStartupCompletion(callback func(*Reader) (StartupCanonic
 		reader.expire().retire()
 		primary, infrastructure := readPrimary(err, reader.failure)
 		err = s.abortReadLocked(begun.txn, primary, infrastructure)
+		s.observeServingReadV1(observed, true)
 		if startupPublicationAllowed(startup, returned, completion, err, reader.failure, s.state) {
 			s.canonicalOwnerVerified = true
 		}
@@ -2830,6 +2840,21 @@ func (s *Store) viewWithStartupCompletion(callback func(*Reader) (StartupCanonic
 	completion, err = callback(reader)
 	returned = true
 	return startupCompletionResult(startup, completion, err), false
+}
+
+// observeServingReadV1 projects actual native disposition while operations is held.
+func (s *Store) observeServingReadV1(observed *ServingViewOutcomeV1, acquired bool) {
+	if observed == nil || !acquired {
+		return
+	}
+	switch {
+	case s.txn != nil:
+		observed.readEnd = ServingRetainedV1
+	case s.state == storeOPEN:
+		observed.readEnd = ServingConsumedHealthyV1
+	default:
+		observed.readEnd = ServingConsumedTerminalV1
+	}
 }
 
 func startupCompletionResult(startup bool, completion StartupCanonicalCompletionV1, err error) error {
@@ -3521,6 +3546,7 @@ func (s *Store) Inspect() (Inspection, error) {
 	if !s.operations.TryLock() {
 		return Inspection{}, adapterError(operationInspect, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
+	defer s.notifyServingCompletionV1()
 	defer s.operations.Unlock()
 	stateErr, _ := s.observationStateError(operationInspect)
 	if stateErr != nil {
@@ -3858,9 +3884,13 @@ func (s *Store) Close() error {
 	if s == nil {
 		return adapterError(operationClose, EngineInvalidInput, codeEINVAL, "nil Store", nil)
 	}
+	serving := s.requestServingCloseV1()
+	defer serving.completeV1()
 	if !s.operations.TryLock() {
+		s.contendedServingCloseV1()
 		return adapterError(operationClose, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
+	defer s.notifyServingCompletionV1()
 	defer s.operations.Unlock()
 	if !validStoreState(s.state) {
 		return adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store state", nil)
