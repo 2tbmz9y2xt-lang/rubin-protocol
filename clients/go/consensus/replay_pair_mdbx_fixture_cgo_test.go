@@ -482,8 +482,11 @@ func TestReplayPairTargetCorpus(t *testing.T) {
 // with a real native-created extra leaf, at the same qualified parent. The
 // endpoint consistency check must distinguish it from accepted CURRENT state.
 func TestReplayPairEndpointUnequal(t *testing.T) {
-	f := icbReplayVaultBlockV1(t, 200, 1)
-	c, w := rpfCase(t, f, 1, true)
+	full := icbReplayVaultBlockV1(t, 200, 1)
+	f := *full
+	f.prefix, f.block, f.old, f.inputs = full.prefix[:5], full.prefix[5], full.prefix[4].rows, nil
+	logicalMDBXAssert(t, len(f.old) == 1 && len(f.block.rows) == 1, "bounded unequal fixture has one original leaf")
+	c, w := rpfCase(t, &f, 1, true)
 	parent := btRequest(f.prefix[len(f.prefix)-1].in.Raw, c.in.Parent.Height)
 	parent.Generation, parent.Endpoint = 2, c.in.Parent
 	btIndexes(t, w.btWorld, parent, true)
