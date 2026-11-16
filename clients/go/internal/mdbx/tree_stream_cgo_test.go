@@ -3701,6 +3701,14 @@ func trBodyV1(op *TreeOperationV1, kind uint8, deleteBody bool) []byte {
 // legal excluded profiles must keep their existing full-projection fallback.
 func TestTreeReplayBoundedProfileV1(t *testing.T) {
 	source := tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { return nil })
+	t.Run("inventory", func(t *testing.T) {
+		op := trOperationV1(t, source, 2)
+		plan := treeOwnPlanV1(op)
+		plan.inventory = &entryInventoryStateV1{}
+		if treeBoundedPlanV1(&plan) {
+			t.Fatal("replay inventory ownership selected")
+		}
+	})
 	for _, roles := range []int{1, 2} {
 		for _, kind := range []uint8{1, 2, 3} {
 			for _, undo := range []TreeUndoEffectV1{1, 2, 3, 4} {
