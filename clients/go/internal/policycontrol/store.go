@@ -85,7 +85,7 @@ type Store struct {
 	crossing                     bool     // commit or recovery I/O in progress
 	pending                      *attempt // unresolved UNKNOWN attempt
 	closed                       bool
-	dependentView                bool     // one synchronous consumer of committed P
+	dependentView                bool // one synchronous consumer of committed P
 	latchRequested, latchRenewed bool // the one coalesced RAM latch request; one recorded since the latest latch decision
 }
 

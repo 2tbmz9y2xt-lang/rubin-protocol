@@ -22,6 +22,11 @@ type dependentCause struct{ cause error }
 func (e *dependentCause) Error() string { return "dependent application error" }
 func (e *dependentCause) Unwrap() error { return e.cause }
 
+// sameDependentValue preserves exact interface identity; errors.Is would accept replacement wrappers.
+func sameDependentValue(got, want any) bool {
+	return reflect.ValueOf(got).Equal(reflect.ValueOf(want))
+}
+
 // awaitDependent bounds test synchronization, not the application's callback.
 func awaitDependent(t *testing.T, done <-chan struct{}) {
 	t.Helper()
@@ -52,7 +57,7 @@ func refuseDependent(t *testing.T, s *Store, want error, unresolved bool) {
 			if !errors.Is(err, ErrBusy) || !errors.Is(err, ErrUnresolved) {
 				t.Fatalf("UNKNOWN admission: %v", err)
 			}
-		} else if err != want || errors.Is(err, ErrUnresolved) {
+		} else if !sameDependentValue(err, want) || errors.Is(err, ErrUnresolved) {
 			t.Fatalf("admission error %v, want exact %v", err, want)
 		}
 	}
@@ -66,7 +71,7 @@ func TestDependentViewAdmission(t *testing.T) {
 	id, dir := testIdentity(1), storeDir(t)
 	s := mustCreate(t, dir, id)
 	before := fileBytes(t, dir)
-	if err := s.WithDependentViewV1(nil); err != ErrRefused {
+	if err := s.WithDependentViewV1(nil); !sameDependentValue(err, ErrRefused) {
 		t.Fatalf("idle nil: %v", err)
 	}
 	tx := mustBegin(t, s)
@@ -106,8 +111,10 @@ func TestDependentViewAdmission(t *testing.T) {
 func dependentOtherStore(t *testing.T, s *Store) {
 	t.Helper()
 	id := testIdentity(1)
-	for _, open := range []func() (*Store, error){func() (*Store, error) { return Open(s.dir, id) },
-		func() (*Store, error) { return Create(s.dir, id, NewInstallationProof{Identity: id}) }} {
+	for _, open := range []func() (*Store, error){
+		func() (*Store, error) { return Open(s.dir, id) },
+		func() (*Store, error) { return Create(s.dir, id, NewInstallationProof{Identity: id}) },
+	} {
 		if other, err := open(); other != nil || !errors.Is(err, ErrBusy) {
 			t.Fatalf("live-slot constructor contention: %v %v", other, err)
 		}
@@ -117,17 +124,17 @@ func dependentOtherStore(t *testing.T, s *Store) {
 // dependentOperations owns exact live-slot tuples and reentrant reads.
 func dependentOperations(t *testing.T, s *Store, want View) {
 	t.Helper()
-	if tx, err := s.Begin(); tx != nil || err != ErrBusy {
+	if tx, err := s.Begin(); tx != nil || !sameDependentValue(err, ErrBusy) {
 		t.Fatalf("live-slot Begin: %v %v", tx, err)
 	}
-	if r, err := s.PersistLatch(stableProof(&Guard{})); r != (Result{}) || err != ErrBusy {
+	if r, err := s.PersistLatch(stableProof(&Guard{})); r != (Result{}) || !sameDependentValue(err, ErrBusy) {
 		t.Fatalf("live-slot PersistLatch: %+v %v", r, err)
 	}
-	if r, err := s.Recover(); r != (Result{}) || err != ErrBusy {
+	if r, err := s.Recover(); r != (Result{}) || !sameDependentValue(err, ErrBusy) {
 		t.Fatalf("live-slot Recover without pending: %+v %v", r, err)
 	}
 	prior := s.Latch()
-	if err := s.Close(); err != ErrBusy || s.Latch() != prior {
+	if err := s.Close(); !sameDependentValue(err, ErrBusy) || s.Latch() != prior {
 		t.Fatalf("live-slot Close: %v, latch %+v -> %+v", err, prior, s.Latch())
 	}
 	refuseDependent(t, s, ErrBusy, false)
@@ -215,29 +222,30 @@ func TestDependentViewOutcomes(t *testing.T) {
 			s.RequestLatch()
 			before := fileBytes(t, s.dir)
 			got := runDependentOutcome(t, s, func() error { return tc.err })
-			if !got.returned || got.err != tc.err || got.panicked != nil {
+			if !got.returned || !sameDependentValue(got.err, tc.err) || got.panicked != nil {
 				t.Fatalf("application outcome changed: %+v", got)
 			}
 			dependentNextOwner(t, s, before)
 		})
 	}
-	for _, name := range []string{"panic", "panic nil", "Goexit"} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		panicValue any
+	}{{"panic", sentinel}, {"panic nil", nil}, {"Goexit", nil}} {
+		t.Run(tc.name, func(t *testing.T) {
 			s := mustCreate(t, storeDir(t), testIdentity(1))
 			s.RequestLatch()
 			before := fileBytes(t, s.dir)
 			got := runDependentOutcome(t, s, func() error {
-				switch name {
-				case "panic":
-					panic(sentinel)
-				case "panic nil":
-					panic(nil)
+				switch tc.name {
+				case "panic", "panic nil":
+					panic(tc.panicValue)
 				default:
 					runtime.Goexit()
 				}
 				return nil
 			})
-			checkDependentUnwind(t, name, got, sentinel)
+			checkDependentUnwind(t, tc.name, got, sentinel)
 			dependentNextOwner(t, s, before)
 		})
 	}
@@ -251,7 +259,7 @@ func checkDependentUnwind(t *testing.T, name string, got dependentExit, sentinel
 	}
 	switch name {
 	case "panic":
-		if got.panicked != sentinel {
+		if !sameDependentValue(got.panicked, sentinel) {
 			t.Fatalf("panic identity changed: %v", got.panicked)
 		}
 	case "panic nil":
@@ -299,8 +307,10 @@ func wantDependentPopulated(t *testing.T, v View) {
 		!reflect.DeepEqual(r.Owner, owner) || !reflect.DeepEqual(r.Cursors, &Cursors{Before: 7, After: 19}) {
 		t.Fatalf("populated receipt: %+v", r)
 	}
-	want := &Incident{Diagnosis: Diagnosis{Height: 321, Hash: fill32(5), Error: []byte("diagnosis"), Source: []byte("own-current-replay"), Trigger: []byte("L/T")},
-		State: StateIntent, Attempted: true, Admission: &Admission{Old: []byte("OLD"), Destination: []byte("destination"), Source: SourceGenesisReplay, Profile: ProfileV1, Ownership: []byte("h1-owner")}}
+	want := &Incident{
+		Diagnosis: Diagnosis{Height: 321, Hash: fill32(5), Error: []byte("diagnosis"), Source: []byte("own-current-replay"), Trigger: []byte("L/T")},
+		State:     StateIntent, Attempted: true, Admission: &Admission{Old: []byte("OLD"), Destination: []byte("destination"), Source: SourceGenesisReplay, Profile: ProfileV1, Ownership: []byte("h1-owner")},
+	}
 	if !reflect.DeepEqual(v.Incident, want) {
 		t.Fatalf("populated incident: %+v", v.Incident)
 	}

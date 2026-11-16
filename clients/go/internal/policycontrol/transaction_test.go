@@ -104,7 +104,7 @@ func TestDependentViewLatchStates(t *testing.T) {
 // dependentLatchBusy pins the zero-result precedence over each underlying latch state.
 func dependentLatchBusy(t *testing.T, s *Store, proof LatchProof, want LatchStatus) {
 	t.Helper()
-	if r, err := s.PersistLatch(proof); r != (Result{}) || err != ErrBusy || s.Gate() != (Gate{}) {
+	if r, err := s.PersistLatch(proof); r != (Result{}) || !sameDependentValue(err, ErrBusy) || s.Gate() != (Gate{}) {
 		t.Fatalf("live-slot persistence/gate (%+v): %+v %v %+v", want, r, err, s.Gate())
 	}
 	wantLatch(t, s, want)
@@ -124,10 +124,10 @@ func TestDependentViewFinishedTransactions(t *testing.T) {
 		dependentBoth(t, func() {
 			for _, tx := range []*Tx{aborted, committed} {
 				for _, end := range []func() (Result, error){tx.Commit, tx.Abort} {
-					if r, err := end(); r != (Result{}) || err != ErrFinished {
+					if r, err := end(); r != (Result{}) || !sameDependentValue(err, ErrFinished) {
 						t.Fatalf("finished transaction under slot: %+v %v", r, err)
 					}
-					if next, err := s.Begin(); next != nil || err != ErrBusy {
+					if next, err := s.Begin(); next != nil || !sameDependentValue(err, ErrBusy) {
 						t.Fatalf("finished transaction released slot: %v %v", next, err)
 					}
 				}
@@ -237,7 +237,7 @@ func TestDependentViewBeginRace(t *testing.T) {
 	t.Cleanup(finish)
 	close(start)
 	a, b := receiveDependentContender(t, results), receiveDependentContender(t, results)
-	if a.kind == b.kind || (a.err == nil) == (b.err == nil) || (a.err != nil && a.err != ErrBusy) || (b.err != nil && b.err != ErrBusy) {
+	if a.kind == b.kind || (a.err == nil) == (b.err == nil) || (a.err != nil && !sameDependentValue(a.err, ErrBusy)) || (b.err != nil && !sameDependentValue(b.err, ErrBusy)) {
 		t.Fatalf("Begin/View race did not have one held winner and ErrBusy loser: %+v %+v", a, b)
 	}
 	finish()
@@ -289,7 +289,7 @@ func TestDependentViewProcessLock(t *testing.T) {
 		t.Fatalf("child before callback: %q", got)
 	}
 	must(t, s.WithDependentViewV1(func(View) error {
-		if err := s.Close(); err != ErrBusy {
+		if err := s.Close(); !sameDependentValue(err, ErrBusy) {
 			t.Fatalf("callback Close: %v", err)
 		}
 		if got := ask(); got != "busy\n" {
@@ -301,7 +301,7 @@ func TestDependentViewProcessLock(t *testing.T) {
 			if got := ask(); got != "busy\n" {
 				t.Errorf("child before concurrent Close: %q", got)
 			}
-			if err := s.Close(); err != ErrBusy {
+			if err := s.Close(); !sameDependentValue(err, ErrBusy) {
 				t.Errorf("concurrent Close: %v", err)
 			}
 			if got := ask(); got != "busy\n" {
