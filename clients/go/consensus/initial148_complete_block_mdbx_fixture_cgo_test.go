@@ -1229,8 +1229,8 @@ func TestInitial148ReplayLargeV1(t *testing.T) {
 			var outcome initial148CompleteBlockOutcomeV1
 			var evidence mdbx.SelectedDamageEvidence
 			var fixtureErr error
-			counts, observeErr := mdbx.FixturePairReadObservation(w.s, func(uint32) {
-				if join.readback && mdbx.FixtureReservationLive(w.owner) != join.sealed {
+			counts, observeErr := mdbx.FixturePairReadObservation(w.s, func(site uint32) {
+				if join.readback && (site == 1 || site == 2) && mdbx.FixtureReservationLive(w.owner) != join.sealed {
 					join.lateGrow = true
 				}
 			}, func() {
@@ -1432,8 +1432,8 @@ func TestInitial148ReplayReadbackV1(t *testing.T) {
 				var got btResult
 				var evidence mdbx.SelectedDamageEvidence
 				var fixtureErr error
-				counts, observeErr := mdbx.FixturePairReadObservation(w.s, func(uint32) {
-					if join.readback && mdbx.FixtureReservationLive(w.owner) != join.sealed {
+				counts, observeErr := mdbx.FixturePairReadObservation(w.s, func(site uint32) {
+					if join.readback && (site == 1 || site == 2) && mdbx.FixtureReservationLive(w.owner) != join.sealed {
 						join.lateGrow = true
 					}
 				}, func() {
