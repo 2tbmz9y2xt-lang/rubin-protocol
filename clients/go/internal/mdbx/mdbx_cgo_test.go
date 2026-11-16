@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1553,16 +1554,174 @@ func requirePlanInvalid(t *testing.T, batch Batch, marker string) {
 	}
 }
 
+// planCapacitySnapshot copies batch for planCapacityUnchanged without formatting it. Every slice and byte slice gets
+// its own backing with nil kept apart from empty, so a later write through the caller's shared buffers stays visible;
+// pointer fields are kept by identity and never dereferenced, as the former "%#v" snapshot printed them by address.
+func planCapacitySnapshot(batch Batch) Batch {
+	snapshot := batch
+	snapshot.Mutations = slices.Clone(batch.Mutations)
+	for i := range snapshot.Mutations {
+		row := &snapshot.Mutations[i]
+		row.Key, row.Literal, row.RefKey = bytes.Clone(row.Key), bytes.Clone(row.Literal), bytes.Clone(row.RefKey)
+	}
+	snapshot.Consulted = slices.Clone(batch.Consulted)
+	for i := range snapshot.Consulted {
+		snapshot.Consulted[i].Key = bytes.Clone(snapshot.Consulted[i].Key)
+	}
+	snapshot.LargeConsulted = slices.Clone(batch.LargeConsulted)
+	snapshot.ObsoleteDeletes = slices.Clone(batch.ObsoleteDeletes)
+	snapshot.ObsoleteConsulted = slices.Clone(batch.ObsoleteConsulted)
+	return snapshot
+}
+
+// planCapacityUnchanged reports whether batch still matches snapshot in every dimension the former "%#v" comparison
+// observed: content and nil-versus-empty of every byte slice; nil-versus-empty, length and order of every slice; every
+// scalar and string field; and the identity of every pointer, which it never dereferences.
+func planCapacityUnchanged(snapshot, batch Batch) bool {
+	sameBytes := func(a, b []byte) bool { return (a == nil) == (b == nil) && bytes.Equal(a, b) }
+	return snapshot.Reverse == batch.Reverse && snapshot.ContextConsulted == batch.ContextConsulted &&
+		planCapacitySame(snapshot.Mutations, batch.Mutations, func(a, b Mutation) bool {
+			return a.DBI == b.DBI && a.BeforePresent == b.BeforePresent && a.AfterKind == b.AfterKind && a.RefDBI == b.RefDBI &&
+				sameBytes(a.Key, b.Key) && sameBytes(a.Literal, b.Literal) && sameBytes(a.RefKey, b.RefKey)
+		}) &&
+		planCapacitySame(snapshot.Consulted, batch.Consulted, func(a, b ConsultedRow) bool { return a.DBI == b.DBI && sameBytes(a.Key, b.Key) }) &&
+		planCapacitySame(snapshot.LargeConsulted, batch.LargeConsulted, planCapacityEqual) &&
+		planCapacitySame(snapshot.ObsoleteDeletes, batch.ObsoleteDeletes, planCapacityEqual) &&
+		planCapacitySame(snapshot.ObsoleteConsulted, batch.ObsoleteConsulted, planCapacityEqual)
+}
+
+// planCapacitySame compares two slices element by element in order and keeps nil apart from empty.
+func planCapacitySame[E any](a, b []E, same func(E, E) bool) bool {
+	return (a == nil) == (b == nil) && slices.EqualFunc(a, b, same)
+}
+
+// planCapacityEqual compares by value; for ObsoleteRowV1 and ObsoletePageWitnessV1 that is the identity of their
+// Reader-scoped pointer.
+func planCapacityEqual[E comparable](a, b E) bool { return a == b }
+
 func requirePlanCapacity(t *testing.T, batch Batch) {
 	t.Helper()
-	before := fmt.Sprintf("%#v", batch)
+	before := planCapacitySnapshot(batch)
 	if _, err := updateOwnedBatch(batch); err == nil {
 		t.Fatal("plan bound row accepted")
 	} else {
 		_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
 	}
-	if fmt.Sprintf("%#v", batch) != before {
+	if !planCapacityUnchanged(before, batch) {
 		t.Fatal("capacity admission changed caller input")
+	}
+}
+
+// TestRequirePlanCapacitySnapshot proves planCapacityUnchanged without the capacity refusal: untouched call-site
+// producers stay unchanged, each dimension the former "%#v" comparison observed reports a change, a write through the
+// caller's shared key buffer is seen, and a pointee changed through the same pointer is not, as "%#v" printed its address.
+func TestRequirePlanCapacitySnapshot(t *testing.T) {
+	for typ, fields := range map[reflect.Type]int{reflect.TypeFor[Batch](): 7, reflect.TypeFor[Mutation](): 7, reflect.TypeFor[ConsultedRow](): 2} {
+		if typ.NumField() != fields {
+			t.Fatalf("%v has %d fields; planCapacityUnchanged compares %d", typ, typ.NumField(), fields)
+		}
+	}
+	dbis := readDBIsLiteral()
+	flip := func(b []byte) []byte { b = bytes.Clone(b); b[len(b)-1] ^= 1; return b }
+	aux := func(t *testing.T) Batch { return updatePlanAuxBatch(t, 16_385) }
+	bulk := func(*testing.T) Batch { return reverseBulkBatch(16_385, false) }
+	mixed := func(*testing.T) Batch { return reverseBulkBatch(16_385, true) }
+	deletes := func(*testing.T) Batch {
+		return Batch{Reverse: true, Mutations: reverseBatchDeletes(dbis[5], reverseBatchKeys(16_385, 77))}
+	}
+	none := func(*testing.T) Batch { return Batch{} }
+	empty := func(*testing.T) Batch {
+		return Batch{Mutations: []Mutation{}, Consulted: []ConsultedRow{}, LargeConsulted: []LargeImageSelectorV1{}, ObsoleteDeletes: []ObsoleteRowV1{}, ObsoleteConsulted: []ObsoletePageWitnessV1{}}
+	}
+	// full sets every Batch field; Mutations[2] and Consulted[2] hold nil byte slices, Mutations[3] and Consulted[3] empty ones.
+	full := func(*testing.T) Batch {
+		batch := reverseBulkBatch(2, true)
+		batch.Mutations = append(batch.Mutations, Mutation{}, Mutation{Key: []byte{}, Literal: []byte{}, RefKey: []byte{}})
+		batch.Consulted = []ConsultedRow{{DBI: dbis[1], Key: []byte{1, 2}}, {DBI: dbis[5], Key: []byte{3}}, {}, {Key: []byte{}}}
+		batch.ContextConsulted = &CanonicalContextWindowV1{Generation: 1, FirstHeight: 2, Count: 3}
+		batch.LargeConsulted = []LargeImageSelectorV1{{Kind: LargeImageBlockBodyV1, Hash: [32]byte{4}}}
+		batch.ObsoleteDeletes = []ObsoleteRowV1{{span: &obsoleteSpan{key: []byte{5}, rank: 1}}}
+		batch.ObsoleteConsulted = []ObsoletePageWitnessV1{{scope: &obsoleteWitness{points: []obsoletePoint{{rank: 1, key: []byte{6}}}}}}
+		return batch
+	}
+	for _, row := range []struct {
+		name    string
+		build   func(*testing.T) Batch
+		mutate  func(*Batch)
+		changed bool
+	}{
+		{"A3 updatePlanAuxBatch(16385)", aux, nil, false},
+		{"A3 reverseBulkBatch(16385, false)", bulk, nil, false},
+		{"A3 reverseBulkBatch(16385, true)", mixed, nil, false},
+		{"A3 reverseBatchDeletes(16385)", deletes, nil, false},
+		{"A2 every field set", full, nil, false},
+		{"R1 Mutations[0].Key byte", mixed, func(b *Batch) { b.Mutations[0].Key = flip(b.Mutations[0].Key) }, true},
+		{"R1 Mutations[8192].Key byte", mixed, func(b *Batch) { b.Mutations[8_192].Key = flip(b.Mutations[8_192].Key) }, true},
+		{"R1 Mutations[16384].Key byte", mixed, func(b *Batch) { b.Mutations[16_384].Key = flip(b.Mutations[16_384].Key) }, true},
+		{"R1 Mutations[0].Literal byte", aux, func(b *Batch) { b.Mutations[0].Literal = flip(b.Mutations[0].Literal) }, true},
+		{"R1 Mutations[8192].Literal byte", aux, func(b *Batch) { b.Mutations[8_192].Literal = flip(b.Mutations[8_192].Literal) }, true},
+		{"R1 Mutations[16384].Literal byte", aux, func(b *Batch) { b.Mutations[16_384].Literal = flip(b.Mutations[16_384].Literal) }, true},
+		{"R1 Mutations[0].RefKey byte", mixed, func(b *Batch) { b.Mutations[0].RefKey = flip(b.Mutations[0].RefKey) }, true},
+		{"R1 Mutations[8192].RefKey byte", mixed, func(b *Batch) { b.Mutations[8_192].RefKey = flip(b.Mutations[8_192].RefKey) }, true},
+		{"R1 Mutations[16384].RefKey byte", mixed, func(b *Batch) { b.Mutations[16_384].RefKey = flip(b.Mutations[16_384].RefKey) }, true},
+		{"R2 Mutations nil to empty", none, func(b *Batch) { b.Mutations = []Mutation{} }, true},
+		{"R2 Mutations empty to nil", empty, func(b *Batch) { b.Mutations = nil }, true},
+		{"R2 Literal nil to empty", full, func(b *Batch) { b.Mutations[2].Literal = []byte{} }, true},
+		{"R2 Literal empty to nil", full, func(b *Batch) { b.Mutations[3].Literal = nil }, true},
+		{"R2 Key nil to empty", full, func(b *Batch) { b.Mutations[2].Key = []byte{} }, true},
+		{"R2 Key empty to nil", full, func(b *Batch) { b.Mutations[3].Key = nil }, true},
+		{"R2 RefKey nil to empty", full, func(b *Batch) { b.Mutations[2].RefKey = []byte{} }, true},
+		{"R2 RefKey empty to nil", full, func(b *Batch) { b.Mutations[3].RefKey = nil }, true},
+		{"R2 Consulted Key nil to empty", full, func(b *Batch) { b.Consulted[2].Key = []byte{} }, true},
+		{"R2 Consulted Key empty to nil", full, func(b *Batch) { b.Consulted[3].Key = nil }, true},
+		{"R3 Mutations appended", aux, func(b *Batch) { b.Mutations = append(b.Mutations, b.Mutations[0]) }, true},
+		{"R3 Mutations truncated", aux, func(b *Batch) { b.Mutations = b.Mutations[:len(b.Mutations)-1] }, true},
+		{"R4 Reverse", full, func(b *Batch) { b.Reverse = !b.Reverse }, true},
+		{"R4 BeforePresent", full, func(b *Batch) { b.Mutations[1].BeforePresent = !b.Mutations[1].BeforePresent }, true},
+		{"R4 AfterKind", full, func(b *Batch) { b.Mutations[1].AfterKind++ }, true},
+		{"R4 DBI.Rank", full, func(b *Batch) { b.Mutations[1].DBI.Rank++ }, true},
+		{"R4 DBI.Name", full, func(b *Batch) { b.Mutations[1].DBI.Name += "x" }, true},
+		{"R4 DBI.Flags", full, func(b *Batch) { b.Mutations[1].DBI.Flags++ }, true},
+		{"R4 RefDBI.Rank", full, func(b *Batch) { b.Mutations[1].RefDBI.Rank++ }, true},
+		{"R4 RefDBI.Name", full, func(b *Batch) { b.Mutations[1].RefDBI.Name += "x" }, true},
+		{"R4 RefDBI.Flags", full, func(b *Batch) { b.Mutations[1].RefDBI.Flags++ }, true},
+		{"R5 ContextConsulted nil to non-nil", none, func(b *Batch) { b.ContextConsulted = &CanonicalContextWindowV1{} }, true},
+		{"R5 ContextConsulted non-nil to nil", full, func(b *Batch) { b.ContextConsulted = nil }, true},
+		{"R5 ContextConsulted equal-content replacement", full, func(b *Batch) { window := *b.ContextConsulted; b.ContextConsulted = &window }, true},
+		{"R6 ObsoleteDeletes nil to empty", none, func(b *Batch) { b.ObsoleteDeletes = []ObsoleteRowV1{} }, true},
+		{"R6 ObsoleteDeletes empty to nil", empty, func(b *Batch) { b.ObsoleteDeletes = nil }, true},
+		{"R6 ObsoleteDeletes appended", full, func(b *Batch) { b.ObsoleteDeletes = append(b.ObsoleteDeletes, b.ObsoleteDeletes[0]) }, true},
+		{"R6 ObsoleteDeletes equal-content replacement", full, func(b *Batch) { span := *b.ObsoleteDeletes[0].span; b.ObsoleteDeletes[0].span = &span }, true},
+		{"R6 ObsoleteConsulted nil to empty", none, func(b *Batch) { b.ObsoleteConsulted = []ObsoletePageWitnessV1{} }, true},
+		{"R6 ObsoleteConsulted empty to nil", empty, func(b *Batch) { b.ObsoleteConsulted = nil }, true},
+		{"R6 ObsoleteConsulted truncated", full, func(b *Batch) { b.ObsoleteConsulted = b.ObsoleteConsulted[:0] }, true},
+		{"R6 ObsoleteConsulted equal-content replacement", full, func(b *Batch) { scope := *b.ObsoleteConsulted[0].scope; b.ObsoleteConsulted[0].scope = &scope }, true},
+		{"R7 Consulted[0].Key byte", full, func(b *Batch) { b.Consulted[0].Key = flip(b.Consulted[0].Key) }, true},
+		{"R7 Consulted[1].DBI", full, func(b *Batch) { b.Consulted[1].DBI.Rank++ }, true},
+		{"R7 Consulted nil to empty", none, func(b *Batch) { b.Consulted = []ConsultedRow{} }, true},
+		{"R7 Consulted empty to nil", empty, func(b *Batch) { b.Consulted = nil }, true},
+		{"R7 Consulted truncated", full, func(b *Batch) { b.Consulted = b.Consulted[:3] }, true},
+		{"R7 LargeConsulted[0].Hash byte", full, func(b *Batch) { b.LargeConsulted[0].Hash[31] ^= 1 }, true},
+		{"R7 LargeConsulted[0].Kind", full, func(b *Batch) { b.LargeConsulted[0].Kind++ }, true},
+		{"R7 LargeConsulted nil to empty", none, func(b *Batch) { b.LargeConsulted = []LargeImageSelectorV1{} }, true},
+		{"R7 LargeConsulted empty to nil", empty, func(b *Batch) { b.LargeConsulted = nil }, true},
+		{"R7 LargeConsulted appended", full, func(b *Batch) { b.LargeConsulted = append(b.LargeConsulted, b.LargeConsulted[0]) }, true},
+		{"R8 Mutations[0] and Mutations[16384] swapped", aux, func(b *Batch) { b.Mutations[0], b.Mutations[16_384] = b.Mutations[16_384], b.Mutations[0] }, true},
+		{"H1 in-place write through the shared targets buffer", bulk, func(b *Batch) { b.Mutations[8_192].Key[43] ^= 1 }, true},
+		{"H2 ContextConsulted pointee", full, func(b *Batch) { b.ContextConsulted.Generation++ }, false},
+		{"H2 ObsoleteDeletes span key pointee", full, func(b *Batch) { b.ObsoleteDeletes[0].span.key[0] ^= 1 }, false},
+		{"H2 ObsoleteConsulted scope points pointee", full, func(b *Batch) { b.ObsoleteConsulted[0].scope.points = nil }, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			batch := row.build(t)
+			snapshot := planCapacitySnapshot(batch)
+			if row.mutate != nil {
+				row.mutate(&batch)
+			}
+			if changed := !planCapacityUnchanged(snapshot, batch); changed != row.changed {
+				t.Fatalf("planCapacityUnchanged changed=%v, want %v", changed, row.changed)
+			}
+		})
 	}
 }
 
