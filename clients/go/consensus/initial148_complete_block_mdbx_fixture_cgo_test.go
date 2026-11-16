@@ -942,7 +942,13 @@ func icbReplayFinishPlanV1(t *testing.T, r *mdbx.Reader, op mdbx.TreeOperationV1
 		mutation := btMutation(0, []byte{2}, encoded)
 		mutation.BeforePresent = true
 		op.Pair.Mutations = append(op.Pair.Mutations, mutation)
-		op.Pair.Consulted = []mdbx.ConsultedRow{{DBI: mdbx.TreeSchemaV1DBIs()[0], Key: []byte{2}}}
+		genesisHash := replay.Target.GenesisHash
+		header, present, err := r.Get(mdbx.TreeSchemaV1DBIs()[3], genesisHash[:])
+		if err != nil {
+			return mdbx.TreeOperationV1{}, err
+		}
+		logicalMDBXAssert(t, present && len(header) == 148, "consulted genesis header: present=%v bytes=%d", present, len(header))
+		op.Pair.Consulted = []mdbx.ConsultedRow{{DBI: mdbx.TreeSchemaV1DBIs()[3], Key: genesisHash[:]}}
 		op.Pair.ContextConsulted = &mdbx.CanonicalContextWindowV1{Generation: 1, FirstHeight: block.in.Height - 11, Count: 11}
 	}
 	btSort(op.Pair.Mutations)
