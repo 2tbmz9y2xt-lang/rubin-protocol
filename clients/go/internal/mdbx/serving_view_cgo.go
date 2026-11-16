@@ -308,18 +308,18 @@ func (o *ServingViewOwnerV1) WithQuiescenceV1(ctx context.Context, s *Store, use
 	return use()
 }
 
-// admitSpanV1 atomically inspects actual ownership and captures its generation.
-func (o *ServingViewOwnerV1) admitSpanV1(m *servingMutationV1) (<-chan struct{}, error) {
+// admitSpanV1 captures the ownership generation; false refuses a finished retained view.
+func (o *ServingViewOwnerV1) admitSpanV1(m *servingMutationV1) (<-chan struct{}, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.current != nil && o.current.finished {
-		return nil, servingBusyV1(operationUpdate)
+		return nil, false
 	}
 	if o.current != nil || o.span != nil {
-		return o.generationV1(), nil
+		return o.generationV1(), true
 	}
 	o.span = m
-	return nil, nil
+	return nil, true
 }
 
 // waitSpanV1 preserves this scope until actual view/span completion or cancellation.
@@ -328,9 +328,12 @@ func (o *ServingViewOwnerV1) waitSpanV1(ctx context.Context, m *servingMutationV
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		changed, err := o.admitSpanV1(m)
-		if err != nil || changed == nil {
-			return err
+		changed, permitted := o.admitSpanV1(m)
+		if !permitted {
+			return servingBusyV1(operationUpdate)
+		}
+		if changed == nil {
+			return nil
 		}
 		done := ctx.Done()
 		select {

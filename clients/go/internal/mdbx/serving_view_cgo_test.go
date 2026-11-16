@@ -387,7 +387,7 @@ func servingNativeHolderV1(t *testing.T, route string, s *Store, reservations *O
 		defer close(done)
 		err := servingNativeHoldCallV1(route, s, reservations, use)
 		if !sameError(err, app) {
-			err = fmt.Errorf("native holder result changed: %v", err)
+			err = fmt.Errorf("native holder result changed: %w", err)
 		} else {
 			err = nil
 		}
