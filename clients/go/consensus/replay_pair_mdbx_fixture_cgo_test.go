@@ -363,30 +363,48 @@ func TestReplayPairSourceOrder(t *testing.T) {
 // TestReplayPairRepeatUse counts the actual native F3 reads. Removing the
 // one-use guard both loses sticky refusal and repeats the root derivation.
 func TestReplayPairRepeatUse(t *testing.T) {
+	full := icbReplayVaultBlockV1(t, 200, 1)
+	f := *full
+	f.prefix, f.block, f.old, f.inputs = full.prefix[:5], full.prefix[5], full.prefix[4].rows, nil
 	var baseline uint64
 	for _, repeated := range []bool{false, true} {
-		c := rpNew(t, 15840, 1, mdbx.UndoTransientV1)
+		c, w := rpfCase(t, &f, 1, true)
 		var got replayPairOutcomeV1
 		var useErr error
-		counts, err := mdbx.FixturePairReadObservation(c.w.s, nil, func() {
-			got = c.run(t, nil, func(_ *mdbx.Reader, _ *initial148CompleteBlockResultV1, use func([]mdbx.TreeOutpointV1) error) error {
-				first := use(nil)
-				logicalMDBXAssert(t, first == nil, "first LAG derive succeeds: %v", first)
-				if repeated { useErr = use(nil); return nil }
-				// End baseline at the same callback position, before admission.
-				return errors.New("baseline callback stop")
-			})
+		var firstGets uint64
+		inFirst := false
+		stop := errors.New("baseline callback stop")
+		lag := func(base replayPairWithLagInputsV1) replayPairWithLagInputsV1 {
+			return func(r *mdbx.Reader, result *initial148CompleteBlockResultV1, use func([]mdbx.TreeOutpointV1) error) error {
+				return base(r, result, func(keys []mdbx.TreeOutpointV1) error {
+					inFirst = true
+					first := use(keys)
+					inFirst = false
+					logicalMDBXAssert(t, first == nil, "first LAG derive succeeds: %v", first)
+					if repeated { useErr = use(keys); return nil }
+					// End baseline at the same callback position, before admission.
+					return stop
+				})
+			}
+		}
+		counts, err := mdbx.FixturePairReadObservation(w.s, func(site uint32) {
+			if inFirst && site == 1 { firstGets++ }
+		}, func() {
+			got = rpfRun(t, c, nil, nil, lag, 0)
 		})
+		if repeated { logicalMDBXAssert(t, counts.Gets == baseline, "second use must refuse before second Derive: reads%d baseline%d", counts.Gets, baseline) }
 		logicalMDBXAssert(t, err == nil, "repeat-use observation: %v", err)
+		logicalMDBXAssert(t, firstGets > 0, "first F3 use must read protected nonzero-height LAG OLD, got%d reads", firstGets)
 		if !repeated {
+			rpTuple(t, got, 1, 1, -1, stop, "LAG")
 			logicalMDBXAssert(t, counts.Writes == 0, "baseline callback refusal has zero writes")
 			baseline = counts.Gets
 			continue
 		}
 		var local *logicalStateFailure
-		logicalMDBXAssert(t, errors.As(useErr, &local) && got.Err == useErr && got.Role == "LAG" && got.Index == -1 && counts.Gets == baseline, "second use must refuse sticky before second Derive: got%+v reads%d baseline%d", got, counts.Gets, baseline)
+		logicalMDBXAssert(t, errors.As(useErr, &local) && local.kind == logicalStateFailureLocalInvariant && useErr.Error() == "repeated replay LAG inputs" && got.Err == useErr && got.Role == "LAG" && got.Index == -1 && got.Truth == 1 && got.Stage == 1, "second use must preserve exact sticky local refusal: got%+v use%v", got, useErr)
 		logicalMDBXAssert(t, counts.Writes == 0, "sticky repeated-use refusal has zero writes")
-		rpFollowing(t, c.w)
+		icbReplayFollowingV1(t, w)
 	}
 }
 
@@ -466,26 +484,69 @@ func TestReplayPairTargetCorpus(t *testing.T) {
 func TestReplayPairEndpointUnequal(t *testing.T) {
 	f := icbReplayVaultBlockV1(t, 200, 1)
 	c, w := rpfCase(t, f, 1, true)
+	parent := btRequest(f.prefix[len(f.prefix)-1].in.Raw, c.in.Parent.Height)
+	parent.Generation, parent.Endpoint = 2, c.in.Parent
+	btIndexes(t, w.btWorld, parent, true)
+	w.read(t, 3, parent.Block[:], parent.Raw[:148])
+	alternate := make(map[Outpoint]UtxoEntry, len(f.old)+1)
+	for key, row := range f.old { alternate[key] = row }
 	extra := btTransaction(999, 0, nil, [][]byte{btFrame(1, 0, []byte{99})}, nil, []byte{0}, nil)
-	req := btRequest(btBody(148, 99, c.in.Parent.BlockHash, extra), c.in.Parent.Height)
+	alternate[Outpoint{Txid: extra.id}] = btEntry(1, 0, []byte{99}, c.in.Parent.Height, true)
+	raw := btBody(148, 99, f.prefix[len(f.prefix)-1].in.Parent.BlockHash, extra)
+	root := canonicalUTXORoot(alternate)
+	copy(raw[108:140], root[:])
+	req := btRequest(raw, c.in.Parent.Height)
 	req.Generation, req.Kind, req.Undo, req.BodyKind = 2, mdbx.TreeKindDirectApplyV1, mdbx.UndoTransientV1, 3
+	req.Endpoint.CumulativeChainwork = c.in.Parent.CumulativeChainwork
 	req.CanonicalBeforePresent = true
-	seed, _, _ := w.btWorld.run(t, []blockTreeRequestV1{req}, nil)
+	parentOwner, _ := mdbx.CanonicalOwnerKey(2, parent.Block)
+	// Replace both OLD partners together; otherwise O1 refuses before the tree.
+	seed, _, _ := w.btWorld.run(t, []blockTreeRequestV1{req}, func(_ []blockTreeEffectV1, _ []*btObserved, op *mdbx.TreeOperationV1) {
+		op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[7], Key: parentOwner, BeforePresent: true, AfterKind: mdbx.AfterAbsent})
+		btSort(op.Pair.Mutations)
+	})
 	seed.want(t, 2, 3, -1)
 	logicalMDBXAssert(t, seed.err == nil, "native coherent alternative LAG: %v", seed.err)
+	btState(t, w.btWorld, 2, req.Endpoint, alternate)
+	btIndexes(t, w.btWorld, req, true)
+	w.read(t, 7, parentOwner, nil)
 	var binding mdbx.RootBindingV1
-	err := w.s.View(func(r *mdbx.Reader) error { var err error; binding, _, err = r.ReadTreeRootBindingV1(2); return err })
+	err := w.s.View(func(r *mdbx.Reader) error { var present bool; var err error; binding, present, err = r.ReadTreeRootBindingV1(2); logicalMDBXAssert(t, err == nil && present && binding.RootDigest == root, "native alternative root: %+v/%v", binding, err); return err })
 	logicalMDBXAssert(t, err == nil, "alternative root read: %v", err)
+	// Restore the qualified parent index/owner and root endpoint atomically.
+	// The native alternate UTXO/node/digest image remains internally coherent.
 	binding.Endpoint = c.in.Parent
-	w.seedBinding(t, 2, binding)
+	encoded, err := binding.Encode()
+	logicalMDBXAssert(t, err == nil, "alternative parent binding: %v", err)
+	canonical, _ := mdbx.HeightKey(2, parent.Height)
+	alternativeOwner, _ := mdbx.CanonicalOwnerKey(2, req.Block)
+	var parentHash [32]byte
+	copy(parentHash[:], parent.Raw[4:36])
+	index := btMutation(2, canonical, mdbx.ChainValue(parent.Block, parentHash, parent.Endpoint.CumulativeChainwork))
+	index.BeforePresent = true
+	rootRow := btMutation(0, btMeta(0x11, 2), encoded)
+	rootRow.BeforePresent = true
+	w.pair(t, rootRow, index,
+		btMutation(7, parentOwner, mdbx.CanonicalOwnerValue(parent.Height)),
+		mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[7], Key: alternativeOwner, BeforePresent: true, AfterKind: mdbx.AfterAbsent})
+	btIndexes(t, w.btWorld, parent, true)
+	w.read(t, 7, alternativeOwner, nil)
+	w.read(t, 3, parent.Block[:], parent.Raw[:148])
+	btState(t, w.btWorld, 2, c.in.Parent, alternate)
+	final := make(map[Outpoint]UtxoEntry, len(f.block.rows)+1)
+	for key, row := range f.block.rows { final[key] = row }
+	final[Outpoint{Txid: extra.id}] = alternate[Outpoint{Txid: extra.id}]
+	derived := canonicalUTXORoot(final)
 	old := icbReplayLagImageV1(t, w)
+	oldCurrent := rtImageRow(t, w.btWorld, btMeta(0x11, 1))
 	oldAuthority := rtImageRow(t, w.btWorld, []byte{2})
 	var got replayPairOutcomeV1
 	counts, err := mdbx.FixturePairReadObservation(w.s, nil, func() { got = rpfRun(t, c, f.inputs, nil, nil, 0) })
 	var unequal *replayPairUnequalV1
 	logicalMDBXAssert(t, err == nil && counts.Writes == 0 && errors.As(got.Err, &unequal) && got.Truth == 1 && got.Stage == 1 && got.Index == -1 && got.Role == "LAG", "coherent unequal typed local callback evidence: %+v/%+v/%v", got, counts, err)
-	logicalMDBXAssert(t, unequal.Generation == 2 && unequal.Height == c.in.Height && unequal.Block == c.in.Endpoint.BlockHash && unequal.Derived != unequal.Accepted && bytes.Equal(unequal.Accepted[:], c.in.Raw[108:140]), "exact protected-LAG unequal evidence: %+v", unequal)
+	logicalMDBXAssert(t, unequal.Generation == 2 && unequal.Height == c.in.Height && unequal.Block == c.in.Endpoint.BlockHash && unequal.Derived == derived && unequal.Accepted == f.block.root && unequal.Derived != unequal.Accepted && bytes.Equal(unequal.Accepted[:], c.in.Raw[108:140]), "exact protected-LAG unequal evidence: %+v", unequal)
 	icbReplayWantLagImageV1(t, w, old)
+	w.read(t, 0, btMeta(0x11, 1), oldCurrent)
 	w.read(t, 0, []byte{2}, oldAuthority)
 	icbReplayFollowingV1(t, w)
 }
