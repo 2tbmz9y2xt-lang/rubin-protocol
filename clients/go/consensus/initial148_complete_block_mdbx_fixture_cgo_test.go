@@ -1272,7 +1272,7 @@ func icbReplayCursorV1(t *testing.T, w *fgWorld, endpoint mdbx.TreeEndpointV1) {
 // complete durable observations and a legal next operation follow reopening.
 func icbReplayCrossedV1(t *testing.T, w *fgWorld, got btResult, truth mdbx.CommitTruth, unreadable bool) {
 	t.Helper()
-	got.want(t, truth, 3, -1)
+	got.want(t, uint8(truth), 3, -1)
 	ce, ok := got.err.(*mdbx.CommitError)
 	logicalMDBXAssert(t, ok && ce.Truth == truth && (ce.ReadbackCause != nil) == unreadable, "exact crossed cause/truth: %v", got.err)
 	engine, ok := ce.Cause.(*mdbx.EngineError)
