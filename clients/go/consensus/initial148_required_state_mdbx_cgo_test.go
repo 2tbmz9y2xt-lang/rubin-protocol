@@ -83,6 +83,36 @@ func irFailureV1(t *testing.T, err error, kind logicalStateFailureKind, text str
 	logicalMDBXAssert(t, errors.As(err, &failure) && failure.kind == kind && failure.cause.Error() == text, "required failure %T %v, want %d/%s", err, err, kind, text)
 }
 
+// BenchmarkInitial148RequiredFactsV1 measures recorded lookups and nonzero residual checks.
+func BenchmarkInitial148RequiredFactsV1(b *testing.B) {
+	const events = 4096
+	scope := initial148RequiredScopeV1{
+		keys: make([]mdbx.TreeOutpointV1, 0, events), lengths: make([]uint32, 0, events),
+		index: make([]uint32, 2*events), active: true,
+	}
+	ops := make([]Outpoint, events)
+	value := btValue(btFrame(1, 0, []byte{3}), 0, false)
+	for i := range ops {
+		ops[i] = Outpoint{Txid: [32]byte{byte(i), byte(i >> 8)}, Vout: uint32(i)}
+		if err := scope.rememberV1(ops[i], value, i%2 == 0); err != nil {
+			b.Fatal(err)
+		}
+	}
+	scope.counters = logicalStateCounters{bytes: 57 * (events/2 + 1), entries: events/2 + 1}
+	scope.haveCounters = true
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		length, present, known := scope.recordedV1(ops[i%events])
+		if !known || length != uint32(57*(1-i%2)) || present != (i%2 == 0) {
+			b.Fatalf("recorded fact: %d/%v/%v", length, present, known)
+		}
+		if err := scope.residualV1(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestInitial148RequiredR(t *testing.T) {
 	t.Run("full-record-and-length", func(t *testing.T) {
 		for _, tc := range []struct {
@@ -440,7 +470,7 @@ func irRecordSizeV1(t *testing.T) {
 				held += uintptr(field.Cap()) * element.Size()
 			}
 		}
-		logicalMDBXAssert(t, fields == 2 && held == 280 && held <= 336 && cap(scope.keys) == 7 && cap(scope.lengths) == 7 && unsafe.Sizeof(*scope) < 4096, "record/fixed allowance: %d slices %d bytes", fields, held)
+		logicalMDBXAssert(t, fields == 3 && held == 336 && cap(scope.keys) == 7 && cap(scope.lengths) == 7 && len(scope.index) == 14 && cap(scope.index) == 14 && unsafe.Sizeof(*scope) < 4096, "record/fixed allowance: %d slices %d bytes", fields, held)
 		return nil
 	})
 	logicalMDBXAssert(t, err == nil, "record size scope: %v", err)
@@ -739,7 +769,7 @@ func irLifetimeV1(t *testing.T) {
 	irFailureV1(t, derive().cause, logicalStateFailureLocalInvariant, "required root derive is not available")
 	scope := kept.(*initial148RequiredScopeV1)
 	_, _, known := scope.recordedV1(Outpoint{})
-	logicalMDBXAssert(t, !known && scope.calls == 0 && scope.keys == nil && scope.lengths == nil, "expired scope retained records or counted lookup")
+	logicalMDBXAssert(t, !known && scope.calls == 0 && scope.keys == nil && scope.lengths == nil && scope.index == nil, "expired scope retained records or counted lookup")
 	btReservationsReleased(t, w.owner)
 }
 

@@ -2769,3 +2769,158 @@ func TestInitial148WriterRetirementV1(t *testing.T) {
 		})
 	}
 }
+
+// icbReplayEnvelopeV1 is the independent, coupled integer domain from RUB-1910.
+// Every product and sum is below 1000000000 on the literal domain (including
+// 16*17000000 and 2*68000157); subtraction requires 150<=n<=68000157.
+func icbReplayEnvelopeV1(n uint64) (b, e, m, w uint64) {
+	if n > 149 {
+		b = min(uint64(17000000), n-149, (68000157-n)/3)
+	}
+	e = min(uint64(414634), b/41)
+	witness := uint64(0)
+	if n > 149 {
+		witness = n - 149
+	}
+	m = 16777216 + n + 6*b
+	w = 16777216 + n + max(131072*min(uint64(1024), b/41)+4194304+6*b+witness+512*(witness/7227), 16*b)
+	return b, e, m, w
+}
+
+type icbReplayAmountsV1 struct {
+	q, bodyHeld, frozen, h, readback, walk, total uint64
+}
+
+// TestInitial148ReplayFitV1 proves a sufficient peak bound, not an attained
+// block maximum or the future replay-step precheck's implementation.
+func TestInitial148ReplayFitV1(t *testing.T) {
+	nativeAmounts := func(n, e uint64, r int, body uint8) icbReplayAmountsV1 {
+		// The 2 MiB floor also dominates 2*(65560+77), 2*(140+46),
+		// 296, 280 and 168. None of those fixed spans is dropped.
+		a := 140472 + 104*e
+		v := icbReplayAmountsV1{q: 424*uint64(r) + 2556501, frozen: uint64(r) * a, readback: 288440 + 104*e, walk: 147968}
+		switch body {
+		case 1:
+			v.q += n
+			v.h = max(uint64(2097152), n)
+		case 2:
+			v.bodyHeld = n
+			v.h = max(uint64(2097152), 2*n)
+		case 3:
+			v.h = 2097152
+		}
+		v.total = v.q + 344 + v.bodyHeld + v.frozen + max(v.h, uint64(131192)) + v.readback + v.walk
+		return v
+	}
+	for _, tc := range []struct {
+		name, diagnostic string
+		n, e, want       uint64
+		term             func(icbReplayAmountsV1) uint64
+	}{
+		{"native-both-frozen", "frozen descriptors", 17000175, 414634, 86524816, func(v icbReplayAmountsV1) uint64 { return v.frozen }},
+		{"native-h-floor", "native H floor", 0, 0, 2097152, func(v icbReplayAmountsV1) uint64 { return v.h }},
+		{"body2-backing", "body2 retained backing", 17000175, 414634, 17000175, func(v icbReplayAmountsV1) uint64 { return v.bodyHeld }},
+		{"writer-walk", "post-reserve writer walk", 17000175, 414634, 147968, func(v icbReplayAmountsV1) uint64 { return v.walk }},
+		{"readback-reserve", "future readback reserve", 17000175, 414634, 43410376, func(v icbReplayAmountsV1) uint64 { return v.readback }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.term(nativeAmounts(tc.n, tc.e, 2, 2))
+			logicalMDBXAssert(t, got == tc.want, "%s: got %d want %d", tc.diagnostic, got, tc.want)
+		})
+	}
+	t.Run("literal-boundaries", func(t *testing.T) { icbReplayLiteralBoundsV1(t, nativeAmounts) })
+	t.Run("caller-budget-contract", icbReplayCallerBudgetV1)
+	t.Run("domain", func(t *testing.T) { icbReplayScanV1(t, nativeAmounts) })
+}
+
+// icbReplayLiteralBoundsV1 exercises each independently owned finite term.
+func icbReplayLiteralBoundsV1(t *testing.T, native func(uint64, uint64, int, uint8) icbReplayAmountsV1) {
+	registry := DefaultSuiteRegistry()
+	params, present := registry.Lookup(1)
+	logicalMDBXAssert(t, present && len(registry.suites) == 1 && params == (SuiteParams{SuiteID: 1, PubkeyLen: 2592, SigLen: 4627, VerifyCost: 8, AlgName: "ML-DSA-87"}), "current canonical native profile changed; rebind replay proof")
+	_, hasDeployment := any(DefaultRotationProvider{}).(SimplicityDeploymentProvider)
+	logicalMDBXAssert(t, !hasDeployment, "current canonical deployment profile changed; rebind replay proof")
+	for _, n := range []uint64{0, 149, 150, 1048575, 1048576, 17000157, 17000175, 68000157} {
+		b, e, m, w := icbReplayEnvelopeV1(n)
+		logicalMDBXAssert(t, b <= 17000000 && e <= 414634 && m <= w && m == initial148RetainedTariffV1(n), "coupled endpoint n%d b%d e%d M%d W%d", n, b, e, m, w)
+	}
+	for _, e := range []uint64{0, 1, 414634} {
+		for _, body := range []uint8{1, 2, 3} {
+			v := native(150, e, 2, body)
+			logicalMDBXAssert(t, v.frozen == 280944+208*e && v.readback == 288440+104*e && v.walk == 147968, "literal native e%d body%d: %+v", e, body, v)
+			logicalMDBXAssert(t, v.h == 2097152 && v.total >= v.frozen+v.readback+v.walk, "small-n H floor body%d", body)
+		}
+	}
+	for _, k := range []uint64{0, 11, 10080} {
+		logicalMDBXAssert(t, 1024+18+8*k <= 81682, "current-profile Cfg K%d", k)
+	}
+	_, _, m, _ := icbReplayEnvelopeV1(17000175)
+	logicalMDBXAssert(t, m+native(17000175, 414634, 2, 2).total == 319418733, "native envelope literal maximum")
+}
+
+type icbReplayMaximumV1 struct {
+	value [5]uint64
+	at    [5]uint64
+}
+
+// icbReplayScanV1 evaluates every integer and all twelve declared shape cells.
+// The entry coordinate deliberately repeats the formula: both entry contracts
+// inherit one body-independent amount, with no count-based narrowing.
+func icbReplayScanV1(t *testing.T, native func(uint64, uint64, int, uint8) icbReplayAmountsV1) {
+	bodies := []uint8{1, 2, 3}
+	var maxima [12]icbReplayMaximumV1
+	var points uint64
+	for n := uint64(0); n <= 68000157; n++ {
+		points++
+		_, e, m, w := icbReplayEnvelopeV1(n)
+		phases := [5]uint64{2*n + 8388608, w + n + 81682 + 135192 + 48*e + 288440 + 104*e + 4824 + 8388608, m + 249*e + 201 + 2*n + 8388608, m + 36*e + 288440 + 104*e + 8388608 + 4824}
+		cell := 0
+		for range 2 {
+			for _, r := range []int{1, 2} {
+				for _, body := range bodies {
+					phases[4] = m + native(n, e, r, body).total + 8388608
+					icbReplayAccumulateV1(t, n, phases, &maxima[cell])
+					cell++
+				}
+			}
+		}
+	}
+	logicalMDBXAssert(t, points == 68000158, "Raw scan points: got %d want 68000158", points)
+	logicalMDBXAssert(t, 2*2*len(bodies) == 12, "scan shape cells: got %d want 12", 2*2*len(bodies))
+	for cell, peak := range maxima {
+		logicalMDBXAssert(t, peak.value[0] == 144388922 && peak.at[0] == 68000157, "inclusive endpoint cell%d: %+v", cell, peak)
+		t.Logf("conservative envelope entry=%s r=%d body=%d P/V/C/F3/J=%v n=%v; T400000000, not an attained-block peak", []string{"sequential", "queued"}[cell/6], cell%6/3+1, cell%3+1, peak.value, peak.at)
+	}
+}
+
+func icbReplayAccumulateV1(t *testing.T, n uint64, phases [5]uint64, peak *icbReplayMaximumV1) {
+	for i, upper := range [5]uint64{144388922, 394700644, 383410362, 202508005, 327807341} {
+		if phases[i] > upper || phases[i] > 400000000 || uint64(400000000) > 402653184 {
+			t.Fatalf("replay phase%d n%d demand%d upper%d", i, n, phases[i], upper)
+		}
+		if phases[i] > peak.value[i] {
+			peak.value[i], peak.at[i] = phases[i], n
+		}
+	}
+}
+
+// icbReplayCallerBudgetV1 pins the finite future consumer contract only. These
+// are not claims of RUB-1728 reservations or RUB-1850 production dispatch.
+func icbReplayCallerBudgetV1(t *testing.T) {
+	terms := []uint64{3 * 1048576, 65536, 8 * 10080, 3*48*16384 + 44*16384, 8192, 65536 + 2*65560 + 2*77}
+	var fixed uint64
+	for _, term := range terms {
+		fixed += term
+	}
+	logicalMDBXAssert(t, fixed == 6577098 && fixed < 8388608, "finite caller controls: %d", fixed)
+	for _, e := range []uint64{0, 1, 414634} {
+		undo := 128*(e+1) + 77*e + 44*e + 33 + 33
+		logicalMDBXAssert(t, undo == 249*e+194 && undo <= 249*e+201 && 36*e <= 14926824, "expected undo/key-only F3 E%d", e)
+	}
+	// Expected undo and the two complete comparison spans retire before F3;
+	// key-only Inputs and the F3 transient root retire before native writing.
+	// The phases above retain each owner's full demand until that boundary.
+	for _, n := range []uint64{150, 24847456, 68000157} {
+		logicalMDBXAssert(t, 2*n+8388608 <= 144388922, "complete comparison body spans n%d", n)
+	}
+}
