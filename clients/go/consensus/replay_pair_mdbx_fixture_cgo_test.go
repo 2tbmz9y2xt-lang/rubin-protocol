@@ -843,6 +843,8 @@ func TestReplayPairNativeCapacity(t *testing.T) {
 			})
 			logicalMDBXAssert(t, err == nil && got.Truth == 1 && got.Stage == 1 && got.Index == row.index && got.Role == row.role && mdbx.IsOperationReservationCapacity(got.Err), "native charge refusal retains raw role/index/account: %+v/%v", got, err)
 			btReservationsReleased(t, c.w.owner)
+			btfCached(t, c.w, btResult{truth: got.Truth, stage: got.Stage, index: got.Index, err: got.Err})
+			c.w.reopen(t)
 			btState(t, c.w, 1, mdbx.TreeEndpointV1{}, map[Outpoint]UtxoEntry{})
 			btState(t, c.w, 2, mdbx.TreeEndpointV1{}, map[Outpoint]UtxoEntry{})
 			logicalMDBXAssert(t, slices.EqualFunc(before, rtImage(t, c.w), bytes.Equal), "native capacity preserves every family count, role metadata and cursor")
