@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -624,4 +625,829 @@ func icbHistoryTerminalV1(t *testing.T, w *fgWorld, got btResult, truth mdbx.Com
 	}) == nil, "history terminal operation")
 	err := w.s.View(func(*mdbx.Reader) error { calls++; return nil })
 	logicalMDBXAssert(t, any(err) == any(got.err) && calls == 0, "history consumed View terminal")
+}
+
+type icbReplayFamilyV1 struct {
+	genesis PublishedGenesisContextV1
+	prefix  []icbHistoryBlockV1
+	block   icbHistoryBlockV1
+	old     map[Outpoint]UtxoEntry
+	inputs  []mdbx.TreeOutpointV1
+	target  mdbx.RecoveryTargetV1
+}
+
+// icbReplaySignV1 uses actual ML-DSA signatures with each input's own value.
+func icbReplaySignV1(t *testing.T, kp *MLDSA87Keypair, chain [32]byte, tx *Tx, values ...uint64) []byte {
+	t.Helper()
+	logicalMDBXAssert(t, len(values) == len(tx.Inputs), "replay signature value cardinality")
+	for i, value := range values {
+		digest, err := SighashV1DigestWithType(tx, uint32(i), value, chain, SIGHASH_ALL)
+		logicalMDBXAssert(t, err == nil, "replay sighash: %v", err)
+		sig, err := kp.SignDigest32(digest)
+		logicalMDBXAssert(t, err == nil, "replay real signature: %v", err)
+		tx.Witness[i] = WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp.PubkeyBytes(), Signature: append(sig, SIGHASH_ALL)}
+	}
+	return icbSignedRawV1(t, tx)
+}
+
+// icbReplayVaultCovenantV1 has a different owner and payout descriptor. All
+// 1024 whitelist entries are real, distinct, sorted and exclude the owner.
+func icbReplayVaultCovenantV1(t *testing.T, kp *MLDSA87Keypair, owner, payout []byte) []byte {
+	t.Helper()
+	x := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, owner))
+	y := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, payout))
+	white := [][32]byte{y}
+	for i := uint64(0); i < 1023; i++ {
+		white = append(white, sha3_256(binary.BigEndian.AppendUint64([]byte("replay-vault-destination"), i)))
+	}
+	slices.SortFunc(white, func(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) })
+	for i, hash := range white {
+		logicalMDBXAssert(t, hash != x && (i == 0 || hash != white[i-1]), "whitelist owner/duplicate at%d", i)
+	}
+	return encodeVaultCovenantData(x, 1, [][32]byte{sha3_256(kp.PubkeyBytes())}, white)
+}
+
+// icbReplayHistoryBlockV1 builds an independent post-state and mined header.
+// Anchor-only extensions reuse the immutable prior map and root.
+func icbReplayHistoryBlockV1(t *testing.T, g PublishedGenesisContextV1, previous icbHistoryBlockV1, txs [][]byte, payouts []testOutput) icbHistoryBlockV1 {
+	t.Helper()
+	h := previous.in.Height + 1
+	commit := initial148BlockWitnessCommit(t, txs...)
+	cb := coinbaseTxWithOutputs(uint32(h), append(payouts, testOutput{covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}))
+	all := append([][]byte{cb}, txs...)
+	rows, root := previous.rows, previous.root
+	if len(txs) != 0 || len(payouts) != 0 {
+		rows = icbHistoryRowsV1(t, previous.rows, h, all)
+		root = icbHistoryRootV1(rows)
+	}
+	raw := initial148BlockFrame(t, all, func(head *initial148BlockHead) {
+		head.parent, head.root, head.timestamp = previous.in.Endpoint.BlockHash, root, initial148GenesisTimestamp+121*h
+	})
+	hash, err := Initial148BlockHash(raw[:148])
+	logicalMDBXAssert(t, err == nil, "replay history header: %v", err)
+	endpoint := mdbx.TreeEndpointV1{Kind: 1, Height: h, BlockHash: hash}
+	binary.BigEndian.PutUint64(endpoint.CumulativeChainwork[32:], h+1)
+	generated, err := checkedAdvanceAlreadyGenerated(previous.in.Height, previous.in.AlreadyGenerated, previous.in.AlreadyGenerated.Big())
+	logicalMDBXAssert(t, err == nil, "replay generated h%d: %v", h, err)
+	times := make([]uint64, min(h, 11))
+	for i := range times {
+		times[i] = initial148GenesisTimestamp + 121*(h-uint64(len(times))+uint64(i))
+	}
+	in := initial148CompleteBlockInputV1{Raw: raw, Height: h, ParentHash: previous.in.Endpoint.BlockHash, ExpectedTarget: POW_LIMIT, ChainID: g.ChainID, DatabaseID: [32]byte{7}, Generation: 1, ParentTimestamps: times, AlreadyGenerated: generated, Parent: previous.in.Endpoint, Endpoint: endpoint, CapRegistry: &validatedLogicalStateCapRegistry{}, Registry: DefaultSuiteRegistry(), Rotation: icbFrozenV1(h)}
+	return icbHistoryBlockV1{in: in, rows: rows, root: root}
+}
+
+// icbReplayVaultBlockV1 constructs a reachable funding prefix: mature h1
+// funding, h101 split, at most 23 Vault creations per block, then the spend.
+// No codec-only or stored invalid transaction supplies the validated body.
+func icbReplayVaultBlockV1(t *testing.T, height uint64, pairs int) *icbReplayFamilyV1 {
+	t.Helper()
+	g := fgContext(t, initial148BlockGenesis(t))
+	kp := icbKeyV1(t)
+	owner, payout := p2pkCovenantDataForPubkey(kp.PubkeyBytes()), validP2PKCovenantData()
+	vault := icbReplayVaultCovenantV1(t, kp, owner, payout)
+	in, _ := icbGenesisInputV1(t, -1)
+	in.Raw, in.PublishedGenesis, in.ChainID, in.Registry = g.Published, g.Published, g.ChainID, DefaultSuiteRegistry()
+	rows := icbHistoryRowsV1(t, map[Outpoint]UtxoEntry{}, 0, [][]byte{g.Published[149:]})
+	previous := icbHistoryBlockV1{in: in, rows: rows, root: icbHistoryRootV1(rows)}
+	f := &icbReplayFamilyV1{genesis: g, prefix: []icbHistoryBlockV1{previous}}
+	var funding, split Outpoint
+	var spends [][]byte
+	for h := uint64(1); h < height; h++ {
+		var txs [][]byte
+		var payouts []testOutput
+		switch {
+		case h == 1:
+			payouts = []testOutput{{value: uint64(376 * pairs), covenantType: COV_TYPE_P2PK, covenantData: owner}}
+		case h == 101:
+			tx := inputViewTx(1, funding)
+			tx.Outputs = slices.Repeat([]TxOutput{{Value: 376, CovenantType: COV_TYPE_P2PK, CovenantData: owner}}, pairs)
+			txs = [][]byte{icbReplaySignV1(t, kp, g.ChainID, tx, uint64(376*pairs))}
+			split = Outpoint{Txid: testTxID(t, txs[0])}
+		case h >= 102 && h < 102+uint64((pairs+22)/23):
+			txs = icbReplayCreationsV1(t, kp, g.ChainID, split.Txid, int(h-102)*23, min(int(h-101)*23, pairs), owner, vault)
+			for _, raw := range txs {
+				id := testTxID(t, raw)
+				tx := inputViewTx(uint64(len(spends)+1), Outpoint{Txid: id}, Outpoint{Txid: id, Vout: 1})
+				outputCount := 375
+				tx.Outputs = slices.Repeat([]TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: payout}}, outputCount)
+				spends = append(spends, icbReplaySignV1(t, kp, g.ChainID, tx, 375, 1))
+			}
+		}
+		previous = icbReplayHistoryBlockV1(t, g, previous, txs, payouts)
+		if h == 1 {
+			parsed, err := ParseInitial148BlockBytes(previous.in.Raw)
+			logicalMDBXAssert(t, err == nil, "funding coinbase: %v", err)
+			funding = Outpoint{Txid: parsed.Txids[0]}
+		}
+		f.prefix = append(f.prefix, previous)
+	}
+	f.old = previous.rows
+	f.block = icbReplayHistoryBlockV1(t, g, previous, spends, nil)
+	f.inputs = icbReplayInputsV1(t, f.block.in.Raw, f.old)
+	previous = f.block
+	for previous.in.Height < 15840 {
+		previous = icbReplayHistoryBlockV1(t, g, previous, nil, nil)
+	}
+	f.target = mdbx.RecoveryTargetV1{ChainID: g.ChainID, GenesisHash: g.GenesisHash, TipHash: previous.in.Endpoint.BlockHash, TipHeight: 15840, CumulativeChainwork: previous.in.Endpoint.CumulativeChainwork}
+	return f
+}
+
+func icbReplayCreationsV1(t *testing.T, kp *MLDSA87Keypair, chain [32]byte, split [32]byte, first, last int, owner, vault []byte) [][]byte {
+	t.Helper()
+	var txs [][]byte
+	for i := first; i < last; i++ {
+		tx := inputViewTx(uint64(i+2), Outpoint{Txid: split, Vout: uint32(i)})
+		tx.Outputs = []TxOutput{{Value: 375, CovenantType: COV_TYPE_VAULT, CovenantData: vault}, {Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: owner}}
+		txs = append(txs, icbReplaySignV1(t, kp, chain, tx, 376))
+	}
+	return txs
+}
+
+// icbReplayInputsV1 independently selects only ORIGINAL OLD spent keys, never
+// values or a caller-provided digest, for the protected LAG derivation.
+func icbReplayInputsV1(t *testing.T, raw []byte, old map[Outpoint]UtxoEntry) []mdbx.TreeOutpointV1 {
+	t.Helper()
+	p, err := ParseInitial148BlockBytes(raw)
+	logicalMDBXAssert(t, err == nil, "F3 key framing: %v", err)
+	var keys []mdbx.TreeOutpointV1
+	for _, tx := range p.Txs[1:] {
+		for _, input := range tx.Inputs {
+			key := Outpoint{Txid: input.PrevTxid, Vout: input.PrevVout}
+			if _, present := old[key]; present {
+				keys = append(keys, mdbx.TreeOutpointV1{Txid: key.Txid, Vout: key.Vout})
+			}
+		}
+	}
+	slices.SortFunc(keys, func(a, b mdbx.TreeOutpointV1) int {
+		if c := bytes.Compare(a.Txid[:], b.Txid[:]); c != 0 {
+			return c
+		}
+		return int(a.Vout) - int(b.Vout)
+	})
+	exact := make([]mdbx.TreeOutpointV1, len(keys))
+	copy(exact, keys)
+	return exact
+}
+
+type icbReplayJoinV1 struct {
+	body       uint8
+	paired     bool
+	currentCap int // 1=exact 4824-byte producer acquisition, 2=one byte short.
+	envelope   *mdbx.TreeAuthorityV1
+	inputs     []mdbx.TreeOutpointV1 // Independent expected keys, never the operation-owned F3 backing.
+	observed   [2]*btObserved
+	trace      []uint64
+	owner      *mdbx.OperationReservationOwner
+	sealed     uint64
+	readback   bool
+	lateGrow   bool
+	ownerLost  bool
+}
+
+// icbReplayF3V1 derives LAG from its own protected OLD and own original keys.
+// Its transient source/Inputs/root workspace ends before native writing.
+func icbReplayF3V1(t *testing.T, r *mdbx.Reader, a *mdbx.OperationAccount, req blockTreeRequestV1, raw []byte, parent mdbx.TreeEndpointV1, spent *blockSpentInputSource, expected []mdbx.TreeOutpointV1, want [32]byte) error {
+	t.Helper()
+	req.Generation, req.Kind, req.Undo = 2, mdbx.TreeKindDirectApplyV1, mdbx.UndoTransientV1
+	req.BodyKind, req.Raw = 1, raw
+	var source blockTreeSourceV1
+	effect, err := prepareBlockTreeEffectV1(&source, r, a, req)
+	if err != nil {
+		return err
+	}
+	var root [32]byte
+	err = a.WithReservation(36*uint64(len(spent.spent)), func() error {
+		// Acquire the exact operation-owned backing only here. The earlier
+		// expected fixture keys are an independent oracle, not this owner.
+		inputs := make([]mdbx.TreeOutpointV1, 0, len(spent.spent))
+		for item, have := spent.next(); have; item, have = spent.next() {
+			key := item.outpoint
+			_, present, readErr := r.Get(mdbx.TreeSchemaV1DBIs()[1], btUTXOKey(2, key))
+			if readErr != nil {
+				return readErr
+			}
+			logicalMDBXAssert(t, present, "F3 key must belong to protected LAG OLD: %+v", key)
+			inputs = append(inputs, mdbx.TreeOutpointV1{Txid: key.Txid, Vout: key.Vout})
+		}
+		slices.SortFunc(inputs, func(a, b mdbx.TreeOutpointV1) int {
+			if c := bytes.Compare(a.Txid[:], b.Txid[:]); c != 0 {
+				return c
+			}
+			return int(a.Vout) - int(b.Vout)
+		})
+		logicalMDBXAssert(t, len(inputs) == cap(inputs) && slices.Equal(inputs, expected), "protected LAG exact-capacity original key census")
+		if len(inputs) != 0 {
+			logicalMDBXAssert(t, &inputs[0] != &expected[0], "F3 operation-owned keys must be distinct from fixture oracle backing")
+		}
+		var deriveErr error
+		root, deriveErr = r.DeriveTreeRootV1(a, mdbx.TreeRootReadV1{Primitive: effect.Primitive, Parent: parent, Inputs: inputs})
+		return deriveErr
+	})
+	if err == nil {
+		logicalMDBXAssert(t, root == want && &source.Raw[0] == &raw[0], "protected LAG F3 root/backing got%x want%x", root, want)
+	}
+	return err
+}
+
+// icbReplayOperationV1 is a test-owned F2/F3 consumer. The validator's
+// DirectApply effect is never committed; CURRENT gets a separate producer.
+func icbReplayOperationV1(t *testing.T, r *mdbx.Reader, a *mdbx.OperationAccount, result *initial148CompleteBlockResultV1, block icbHistoryBlockV1, join *icbReplayJoinV1) (mdbx.TreeOperationV1, error) {
+	t.Helper()
+	generated := initial148PendingGeneratedV1(block.in)
+	req := blockTreeRequestV1{DatabaseID: [32]byte{7}, Generation: 1, Block: block.in.Endpoint.BlockHash, Height: block.in.Height, HeaderBytes: 148, BodyKind: join.body, Raw: block.in.Raw, Generated: &generated, Direction: mdbx.TreeForwardV1, Undo: mdbx.UndoTransientV1, Endpoint: block.in.Endpoint}
+	req.Kind = mdbx.TreeKindReplayNextV1
+	if req.BodyKind == 2 {
+		req.Raw = nil
+	}
+	var source blockTreeSourceV1
+	var current blockTreeEffectV1
+	prepare := func() error {
+		var err error
+		current, err = prepareBlockTreeEffectV1(&source, r, a, req)
+		return err
+	}
+	var err error
+	if join.currentCap != 0 {
+		filler := uint64(402653184) - mdbx.FixtureReservationLive(join.owner) - 4824 + uint64(join.currentCap-1)
+		err = a.WithReservation(filler, prepare)
+	} else {
+		err = prepare()
+	}
+	if err != nil {
+		return mdbx.TreeOperationV1{}, err
+	}
+	logicalMDBXAssert(t, current.Primitive.Kind == mdbx.TreeKindReplayNextV1, "committing CURRENT kind must be ReplayNext")
+	logicalMDBXAssert(t, result.effect.Primitive.Kind == mdbx.TreeKindDirectApplyV1 && current.Primitive.Source != result.effect.Primitive.Source, "F2 must be a separate producer")
+	logicalMDBXAssert(t, source.coverage.BlockMeta == result.effect.Primitive.Coverage.BlockMeta, "separate CURRENT full metadata")
+	if join.body == 2 {
+		logicalMDBXAssert(t, source.Raw == nil && source.coverage.CurrentBody == nil, "stored body source must not invent Raw backing")
+	} else {
+		logicalMDBXAssert(t, &source.Raw[0] == &block.in.Raw[0], "CURRENT borrowed immutable Raw/backing")
+		if join.body == 1 {
+			logicalMDBXAssert(t, &current.CurrentBody.Literal[0] == &block.in.Raw[0], "body1 Pair must borrow the original Raw before native ownership")
+		} else {
+			logicalMDBXAssert(t, current.CurrentBody.AfterKind == 0 && current.CurrentBody.Literal == nil, "held body3 must not emit a stored body")
+		}
+	}
+	op := mdbx.TreeOperationV1{Primitives: []mdbx.TreePrimitiveV1{current.Primitive}}
+	op.Pair.Mutations = append(op.Pair.Mutations, current.Index[:]...)
+	if current.CurrentBody.AfterKind != 0 {
+		op.Pair.Mutations = append(op.Pair.Mutations, current.CurrentBody)
+	}
+	join.observed[0].source = &source
+	op.Primitives[0].Source = join.observed[0]
+	if join.paired {
+		req.Generation, req.Kind = 2, mdbx.TreeKindLagForwardV1
+		lagSource := new(blockTreeSourceV1)
+		lag, lagErr := prepareBlockTreeEffectV1(lagSource, r, a, req)
+		if lagErr != nil {
+			return mdbx.TreeOperationV1{}, lagErr
+		}
+		join.observed[1].source = lagSource
+		lag.Primitive.Source = join.observed[1]
+		op.Primitives = append(op.Primitives, lag.Primitive)
+		op.Pair.Mutations = append(op.Pair.Mutations, lag.Index[:]...)
+		logicalMDBXAssert(t, lagSource.coverage.BlockMeta == source.coverage.BlockMeta && lag.Primitive.Generation != current.Primitive.Generation, "independent role metadata/identity")
+		if join.body != 2 {
+			logicalMDBXAssert(t, &lagSource.Raw[0] == &source.Raw[0] && &source.Raw[0] == &block.in.Raw[0], "both roles must borrow identical immutable Raw backing")
+		}
+		if err := icbReplayF3V1(t, r, a, req, block.in.Raw, block.in.Parent, result.transition.spentInputs, join.inputs, block.root); err != nil {
+			return mdbx.TreeOperationV1{}, err
+		}
+		join.inputs = nil
+	}
+	return icbReplayFinishPlanV1(t, r, op, block, join)
+}
+
+func icbReplayFinishPlanV1(t *testing.T, r *mdbx.Reader, op mdbx.TreeOperationV1, block icbHistoryBlockV1, join *icbReplayJoinV1) (mdbx.TreeOperationV1, error) {
+	t.Helper()
+	if join.paired {
+		logicalMDBXAssert(t, len(op.Primitives) == 2, "pair primitive count: got %d want 2", len(op.Primitives))
+	}
+	_, present, err := r.Get(mdbx.TreeSchemaV1DBIs()[3], block.in.Endpoint.BlockHash[:])
+	if err != nil {
+		return mdbx.TreeOperationV1{}, err
+	}
+	if !present {
+		op.Pair.Mutations = append(op.Pair.Mutations, btMutation(3, block.in.Endpoint.BlockHash[:], block.in.Raw[:148]))
+	}
+	if join.envelope != nil {
+		planned := *join.envelope
+		replay := *planned.Authority.Replay
+		replay.Cursor = mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorAppliedV1, Height: block.in.Height, BlockHash: block.in.Endpoint.BlockHash}
+		planned.Authority.Replay = &replay
+		encoded, encodeErr := planned.Encode()
+		logicalMDBXAssert(t, encodeErr == nil, "planned replay cursor: %v", encodeErr)
+		mutation := btMutation(0, []byte{2}, encoded)
+		mutation.BeforePresent = true
+		op.Pair.Mutations = append(op.Pair.Mutations, mutation)
+		op.Pair.Consulted = []mdbx.ConsultedRow{{DBI: mdbx.TreeSchemaV1DBIs()[0], Key: []byte{2}}}
+		op.Pair.ContextConsulted = &mdbx.CanonicalContextWindowV1{Generation: 1, FirstHeight: block.in.Height - 11, Count: 11}
+	}
+	btSort(op.Pair.Mutations)
+	return op, nil
+}
+
+// icbReplayApplyV1 retains actual W then M on one account. The fixed 8 MiB
+// hold is an explicitly labelled future caller-budget control, not a precheck
+// or a grant-consumption implementation. Native/source charges remain real.
+func icbReplayApplyV1(t *testing.T, w *fgWorld, block icbHistoryBlockV1, workers int, join *icbReplayJoinV1) (btResult, initial148CompleteBlockOutcomeV1) {
+	t.Helper()
+	// These independent fixture observations are outside the operation's
+	// consumers; only the scalar census and digest survive into this frame.
+	expectedEvents := icbReplayEventsV1(t, block.in.Raw)
+	beforeHash := sha3_256(block.in.Raw)
+	var got btResult
+	var outcome initial148CompleteBlockOutcomeV1
+	join.owner = w.owner
+	if !join.paired {
+		join.inputs = nil
+	}
+	for i := range join.observed {
+		join.observed[i] = &btObserved{t: t}
+		join.observed[i].before = func(position mdbx.TreePositionV1, _ *mdbx.Reader, _ *mdbx.TreeDeltaSinkV1) error {
+			held := mdbx.FixtureReservationLive(w.owner)
+			join.trace = append(join.trace, held-2653184)
+			join.ownerLost = join.ownerLost || held < icbMV1(uint64(len(block.in.Raw)))+8388608+2653184
+			join.ownerLost = join.ownerLost || join.paired && join.inputs != nil
+			if position == mdbx.TreeReadbackV1 {
+				if !join.readback {
+					join.sealed, join.readback = held, true
+				}
+				join.lateGrow = join.lateGrow || held != join.sealed
+			}
+			return nil
+		}
+	}
+	err := w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+		// Artificial headroom leaves exactly T for every actual acquisition,
+		// including acquisitions between observer samples. It is neither
+		// operation data nor the future single-precheck consumption mechanism.
+		return a.WithReservation(2653184, func() error {
+			return a.WithReservation(8388608, func() error {
+				var outer error
+				outcome, outer = icbEntryWorkersV1(workers)(a, block.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+					got.truth, got.stage, got.index, got.err = w.s.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+						result, validationErr := validate(r)
+						if validationErr != nil {
+							return mdbx.TreeOperationV1{}, validationErr
+						}
+						logicalMDBXAssert(t, result != nil && mdbx.FixtureReservationLive(w.owner) == icbMV1(uint64(len(block.in.Raw)))+8388608+2653184, "successful validation must retain M plus caller-budget control and artificial headroom")
+						join.trace = append(join.trace, mdbx.FixtureReservationLive(w.owner)-2653184)
+						return icbReplayOperationV1(t, r, a, result, block, join)
+					})
+					return got.err
+				})
+				logicalMDBXAssert(t, any(outer) == any(got.err), "native/outer cause identity: %v/%v", outer, got.err)
+				return nil
+			})
+		})
+	})
+	logicalMDBXAssert(t, err == nil && mdbx.FixtureReservationLive(w.owner) == 0, "one-account final cleanup: %v", err)
+	for _, held := range join.trace {
+		logicalMDBXAssert(t, held <= 400000000, "actual source/retained observation %d exceeds T", held)
+	}
+	btReservationsReleased(t, w.owner)
+	logicalMDBXAssert(t, sha3_256(block.in.Raw) == beforeHash, "immutable Raw changed through final native consumer")
+	for _, observed := range join.observed {
+		if observed.source != nil {
+			logicalMDBXAssert(t, uint64(observed.source.coverage.BlockMeta.EventCount) == expectedEvents, "full real source EventCount: got%d want%d", observed.source.coverage.BlockMeta.EventCount, expectedEvents)
+		}
+	}
+	return got, outcome
+}
+
+// icbReplayWorldV1 installs the real signed prefix in both generations. Setup
+// is not a surrogate validator: each complete block passes the real entry and
+// LAG's separate protected derivation before its native operation.
+func icbReplayWorldV1(t *testing.T, f *icbReplayFamilyV1) *fgWorld {
+	t.Helper()
+	// Persist the larger test database geometry at creation; OpenTreeV1
+	// correctly requires the exact persisted ConfigV1 on every reopen.
+	base := &btWorld{path: filepath.Join(t.TempDir(), "replay"), cfg: mdbx.ConfigV1{Lower: 1 << 20, Now: 2 << 20, Upper: 1 << 30, Growth: 1 << 20, Shrink: 2 << 20, PageSize: 4096, MaxReaders: 492}}
+	var err error
+	base.s, err = mdbx.CreateTreeV1(base.path, base.cfg, [32]byte{7})
+	logicalMDBXAssert(t, err == nil, "create replay fixture: %v", err)
+	base.owner, err = mdbx.NewOperationReservationOwner(805306368)
+	logicalMDBXAssert(t, err == nil, "replay reservation owner: %v", err)
+	t.Cleanup(func() { _ = base.s.Close() })
+	w := &fgWorld{btWorld: base, database: [32]byte{7}, current: 1, lag: 2, raw: f.genesis.Published, genesis: f.genesis}
+	w.seedAuthority(t, mdbx.TreeAuthorityV1{Authority: mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 5, Phase: 1, Lifecycle: 1}, LagGenerationID: 2})
+	for _, generation := range []uint64{1, 2} {
+		w.seed(t, 0, btMeta(0x10, generation), mdbx.LogicalCounterValue(0, 0))
+		w.seedBinding(t, generation, w.emptyBinding())
+	}
+	old := map[Outpoint]UtxoEntry{}
+	for _, block := range f.prefix {
+		join := &icbReplayJoinV1{body: 1, paired: true, inputs: icbReplayInputsV1(t, block.in.Raw, old)}
+		got, outcome := icbReplayApplyV1(t, w, block, -1, join)
+		got.want(t, 2, 3, -1)
+		logicalMDBXAssert(t, got.err == nil && outcome.required.derived && outcome.required.root == block.root, "signed setup h%d: %v", block.in.Height, got.err)
+		old = block.rows
+	}
+	icbReplayStateV1(t, w, 1, f.prefix[len(f.prefix)-1], nil)
+	icbReplayStateV1(t, w, 2, f.prefix[len(f.prefix)-1], nil)
+	return w
+}
+
+func icbReplayAuthorityV1(t *testing.T, w *fgWorld, f *icbReplayFamilyV1, profile mdbx.StorageProfileV1) mdbx.TreeAuthorityV1 {
+	t.Helper()
+	parent := f.block.in.Parent
+	a := mdbx.TreeAuthorityV1{Authority: mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, ActiveGenerationID: 3, NextGenerationID: 5, Phase: mdbx.StoragePhaseReplayV1, Lifecycle: mdbx.StorageLifecycleRecoveryRequiredV1, Replay: &mdbx.ReplayV1{TargetProfile: profile, TargetGenerationID: 1, Target: f.target, Cursor: mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorAppliedV1, Height: parent.Height, BlockHash: parent.BlockHash}}}, LagGenerationID: 4, TargetLagGenerationID: 2, SourceKind: mdbx.TreeSourceGenesisReplayV1}
+	w.seedAuthority(t, a)
+	return a
+}
+
+// icbReplayStateV1 compares every expected UTXO, every original spend's
+// absence, exact counters and the independently built canonical root/endpoint.
+func icbReplayStateV1(t *testing.T, w *fgWorld, generation uint64, block icbHistoryBlockV1, spent []mdbx.TreeOutpointV1) {
+	t.Helper()
+	err := w.s.View(func(r *mdbx.Reader) error {
+		var total uint64
+		for key, row := range block.rows {
+			want := btValue(btFrame(row.Value, row.CovenantType, row.CovenantData), row.CreationHeight, row.CreatedByCoinbase)
+			total += 36 + uint64(len(want))
+			value, present, err := r.Get(mdbx.TreeSchemaV1DBIs()[1], btUTXOKey(generation, key))
+			logicalMDBXAssert(t, err == nil && present && bytes.Equal(value, want), "generation%d full UTXO %+v: %v", generation, key, err)
+		}
+		for _, key := range spent {
+			_, present, err := r.Get(mdbx.TreeSchemaV1DBIs()[1], btUTXOKey(generation, Outpoint{Txid: key.Txid, Vout: key.Vout}))
+			logicalMDBXAssert(t, err == nil && !present, "generation%d spent row retained %+v: %v", generation, key, err)
+		}
+		value, present, err := r.Get(mdbx.TreeSchemaV1DBIs()[0], btMeta(0x10, generation))
+		logicalMDBXAssert(t, err == nil && present && bytes.Equal(value, mdbx.LogicalCounterValue(total, uint64(len(block.rows)))), "generation%d exact counters: %v", generation, err)
+		root, present, err := r.ReadTreeRootBindingV1(generation)
+		logicalMDBXAssert(t, err == nil && present && root.RootDigest == block.root && root.Endpoint == block.in.Endpoint && root.ChainID == w.genesis.ChainID && root.GenesisHash == w.genesis.GenesisHash, "generation%d independent root/endpoint/identity: %+v/%v", generation, root, err)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "complete replay state: %v", err)
+}
+
+// icbReplayLagImageV1 takes independent byte snapshots of every LAG-owned
+// UTXO/index/owner/node and both metadata rows, with real paged reads.
+func icbReplayLagImageV1(t *testing.T, w *fgWorld) []btfRow {
+	t.Helper()
+	var rows []btfRow
+	err := w.s.View(func(r *mdbx.Reader) error {
+		for _, tag := range []byte{0x10, 0x11} {
+			key := btMeta(tag, 2)
+			value, present, err := r.Get(mdbx.TreeSchemaV1DBIs()[0], key)
+			logicalMDBXAssert(t, err == nil && present, "LAG metadata snapshot: %v", err)
+			rows = append(rows, btfRow{0, key, value})
+		}
+		for _, rank := range []uint8{1, 2, 7, 8} {
+			var after []byte
+			for {
+				page, err := r.PrefixPage(mdbx.TreeSchemaV1DBIs()[rank], binary.BigEndian.AppendUint64(nil, 2), after, 1440, 1<<20)
+				if err != nil {
+					return err
+				}
+				for _, row := range page.Rows {
+					rows = append(rows, btfRow{rank, row.Key, row.Value})
+				}
+				if page.Stop == mdbx.PrefixPageExhausted {
+					break
+				}
+				logicalMDBXAssert(t, len(page.Rows) != 0, "LAG snapshot page made no progress")
+				after = page.Rows[len(page.Rows)-1].Key
+			}
+		}
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "complete LAG snapshot: %v", err)
+	return rows
+}
+
+func icbReplayWantLagImageV1(t *testing.T, w *fgWorld, before []btfRow) {
+	t.Helper()
+	after := icbReplayLagImageV1(t, w)
+	logicalMDBXAssert(t, len(before) == len(after), "CURRENT-alone LAG row cardinality %d/%d", len(before), len(after))
+	for i := range before {
+		logicalMDBXAssert(t, before[i].rank == after[i].rank && bytes.Equal(before[i].key, after[i].key) && bytes.Equal(before[i].value, after[i].value), "CURRENT-alone changed LAG bytes row%d", i)
+	}
+}
+
+// icbReplayFollowingV1 distinguishes a released account and usable reopened
+// owner from a final-image-only assertion.
+func icbReplayFollowingV1(t *testing.T, w *fgWorld) {
+	t.Helper()
+	err := w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+		truth, stage, index, err := w.s.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+			value, present, readErr := r.Get(mdbx.TreeSchemaV1DBIs()[0], []byte{2})
+			if readErr != nil {
+				return mdbx.TreeOperationV1{}, readErr
+			}
+			logicalMDBXAssert(t, present, "next operation requires the actual authority owner")
+			mutation := btMutation(0, []byte{2}, value)
+			mutation.BeforePresent = true
+			return mdbx.TreeOperationV1{Pair: mdbx.TreePairV1{Mutations: []mdbx.Mutation{mutation}}}, nil
+		})
+		logicalMDBXAssert(t, err == nil && truth == 2 && stage == 3 && index == -1, "next legal native operation: %d/%d/%d/%v", truth, stage, index, err)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "next legal account: %v", err)
+	btReservationsReleased(t, w.owner)
+}
+
+func icbReplayMetadataV1(t *testing.T, f *icbReplayFamilyV1) {
+	t.Helper()
+	logicalMDBXAssert(t, len(f.block.in.Raw) == 24847456, "vault800 Raw: got %d want 24847456", len(f.block.in.Raw))
+	summary, err := ValidateInitial148BlockSteps1To12(f.block.in.Raw, f.block.in.ParentHash, POW_LIMIT, f.block.in.Height, f.block.in.ParentTimestamps)
+	logicalMDBXAssert(t, err == nil && summary.TxCount == 801 && summary.SumWeight == 64707614, "vault800 TxCount/weight: %+v/%v", summary, err)
+	logicalMDBXAssert(t, len(f.inputs) == 1600 && len(f.block.rows) == 300001 && len(f.old) == 1601, "vault800 full event cardinality: %d/%d/%d", len(f.inputs), len(f.block.rows), len(f.old))
+	logicalMDBXAssert(t, icbReplayEventsV1(t, f.block.in.Raw) == 301600, "vault800 EventCount must be 301600")
+	logicalMDBXAssert(t, icbReplayLogicalBytesV1(f.block.rows)-icbReplayLogicalBytesV1(f.old) == 313600, "vault800 growth must be 313600")
+	logicalMDBXAssert(t, icbHistoryRootV1(f.block.rows) == f.block.root && bytes.Equal(f.block.in.Raw[108:140], f.block.root[:]), "vault800 independent canonical post-root")
+}
+
+func icbReplayEventsV1(t *testing.T, raw []byte) uint64 {
+	t.Helper()
+	parsed, err := ParseInitial148BlockBytes(raw)
+	logicalMDBXAssert(t, err == nil, "independent event census: %v", err)
+	var events uint64
+	for i, tx := range parsed.Txs {
+		if i != 0 {
+			events += uint64(len(tx.Inputs))
+		}
+		for _, out := range tx.Outputs {
+			if out.CovenantType != COV_TYPE_ANCHOR && out.CovenantType != COV_TYPE_DA_COMMIT {
+				events++
+			}
+		}
+	}
+	return events
+}
+
+func icbReplayLogicalBytesV1(rows map[Outpoint]UtxoEntry) uint64 {
+	var total uint64
+	for _, row := range rows {
+		total += 36 + uint64(len(btValue(btFrame(row.Value, row.CovenantType, row.CovenantData), row.CreationHeight, row.CreatedByCoinbase)))
+	}
+	return total
+}
+
+// TestInitial148ReplayLargeV1 joins the actual large family through both
+// validators, separate F2 and protected F3, selected native writer/readback.
+func TestInitial148ReplayLargeV1(t *testing.T) {
+	families := map[uint64]*icbReplayFamilyV1{}
+	load := func(t *testing.T, height uint64) *icbReplayFamilyV1 {
+		if families[height] == nil {
+			families[height] = icbReplayVaultBlockV1(t, height, 800)
+		}
+		return families[height]
+	}
+	t.Run("metadata", func(t *testing.T) { icbReplayMetadataV1(t, load(t, 200)) })
+	for _, tc := range []struct {
+		name    string
+		height  uint64
+		workers int
+		paired  bool
+	}{
+		{"pair-sequential", 200, -1, true}, {"pair-queued", 200, 4, true},
+		{"current-sequential", 721, -1, false}, {"current-queued", 721, 4, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := load(t, tc.height)
+			icbReplayMetadataV1(t, f)
+			w := icbReplayWorldV1(t, f)
+			authority := icbReplayAuthorityV1(t, w, f, mdbx.StorageProfileArchiveV1)
+			var lagBefore []btfRow
+			if !tc.paired {
+				lagBefore = icbReplayLagImageV1(t, w)
+			}
+			join := &icbReplayJoinV1{body: 1, paired: tc.paired, envelope: &authority, inputs: f.inputs}
+			var got btResult
+			var outcome initial148CompleteBlockOutcomeV1
+			var evidence mdbx.SelectedDamageEvidence
+			var fixtureErr error
+			counts, observeErr := mdbx.FixturePairReadObservation(w.s, func(uint32) {
+				if join.readback && mdbx.FixtureReservationLive(w.owner) != join.sealed {
+					join.lateGrow = true
+				}
+			}, func() {
+				evidence, fixtureErr = mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageCommitNew, 0, btMeta(0x11, 1), func() { got, outcome = icbReplayApplyV1(t, w, f.block, tc.workers, join) })
+			})
+			logicalMDBXAssert(t, observeErr == nil && fixtureErr == nil && evidence.Commits == 1 && evidence.BeginRead == 1 && counts.Comparisons != 0, "large complete crossing: %+v/%+v/%v/%v", counts, evidence, observeErr, fixtureErr)
+			icbReplayCrossedV1(t, w, got, 2, false)
+			logicalMDBXAssert(t, outcome.required.derived && outcome.required.root == f.block.root && outcome.validationErr == nil, "large validation root: %+v", outcome)
+			icbReplaySourceCallsV1(t, join, [3]int{0, 1, 1})
+			w.reopen(t)
+			icbReplayStateV1(t, w, 1, f.block, f.inputs)
+			if tc.paired {
+				icbReplayStateV1(t, w, 2, f.block, f.inputs)
+			} else {
+				icbReplayWantLagImageV1(t, w, lagBefore)
+			}
+			icbReplayCursorV1(t, w, f.block.in.Endpoint)
+			icbReplayFollowingV1(t, w)
+			t.Logf("real Vault800 h%d Raw24847456 E301600 weight64707614 growth313600 observed grants=%v; conservative T400000000", tc.height, join.trace)
+		})
+	}
+}
+
+func icbReplaySourceCallsV1(t *testing.T, join *icbReplayJoinV1, want [3]int) {
+	t.Helper()
+	roles := 1
+	if join.paired {
+		roles = 2
+		logicalMDBXAssert(t, join.inputs == nil, "F3 Inputs must retire before writing")
+	}
+	for i, source := range join.observed[:roles] {
+		logicalMDBXAssert(t, source.calls == want, "role%d exact writer/readback positions: got%v want%v", i, source.calls, want)
+	}
+	logicalMDBXAssert(t, !join.lateGrow, "strict readback must not grow the carried account")
+	logicalMDBXAssert(t, !join.ownerLost, "CURRENT/M/Raw or F3 retirement owner lost before last consumer")
+}
+
+func icbReplayCursorV1(t *testing.T, w *fgWorld, endpoint mdbx.TreeEndpointV1) {
+	t.Helper()
+	a := rtEnvelope(t, w.btWorld)
+	logicalMDBXAssert(t, a.Authority.Replay != nil && a.Authority.Replay.Cursor == (mdbx.ReplayCursorV1{Kind: 2, Height: endpoint.Height, BlockHash: endpoint.BlockHash}), "cursor must advance once with complete NEW: %+v", a.Authority.Replay)
+}
+
+// icbReplayCrossedV1 preserves native cause/truth and consumed disposition;
+// complete durable observations and a legal next operation follow reopening.
+func icbReplayCrossedV1(t *testing.T, w *fgWorld, got btResult, truth mdbx.CommitTruth, unreadable bool) {
+	t.Helper()
+	got.want(t, truth, 3, -1)
+	ce, ok := got.err.(*mdbx.CommitError)
+	logicalMDBXAssert(t, ok && ce.Truth == truth && (ce.ReadbackCause != nil) == unreadable, "exact crossed cause/truth: %v", got.err)
+	engine, ok := ce.Cause.(*mdbx.EngineError)
+	logicalMDBXAssert(t, ok && engine.Class == mdbx.EngineCapacity && engine.Operation == "update" && engine.Code == 28 && engine.Diagnostic == "error 28" && engine.Cause == nil, "original native commit cause: %v", ce.Cause)
+	if unreadable {
+		var read *mdbx.EngineError
+		logicalMDBXAssert(t, errors.As(ce.ReadbackCause, &read) && read.Class == mdbx.EngineIO && read.Code == 5 && read.Diagnostic == "error 5", "readback original unavailable cause: %v", ce.ReadbackCause)
+	}
+	icbHistoryTerminalV1(t, w, got, truth)
+}
+
+// TestInitial148ReplayPairV1 retains the exact M1/M2 local mutation owners and
+// exercises stored/held body representatives at the real replay boundary.
+func TestInitial148ReplayPairV1(t *testing.T) {
+	families := map[uint64]*icbReplayFamilyV1{}
+	load := func(t *testing.T, h uint64) *icbReplayFamilyV1 {
+		if families[h] == nil {
+			families[h] = icbReplayVaultBlockV1(t, h, 1)
+		}
+		return families[h]
+	}
+	for _, name := range []string{"f2-current-kind", "pair-shape"} {
+		t.Run(name, func(t *testing.T) {
+			f := load(t, 200)
+			icbReplaySmallSuccessV1(t, f, -1, 1, true)
+		})
+	}
+	for _, workers := range []int{-1, 4} {
+		for _, tc := range []struct {
+			name   string
+			h      uint64
+			body   uint8
+			paired bool
+		}{
+			{"pair-body2", 200, 2, true}, {"pair-body3", 200, 3, true},
+			{"pair-at-boundary-body1", 720, 1, true},
+			{"current-body2", 721, 2, false},
+		} {
+			t.Run(fmt.Sprintf("%s/workers%d", tc.name, workers), func(t *testing.T) {
+				icbReplaySmallSuccessV1(t, load(t, tc.h), workers, tc.body, tc.paired)
+			})
+		}
+	}
+	// For H15840 PRUNED, L_body=b_target+1=721. A replay CURRENT
+	// alone has h>=721, so body3 is unreachable; its numeric cell is retained.
+	t.Log("CURRENT-alone BodyKind3: codec-only/unreachable replay cell; numeric full-domain evidence is TestInitial148ReplayFitV1")
+}
+
+func icbReplaySmallSuccessV1(t *testing.T, f *icbReplayFamilyV1, workers int, body uint8, paired bool) {
+	t.Helper()
+	w := icbReplayWorldV1(t, f)
+	profile := mdbx.StorageProfileArchiveV1
+	if body == 3 {
+		profile = mdbx.StorageProfilePrunedV1
+	}
+	a := icbReplayAuthorityV1(t, w, f, profile)
+	icbReplayBodyPreconditionV1(t, w, f, body)
+	before := icbReplayLagImageV1(t, w)
+	join := &icbReplayJoinV1{body: body, paired: paired, envelope: &a, inputs: f.inputs}
+	got, outcome := icbReplayApplyV1(t, w, f.block, workers, join)
+	got.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, got.err == nil && outcome.required.derived && outcome.required.root == f.block.root, "real replay body%d: %v", body, got.err)
+	icbReplaySourceCallsV1(t, join, [3]int{0, 1, 0})
+	w.reopen(t)
+	icbReplayStateV1(t, w, 1, f.block, f.inputs)
+	if paired {
+		icbReplayStateV1(t, w, 2, f.block, f.inputs)
+	} else {
+		icbReplayWantLagImageV1(t, w, before)
+	}
+	var wantBody []byte
+	if body != 3 {
+		wantBody = f.block.in.Raw
+	}
+	w.read(t, 4, f.block.in.Endpoint.BlockHash[:], wantBody)
+	icbReplayCursorV1(t, w, f.block.in.Endpoint)
+	icbReplayFollowingV1(t, w)
+}
+
+func icbReplayBodyPreconditionV1(t *testing.T, w *fgWorld, f *icbReplayFamilyV1, body uint8) {
+	t.Helper()
+	logicalMDBXAssert(t, f.target.TipHeight == 15840 && f.target.TipHeight-15120 == 720 && f.target.TipHeight-1439 == 14401, "actual replay target promises")
+	if body == 2 {
+		w.pair(t, btMutation(3, f.block.in.Endpoint.BlockHash[:], f.block.in.Raw[:148]), btMutation(4, f.block.in.Endpoint.BlockHash[:], f.block.in.Raw))
+	}
+	if body == 3 {
+		logicalMDBXAssert(t, f.block.in.Height <= 720, "held body is reachable only in paired below-promise replay")
+	}
+}
+
+// TestInitial148ReplayCapacityV1 preloads the actual CURRENT producer's 4824
+// acquisition. T-1 is deliberately not treated as an attained fixture peak.
+func TestInitial148ReplayCapacityV1(t *testing.T) {
+	f := icbReplayVaultBlockV1(t, 200, 1)
+	for _, workers := range []int{-1, 4} {
+		for _, capacity := range []int{1, 2} {
+			t.Run(fmt.Sprintf("workers%d/cap%d", workers, capacity), func(t *testing.T) {
+				w := icbReplayWorldV1(t, f)
+				a := icbReplayAuthorityV1(t, w, f, mdbx.StorageProfileArchiveV1)
+				before := icbReplayLagImageV1(t, w)
+				oldAuthority := rtImageRow(t, w.btWorld, []byte{2})
+				join := &icbReplayJoinV1{body: 1, paired: true, currentCap: capacity, envelope: &a, inputs: f.inputs}
+				var got btResult
+				evidence, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { got, _ = icbReplayApplyV1(t, w, f.block, workers, join) })
+				logicalMDBXAssert(t, fixtureErr == nil, "actual capacity fixture: %v", fixtureErr)
+				if capacity == 1 {
+					got.want(t, 2, 3, -1)
+					logicalMDBXAssert(t, got.err == nil && evidence.Commits == 1, "exact acquisition must continue to complete NEW: %v", got.err)
+					icbReplayStateV1(t, w, 1, f.block, f.inputs)
+					icbReplayStateV1(t, w, 2, f.block, f.inputs)
+				} else {
+					got.want(t, 1, 1, -1)
+					logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(got.err) && evidence.Commits == 0 && evidence.BeginWrite == 0, "one byte short CURRENT acquisition: %v/%+v", got.err, evidence)
+					logicalMDBXAssert(t, join.observed[0].source == nil && join.observed[0].calls == [3]int{}, "source published/used after refused acquisition")
+					w.read(t, 0, []byte{2}, oldAuthority)
+					icbReplayWantLagImageV1(t, w, before)
+					icbReplayStateV1(t, w, 1, f.prefix[len(f.prefix)-1], nil)
+					icbReplayFollowingV1(t, w)
+					fresh := &icbReplayJoinV1{body: 1, paired: true, envelope: &a, inputs: f.inputs}
+					next, _ := icbReplayApplyV1(t, w, f.block, workers, fresh)
+					logicalMDBXAssert(t, next.err == nil && next.truth == 2 && next.stage == 3, "next legal replay after local refusal: %v", next.err)
+				}
+				icbReplayFollowingV1(t, w)
+			})
+		}
+	}
+}
+
+// TestInitial148ReplayReadbackV1 joins the complete native truth domain to
+// real validation/F2/F3. Third-image damage affects only the authority row;
+// restoring that fixture damage is explicit before reopening the owner.
+func TestInitial148ReplayReadbackV1(t *testing.T) {
+	f := icbReplayVaultBlockV1(t, 200, 1)
+	for _, workers := range []int{-1, 4} {
+		for _, tc := range []struct {
+			name       string
+			scenario   mdbx.SelectedDamageScenario
+			truth      mdbx.CommitTruth
+			unreadable bool
+		}{
+			{"OLD", mdbx.SelectedDamageCommitOld, 1, false}, {"NEW", mdbx.SelectedDamageCommitNew, 2, false},
+			{"mixed", mdbx.SelectedDamageCommitThird, 3, false}, {"unreadable", mdbx.SelectedDamageCommitUnreadable, 3, true},
+		} {
+			t.Run(fmt.Sprintf("%s/workers%d", tc.name, workers), func(t *testing.T) {
+				w := icbReplayWorldV1(t, f)
+				a := icbReplayAuthorityV1(t, w, f, mdbx.StorageProfileArchiveV1)
+				join := &icbReplayJoinV1{body: 1, paired: true, envelope: &a, inputs: f.inputs}
+				var got btResult
+				var evidence mdbx.SelectedDamageEvidence
+				var fixtureErr error
+				counts, observeErr := mdbx.FixturePairReadObservation(w.s, func(uint32) {
+					if join.readback && mdbx.FixtureReservationLive(w.owner) != join.sealed {
+						join.lateGrow = true
+					}
+				}, func() {
+					evidence, fixtureErr = mdbx.FixtureSelectedDamage(w.s, w.owner, tc.scenario, 0, btMeta(0x11, 2), func() { got, _ = icbReplayApplyV1(t, w, f.block, workers, join) })
+				})
+				logicalMDBXAssert(t, observeErr == nil && fixtureErr == nil && evidence.Commits == 1 && counts.Comparisons != 0, "complete crossing observations: %+v/%+v/%v/%v", counts, evidence, observeErr, fixtureErr)
+				icbReplayCrossedV1(t, w, got, tc.truth, tc.unreadable)
+				icbReplaySourceCallsV1(t, join, [3]int{0, 1, 1})
+				if tc.name == "mixed" {
+					planned := a
+					replay := *a.Authority.Replay
+					replay.Cursor = mdbx.ReplayCursorV1{Kind: 2, Height: f.block.in.Height, BlockHash: f.block.in.Endpoint.BlockHash}
+					planned.Authority.Replay = &replay
+					w.seedAuthority(t, planned)
+				}
+				w.reopen(t)
+				block, spent := f.block, f.inputs
+				if tc.truth == 1 {
+					block, spent = f.prefix[len(f.prefix)-1], nil
+				}
+				icbReplayStateV1(t, w, 1, block, spent)
+				icbReplayStateV1(t, w, 2, block, spent)
+				icbReplayCursorV1(t, w, block.in.Endpoint)
+				icbReplayFollowingV1(t, w)
+			})
+		}
+	}
 }
