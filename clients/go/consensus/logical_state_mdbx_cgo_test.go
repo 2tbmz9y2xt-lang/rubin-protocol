@@ -814,6 +814,11 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	var listed struct{ GoFiles, CgoFiles, IgnoredGoFiles, TestGoFiles []string }
 	out, err := exec.CommandContext(t.Context(), "go", "list", "-e", "-json", ".").Output()
 	logicalMDBXAssert(t, err == nil && json.Unmarshal(out, &listed) == nil, "go list: %v", err)
+	logicalMDBXAssert(t, slices.Contains(listed.GoFiles, "replay_pair_mdbx_cgo.go") && slices.Contains(listed.TestGoFiles, "replay_pair_mdbx_cgo_test.go"), "replay pair ordinary build membership")
+	replayFixture, replayReadErr := os.ReadFile("replay_pair_mdbx_fixture_cgo_test.go")
+	logicalMDBXAssert(t, replayReadErr == nil, "replay pair fixture read: %v", replayReadErr)
+	replayExpression, replayParseErr := constraint.Parse(strings.SplitN(string(replayFixture), "\n", 2)[0])
+	logicalMDBXAssert(t, replayParseErr == nil && replayExpression.String() == "rubin_mdbx_fixture && "+logicalMDBXConstraint, "replay pair fixture constraint: %v/%v", replayExpression, replayParseErr)
 	logicalMDBXAssert(t, slices.Contains(listed.GoFiles, "block_tree_source_mdbx_cgo.go") && slices.Contains(listed.TestGoFiles, "block_tree_source_mdbx_cgo_test.go"), "block source ordinary build membership")
 	logicalMDBXAssert(t, slices.Contains(listed.GoFiles, "initial148_required_state_mdbx_cgo.go") && slices.Contains(listed.TestGoFiles, "initial148_required_state_mdbx_cgo_test.go"), "required state ordinary build membership")
 	fixture, fixtureReadErr := os.ReadFile("block_tree_source_mdbx_fixture_cgo_test.go")
@@ -839,7 +844,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	completeExpression, completeParseErr := constraint.Parse(strings.SplitN(string(completeFixture), "\n", 2)[0])
 	logicalMDBXAssert(t, completeParseErr == nil && completeExpression.String() == "rubin_mdbx_fixture && "+logicalMDBXConstraint, "complete block fixture constraint: %v/%v", completeExpression, completeParseErr)
 	logicalMDBXAssert(t, slices.Contains(listed.GoFiles, "initial148_complete_block_mdbx_cgo.go") && slices.Contains(listed.TestGoFiles, "initial148_complete_block_mdbx_cgo_test.go"), "complete block ordinary build membership")
-	for _, name := range []string{"initial148_complete_block_mdbx_cgo.go", "initial148_complete_block_mdbx_cgo_test.go", "initial148_required_state_mdbx_cgo.go", "initial148_required_state_mdbx_cgo_test.go", "block_tree_source_mdbx_cgo.go", "block_tree_source_mdbx_cgo_test.go", "logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go", "genesis_mdbx_cgo_external_test.go", "selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "archive_profile_mdbx_cgo.go", "archive_profile_mdbx_cgo_test.go", "stored_block_commitments_stream_test.go", "cleanup_generation_mdbx_cgo.go", "cleanup_generation_mdbx_cgo_test.go", "detached_drain_mdbx_cgo.go", "detached_drain_mdbx_cgo_test.go", "replay_entry_mdbx_cgo.go", "replay_entry_mdbx_cgo_test.go", "replay_recovery_mdbx_cgo.go", "replay_recovery_mdbx_cgo_test.go", "replay_path_mdbx_cgo.go", "replay_path_mdbx_cgo_test.go", "canonical_undo_mdbx_cgo.go", "canonical_undo_mdbx_cgo_test.go", "startup_mdbx_cgo.go", "startup_mdbx_cgo_test.go", "replay_step_mdbx_cgo.go", "replay_step_mdbx_cgo_test.go", "replay_header148_mdbx_cgo.go", "replay_header148_mdbx_cgo_test.go", "replay_qualifier148_mdbx_cgo.go", "replay_qualifier148_mdbx_cgo_test.go", "replay_tree_route_mdbx_cgo.go", "replay_tree_route_mdbx_cgo_test.go"} {
+	for _, name := range []string{"replay_pair_mdbx_cgo.go", "replay_pair_mdbx_cgo_test.go", "initial148_complete_block_mdbx_cgo.go", "initial148_complete_block_mdbx_cgo_test.go", "initial148_required_state_mdbx_cgo.go", "initial148_required_state_mdbx_cgo_test.go", "block_tree_source_mdbx_cgo.go", "block_tree_source_mdbx_cgo_test.go", "logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go", "genesis_mdbx_cgo_external_test.go", "selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "archive_profile_mdbx_cgo.go", "archive_profile_mdbx_cgo_test.go", "stored_block_commitments_stream_test.go", "cleanup_generation_mdbx_cgo.go", "cleanup_generation_mdbx_cgo_test.go", "detached_drain_mdbx_cgo.go", "detached_drain_mdbx_cgo_test.go", "replay_entry_mdbx_cgo.go", "replay_entry_mdbx_cgo_test.go", "replay_recovery_mdbx_cgo.go", "replay_recovery_mdbx_cgo_test.go", "replay_path_mdbx_cgo.go", "replay_path_mdbx_cgo_test.go", "canonical_undo_mdbx_cgo.go", "canonical_undo_mdbx_cgo_test.go", "startup_mdbx_cgo.go", "startup_mdbx_cgo_test.go", "replay_step_mdbx_cgo.go", "replay_step_mdbx_cgo_test.go", "replay_header148_mdbx_cgo.go", "replay_header148_mdbx_cgo_test.go", "replay_qualifier148_mdbx_cgo.go", "replay_qualifier148_mdbx_cgo_test.go", "replay_tree_route_mdbx_cgo.go", "replay_tree_route_mdbx_cgo_test.go"} {
 		source, readErr := os.ReadFile(name)
 		logicalMDBXAssert(t, readErr == nil, "read %s: %v", name, readErr)
 		expression, parseErr := constraint.Parse(strings.SplitN(string(source), "\n", 2)[0])
@@ -860,7 +865,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		if name == "retained_image_mdbx_fixture_cgo_test.go" || name == "retained_capacity_mdbx_fixture_cgo_test.go" {
 			return true
 		}
-		return name == "initial148_first_genesis_mdbx_fixture_cgo_test.go" || name == "initial148_complete_block_mdbx_fixture_cgo_test.go" || name == "initial148_required_state_mdbx_fixture_cgo_test.go" || name == "block_tree_source_mdbx_fixture_cgo_test.go" || name == "selected_side_damage_mdbx_fixture_cgo_test.go" || name == "archive_profile_mdbx_fixture_cgo_test.go" || name == "cleanup_drains_mdbx_fixture_cgo_test.go" || name == "replay_entry_mdbx_fixture_cgo_test.go" || name == "replay_recovery_mdbx_fixture_cgo_test.go" || name == "replay_path_mdbx_fixture_cgo_test.go" || name == "canonical_undo_mdbx_fixture_cgo_test.go" || name == "startup_mdbx_fixture_cgo_test.go" || name == "replay_step_mdbx_fixture_cgo_test.go" || name == "replay_qualifier148_mdbx_fixture_cgo_test.go"
+		return name == "replay_pair_mdbx_fixture_cgo_test.go" || name == "initial148_first_genesis_mdbx_fixture_cgo_test.go" || name == "initial148_complete_block_mdbx_fixture_cgo_test.go" || name == "initial148_required_state_mdbx_fixture_cgo_test.go" || name == "block_tree_source_mdbx_fixture_cgo_test.go" || name == "selected_side_damage_mdbx_fixture_cgo_test.go" || name == "archive_profile_mdbx_fixture_cgo_test.go" || name == "cleanup_drains_mdbx_fixture_cgo_test.go" || name == "replay_entry_mdbx_fixture_cgo_test.go" || name == "replay_recovery_mdbx_fixture_cgo_test.go" || name == "replay_path_mdbx_fixture_cgo_test.go" || name == "canonical_undo_mdbx_fixture_cgo_test.go" || name == "startup_mdbx_fixture_cgo_test.go" || name == "replay_step_mdbx_fixture_cgo_test.go" || name == "replay_qualifier148_mdbx_fixture_cgo_test.go"
 	})
 	fset, imports, files := token.NewFileSet(), 0, make([]*ast.File, 0, len(sources))
 	for _, name := range sources {
@@ -872,12 +877,12 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 				if name == "retained_image_mdbx_cgo.go" || name == "retained_artifact_mdbx_cgo.go" || name == "retained_charge.go" {
 					continue
 				}
-				logicalMDBXAssert(t, name == "initial148_first_genesis_mdbx_cgo.go" || name == "initial148_complete_block_mdbx_cgo.go" || name == "retained_capacity_mdbx_cgo.go" || name == "initial148_required_state_mdbx_cgo.go" || name == "block_tree_source_mdbx_cgo.go" || name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go" || name == "archive_profile_mdbx_cgo.go" || name == "cleanup_generation_mdbx_cgo.go" || name == "detached_drain_mdbx_cgo.go" || name == "replay_entry_mdbx_cgo.go" || name == "replay_recovery_mdbx_cgo.go" || name == "replay_path_mdbx_cgo.go" || name == "canonical_undo_mdbx_cgo.go" || name == "startup_mdbx_cgo.go" || name == "replay_step_mdbx_cgo.go" || name == "replay_header148_mdbx_cgo.go" || name == "replay_qualifier148_mdbx_cgo.go" || name == "replay_tree_route_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
+				logicalMDBXAssert(t, name == "replay_pair_mdbx_cgo.go" || name == "initial148_first_genesis_mdbx_cgo.go" || name == "initial148_complete_block_mdbx_cgo.go" || name == "retained_capacity_mdbx_cgo.go" || name == "initial148_required_state_mdbx_cgo.go" || name == "block_tree_source_mdbx_cgo.go" || name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go" || name == "archive_profile_mdbx_cgo.go" || name == "cleanup_generation_mdbx_cgo.go" || name == "detached_drain_mdbx_cgo.go" || name == "replay_entry_mdbx_cgo.go" || name == "replay_recovery_mdbx_cgo.go" || name == "replay_path_mdbx_cgo.go" || name == "canonical_undo_mdbx_cgo.go" || name == "startup_mdbx_cgo.go" || name == "replay_step_mdbx_cgo.go" || name == "replay_header148_mdbx_cgo.go" || name == "replay_qualifier148_mdbx_cgo.go" || name == "replay_tree_route_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
 			}
 		}
 		files = append(files, parsed)
 	}
-	logicalMDBXAssert(t, imports == 22, "bridge lost dormancy: %d non-test internal/mdbx imports, want 22", imports)
+	logicalMDBXAssert(t, imports == 23, "bridge lost dormancy: %d non-test internal/mdbx imports, want 23", imports)
 	native := startupCensusNative(t)
 	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{native: native}}
 	consensusPackage, _ := config.Check("consensus", fset, files, info)
@@ -1038,6 +1043,13 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 	// the approved consumers of the protected source and required-state owners.
 	composer := "initial148_complete_block_mdbx_cgo.go"
 	composed := initial148CompleteCensusDefinitionsV1(t, fset, files, info, composer)
+	replayComposer := "replay_pair_mdbx_cgo.go"
+	replayComposed := map[types.Object]bool{}
+	for id, object := range info.Defs {
+		if object != nil && fset.Position(id.Pos()).Filename == replayComposer {
+			replayComposed[object] = true
+		}
+	}
 	definitions := map[types.Object]bool{}
 	var sourcePackage *types.Package
 	protected := map[string]bool{"prepareBlockTreeEffectV1": true, "blockTreeSourceV1": true, "TreeDeltaV1": true, "withInitial148RequiredStateV1": true, "initial148RequiredRequestV1": true, "initial148RootReadOutcomeV1": true}
@@ -1083,10 +1095,13 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 	for id, object := range info.Uses {
 		filename := fset.Position(id.Pos()).Filename
 		if definitions[object] {
-			logicalMDBXAssert(t, filename == owned || filename == required || filename == composer || filename == "initial148_first_genesis_mdbx_cgo.go", "block source lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
+			logicalMDBXAssert(t, filename == owned || filename == required || filename == composer || filename == "replay_pair_mdbx_cgo.go" || filename == "initial148_first_genesis_mdbx_cgo.go", "block source lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
 		}
 		if composed[object] {
-			logicalMDBXAssert(t, filename == composer || filename == "initial148_first_genesis_mdbx_cgo.go", "complete block lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
+			logicalMDBXAssert(t, filename == composer || filename == "replay_pair_mdbx_cgo.go" || filename == "initial148_first_genesis_mdbx_cgo.go", "complete block lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
+		}
+		if replayComposed[object] {
+			logicalMDBXAssert(t, filename == replayComposer, "replay pair lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
 		}
 		if (filename == owned || filename == required) && object.Pkg() == native {
 			nativeUses[id.Name]++
