@@ -185,6 +185,7 @@ func runDependentOutcome(t *testing.T, s *Store, outcome func() error) dependent
 // dependentNextOwner proves cleanup, OLD abort and unchanged reopened durable P.
 func dependentNextOwner(t *testing.T, s *Store, before []byte) {
 	t.Helper()
+	wantLatch(t, s, LatchStatus{Requested: true})
 	if !bytes.Equal(fileBytes(t, s.dir), before) || !reflect.DeepEqual(mustView(t, s), View{Identity: testIdentity(1)}) {
 		t.Fatal("dependent exit changed P sequence, receipt or bytes")
 	}
