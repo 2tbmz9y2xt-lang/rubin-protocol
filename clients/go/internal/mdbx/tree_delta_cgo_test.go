@@ -268,6 +268,28 @@ func TestTreeDeltaGrammarV1(t *testing.T) {
 // The retained-owner check has a distinct resource contract: successful final
 // rows alone cannot reveal a block-wide retained ORIGINAL OLD payload array.
 func TestTreeReplayBoundedOldReferencesV1(t *testing.T) {
+	t.Run("original-reopen-IO", func(t *testing.T) {
+		c, old := tdAllocCase(1)
+		c.events = []tdEv{tdSpend(tdTxid(0x0a), 0, 1, 0), tdSpend(tdTxid(0x0d), 0, 1, 1)}
+		ledger := &tdLedger{}
+		r, d := c.delta(t, treeWriterV1, ledger)
+		defer r.releaseV1()
+		marker := &EngineError{Class: "IO", Operation: "update", Code: 5, Diagnostic: "error 5"}
+		reopen := &trReopenErrorOldV1{treeOldV1: old, key: tdUTXOKey(9, tdTxid(0x0a), 0), err: marker}
+		r.referenceOnly, d.original = true, reopen
+		tdOK(t, d.resolveV1(old)) // The unchanged valid OLD resolves before the I/O refusal.
+		emit := &tdCountEmitter{}
+		if err := d.applyV1(emit); any(err) != any(marker) {
+			t.Fatal("original reopen IO identity was replaced or ignored", err)
+		}
+		if reopen.calls != 1 || emit.emits != 0 || ledger.used != 65768 || ledger.logged() != "charge 65768" {
+			t.Fatal("original reopen IO reached a target or U acquisition", reopen.calls, emit.emits, ledger.used, ledger.logged())
+		}
+		r.releaseV1()
+		if ledger.used != 0 || ledger.logged() != "charge 65768|release 65768" {
+			t.Fatal("original reopen IO retained or duplicated a descriptor/U hold", ledger.used, ledger.logged())
+		}
+	})
 	for _, undo := range []uint8{1, 2, 3, 4} {
 		for _, position := range []treePositionV1{1, 2} {
 			c, old := tdAllocCase(undo)
@@ -338,6 +360,23 @@ func TestTreeReplayBoundedOldReferencesV1(t *testing.T) {
 			t.Fatal("maximum codec original undo was absent or truncated")
 		}
 	})
+}
+
+// trReopenErrorOldV1 models only the existing delta point-I/O refusal boundary;
+// the stored ORIGINAL OLD backing and every other read remain unchanged.
+type trReopenErrorOldV1 struct {
+	treeOldV1
+	key   []byte
+	err   error
+	calls int
+}
+
+func (o *trReopenErrorOldV1) getV1(dbi DBI, key []byte) (treeImageV1, error) {
+	if dbi.Rank == 1 && bytes.Equal(key, o.key) {
+		o.calls++
+		return treeImageV1{}, o.err
+	}
+	return o.treeOldV1.getV1(dbi, key)
 }
 
 // The U loan is separately observable at its real family consumer, after the
