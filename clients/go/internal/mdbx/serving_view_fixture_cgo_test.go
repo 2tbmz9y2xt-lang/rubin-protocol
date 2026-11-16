@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -28,6 +29,13 @@ func TestServingViewFixtureV1(t *testing.T) {
 	t.Run("R2/required retained span", servingFixtureRetainedSpanV1)
 	t.Run("A8/terminal native tuples", servingFixtureTerminalEntriesV1)
 	t.Run("A7/external native cleanup", servingFixtureSpanNativeV1)
+	for _, site := range []uint32{4, 5} {
+		for _, late := range []bool{false, true} {
+			t.Run(fmt.Sprintf("A7/inspect/site%d/late=%v", site, late), func(t *testing.T) {
+				servingFixtureInspectWakeV1(t, site, late)
+			})
+		}
+	}
 }
 
 // servingFixtureCallbackV1 preserves each independent error's identity.
@@ -267,8 +275,31 @@ func servingFixtureReadV1(t *testing.T, mode uint32, kind string) {
 			servingFixtureErrorV1(t, mode, s.terminal, primary)
 		}
 	}
+	if mode != 10 {
+		servingFixtureRequiredTerminalV1(t, s, o)
+	}
 	if mode == 10 || mode == 11 {
 		mustEnvironment(t, fixtureLargeRelease(s))
+	}
+}
+
+// servingFixtureRequiredTerminalV1 distinguishes acquired state errors from lock contention.
+func servingFixtureRequiredTerminalV1(t *testing.T, s *Store, o *ServingViewOwnerV1) {
+	t.Helper()
+	terminal := s.terminal
+	c, result, _ := servingRequiredV1(t, o, s, func() error {
+		t.Error("terminal native state admitted callback")
+		return nil
+	})
+	select {
+	case got := <-result:
+		if !sameError(got, terminal) {
+			t.Fatal("acquired native state error identity changed")
+		}
+	case <-c.waiting:
+		t.Fatal("acquired native state error was retried as lock contention")
+	case <-time.After(5 * time.Second):
+		t.Fatal("acquired native state error did not return")
 	}
 }
 
@@ -367,16 +398,67 @@ func servingFixtureRetainedSpanV1(t *testing.T) {
 	if txn == nil || !sameError(result, terminal) {
 		t.Fatal("retained setup missing actual pointer/cause")
 	}
-	got := o.WithQuiescenceV1(context.Background(), s, func() error {
+	t.Cleanup(func() { _ = fixtureLargeRelease(s) })
+	c, requiredResult, _ := servingRequiredV1(t, o, s, func() error {
 		t.Fatal("retained native read allowed required effect")
 		return nil
 	})
+	var got error
+	select {
+	case got = <-requiredResult:
+	case <-c.waiting:
+		t.Fatal("retained completion did not refuse")
+	case <-time.After(5 * time.Second):
+		t.Fatal("retained completion did not refuse")
+	}
 	servingWantBusyV1(t, got, "update")
 	if s.txn != txn || !sameError(s.terminal, terminal) || s.state != storePOISONEDTHREAD {
 		t.Fatal("required refusal altered retained truth")
 	}
 	servingRefusedV1(t, o, s, reservations)
 	mustEnvironment(t, fixtureLargeRelease(s))
+}
+
+// servingFixtureInspectWakeV1 pauses actual native OLD abort before/after consumption.
+func servingFixtureInspectWakeV1(t *testing.T, site uint32, late bool) {
+	s, o, reservations := servingSetupV1(t)
+	if !late {
+		servingFreshV1(t, o, s, reservations, "initial binding failed")
+	}
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	open := sync.OnceFunc(func() { close(release) })
+	holder := make(chan error, 1)
+	go func() {
+		defer close(done)
+		var result error
+		_, err := FixturePairReadObservation(s, func(at uint32) {
+			if at == site {
+				close(entered)
+				<-release
+			}
+		}, func() { _, result = s.Inspect() })
+		if err == nil {
+			err = result
+		}
+		holder <- err
+	}()
+	t.Cleanup(func() { open(); servingSignalV1(t, done, "Inspect cleanup stranded") })
+	servingSignalV1(t, entered, "Inspect actual abort site not reached")
+	called := 0
+	c, result, _ := servingRequiredV1(t, o, s, func() error { called++; return nil })
+	servingWaitingV1(t, c, result)
+	open()
+	mustEnvironment(t, servingResultV1(t, holder, "Inspect actual cleanup did not finish"))
+	c.release()
+	message := "native completion did not wake required invocation"
+	if late {
+		message = "late-bound completion did not wake required invocation"
+	}
+	mustEnvironment(t, servingResultV1(t, result, message))
+	if called != 1 || s.txn != nil || s.state != storeOPEN {
+		t.Fatal("Inspect completion changed callback/native state")
+	}
+	servingFreshV1(t, o, s, reservations, "resolved invocation retained priority")
 }
 
 // servingFixtureTerminalEntriesV1 shows optional closure adds no error over actual native state.

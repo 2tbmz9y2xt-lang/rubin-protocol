@@ -2710,11 +2710,12 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 		return CommitTruthOld, UpdateStagePrewrite, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Update callback", nil)
 	}
 	serving := s.requestServingCloseV1()
+	defer serving.completeV1()
 	if !s.operations.TryLock() {
 		s.contendedServingCloseV1()
 		return CommitTruthOld, UpdateStagePrewrite, adapterError(operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
-	defer serving.completeV1()
+	defer s.notifyServingCompletionV1()
 	defer s.operations.Unlock()
 	stateErr, _ := s.observationStateError(operationUpdate)
 	if stateErr != nil {
@@ -2802,6 +2803,7 @@ func (s *Store) viewWithStartupCompletion(callback func(*Reader) (StartupCanonic
 	if !s.operations.TryLock() {
 		return adapterError(operationView, EngineConcurrency, codeBusy, "store operation in progress", nil), false
 	}
+	defer s.notifyServingCompletionV1()
 	defer s.operations.Unlock()
 	stateErr, cached := s.observationStateError(operationView)
 	if stateErr != nil {
@@ -3544,6 +3546,7 @@ func (s *Store) Inspect() (Inspection, error) {
 	if !s.operations.TryLock() {
 		return Inspection{}, adapterError(operationInspect, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
+	defer s.notifyServingCompletionV1()
 	defer s.operations.Unlock()
 	stateErr, _ := s.observationStateError(operationInspect)
 	if stateErr != nil {
@@ -3882,11 +3885,12 @@ func (s *Store) Close() error {
 		return adapterError(operationClose, EngineInvalidInput, codeEINVAL, "nil Store", nil)
 	}
 	serving := s.requestServingCloseV1()
+	defer serving.completeV1()
 	if !s.operations.TryLock() {
 		s.contendedServingCloseV1()
 		return adapterError(operationClose, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
-	defer serving.completeV1()
+	defer s.notifyServingCompletionV1()
 	defer s.operations.Unlock()
 	if !validStoreState(s.state) {
 		return adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store state", nil)

@@ -285,74 +285,166 @@ func servingPriorityV1(t *testing.T) {
 	t.Run("first binding", servingFirstBindingV1)
 }
 
-// servingFirstBindingV1 crosses initial binding and superseded native completion.
-// Direct source review binds all three adapters to the contention effect; this
-// fixture does not schedule the narrow public preemption window.
+// servingFirstBindingV1 exercises actual holders that began before owner binding.
 func servingFirstBindingV1(t *testing.T) {
-	t.Run("unbound", func(t *testing.T) { servingContentionOrderV1(t, false) })
-	t.Run("superseded and cleared", func(t *testing.T) { servingContentionOrderV1(t, true) })
+	for _, route := range []string{"view", "update", "tree"} {
+		for _, late := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/late=%v", route, late), func(t *testing.T) {
+				servingNativeWakeV1(t, route, late)
+			})
+		}
+	}
 }
 
-// servingContentionOrderV1 restores absent priority while preserving a newer mark.
-func servingContentionOrderV1(t *testing.T, superseded bool) {
-	s, o, reservations := servingSetupV1(t)
-	if superseded {
-		_, err := servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
-		mustEnvironment(t, err)
-	}
-	initial := s.requestServingCloseV1()
-	if (initial != nil) != superseded {
-		t.Fatal("initial mutation identity did not match binding order")
-	}
-	if superseded {
-		servingNativeRetryV1(t, "update", s, nil)
-		if o.priority != nil {
-			t.Fatal("newer native completion did not clear its own priority")
-		}
-	}
-	var pending *servingMutationV1
-	out, err := servingCallV1(t, o, s, reservations, func(r *Reader, e *ServingEpochV1, _ *OperationAccount) error {
-		if s.servingOwner.Load() != o || !r.usable() || r.txn == nil {
-			t.Fatal("first binding did not open an actual native epoch")
-		}
-		if s.operations.TryLock() {
-			s.operations.Unlock()
-			t.Fatal("native Reader did not retain the operation lock")
-		}
-		mustEnvironment(t, e.CheckV1())
-		s.contendedServingCloseV1()
-		if o.priority == nil {
-			t.Fatal("native contention did not restore absent priority")
-		}
-		servingWantBusyV1(t, e.CheckV1(), "view")
-		if o.current != e || !r.usable() || r.txn == nil {
-			t.Fatal("contention released the occupied native epoch")
-		}
-		older := o.priority
-		pending = s.requestServingCloseV1()
-		if pending == older {
-			t.Fatal("newer native attempt reused the older priority identity")
-		}
-		s.contendedServingCloseV1()
-		if o.priority != pending {
-			t.Fatal("already-marked contention replaced a newer pending identity")
-		}
-		servingWantBusyV1(t, e.CheckV1(), "view")
-		return nil
+// servingWaitContextV1 schedules a public wait without supplying its result.
+type servingWaitContextV1 struct {
+	context.Context
+	waiting chan struct{}
+	resume  chan struct{}
+	signal  sync.Once
+	release func()
+}
+
+// Done pauses before the wait select, making a preceding completion observable.
+func (c *servingWaitContextV1) Done() <-chan struct{} {
+	c.signal.Do(func() { close(c.waiting) })
+	<-c.resume
+	return c.Context.Done()
+}
+
+// servingRequiredV1 starts one bounded invocation and releases every gate on failure.
+func servingRequiredV1(t *testing.T, o *ServingViewOwnerV1, s *Store, use func() error) (*servingWaitContextV1, <-chan error, context.CancelFunc) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	c := &servingWaitContextV1{Context: ctx, waiting: make(chan struct{}), resume: make(chan struct{})}
+	c.release = sync.OnceFunc(func() { close(c.resume) })
+	result, done := make(chan error, 1), make(chan struct{})
+	go func() {
+		defer close(done)
+		result <- o.WithQuiescenceV1(c, s, use)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		c.release()
+		servingSignalV1(t, done, "required invocation cleanup did not finish")
 	})
-	mustEnvironment(t, err)
-	servingWantOutcomeV1(t, out, 1, true)
-	if o.current != nil || o.priority != pending {
-		t.Fatal("actual old-view close lost the first-bound pending priority")
+	return c, result, cancel
+}
+
+// servingWaitingV1 rejects old immediate-busy behavior at the actual return boundary.
+func servingWaitingV1(t *testing.T, c *servingWaitContextV1, result <-chan error) {
+	t.Helper()
+	select {
+	case err := <-result:
+		t.Fatalf("required invocation returned before actual closure: %v", err)
+	case <-c.waiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("required invocation did not reach cancellation wait")
 	}
-	servingRefusedV1(t, o, s, reservations)
-	servingRefusedV1(t, o, s, reservations)
-	servingNativeRetryV1(t, "update", s, nil)
-	if o.priority != nil {
-		t.Fatal("actual retry failed to clear first-bound priority")
+}
+
+// servingResultV1 bounds a missing wake without treating time as a successful result.
+func servingResultV1(t *testing.T, result <-chan error, message string) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatal(message)
+		return nil
 	}
-	_, err = servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
-	mustEnvironment(t, err)
+}
+
+// servingSignalV1 waits for an actual callback/completion synchronization event.
+func servingSignalV1(t *testing.T, event <-chan struct{}, message string) {
+	t.Helper()
+	select {
+	case <-event:
+	case <-time.After(5 * time.Second):
+		t.Fatal(message)
+	}
+}
+
+// servingFreshV1 proves invocation retirement by a new public healthy serving call.
+func servingFreshV1(t *testing.T, o *ServingViewOwnerV1, s *Store, reservations *OperationReservationOwner, message string) {
+	t.Helper()
+	out, err := servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
+	if err != nil {
+		t.Fatalf("%s: %v", message, err)
+	}
+	servingWantOutcomeV1(t, out, 1, false)
+}
+
+// servingNativeHolderV1 pauses a real callback under its original native lock.
+func servingNativeHolderV1(t *testing.T, route string, s *Store, reservations *OperationReservationOwner) (func(), <-chan error) {
+	t.Helper()
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	open := sync.OnceFunc(func() { close(release) })
+	app := errors.New("holder application result")
+	result := make(chan error, 1)
+	use := func(*Reader) error { close(entered); <-release; return app }
+	go func() {
+		defer close(done)
+		err := servingNativeHoldCallV1(route, s, reservations, use)
+		if !sameError(err, app) {
+			err = fmt.Errorf("native holder result changed: %v", err)
+		} else {
+			err = nil
+		}
+		result <- err
+	}()
+	t.Cleanup(func() { open(); servingSignalV1(t, done, "native holder cleanup did not finish") })
+	servingSignalV1(t, entered, "native holder did not enter")
+	return open, result
+}
+
+// servingNativeHoldCallV1 retains each native entry's real callback/error tuple.
+func servingNativeHoldCallV1(route string, s *Store, reservations *OperationReservationOwner, use func(*Reader) error) error {
+	if route == "view" {
+		return s.View(use)
+	}
+	if route == "update" {
+		truth, stage, err := s.Update(func(r *Reader) (Batch, error) { return Batch{}, use(r) })
+		if truth != 1 || stage != 1 {
+			return fmt.Errorf("holder Update tuple %d/%d", truth, stage)
+		}
+		return err
+	}
+	return reservations.WithOperation(LaneOperation, func(a *OperationAccount) error {
+		truth, stage, index, err := s.UpdateTreeV1(a, func(r *Reader) (TreeOperationV1, error) { return TreeOperationV1{}, use(r) })
+		if truth != 1 || stage != 1 || index != -1 {
+			return fmt.Errorf("holder Tree tuple %d/%d/%d", truth, stage, index)
+		}
+		return err
+	})
+}
+
+// servingNativeWakeV1 completes the actual holder before the captured wait selects.
+func servingNativeWakeV1(t *testing.T, route string, late bool) {
+	s, o, reservations := servingSetupV1(t)
+	if route == "tree" {
+		s, _, reservations = tsNew(t)
+	}
+	if !late {
+		servingFreshV1(t, o, s, reservations, "initial binding failed")
+	}
+	open, holder := servingNativeHolderV1(t, route, s, reservations)
+	called := 0
+	c, result, _ := servingRequiredV1(t, o, s, func() error { called++; return nil })
+	servingWaitingV1(t, c, result)
+	servingRefusedV1(t, o, s, reservations)
+	open()
+	mustEnvironment(t, servingResultV1(t, holder, "native holder cleanup did not finish"))
+	c.release()
+	message := "native completion did not wake required invocation"
+	if late {
+		message = "late-bound completion did not wake required invocation"
+	}
+	mustEnvironment(t, servingResultV1(t, result, message))
+	if called != 1 {
+		t.Fatal("completion notification was lost or callback replayed")
+	}
+	servingFreshV1(t, o, s, reservations, "resolved invocation retained priority")
 }
 
 // servingNativeBusyV1 pins original contention tuples and zero callback effects.
@@ -420,7 +512,7 @@ func servingNativeRetryV1(t *testing.T, route string, s *Store, a *OperationAcco
 	}
 }
 
-// servingPriorityRouteV1 proves contention leaves a mark through old-view cleanup.
+// servingPriorityRouteV1 proves optional busy retires without a phantom retry.
 func servingPriorityRouteV1(t *testing.T, route string) {
 	s, o, reservations := servingSetupV1(t)
 	if route == "tree" {
@@ -437,44 +529,96 @@ func servingPriorityRouteV1(t *testing.T, route string) {
 	})
 	mustEnvironment(t, err)
 	servingWantOutcomeV1(t, out, 1, true)
-	servingRefusedV1(t, o, s, reservations)
-	servingRefusedV1(t, o, s, reservations)
+	servingFreshV1(t, o, s, reservations, "optional invocation left priority after actual close")
 	mustEnvironment(t, reservations.WithOperation(LaneOperation, func(a *OperationAccount) error {
 		servingNativeRetryV1(t, route, s, a)
 		return nil
 	}))
-	if o.priority != nil {
-		t.Fatal("matching actual retry failed to clear priority")
-	}
-	if route != "close" {
-		_, err = servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
-		mustEnvironment(t, err)
+}
+
+// servingNewerPriorityV1 preserves each live caller in both completion/cancel orders.
+func servingNewerPriorityV1(t *testing.T) {
+	for _, first := range []int{0, 1} {
+		for _, canceled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("first%d/cancel=%v", first, canceled), func(t *testing.T) {
+				servingPendingOrderV1(t, first, canceled)
+			})
+		}
 	}
 }
 
-// servingNewerPriorityV1 forces a newer contender before an older callback ends.
-func servingNewerPriorityV1(t *testing.T) {
+// servingEpochHolderV1 pauses the actual finite serving Reader until released.
+func servingEpochHolderV1(t *testing.T, o *ServingViewOwnerV1, s *Store, reservations *OperationReservationOwner) (func(), <-chan error) {
+	t.Helper()
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	open := sync.OnceFunc(func() { close(release) })
+	result := make(chan error, 1)
+	go func() {
+		defer close(done)
+		_, err := servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error {
+			close(entered)
+			<-release
+			return nil
+		})
+		result <- err
+	}()
+	t.Cleanup(func() { open(); servingSignalV1(t, done, "serving holder cleanup did not finish") })
+	servingSignalV1(t, entered, "serving holder did not enter")
+	return open, result
+}
+
+// servingPendingOrderV1 holds the second real caller before admission after the first returns.
+func servingPendingOrderV1(t *testing.T, first int, canceled bool) {
 	s, o, reservations := servingSetupV1(t)
-	_, err := servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
-	mustEnvironment(t, err)
-	app := errors.New("older callback")
-	var newer *servingMutationV1
-	truth, stage, result := s.Update(func(*Reader) (Batch, error) {
-		older := o.priority
-		servingNativeBusyV1(t, "update", s, nil)
-		newer = o.priority
-		if newer == nil || newer == older {
-			t.Fatal("attempt identities joined")
-		}
-		return Batch{}, app
-	})
-	if truth != 1 || stage != 1 || !sameError(result, app) || o.priority != newer {
-		t.Fatal("older completion cleared the newer pending identity")
+	open, view := servingEpochHolderV1(t, o, s, reservations)
+	calls := [2]int{}
+	contexts := [2]*servingWaitContextV1{}
+	results := [2]<-chan error{}
+	cancels := [2]context.CancelFunc{}
+	for i := range 2 {
+		contexts[i], results[i], cancels[i] = servingRequiredV1(t, o, s, func() error { calls[i]++; return nil })
+		servingWaitingV1(t, contexts[i], results[i])
 	}
-	servingRefusedV1(t, o, s, reservations)
-	servingNativeRetryV1(t, "update", s, nil)
-	_, err = servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
-	mustEnvironment(t, err)
+	if canceled {
+		cancels[first]()
+		contexts[first].release()
+	} else {
+		open()
+		mustEnvironment(t, servingResultV1(t, view, "old native cleanup did not finish"))
+		contexts[first].release()
+	}
+	err := servingResultV1(t, results[first], "first invocation did not resolve")
+	servingWantResolutionV1(t, err, calls[first], canceled)
+	if canceled {
+		servingRefusedV1(t, o, s, reservations)
+		open()
+		mustEnvironment(t, servingResultV1(t, view, "old native cleanup did not finish"))
+	}
+	out, got := servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
+	if got == nil {
+		t.Fatal("completed mutation admitted view past live waiter")
+	}
+	servingWantBusyV1(t, got, "view")
+	servingWantOutcomeV1(t, out, 0, false)
+	second := 1 - first
+	contexts[second].release()
+	mustEnvironment(t, servingResultV1(t, results[second], "second live invocation did not resolve"))
+	if calls[second] != 1 {
+		t.Fatal("remaining caller lost callback or replayed it")
+	}
+	servingFreshV1(t, o, s, reservations, "resolved invocation retained priority")
+}
+
+// servingWantResolutionV1 pins waiting cancellation and one admitted callback separately.
+func servingWantResolutionV1(t *testing.T, err error, called int, canceled bool) {
+	t.Helper()
+	want, count := error(nil), 1
+	if canceled {
+		want, count = context.Canceled, 0
+	}
+	if !sameError(err, want) || called != count {
+		t.Fatal("cancellation replaced established result or replayed callback")
+	}
 }
 
 // servingOwnedCopyV1 checks the local ownership boundary; no peer or Service is simulated.
@@ -510,26 +654,62 @@ func servingSpanV1(t *testing.T) {
 	for _, mode := range []string{"nil", "error", "typed nil", "wrapped", "panic", "goexit"} {
 		t.Run(mode, func(t *testing.T) { servingSpanUnwindV1(t, mode) })
 	}
-	t.Run("second span and newer mark", servingSpanContenderV1)
+	t.Run("second span and canceled effect cleanup", servingSpanContenderV1)
 	t.Run("old view must actually end", servingSpanOldViewV1)
-	t.Run("original operation contention retains priority", servingSpanOperationV1)
+	t.Run("native wait and cancellation", servingSpanOperationV1)
 }
 
-// servingSpanOperationV1 keeps priority after an actual preflight lock refusal.
+// servingSpanOperationV1 checks cancellation against real native preflight contention.
 func servingSpanOperationV1(t *testing.T) {
+	for _, route := range []string{"view", "update", "tree"} {
+		t.Run(route, func(t *testing.T) { servingNativeCancelV1(t, route) })
+	}
+	t.Run("canceled entry states", servingCanceledEntriesV1)
+}
+
+// servingNativeCancelV1 makes cancellation and completion ready before wait resumption.
+func servingNativeCancelV1(t *testing.T, route string) {
 	s, o, reservations := servingSetupV1(t)
-	s.operations.Lock()
-	err := o.WithQuiescenceV1(context.Background(), s, func() error {
-		t.Error("preflight contention executed effect")
+	if route == "tree" {
+		s, _, reservations = tsNew(t)
+	}
+	open, holder := servingNativeHolderV1(t, route, s, reservations)
+	called := 0
+	c, result, cancel := servingRequiredV1(t, o, s, func() error { called++; return nil })
+	servingWaitingV1(t, c, result)
+	cancel()
+	open()
+	mustEnvironment(t, servingResultV1(t, holder, "native holder did not finish"))
+	c.release()
+	got := servingResultV1(t, result, "native completion did not wake required invocation")
+	servingWantResolutionV1(t, got, called, true)
+	servingFreshV1(t, o, s, reservations, "resolved invocation retained priority")
+}
+
+// servingCanceledEntriesV1 rejects canceled calls without ending an existing epoch.
+func servingCanceledEntriesV1(t *testing.T) {
+	s, o, reservations := servingSetupV1(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	refused := func() {
+		called := 0
+		err := o.WithQuiescenceV1(ctx, s, func() error { called++; return nil })
+		if !sameError(err, context.Canceled) || called != 0 {
+			t.Fatal("canceled entry changed context or called effect")
+		}
+	}
+	refused()
+	out, err := servingCallV1(t, o, s, reservations, func(_ *Reader, e *ServingEpochV1, _ *OperationAccount) error {
+		refused()
+		if e.CheckV1() != nil {
+			t.Fatal("canceled entry changed old eligibility or retained priority")
+		}
 		return nil
 	})
-	s.operations.Unlock()
-	servingWantBusyV1(t, err, "update")
-	servingRefusedV1(t, o, s, reservations)
-	mustEnvironment(t, o.WithQuiescenceV1(context.Background(), s, func() error { return nil }))
-	if o.priority != nil || o.span != nil {
-		t.Fatal("actual preflight retry did not complete its exclusion")
-	}
+	mustEnvironment(t, err)
+	servingWantOutcomeV1(t, out, 1, false)
+	mustEnvironment(t, o.WithQuiescenceV1(context.Background(), s, func() error { refused(); return nil }))
+	servingFreshV1(t, o, s, reservations, "canceled entry changed old eligibility or retained priority")
 }
 
 // servingModeV1 uses an independent callback result for each unwind shape.
@@ -580,7 +760,7 @@ func servingSpanUnwindV1(t *testing.T, mode string) {
 		t.Fatal("external span callback/cleanup did not finish")
 	}
 	servingWantUnwindV1(t, mode, result, panicked, returned, app)
-	if o.span != nil || o.priority != nil {
+	if o.span != nil || s.state != storeOPEN || s.txn != nil {
 		t.Fatal("outer synchronous cleanup left its span")
 	}
 	_, err := servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
@@ -611,55 +791,89 @@ func servingWantUnwindV1(t *testing.T, mode string, result error, panicked any, 
 	}
 }
 
-// servingSpanContenderV1 makes a second span's pending identity outlive the older span.
+// servingSpanContenderV1 keeps the outer effect and its cleanup despite cancellation.
 func servingSpanContenderV1(t *testing.T) {
 	s, o, reservations := servingSetupV1(t)
-	var newer *servingMutationV1
-	err := o.WithQuiescenceV1(context.Background(), s, func() error {
-		before := o.span
-		got := o.WithQuiescenceV1(context.Background(), s, func() error {
-			t.Fatal("second span callback ran")
-			return nil
+	entered, cleanup := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(cleanup) })
+	t.Cleanup(release)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result, done := make(chan error, 1), make(chan struct{})
+	app := errors.New("outer established result")
+	go func() {
+		defer close(done)
+		result <- o.WithQuiescenceV1(ctx, s, func() error {
+			defer func() { close(entered); <-cleanup }()
+			cancel()
+			servingNativeRetryV1(t, "update", s, nil)
+			return app
 		})
-		servingWantBusyV1(t, got, "update")
-		newer = o.priority
-		if o.span != before || newer == before {
-			t.Fatal("second span joined or replaced the first")
-		}
-		return nil
-	})
-	mustEnvironment(t, err)
-	if o.span != nil || o.priority != newer {
-		t.Fatal("older span cleared a newer mark")
+	}()
+	t.Cleanup(func() { release(); servingSignalV1(t, done, "active callback cleanup stranded") })
+	servingSignalV1(t, entered, "outer cleanup did not start")
+	c, second, cancelSecond := servingRequiredV1(t, o, s, func() error { return nil })
+	servingWaitingV1(t, c, second)
+	out, err := servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
+	if err == nil {
+		t.Fatal("active effect cleanup admitted a serving view")
+	}
+	servingWantBusyV1(t, err, "view")
+	servingWantOutcomeV1(t, out, 0, false)
+	cancelSecond()
+	c.release()
+	if !sameError(servingResultV1(t, second, "waiting cancellation did not return"), context.Canceled) {
+		t.Fatal("waiting cancellation did not preserve its context")
 	}
 	servingRefusedV1(t, o, s, reservations)
-	mustEnvironment(t, o.WithQuiescenceV1(context.Background(), s, func() error { return nil }))
-	_, err = servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
-	mustEnvironment(t, err)
+	release()
+	if !sameError(servingResultV1(t, result, "active cleanup did not return"), app) {
+		t.Fatal("cancellation replaced established result or replayed callback")
+	}
+	servingFreshV1(t, o, s, reservations, "resolved invocation retained priority")
 }
 
-// servingSpanOldViewV1 proves required refusal cannot execute before real read closure.
+// servingSpanOldViewV1 waits for the actual Reader/borrow cleanup before effects.
 func servingSpanOldViewV1(t *testing.T) {
 	s, o, reservations := servingSetupV1(t)
-	_, err := servingCallV1(t, o, s, reservations, func(r *Reader, e *ServingEpochV1, _ *OperationAccount) error {
-		got := o.WithQuiescenceV1(context.Background(), s, func() error {
-			t.Fatal("effect before native close")
-			return nil
+	entered, release := make(chan struct{}), make(chan struct{})
+	open := sync.OnceFunc(func() { close(release) })
+	view, done := make(chan error, 1), make(chan struct{})
+	var reader *Reader
+	var epoch *ServingEpochV1
+	go func() {
+		defer close(done)
+		_, err := servingCallV1(t, o, s, reservations, func(r *Reader, e *ServingEpochV1, a *OperationAccount) error {
+			reader, epoch = r, e
+			return a.WithReservation(17, func() error { close(entered); <-release; return nil })
 		})
-		servingWantBusyV1(t, got, "update")
-		if !r.usable() || r.txn == nil {
-			t.Fatal("required refusal pretended to close the native Reader")
-		}
-		return nil
-	})
-	mustEnvironment(t, err)
-	mustEnvironment(t, o.WithQuiescenceV1(context.Background(), s, func() error {
-		if o.current != nil {
-			t.Fatal("effect reached before consumed old borrow")
+		view <- err
+	}()
+	t.Cleanup(func() { open(); servingSignalV1(t, done, "serving callback cleanup stranded") })
+	servingSignalV1(t, entered, "serving callback did not enter")
+	called := 0
+	c, result, _ := servingRequiredV1(t, o, s, func() error {
+		called++
+		if reader.usable() || s.txn != nil || reservationLive(reservations) != 0 {
+			t.Error("effect before actual Reader/account close")
 		}
 		servingRefusedV1(t, o, s, reservations)
 		return nil
-	}))
+	})
+	servingWaitingV1(t, c, result)
+	servingWantBusyV1(t, epoch.CheckV1(), "view")
+	if !reader.usable() || reservationLive(reservations) != 17 {
+		t.Fatal("waiting required invocation forced old native/account close")
+	}
+	servingRefusedV1(t, o, s, reservations)
+	open()
+	mustEnvironment(t, servingResultV1(t, view, "serving cleanup did not finish"))
+	c.release()
+	mustEnvironment(t, servingResultV1(t, result, "completion notification was lost"))
+	if called != 1 {
+		t.Fatal("actual close failed to admit effect once")
+	}
+	servingFreshV1(t, o, s, reservations, "resolved invocation retained priority")
 }
 
 // servingOptionalV1 crosses original native state/format with owner exclusion flags.
@@ -668,9 +882,41 @@ func servingOptionalV1(t *testing.T) {
 		for _, state := range []string{"active", "expired", "priority", "span"} {
 			t.Run(route+"/"+state, func(t *testing.T) { servingOptionalRouteV1(t, route, state) })
 		}
+		t.Run(route+"/pending native admitted", func(t *testing.T) { servingOptionalPendingRouteV1(t, route) })
 	}
 	t.Run("format refusals unchanged", servingFormatV1)
 	t.Run("static inputs precede marking", servingNativeInputsV1)
+}
+
+// servingOptionalPendingRouteV1 admits the original native callback while another scope waits.
+func servingOptionalPendingRouteV1(t *testing.T, route string) {
+	s, o, reservations := servingSetupV1(t)
+	if route == "tree" {
+		s, _, reservations = tsNew(t)
+	}
+	open, view := servingEpochHolderV1(t, o, s, reservations)
+	called := 0
+	c, result, _ := servingRequiredV1(t, o, s, func() error { called++; return nil })
+	servingWaitingV1(t, c, result)
+	open()
+	mustEnvironment(t, servingResultV1(t, view, "old epoch cleanup did not finish"))
+	servingRefusedV1(t, o, s, reservations)
+	mustEnvironment(t, reservations.WithOperation(LaneOperation, func(a *OperationAccount) error {
+		servingNativeRetryV1(t, route, s, a)
+		return nil
+	}))
+	servingRefusedV1(t, o, s, reservations)
+	c.release()
+	err := servingResultV1(t, result, "native completion did not wake required invocation")
+	if route == "close" {
+		requireEnvironmentError(t, err, EngineClass("InvalidInput"), engineOperation("update"), 22, "Store is closed")
+		if called != 0 {
+			t.Fatal("consumed terminal Store admitted required effect")
+		}
+		return
+	}
+	servingWantResolutionV1(t, err, called, false)
+	servingFreshV1(t, o, s, reservations, "resolved invocation retained priority")
 }
 
 // servingNativeInputsV1 protects the existing entry-order rows while a real
@@ -702,12 +948,13 @@ func servingNativeInputsV1(t *testing.T) {
 			}
 			treeNativeError(t, result, engineOperation("update"), EngineClass("InvalidInput"), 22, row.text, nil)
 		}
-		if o.priority != nil || e.closing {
+		if e.closing {
 			t.Fatal("refused static input changed serving priority")
 		}
 		return e.CheckV1()
 	})
 	mustEnvironment(t, err)
+	servingFreshV1(t, o, s, reservations, "static input retained priority")
 }
 
 // servingOptionalRouteV1 demonstrates closure adds neither wait nor refusal.
@@ -750,7 +997,7 @@ func servingOptionalRouteV1(t *testing.T, route, state string) {
 		}
 		servingNativeBusyV1(t, route, s, a)
 		if state == "priority" {
-			servingNativeBusyV1(t, route, s, a)
+			servingOptionalPendingV1(t, o, s, route, a)
 		}
 		if !r.usable() {
 			t.Fatal("optional native closure expired Reader")
@@ -763,6 +1010,22 @@ func servingOptionalRouteV1(t *testing.T, route, state string) {
 		servingNativeRetryV1(t, route, s, a)
 		return nil
 	}))
+}
+
+// servingOptionalPendingV1 preserves a real required caller across optional busy.
+func servingOptionalPendingV1(t *testing.T, o *ServingViewOwnerV1, s *Store, route string, a *OperationAccount) {
+	t.Helper()
+	c, result, cancel := servingRequiredV1(t, o, s, func() error {
+		t.Error("pending optional row entered before actual close")
+		return nil
+	})
+	servingWaitingV1(t, c, result)
+	servingNativeBusyV1(t, route, s, a)
+	cancel()
+	c.release()
+	if !sameError(servingResultV1(t, result, "pending optional row cancellation stranded"), context.Canceled) {
+		t.Fatal("optional native invocation altered pending caller")
+	}
 }
 
 // servingFormatV1 preserves native format refusal before a callback is inspected.
@@ -815,7 +1078,7 @@ func servingAdmissionV1(t *testing.T) {
 		t.Fatal("foreign span admitted")
 		return nil
 	}), "update")
-	if s.servingOwner.Load() != o || foreign.current != nil || foreign.priority != nil {
+	if s.servingOwner.Load() != o || foreign.current != nil {
 		t.Fatal("foreign attempt rebound or marked Store")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -832,6 +1095,8 @@ func servingAdmissionV1(t *testing.T) {
 		}), "update")
 		return nil
 	}))
+	fresh, _, freshReservations := servingSetupV1(t)
+	servingFreshV1(t, foreign, fresh, freshReservations, "foreign input retained priority")
 }
 
 // servingNoReadV1 distinguishes pre-acquisition refusal and terminal native state.
@@ -898,6 +1163,7 @@ func servingInputOrderV1(t *testing.T) {
 	}{
 		{nil, nil, nil, nil, nil},
 		{&ServingViewOwnerV1{}, s, ctx, callback, spanCallback},
+		{&ServingViewOwnerV1{self: o, lifetime: time.Hour}, s, ctx, callback, spanCallback},
 		{o, nil, ctx, callback, spanCallback},
 		{o, s, nil, callback, spanCallback},
 		{o, s, ctx, nil, nil},
@@ -916,7 +1182,7 @@ func servingInputOrderV1(t *testing.T) {
 		return nil
 	}))
 	servingBadAccountsV1(t, o, s, ctx, callback)
-	if err := o.WithQuiescenceV1(ctx, s, spanCallback); !sameError(err, context.Canceled) || o.span != nil || o.priority != nil {
+	if err := o.WithQuiescenceV1(ctx, s, spanCallback); !sameError(err, context.Canceled) || o.span != nil {
 		t.Fatal("canceled no-effect span changed context or retained mark")
 	}
 	low := reservationOwner(t, 805306367)
@@ -1108,7 +1374,7 @@ func servingReplacementV1(t *testing.T) {
 		t.Fatal("old source actual cleanup did not finish")
 	}
 	mustEnvironment(t, result)
-	servingRefusedV1(t, o, replacement, otherReservations)
+	servingFreshV1(t, o, replacement, otherReservations, "optional invocation left priority after actual close")
 	mustEnvironment(t, o.WithQuiescenceV1(context.Background(), s, func() error {
 		if oldReader.usable() || s.txn != nil {
 			t.Fatal("replacement effect preceded actual native close")

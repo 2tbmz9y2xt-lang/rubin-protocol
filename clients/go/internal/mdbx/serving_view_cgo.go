@@ -45,8 +45,9 @@ type ServingViewOwnerV1 struct {
 	self     *ServingViewOwnerV1
 	lifetime time.Duration
 	current  *ServingEpochV1
-	priority *servingMutationV1
+	live     uint64
 	span     *servingMutationV1
+	changed  chan struct{}
 }
 
 // ServingEpochV1 is valid only inside its synchronous WithViewV1 callback.
@@ -63,7 +64,7 @@ type ServingEpochV1 struct {
 	finished bool
 }
 
-// servingMutationV1 identifies one attempt; its nonzero size preserves identity.
+// servingMutationV1 owns one live invocation; its nonzero size preserves identity.
 type servingMutationV1 struct {
 	owner *ServingViewOwnerV1
 }
@@ -161,7 +162,7 @@ func (o *ServingViewOwnerV1) WithViewV1(ctx context.Context, s *Store, account *
 func (o *ServingViewOwnerV1) admitViewV1(ctx context.Context, s *Store) (*ServingEpochV1, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.current != nil || o.priority != nil || o.span != nil {
+	if o.current != nil || o.live != 0 || o.span != nil {
 		return nil, servingBusyV1(operationView)
 	}
 	e := &ServingEpochV1{owner: o, store: s, request: ctx}
@@ -225,10 +226,11 @@ func (o *ServingViewOwnerV1) finishViewV1(e *ServingEpochV1, out *ServingViewOut
 	if o.current == e && out.readEnd != ServingRetainedV1 {
 		o.current = nil
 	}
+	o.notifyV1()
 }
 
 // requestServingCloseV1 is optional and never changes native admission/errors.
-// The attempt's mark survives a failed TryLock until an actual retry completes.
+// Its scope ends at this invocation's return, including a failed TryLock.
 func (s *Store) requestServingCloseV1() *servingMutationV1 {
 	o := s.servingOwner.Load()
 	if o == nil {
@@ -239,8 +241,7 @@ func (s *Store) requestServingCloseV1() *servingMutationV1 {
 	return o.markV1()
 }
 
-// contendedServingCloseV1 restores absent priority after binding or completion.
-// A newer pending identity remains authoritative.
+// contendedServingCloseV1 refreshes eligibility if binding happened after entry.
 func (s *Store) contendedServingCloseV1() {
 	o := s.servingOwner.Load()
 	if o == nil {
@@ -248,22 +249,22 @@ func (s *Store) contendedServingCloseV1() {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.priority == nil {
-		o.markV1()
+	if o.current != nil {
+		o.current.closing = true
 	}
 }
 
-// markV1 installs the latest bounded identity and ends eligibility only.
+// markV1 registers one material live scope and ends eligibility only, under mu.
 func (o *ServingViewOwnerV1) markV1() *servingMutationV1 {
 	m := &servingMutationV1{owner: o}
-	o.priority = m
+	o.live++
 	if o.current != nil {
 		o.current.closing = true
 	}
 	return m
 }
 
-// completeV1 ends only this attempt's priority, after native unlock/cleanup.
+// completeV1 retires only this invocation, without masking an unlock notification.
 func (m *servingMutationV1) completeV1() {
 	if m == nil {
 		return
@@ -271,18 +272,17 @@ func (m *servingMutationV1) completeV1() {
 	o := m.owner
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.priority == m {
-		o.priority = nil
-	}
+	o.live--
 }
 
 // WithQuiescenceV1 holds serving exclusion through the synchronous source
 // effect and cleanup in use. The caller owns semantic admission and projects a
 // refusal to its existing storage_concurrency/OLD result. This is required only
 // at an actual semantic trigger; optional native closures must not call it.
-// No coordinator/native lock is held across use, and no effect may escape it.
-// A busy refusal leaves priority pending; the caller retries after its actual
-// resolution event. Abandoning that retry can leave serving unavailable.
+// Waits and use hold no coordinator/native lock; effects and cleanup cannot escape.
+// Invoke outside a View/native callback or span whose completion it must await.
+// use must not await another caller blocked by this span. Native retries elected
+// by use remain inside this invocation and its original work/account/deadline.
 func (o *ServingViewOwnerV1) WithQuiescenceV1(ctx context.Context, s *Store, use func() error) error {
 	if err := o.inputV1(ctx, s, use != nil, operationUpdate); err != nil {
 		return err
@@ -290,13 +290,16 @@ func (o *ServingViewOwnerV1) WithQuiescenceV1(ctx context.Context, s *Store, use
 	if err := o.bindV1(s, operationUpdate); err != nil {
 		return err
 	}
-	m, err := o.admitSpanV1()
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	completed := false
-	defer func() { o.finishSpanV1(m, completed) }()
-	if err, completed = s.servingPreflightV1(); err != nil {
+	m := s.requestServingCloseV1()
+	defer m.completeV1()
+	if err := o.waitSpanV1(ctx, m); err != nil {
+		return err
+	}
+	defer o.finishSpanV1(m)
+	if err := o.waitNativeV1(ctx, s); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -305,36 +308,100 @@ func (o *ServingViewOwnerV1) WithQuiescenceV1(ctx context.Context, s *Store, use
 	return use()
 }
 
-// admitSpanV1 requests closure before testing actual ownership, without waiting.
-func (o *ServingViewOwnerV1) admitSpanV1() (*servingMutationV1, error) {
+// admitSpanV1 atomically inspects actual ownership and captures its generation.
+func (o *ServingViewOwnerV1) admitSpanV1(m *servingMutationV1) (<-chan struct{}, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	m := o.markV1()
-	if o.current != nil || o.span != nil {
+	if o.current != nil && o.current.finished {
 		return nil, servingBusyV1(operationUpdate)
 	}
+	if o.current != nil || o.span != nil {
+		return o.generationV1(), nil
+	}
 	o.span = m
-	return m, nil
+	return nil, nil
+}
+
+// waitSpanV1 preserves this scope until actual view/span completion or cancellation.
+func (o *ServingViewOwnerV1) waitSpanV1(ctx context.Context, m *servingMutationV1) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		changed, err := o.admitSpanV1(m)
+		if err != nil || changed == nil {
+			return err
+		}
+		done := ctx.Done()
+		select {
+		case <-changed:
+		case <-done:
+		}
+	}
+}
+
+// waitNativeV1 reserves the span across lock contention and never replays use.
+func (o *ServingViewOwnerV1) waitNativeV1(ctx context.Context, s *Store) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		o.mu.Lock()
+		changed := o.generationV1()
+		o.mu.Unlock()
+		if err, acquired := s.servingPreflightV1(); acquired {
+			return err
+		}
+		done := ctx.Done()
+		select {
+		case <-changed:
+		case <-done:
+		}
+	}
 }
 
 // servingPreflightV1 observes Store health only under its existing operation lock.
 func (s *Store) servingPreflightV1() (error, bool) {
 	if !s.operations.TryLock() {
-		return servingBusyV1(operationUpdate), false
+		return nil, false
 	}
+	defer s.notifyServingCompletionV1()
 	defer s.operations.Unlock()
 	err, _ := s.observationStateError(operationUpdate)
 	return err, true
 }
 
-// finishSpanV1 preserves a newer contender and never derives truth from use.
-func (o *ServingViewOwnerV1) finishSpanV1(m *servingMutationV1, completed bool) {
+// finishSpanV1 releases only the matching span after actual synchronous cleanup.
+func (o *ServingViewOwnerV1) finishSpanV1(m *servingMutationV1) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.span == m {
 		o.span = nil
+		o.notifyV1()
 	}
-	if completed && o.priority == m {
-		o.priority = nil
+}
+
+// generationV1 lazily captures one shared completion channel, under mu.
+func (o *ServingViewOwnerV1) generationV1() <-chan struct{} {
+	if o.changed == nil {
+		o.changed = make(chan struct{})
+	}
+	return o.changed
+}
+
+// notifyV1 publishes a completed ownership transition to captured waiters, under mu.
+func (o *ServingViewOwnerV1) notifyV1() {
+	if o.changed != nil {
+		close(o.changed)
+		o.changed = nil
+	}
+}
+
+// notifyServingCompletionV1 observes binding at completion, after native Unlock.
+func (s *Store) notifyServingCompletionV1() {
+	if o := s.servingOwner.Load(); o != nil {
+		o.mu.Lock()
+		o.notifyV1()
+		o.mu.Unlock()
 	}
 }

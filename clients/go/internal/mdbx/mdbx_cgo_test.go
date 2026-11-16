@@ -2792,7 +2792,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			"newReader": 1, "uint8": 1, "s.format.Load": 1, "uint64": 1, "limitsForPage": 1, "reader.captureLineageV1": 1, "reader.active.Store": 1,
 			"<closure>": 1, "reader.expire().retire": 1, "reader.expire": 1,
 			"readPrimary": 1, "s.abortReadLocked": 1, "startupPublicationAllowed": 1,
-			"s.observeServingReadV1": 2, "servingOpeningV1": 1,
+			"s.observeServingReadV1": 2, "servingOpeningV1": 1, "s.notifyServingCompletionV1": 1,
 			"callback": 1, "startupCompletionResult": 1,
 		},
 		"StartupCanonicalNextV1": {
