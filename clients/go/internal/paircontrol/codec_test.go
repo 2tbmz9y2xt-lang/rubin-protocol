@@ -23,8 +23,10 @@ func require(t *testing.T, err error) {
 
 // exactShapeError excludes every errors.Is adapter, leaving only sentinel identity.
 func exactShapeError(err error) bool {
-	switch err.(type) {
-	case interface{ Is(error) bool }, interface{ Unwrap() error }, interface{ Unwrap() []error }:
+	var isAdapter interface{ Is(error) bool }
+	var singleWrapper interface{ Unwrap() error }
+	var multiWrapper interface{ Unwrap() []error }
+	if errors.As(err, &isAdapter) || errors.As(err, &singleWrapper) || errors.As(err, &multiWrapper) {
 		return false
 	}
 	return errors.Is(err, errShapeV1)
