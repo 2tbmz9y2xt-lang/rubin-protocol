@@ -49,29 +49,29 @@ type treePlanV1 struct {
 // treeScopeV1 is one position's slots (op or the truth evaluator, D30, D35): the Reader slot, the recorder slot and
 // the unwind capture recorded. call is the Source call wrapper, created once per scope before primitive 0 (D34).
 type treeScopeV1 struct {
-	s           *Store
-	old         *C.MDBX_txn
-	plan        *treePlanV1
-	position    treePositionV1
-	ledger      treeLedgerV1
-	t           *treeSectionV1
-	rb          *treeReadbackStateV1
-	j           int
-	reader      *Reader
-	rec         *treeRecorderV1
-	recorded    error
-	unwind      treeUnwindV1
-	call        func() error
-	held        bool   // W + F_fixed + C + R of j is charged
-	events      uint32 // max_j EventCount_j at the writer
-	observation TreeObservationV1
-	delta       *treeDeltaV1 // selected frozen writer descriptors through reserve/write
-	bounded     bool
-	enclosing   bool // selected checker and regeneration own index -1
-	frozen      [2]*treeDeltaV1 // separately charged per-role owners; never a projection
+	s              *Store
+	old            *C.MDBX_txn
+	plan           *treePlanV1
+	position       treePositionV1
+	ledger         treeLedgerV1
+	t              *treeSectionV1
+	rb             *treeReadbackStateV1
+	j              int
+	reader         *Reader
+	rec            *treeRecorderV1
+	recorded       error
+	unwind         treeUnwindV1
+	call           func() error
+	held           bool   // W + F_fixed + C + R of j is charged
+	events         uint32 // max_j EventCount_j at the writer
+	observation    TreeObservationV1
+	delta          *treeDeltaV1 // selected frozen writer descriptors through reserve/write
+	bounded        bool
+	enclosing      bool            // selected checker and regeneration own index -1
+	frozen         [2]*treeDeltaV1 // separately charged per-role owners; never a projection
 	lagObservation TreeObservationV1
-	storedBody  treeBodyV1
-	bodyHeld    uint64 // one protected stored backing; numeric grant survives crossing
+	storedBody     treeBodyV1
+	bodyHeld       uint64 // one protected stored backing; numeric grant survives crossing
 }
 
 // treeComposeV1 is the frame-held state of one updateTreeLockedV1 call: the captured outcome and index (D17 item 3)
@@ -200,7 +200,8 @@ func (e *treeScopeV1) retainBodyV1(body treeBodyV1) (treeBodyV1, error) {
 		return body, nil
 	}
 	n := uint64(len(body.bytes))
-	if err := e.ledger.chargeV1(n); err != nil {
+	err := e.ledger.chargeV1(n)
+	if err != nil {
 		return treeBodyV1{}, err
 	}
 	e.storedBody, e.bodyHeld = body, n
@@ -586,7 +587,8 @@ func (c *treeComposeV1) boundedHoldV1() error {
 		if j == len(w.plan.primitives)-1 {
 			emit.pair = w.plan.pair
 		}
-		if err := w.regenerateV1(w.frozen[j], &prim, emit); err != nil {
+		err = w.regenerateV1(w.frozen[j], &prim, emit)
+		if err != nil {
 			return err
 		}
 		w.retireFrozenV1(j)
@@ -628,7 +630,8 @@ func (e *treeScopeV1) consultedUTXOV1(key []byte) bool {
 func (e *treeScopeV1) boundedCheckV1() error {
 	for j := range e.plan.primitives {
 		prim := treeAdmittedPrimitiveV1(&e.plan.primitives[j])
-		if err := e.regenerateV1(e.frozen[j], &prim, treeBoundedEmitterV1{section: e.t}); err != nil {
+		err := e.regenerateV1(e.frozen[j], &prim, treeBoundedEmitterV1{section: e.t})
+		if err != nil {
 			return err
 		}
 	}

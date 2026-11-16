@@ -3729,10 +3729,18 @@ func TestTreeReplayBoundedProfileV1(t *testing.T) {
 		{"proof", func(o *TreeOperationV1) { o.Proof = func(*TreeDeltaReportV1) error { return nil } }},
 		{"slot", func(o *TreeOperationV1) { o.HeaderSlot = &TreeHeaderSlotV1{} }},
 		{"prepaid", func(o *TreeOperationV1) { o.Pair.PrepaidReadBytes = 1 }},
-		{"rank8-consulted", func(o *TreeOperationV1) { o.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[8], Key: make([]byte, 46)}} }},
-		{"undo-consulted", func(o *TreeOperationV1) { o.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[5], Key: make([]byte, 33)}} }},
-		{"pending-consulted", func(o *TreeOperationV1) { o.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[6], Key: make([]byte, 32)}} }},
-		{"other-body-consulted", func(o *TreeOperationV1) { o.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[4], Key: bytes.Repeat([]byte{0x99}, 32)}} }},
+		{"rank8-consulted", func(o *TreeOperationV1) {
+			o.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[8], Key: make([]byte, 46)}}
+		}},
+		{"undo-consulted", func(o *TreeOperationV1) {
+			o.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[5], Key: make([]byte, 33)}}
+		}},
+		{"pending-consulted", func(o *TreeOperationV1) {
+			o.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[6], Key: make([]byte, 32)}}
+		}},
+		{"other-body-consulted", func(o *TreeOperationV1) {
+			o.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[4], Key: bytes.Repeat([]byte{0x99}, 32)}}
+		}},
 		{"current-direction", func(o *TreeOperationV1) { o.Primitives[0].Direction = 2 }},
 		{"current-kind0", func(o *TreeOperationV1) { o.Primitives[0].Kind = 0 }},
 		{"current-undo0", func(o *TreeOperationV1) { o.Primitives[0].Undo = 0 }},
@@ -3758,7 +3766,10 @@ func TestTreeReplayBoundedProfileV1(t *testing.T) {
 		{"lag-endpoint", func(o *TreeOperationV1) { o.Primitives[1].Endpoint.CumulativeChainwork[0]++ }},
 		{"lag-database", func(o *TreeOperationV1) { o.Primitives[1].Coverage.DatabaseID[0]++ }},
 		{"lag-meta", func(o *TreeOperationV1) { o.Primitives[1].Coverage.BlockMeta.EventCount++ }},
-		{"lag-body-kind", func(o *TreeOperationV1) { o.Primitives[1].Coverage.BodyKind = 2; o.Primitives[1].Coverage.CurrentBody = nil }},
+		{"lag-body-kind", func(o *TreeOperationV1) {
+			o.Primitives[1].Coverage.BodyKind = 2
+			o.Primitives[1].Coverage.CurrentBody = nil
+		}},
 		{"lag-header", func(o *TreeOperationV1) { o.Primitives[1].Coverage.HeaderBytes = 116 }},
 		{"lag-header0", func(o *TreeOperationV1) { o.Primitives[1].Coverage.HeaderBytes = 0 }},
 		{"lag-header149", func(o *TreeOperationV1) { o.Primitives[1].Coverage.HeaderBytes = 149 }},
@@ -3773,10 +3784,22 @@ func TestTreeReplayBoundedProfileV1(t *testing.T) {
 		{"missing-lag-index", func(o *TreeOperationV1) { o.Pair.Mutations = append(o.Pair.Mutations[:1], o.Pair.Mutations[2:]...) }},
 		{"missing-lag-owner", func(o *TreeOperationV1) { o.Pair.Mutations = o.Pair.Mutations[:len(o.Pair.Mutations)-1] }},
 		{"missing-body1-target", func(o *TreeOperationV1) { o.Pair.Mutations = append(o.Pair.Mutations[:2], o.Pair.Mutations[3:]...) }},
-		{"body3-extra-target", func(o *TreeOperationV1) { for j := range o.Primitives { o.Primitives[j].Coverage.BodyKind = 3 } }},
-		{"body2-literal-conflict", func(o *TreeOperationV1) { for j := range o.Primitives { o.Primitives[j].Coverage.BodyKind = 2; o.Primitives[j].Coverage.CurrentBody = nil } }},
+		{"body3-extra-target", func(o *TreeOperationV1) {
+			for j := range o.Primitives {
+				o.Primitives[j].Coverage.BodyKind = 3
+			}
+		}},
+		{"body2-literal-conflict", func(o *TreeOperationV1) {
+			for j := range o.Primitives {
+				o.Primitives[j].Coverage.BodyKind = 2
+				o.Primitives[j].Coverage.CurrentBody = nil
+			}
+		}},
 		{"extra-target", func(o *TreeOperationV1) { o.Pair.Mutations = append(o.Pair.Mutations, tsTarget(99)) }},
-		{"held-independent-copy", func(o *TreeOperationV1) { trBodyV1(o, 3, false); o.Primitives[1].Coverage.CurrentBody = bytes.Clone(o.Primitives[0].Coverage.CurrentBody) }},
+		{"held-independent-copy", func(o *TreeOperationV1) {
+			trBodyV1(o, 3, false)
+			o.Primitives[1].Coverage.CurrentBody = bytes.Clone(o.Primitives[0].Coverage.CurrentBody)
+		}},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {

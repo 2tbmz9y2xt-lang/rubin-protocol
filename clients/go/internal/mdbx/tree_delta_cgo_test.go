@@ -439,10 +439,10 @@ func TestTreeReplayBoundedFundingLoanV1(t *testing.T) {
 // owned resource invariant cannot be inferred from the final byte image alone.
 type trLoanOldV1 struct {
 	*tdMemOld
-	t *testing.T
-	ledger *tdLedger
+	t        *testing.T
+	ledger   *tdLedger
 	baseline uint64
-	entries int
+	entries  int
 }
 
 func (o *trLoanOldV1) nextV1(dbi DBI, from []byte) ([]byte, treeImageV1, bool, error) {
@@ -458,10 +458,10 @@ func (o *trLoanOldV1) nextV1(dbi DBI, from []byte) ([]byte, treeImageV1, bool, e
 
 type trLoanEmitterV1 struct {
 	tdCountEmitter
-	t *testing.T
-	ledger *tdLedger
+	t        *testing.T
+	ledger   *tdLedger
 	baseline uint64
-	entries int
+	entries  int
 }
 
 func (e *trLoanEmitterV1) emitV1(target treeTargetV1) error {

@@ -3639,7 +3639,7 @@ func TestTreeReplayBoundedPreflightV1(t *testing.T) {
 func trOldDriftV1(t *testing.T, role int, domain string) {
 	t.Helper()
 	f := trSceneV1(t)
-	g := uint64(role+1)
+	g := uint64(role + 1)
 	rank, key := uint8(0), tsCounterKey(g)
 	switch domain {
 	case "UTXO":
@@ -3834,7 +3834,7 @@ func TestTreeReplayBoundedOrderV1(t *testing.T) {
 				t.Fatal("CURRENT retired or observation aliased before LAG freeze")
 			}
 			for index, rec := range []*treeRecorderV1{first, sink.recorder} {
-				want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: uint64(index+1), Block: f.op.Primitives[index].Block, Height: 5, Primitive: index, Position: pos}
+				want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: uint64(index + 1), Block: f.op.Primitives[index].Block, Height: 5, Primitive: index, Position: pos}
 				if *rec.observation != want {
 					t.Fatalf("role-observation%d = %+v want %+v", index, *rec.observation, want)
 				}
@@ -3956,7 +3956,7 @@ func trUndoResultV1(t *testing.T, roles int, undo TreeUndoEffectV1, existing, cr
 		f.p[j].block = meta
 		f.p[j].events = []TreeEventV1{tsSpend(0x20, 0, 1, 0), tsSpend(0x21, 0, 1, 1), tsCreate(0x31, 0, 1, 148, 11)}
 		f.op.Primitives[j].Coverage.BlockMeta = meta
-		g := uint64(j+1)
+		g := uint64(j + 1)
 		var entries []testTreeEntry
 		for i, tag := range []byte{0x20, 0x21} {
 			value := tdFormed(tdFrame(uint64(7+i), 0, []byte{tag}), 4, 0)
@@ -4051,7 +4051,7 @@ func TestTreeReplayBoundedBodyV1(t *testing.T) {
 							t.Fatal("writer/readback replay mode")
 						}
 						return nil
-						}
+					}
 				}
 				var result tsResult
 				evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() { result = f.run(t) })
@@ -4107,12 +4107,14 @@ func TestTreeReplayBoundedBodyV1(t *testing.T) {
 // additional physical L. Removing any of these owners changes the minus-one row.
 func TestTreeReplayBoundedFundingV1(t *testing.T) {
 	for _, body := range []struct {
-		kind uint8
+		kind   uint8
 		delete bool
-		q, b uint64
+		q, b   uint64
 	}{
-		{1, false, 1167, 0}, {2, false, 848, 159},
-		{2, true, 1008, 159}, {3, false, 848, 0},
+		{1, false, 1167, 0},
+		{2, false, 848, 159},
+		{2, true, 1008, 159},
+		{3, false, 848, 0},
 	} {
 		for _, short := range []uint64{0, 1} {
 			t.Run(fmt.Sprintf("body%d/delete%v/short%d", body.kind, body.delete, short), func(t *testing.T) {
@@ -4121,7 +4123,7 @@ func TestTreeReplayBoundedFundingV1(t *testing.T) {
 				if body.kind == 2 {
 					treeNativeSeed(t, f.s, 4, f.op.Primitives[0].Block[:], raw)
 				}
-				peak := body.q+body.b+2*(74912+65560+104)+131192+288544+147968
+				peak := body.q + body.b + 2*(74912+65560+104) + 131192 + 288544 + 147968
 				var result tsResult
 				mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
 					return a.WithReservation(402653184-peak+short, func() error {
@@ -4200,7 +4202,7 @@ func trFundingOwnerV1(t *testing.T, owner string, short uint64) {
 		if owner == "future-readback" && ledger.held+n != 700888 {
 			t.Error("future reserve excludes a frozen A_j or Sr/Br", ledger.held, n)
 		}
-		ledger.limit = ledger.held+n-short
+		ledger.limit = ledger.held + n - short
 	}
 	var result tsResult
 	var unwind treeUnwindV1
@@ -4250,11 +4252,12 @@ func trFundingOwnerV1(t *testing.T, owner string, short uint64) {
 // domains, even when an earlier OLD or NEW predicate has already become false.
 func TestTreeReplayBoundedReadbackV1(t *testing.T) {
 	for _, row := range []struct {
-		name string
+		name     string
 		scenario SelectedDamageScenario
-		truth CommitTruth
+		truth    CommitTruth
 	}{
-		{"OLD", SelectedDamageCommitOld, 1}, {"NEW", SelectedDamageCommitNew, 2},
+		{"OLD", SelectedDamageCommitOld, 1},
+		{"NEW", SelectedDamageCommitNew, 2},
 		{"unreadable", SelectedDamageCommitUnreadable, 3},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -4802,8 +4805,8 @@ func TestTreeReplayBoundedStressV1(t *testing.T) {
 			}
 			// Q=5*128+2*168+32+n; each A=140472+104E;
 			// H of these fixed rows is below Sr (all node values <=140).
-			q := uint64(1008+len(raw))
-			quota := q+2*(74912+65560+104*events)+131192+(288440+104*events)+147968
+			q := uint64(1008 + len(raw))
+			quota := q + 2*(74912+65560+104*events) + 131192 + (288440 + 104*events) + 147968
 			var result tsResult
 			mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
 				return a.WithReservation(402653184-quota, func() error {
@@ -4882,10 +4885,10 @@ func trStressSeedV1(t *testing.T, f *tsfScene, n int) []byte {
 		events = append(events, TreeEventV1{Kind: 1, Outpoint: TreeOutpointV1{Txid: trStressKeyV1(i, false), Vout: uint32(i)}, TxIndex: 1, InputIndex: uint32(i)})
 	}
 	for i := range n {
-		events = append(events, TreeEventV1{Kind: 2, Outpoint: TreeOutpointV1{Txid: trStressKeyV1(i, true), Vout: uint32(i)}, TxIndex: 1, FrameOffset: uint64(148+11*i), FrameLength: 11})
+		events = append(events, TreeEventV1{Kind: 2, Outpoint: TreeOutpointV1{Txid: trStressKeyV1(i, true), Vout: uint32(i)}, TxIndex: 1, FrameOffset: uint64(148 + 11*i), FrameLength: 11})
 	}
 	for j, p := range f.op.Primitives {
-		f.p[j].block, f.p[j].events = TreeBlockV1{TxCount: 2, EventCount: uint32(2*n)}, events
+		f.p[j].block, f.p[j].events = TreeBlockV1{TxCount: 2, EventCount: uint32(2 * n)}, events
 		p.Coverage.CurrentBody, p.Coverage.BlockMeta = raw, f.p[j].block
 		entries := trStressEntriesV1(p.Generation, n, false, raw)
 		rows := map[string][]byte{}
