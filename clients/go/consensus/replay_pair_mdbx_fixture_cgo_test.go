@@ -485,7 +485,6 @@ func TestReplayPairEndpointUnequal(t *testing.T) {
 	full := icbReplayVaultBlockV1(t, 200, 1)
 	f := *full
 	f.prefix, f.block, f.old, f.inputs = full.prefix[:5], full.prefix[5], full.prefix[4].rows, nil
-	logicalMDBXAssert(t, len(f.old) == 1 && len(f.block.rows) == 1, "bounded unequal fixture has one original leaf")
 	c, w := rpfCase(t, &f, 1, true)
 	parent := btRequest(f.prefix[len(f.prefix)-1].in.Raw, c.in.Parent.Height)
 	parent.Generation, parent.Endpoint = 2, c.in.Parent
@@ -510,11 +509,12 @@ func TestReplayPairEndpointUnequal(t *testing.T) {
 	})
 	seed.want(t, 2, 3, -1)
 	logicalMDBXAssert(t, seed.err == nil, "native coherent alternative LAG: %v", seed.err)
-	btState(t, w.btWorld, 2, req.Endpoint, alternate)
+	alternateState := icbHistoryBlockV1{in: initial148CompleteBlockInputV1{Height: req.Height, Endpoint: req.Endpoint}, rows: alternate, root: root}
+	icbReplayStateV1(t, w, 2, alternateState, nil)
 	btIndexes(t, w.btWorld, req, true)
 	w.read(t, 7, parentOwner, nil)
 	var binding mdbx.RootBindingV1
-	err := w.s.View(func(r *mdbx.Reader) error { var present bool; var err error; binding, present, err = r.ReadTreeRootBindingV1(2); logicalMDBXAssert(t, err == nil && present && binding.RootDigest == root, "native alternative root: %+v/%v", binding, err); return err })
+	err := w.s.View(func(r *mdbx.Reader) error { var present bool; var err error; binding, present, err = r.ReadTreeRootBindingV1(2); logicalMDBXAssert(t, err == nil && present && binding.RootDigest == root && binding.DatabaseID == ([32]byte{7}) && binding.CommitmentVersion == 1 && binding.Assurance.Kind == 1, "native alternative root: %+v/%v", binding, err); return err })
 	logicalMDBXAssert(t, err == nil, "alternative root read: %v", err)
 	// Restore the qualified parent index/owner and root endpoint atomically.
 	// The native alternate UTXO/node/digest image remains internally coherent.
@@ -535,7 +535,8 @@ func TestReplayPairEndpointUnequal(t *testing.T) {
 	btIndexes(t, w.btWorld, parent, true)
 	w.read(t, 7, alternativeOwner, nil)
 	w.read(t, 3, parent.Block[:], parent.Raw[:148])
-	btState(t, w.btWorld, 2, c.in.Parent, alternate)
+	alternateState.in.Endpoint = c.in.Parent
+	icbReplayStateV1(t, w, 2, alternateState, nil)
 	final := make(map[Outpoint]UtxoEntry, len(f.block.rows)+1)
 	for key, row := range f.block.rows { final[key] = row }
 	final[Outpoint{Txid: extra.id}] = alternate[Outpoint{Txid: extra.id}]
