@@ -515,11 +515,17 @@ func servingFixtureSpanNativeV1(t *testing.T) {
 				var result error
 				var panicked any
 				var returned bool
+				called := 0
 				done := make(chan struct{})
 				go func() {
 					defer close(done)
 					defer func() { panicked = recover() }()
 					result = o.WithQuiescenceV1(context.Background(), s, func() error {
+						called++
+						if called != 1 {
+							t.Error("cancellation replaced established result or replayed callback")
+							return app
+						}
 						_, err := fixtureLargeFault(s, mode, 0, []byte{0}, func() {
 							_ = s.View(func(*Reader) error { return nil })
 						})
@@ -529,10 +535,9 @@ func servingFixtureSpanNativeV1(t *testing.T) {
 					})
 					returned = true
 				}()
-				select {
-				case <-done:
-				case <-time.After(5 * time.Second):
-					t.Fatal("external native callback/cleanup did not finish")
+				servingSignalV1(t, done, "external native callback/cleanup did not finish")
+				if called != 1 {
+					t.Fatal("cancellation replaced established result or replayed callback")
 				}
 				servingWantUnwindV1(t, kind, result, panicked, returned, app)
 				if o.span != nil || s.terminal == nil || (mode == 10) != (s.txn != nil) {

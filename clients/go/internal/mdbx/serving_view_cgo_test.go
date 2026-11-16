@@ -661,7 +661,7 @@ func servingSpanV1(t *testing.T) {
 
 // servingSpanOperationV1 checks cancellation against real native preflight contention.
 func servingSpanOperationV1(t *testing.T) {
-	for _, route := range []string{"view", "update", "tree"} {
+	for _, route := range []string{"view", "update", "tree", "closed"} {
 		t.Run(route, func(t *testing.T) { servingNativeCancelV1(t, route) })
 	}
 	t.Run("canceled entry states", servingCanceledEntriesV1)
@@ -673,16 +673,26 @@ func servingNativeCancelV1(t *testing.T, route string) {
 	if route == "tree" {
 		s, _, reservations = tsNew(t)
 	}
-	open, holder := servingNativeHolderV1(t, route, s, reservations)
+	holderRoute := route
+	if route == "closed" {
+		holderRoute = "view"
+	}
+	open, holder := servingNativeHolderV1(t, holderRoute, s, reservations)
 	called := 0
 	c, result, cancel := servingRequiredV1(t, o, s, func() error { called++; return nil })
 	servingWaitingV1(t, c, result)
 	cancel()
 	open()
 	mustEnvironment(t, servingResultV1(t, holder, "native holder did not finish"))
+	if route == "closed" {
+		mustEnvironment(t, s.Close())
+	}
 	c.release()
 	got := servingResultV1(t, result, "native completion did not wake required invocation")
 	servingWantResolutionV1(t, got, called, true)
+	if route == "closed" {
+		return
+	}
 	servingFreshV1(t, o, s, reservations, "resolved invocation retained priority")
 }
 
@@ -739,11 +749,17 @@ func servingSpanUnwindV1(t *testing.T, mode string) {
 	var result error
 	var panicked any
 	var returned bool
+	called := 0
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer func() { panicked = recover() }()
 		result = o.WithQuiescenceV1(context.Background(), s, func() error {
+			called++
+			if called != 1 {
+				t.Error("cancellation replaced established result or replayed callback")
+				return app
+			}
 			servingRefusedV1(t, o, s, reservations)
 			servingNativeRetryV1(t, "update", s, nil)
 			servingRefusedV1(t, o, s, reservations)
@@ -754,10 +770,9 @@ func servingSpanUnwindV1(t *testing.T, mode string) {
 		})
 		returned = true
 	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("external span callback/cleanup did not finish")
+	servingSignalV1(t, done, "external span callback/cleanup did not finish")
+	if called != 1 {
+		t.Fatal("cancellation replaced established result or replayed callback")
 	}
 	servingWantUnwindV1(t, mode, result, panicked, returned, app)
 	if o.span != nil || s.state != storeOPEN || s.txn != nil {
@@ -801,9 +816,15 @@ func servingSpanContenderV1(t *testing.T) {
 	defer cancel()
 	result, done := make(chan error, 1), make(chan struct{})
 	app := errors.New("outer established result")
+	called := 0
 	go func() {
 		defer close(done)
 		result <- o.WithQuiescenceV1(ctx, s, func() error {
+			called++
+			if called != 1 {
+				t.Error("cancellation replaced established result or replayed callback")
+				return app
+			}
 			defer func() { close(entered); <-cleanup }()
 			cancel()
 			servingNativeRetryV1(t, "update", s, nil)
@@ -812,14 +833,14 @@ func servingSpanContenderV1(t *testing.T) {
 	}()
 	t.Cleanup(func() { release(); servingSignalV1(t, done, "active callback cleanup stranded") })
 	servingSignalV1(t, entered, "outer cleanup did not start")
-	c, second, cancelSecond := servingRequiredV1(t, o, s, func() error { return nil })
-	servingWaitingV1(t, c, second)
 	out, err := servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
 	if err == nil {
 		t.Fatal("active effect cleanup admitted a serving view")
 	}
 	servingWantBusyV1(t, err, "view")
 	servingWantOutcomeV1(t, out, 0, false)
+	c, second, cancelSecond := servingRequiredV1(t, o, s, func() error { return nil })
+	servingWaitingV1(t, c, second)
 	cancelSecond()
 	c.release()
 	if !sameError(servingResultV1(t, second, "waiting cancellation did not return"), context.Canceled) {
@@ -827,7 +848,7 @@ func servingSpanContenderV1(t *testing.T) {
 	}
 	servingRefusedV1(t, o, s, reservations)
 	release()
-	if !sameError(servingResultV1(t, result, "active cleanup did not return"), app) {
+	if !sameError(servingResultV1(t, result, "active cleanup did not return"), app) || called != 1 {
 		t.Fatal("cancellation replaced established result or replayed callback")
 	}
 	servingFreshV1(t, o, s, reservations, "resolved invocation retained priority")
