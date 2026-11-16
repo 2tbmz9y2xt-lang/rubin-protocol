@@ -244,7 +244,7 @@ func TestDependentViewBeginRace(t *testing.T) {
 }
 
 // dependentChild reuses the existing process protocol, closing pipes and joining on every exit.
-func dependentChild(t *testing.T, s *Store) func() string {
+func dependentChild(t *testing.T, s *Store) (func() string, func()) {
 	t.Helper()
 	id := testIdentity(1)
 	idHex := hex.EncodeToString(append(append(id.InstallationID[:], id.ChainID[:]...), id.GenesisHash[:]...))
@@ -262,7 +262,7 @@ func dependentChild(t *testing.T, s *Store) func() string {
 		_ = stdout.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	finish := sync.OnceFunc(func() {
 		_ = stdin.Close()
 		if err := cmd.Wait(); err != nil {
 			t.Errorf("dependent child join: %v", err)
@@ -270,6 +270,7 @@ func dependentChild(t *testing.T, s *Store) func() string {
 		_ = stdout.Close()
 		cancel()
 	})
+	t.Cleanup(finish)
 	out := bufio.NewReader(stdout)
 	return func() string {
 		_, err := io.WriteString(stdin, "try\n")
@@ -277,13 +278,13 @@ func dependentChild(t *testing.T, s *Store) func() string {
 		line, err := out.ReadString('\n')
 		must(t, err)
 		return line
-	}
+	}, finish
 }
 
 // H2: refused direct/concurrent Close retains actual process exclusion until exit.
 func TestDependentViewProcessLock(t *testing.T) {
 	s := mustCreate(t, storeDir(t), testIdentity(1))
-	ask := dependentChild(t, s)
+	ask, finish := dependentChild(t, s)
 	before := fileBytes(t, s.dir)
 	if got := ask(); got != "busy\n" {
 		t.Fatalf("child before callback: %q", got)
@@ -318,6 +319,7 @@ func TestDependentViewProcessLock(t *testing.T) {
 	if got := ask(); got != "open\n" {
 		t.Fatalf("child after actual Close: %q", got)
 	}
+	finish()
 	if !reflect.DeepEqual(mustView(t, mustOpen(t, s.dir, testIdentity(1))), View{Identity: testIdentity(1)}) || !bytes.Equal(fileBytes(t, s.dir), before) {
 		t.Fatal("reopen after process exclusion changed P")
 	}
