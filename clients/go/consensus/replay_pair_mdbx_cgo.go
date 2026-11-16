@@ -40,8 +40,10 @@ type replayPairRequestV1 struct {
 	Raw       []byte
 }
 
-type replayPairPrepareCurrentV1 func(*mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error)
-type replayPairWithLagInputsV1 func(*mdbx.Reader, *initial148CompleteBlockResultV1, func([]mdbx.TreeOutpointV1) error) error
+type (
+	replayPairPrepareCurrentV1 func(*mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error)
+	replayPairWithLagInputsV1  func(*mdbx.Reader, *initial148CompleteBlockResultV1, func([]mdbx.TreeOutpointV1) error) error
+)
 
 // replayPairOutcomeV1 preserves the native tuple. Role is empty before callback
 // entry, owns a CURRENT/LAG callback refusal, or projects native index 0/1.

@@ -29,9 +29,13 @@ func rpfCase(t *testing.T, f *icbReplayFamilyV1, body uint8, paired bool) (*rpCa
 		w.seedAuthority(t, a)
 	}
 	icbReplayBodyPreconditionV1(t, w, f, body)
-	c := &rpCase{w: w.btWorld, in: f.block.in, request: replayPairRequestV1{Authority: a, Database: w.database,
-		Height: f.block.in.Height, Endpoint: f.block.in.Endpoint, LagParent: f.block.in.Parent, Raw: f.block.in.Raw},
-		rows: replayPairRowsV1{BodyKind: body, Undo: mdbx.UndoTransientV1}, store: rpStore{store: w.s}}
+	c := &rpCase{
+		w: w.btWorld, in: f.block.in, request: replayPairRequestV1{
+			Authority: a, Database: w.database,
+			Height: f.block.in.Height, Endpoint: f.block.in.Endpoint, LagParent: f.block.in.Parent, Raw: f.block.in.Raw,
+		},
+		rows: replayPairRowsV1{BodyKind: body, Undo: mdbx.UndoTransientV1}, store: rpStore{store: w.s},
+	}
 	return c, w
 }
 

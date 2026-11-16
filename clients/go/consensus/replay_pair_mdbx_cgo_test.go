@@ -60,10 +60,15 @@ func rpNew(t *testing.T, target uint64, body uint8, undo mdbx.TreeUndoEffectV1) 
 	in, _ := icbGenesisInputV1(t, -1)
 	a := mdbx.TreeAuthorityV1{Authority: mdbx.StorageAuthorityV1{
 		Version: 1, ActiveProfile: 1, ActiveGenerationID: 3, NextGenerationID: 5,
-		Phase: 3, Lifecycle: 2, Replay: &mdbx.ReplayV1{TargetProfile: 2, TargetGenerationID: 1,
-			Target: mdbx.RecoveryTargetV1{ChainID: in.ChainID, GenesisHash: in.Endpoint.BlockHash,
-				TipHeight: target, TipHash: [32]byte{9}, CumulativeChainwork: [40]byte{39: 99}},
-			Cursor: mdbx.ReplayCursorV1{Kind: 1}}}, LagGenerationID: 4, TargetLagGenerationID: 2, SourceKind: 1}
+		Phase: 3, Lifecycle: 2, Replay: &mdbx.ReplayV1{
+			TargetProfile: 2, TargetGenerationID: 1,
+			Target: mdbx.RecoveryTargetV1{
+				ChainID: in.ChainID, GenesisHash: in.Endpoint.BlockHash,
+				TipHeight: target, TipHash: [32]byte{9}, CumulativeChainwork: [40]byte{39: 99},
+			},
+			Cursor: mdbx.ReplayCursorV1{Kind: 1},
+		},
+	}, LagGenerationID: 4, TargetLagGenerationID: 2, SourceKind: 1}
 	if body == 3 || undo == mdbx.UndoCompareV1 || undo == mdbx.UndoCompareDeleteV1 {
 		a.Authority.Replay.TargetProfile = mdbx.StorageProfilePrunedV1
 	}
