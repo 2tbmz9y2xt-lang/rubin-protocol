@@ -1456,7 +1456,8 @@ func TestInitial148ReplayReadbackV1(t *testing.T) {
 				icbReplaySourceCallsV1(t, join, [3]int{0, 1, 1})
 				w.reopen(t)
 				if tc.name == "mixed" {
-					w.read(t, 4, hash[:], []byte{0x7f})
+					equal, rawErr := mdbx.FixtureRawRowEqual(w.s, 4, hash[:], []byte{0x7f})
+					logicalMDBXAssert(t, rawErr == nil && equal, "reopened mixed body must retain exact malformed byte 7f: equal=%t err=%v", equal, rawErr)
 					w.seed(t, 4, hash[:], f.block.in.Raw)
 				}
 				block, spent := f.block, f.inputs
