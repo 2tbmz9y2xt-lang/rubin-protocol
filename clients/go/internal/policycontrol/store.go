@@ -23,7 +23,7 @@ const (
 // NewInstallationProof names the identity it attests; a zero value or another identity refuses.
 type NewInstallationProof struct{ Identity Identity }
 
-// View is a protected copy of the last qualified committed P.
+// View is a detached point-in-time copy of the last qualified committed P.
 type View struct {
 	Identity                         Identity
 	Sequence                         uint64
@@ -85,6 +85,7 @@ type Store struct {
 	crossing                     bool     // commit or recovery I/O in progress
 	pending                      *attempt // unresolved UNKNOWN attempt
 	closed                       bool
+	dependentView                bool     // one synchronous consumer of committed P
 	latchRequested, latchRenewed bool // the one coalesced RAM latch request; one recorded since the latest latch decision
 }
 
@@ -303,7 +304,7 @@ func (s *Store) settleCrossing(c *crossingResult, scratch string, f *os.File) {
 	}
 }
 
-// View returns a protected copy of the last qualified committed P. It refuses
+// View returns a detached point-in-time copy of the last qualified committed P. It refuses
 // with ErrClosed after Close and ErrBusy during a crossing or while an attempt is UNKNOWN.
 func (s *Store) View() (View, error) {
 	s.mu.Lock()
@@ -311,6 +312,11 @@ func (s *Store) View() (View, error) {
 	if err := s.readableLocked(); err != nil {
 		return View{}, err
 	}
+	return s.viewLocked(), nil
+}
+
+// viewLocked copies the committed state while the caller holds s.mu.
+func (s *Store) viewLocked() View {
 	st := s.st
 	v := View{Identity: st.id, Sequence: st.seq, InitialSyncCompleted: st.ctl.initialSync, HasAttempt: st.ctl.hasAttempt, ControlSequence: st.ctl.sequence, Incident: st.ctl.incident.clone()}
 	if r := st.receipt; r != nil {
@@ -321,7 +327,40 @@ func (s *Store) View() (View, error) {
 		}
 		v.Receipt = &rc
 	}
-	return v, nil
+	return v
+}
+
+// WithDependentViewV1 protects qualified committed P through one synchronous use
+// of its detached View, including use's deferred cleanup, without holding a Tx or
+// s.mu over use. Closed, UNKNOWN and crossing refusals precede held-owner ErrBusy,
+// which precedes ErrRefused for nil use. Begin, PersistLatch, Recover, Close and
+// nested admission refuse while use runs; ordinary reads and RAM latch requests
+// remain available. It returns use's exact error and preserves panic/Goexit.
+// All dependent work must finish inside use; a retained View confers no later
+// qualification, source lifetime or native/outer-effect permission.
+func (s *Store) WithDependentViewV1(use func(View) error) error {
+	s.mu.Lock()
+	if err := s.readableLocked(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if s.heldLocked() {
+		s.mu.Unlock()
+		return ErrBusy
+	}
+	if use == nil {
+		s.mu.Unlock()
+		return ErrRefused
+	}
+	v := s.viewLocked()
+	s.dependentView = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.dependentView = false
+		s.mu.Unlock()
+	}()
+	return use(v)
 }
 
 func (s *Store) readableLocked() error {
@@ -337,14 +376,15 @@ func (s *Store) readableLocked() error {
 }
 
 // Close ends a held transaction as OLD, disposes a retained crossing handle and releases the directory lock, returning
-// any release failure. It refuses with ErrBusy during a crossing; a second Close returns nil and does nothing.
+// any release failure. It refuses with ErrBusy during a crossing or dependent callback;
+// a second Close returns nil and does nothing.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil
 	}
-	if s.crossing {
+	if s.crossing || s.dependentView {
 		return ErrBusy
 	}
 	if s.tx != nil {
