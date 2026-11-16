@@ -4683,6 +4683,9 @@ func trLifecycleV1(t *testing.T, position TreePositionV1, role int, mode string,
 		if position == 2 && (mode == "nil" || j <= role) {
 			readback = 1
 		}
+		if position == 1 && mode == "nil" && cleanup != 0 {
+			readback = 1
+		}
 		if provider.calls != [3]int{0, writer, readback} {
 			t.Fatal("Source prefix suppression/position", j, provider.calls)
 		}
@@ -4713,10 +4716,8 @@ func trLifecycleResultV1(t *testing.T, f *tsfScene, position TreePositionV1, rol
 				t.Fatal("nil Source complete NEW infrastructure tuple", result.err)
 			}
 			if position == 1 {
-				if ce.ReadbackCause != nil {
-					t.Fatal("OLD abort cleanup fabricated readback cause", ce.ReadbackCause)
-				}
-				tsHeldCausesV1(t, ce.Cause, nil, cleanup)
+				treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+				tsHeldCausesV1(t, ce.ReadbackCause, nil, cleanup)
 			}
 		}
 	}
