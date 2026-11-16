@@ -1204,8 +1204,10 @@ func TestInitial148ReplayLargeV1(t *testing.T) {
 		workers int
 		paired  bool
 	}{
-		{"pair-sequential", 200, -1, true}, {"pair-queued", 200, 4, true},
-		{"current-sequential", 721, -1, false}, {"current-queued", 721, 4, false},
+		{"pair-sequential", 200, -1, true},
+		{"pair-queued", 200, 4, true},
+		{"current-sequential", 721, -1, false},
+		{"current-queued", 721, 4, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := load(t, tc.height)
@@ -1305,7 +1307,8 @@ func TestInitial148ReplayPairV1(t *testing.T) {
 			body   uint8
 			paired bool
 		}{
-			{"pair-body2", 200, 2, true}, {"pair-body3", 200, 3, true},
+			{"pair-body2", 200, 2, true},
+			{"pair-body3", 200, 3, true},
 			{"pair-at-boundary-body1", 720, 1, true},
 			{"current-body2", 721, 2, false},
 		} {
@@ -1411,8 +1414,10 @@ func TestInitial148ReplayReadbackV1(t *testing.T) {
 			truth      mdbx.CommitTruth
 			unreadable bool
 		}{
-			{"OLD", mdbx.SelectedDamageCommitOld, 1, false}, {"NEW", mdbx.SelectedDamageCommitNew, 2, false},
-			{"mixed", mdbx.SelectedDamageCommitThird, 3, false}, {"unreadable", mdbx.SelectedDamageCommitUnreadable, 3, true},
+			{"OLD", mdbx.SelectedDamageCommitOld, 1, false},
+			{"NEW", mdbx.SelectedDamageCommitNew, 2, false},
+			{"mixed", mdbx.SelectedDamageCommitThird, 3, false},
+			{"unreadable", mdbx.SelectedDamageCommitUnreadable, 3, true},
 		} {
 			t.Run(fmt.Sprintf("%s/workers%d", tc.name, workers), func(t *testing.T) {
 				w := icbReplayWorldV1(t, f)
