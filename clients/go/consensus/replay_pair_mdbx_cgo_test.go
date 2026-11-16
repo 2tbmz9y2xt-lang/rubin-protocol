@@ -311,6 +311,10 @@ func TestReplayPairCurrentRefusal(t *testing.T) {
 	for _, name := range []string{"nil-callback", "nil-result", "direct", "wrapped", "typed-nil", "validation", "F2-source"} {
 		t.Run(name, func(t *testing.T) {
 			c := rpNew(t, 15840, 1, mdbx.UndoTransientV1)
+			if name == "validation" {
+				c.in, _ = icbGenesisInputV1(t, 0)
+				c.request.Raw, c.request.Endpoint = c.in.Raw, c.in.Endpoint
+			}
 			before := bytes.Clone(c.in.Raw)
 			var want error
 			alter := func(prepare replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
@@ -339,10 +343,6 @@ func TestReplayPairCurrentRefusal(t *testing.T) {
 					return result, rows, err
 				}
 			}
-			if name == "validation" {
-				c.in.Raw = bytes.Clone(c.in.Raw)
-				c.in.Raw[len(c.in.Raw)-1] = 1
-			}
 			got := c.run(t, alter, c.inputs)
 			logicalMDBXAssert(t, got.Err != nil && got.Truth == 1 && got.Stage == 1 && got.Index == -1 && got.Role == "CURRENT" && c.lag == 0, "CURRENT refusal must suppress every LAG stage: %+v calls%d", got, c.lag)
 			if want != nil {
@@ -352,7 +352,11 @@ func TestReplayPairCurrentRefusal(t *testing.T) {
 				var local *logicalStateFailure
 				logicalMDBXAssert(t, errors.As(got.Err, &local), "typed local CURRENT refusal: %T", got.Err)
 			}
-			logicalMDBXAssert(t, bytes.Equal(c.request.Raw, before), "refusal changed caller Raw")
+			if name == "validation" {
+				initial148BlockWantError(t, "composer CURRENT validation", got.Err, BLOCK_ERR_UTXO_ROOT_MISMATCH, "utxo_root mismatch")
+				logicalMDBXAssert(t, c.current == 1 && c.result == nil && c.validation.attempted && any(c.validation.validationErr) == any(got.Err) && c.validation.required.derived, "actual CURRENT validator refusal reaches composer")
+			}
+			logicalMDBXAssert(t, bytes.Equal(c.request.Raw, before) && bytes.Equal(c.in.Raw, before), "refusal changed caller Raw")
 			btState(t, c.w, 1, mdbx.TreeEndpointV1{}, map[Outpoint]UtxoEntry{})
 			btState(t, c.w, 2, mdbx.TreeEndpointV1{}, map[Outpoint]UtxoEntry{})
 			rpFollowing(t, c.w)
