@@ -4297,6 +4297,7 @@ func TestTreeReplayBoundedReadbackV1(t *testing.T) {
 	}
 	t.Run("both-complete-OLD-first", trReadbackOldFirstV1)
 	t.Run("native-mixed-CURRENT-new-LAG-old", trReadbackMixedV1)
+	t.Run("false-NEW-then-LAG-unavailable", trReadbackNewFalseLateV1)
 	t.Run("neither-complete", func(t *testing.T) {
 		f := trSceneV1(t)
 		var result tsResult
@@ -4315,6 +4316,42 @@ func TestTreeReplayBoundedReadbackV1(t *testing.T) {
 		}
 		tsConsumed(t, f.s, f.o, 3, result.err)
 	})
+}
+
+func trReadbackNewFalseLateV1(t *testing.T) {
+	t.Helper()
+	f := trSceneV1(t)
+	f.p[1].before = func(pos TreePositionV1, r *Reader, _ *TreeDeltaSinkV1) error {
+		if pos != 2 {
+			return nil
+		}
+		_, _, err := r.Get(schemaDBIs[0], []byte{2})
+		return err
+	}
+	var result tsResult
+	var late SelectedDamageEvidence
+	var armErr error
+	drift, err := fixtureLargeFault(f.s, 3, 1, tdUTXOKey(1, tdTxid(0x31), 0), func() {
+		late, armErr = FixtureSelectedDamage(f.s, f.o, SelectedDamageGetEIO, 0, []byte{2}, func() { result = f.run(t) })
+	})
+	// These observations precede the fixture-enforcer: a shortened fold must
+	// fail for the missing later Source/cause, rather than the unconsumed fault.
+	for _, provider := range f.p {
+		if provider.calls != [3]int{0, 1, 1} {
+			t.Fatal("false NEW suppressed the later LAG Source", provider.calls)
+		}
+		tsExpiredReader(t, provider.reader)
+	}
+	result.tuple(t, 3, 3, -1)
+	ce, ok := result.err.(*CommitError)
+	if !ok || drift.drift != 1 || drift.commits != 1 || late.Faults != 1 {
+		t.Fatal("false NEW lost later unavailable evidence", result, drift, late)
+	}
+	treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+	treeNativeError(t, ce.ReadbackCause, "get", "IO", 5, "error 5", nil)
+	mustEnvironment(t, armErr)
+	mustEnvironment(t, err)
+	tsConsumed(t, f.s, f.o, 3, result.err)
 }
 
 // The existing native commit seam constructs a complete mixed physical image.
