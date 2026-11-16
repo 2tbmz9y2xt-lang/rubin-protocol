@@ -393,7 +393,7 @@ func TestReplayPairDrift(t *testing.T) {
 	counts, err := mdbx.FixturePairReadObservation(w.s, nil, func() {
 		drift, driftErr = mdbx.FixtureWriteSnapshotDrift(w.s, 0, btMeta(0x10, 2), func() { got = rpfRun(t, c, f.inputs, nil, nil, 0) })
 	})
-	logicalMDBXAssert(t, err == nil && driftErr == nil && drift == 1 && counts.Writes == 0 && got.Truth == 1 && got.Stage == 1 && got.Index == -1 && got.Role == "", "stale LAG OLD zero effect: %+v/%+v/%d/%v/%v", got, counts, drift, err, driftErr)
+	logicalMDBXAssert(t, err == nil && driftErr == nil && drift == 1 && counts.Writes == 0 && got.Truth == 1 && got.Stage == 1 && got.Index == 1 && got.Role == "LAG", "stale LAG OLD zero effect: %+v/%+v/%d/%v/%v", got, counts, drift, err, driftErr)
 	var engine *mdbx.EngineError
 	logicalMDBXAssert(t, errors.As(got.Err, &engine) && got.Err == engine && engine.Class == "StateMismatch" && engine.Operation == "update" && engine.Code == -30779 && engine.Diagnostic == "OLD/write snapshot mismatch" && engine.Cause == nil && engine.TreeObservation == nil && !engine.ReopenRequired, "STALE_LOCAL_PLAN native cause: %+v", got.Err)
 	w.reopen(t)
