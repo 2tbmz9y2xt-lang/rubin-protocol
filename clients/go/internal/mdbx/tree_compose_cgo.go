@@ -268,11 +268,13 @@ func (e *treeScopeV1) bindCoverageV1(j int, prim *treePrimitiveV1) {
 		return
 	}
 	e.rec.coverage = *coverage
-	e.rec.observation = &e.observation
 	if e.bounded && j != 0 {
+		e.lagObservation = TreeObservationV1{DatabaseID: coverage.DatabaseID, Generation: prim.generation, Block: prim.block, Height: prim.height, Primitive: j, Position: TreePositionV1(e.position)}
 		e.rec.observation = &e.lagObservation
+		return
 	}
-	*e.rec.observation = TreeObservationV1{DatabaseID: coverage.DatabaseID, Generation: prim.generation, Block: prim.block, Height: prim.height, Primitive: j, Position: TreePositionV1(e.position)}
+	e.observation = TreeObservationV1{DatabaseID: coverage.DatabaseID, Generation: prim.generation, Block: prim.block, Height: prim.height, Primitive: j, Position: TreePositionV1(e.position)}
+	e.rec.observation = &e.observation
 }
 
 // retireStepV1 retires writer work before strict readback allocates its own.

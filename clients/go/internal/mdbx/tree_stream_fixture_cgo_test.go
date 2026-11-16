@@ -4041,7 +4041,7 @@ func TestTreeReplayBoundedBodyV1(t *testing.T) {
 				raw := trBodyV1(&f.op, kind, deleteBody)
 				original := &raw[0]
 				if kind == 2 {
-					treeNativeSeed(t, f.s, 4, f.op.Primitives[0].Block[:], raw)
+					treeNativeSeed(t, f.s, 4, bytes.Clone(f.op.Primitives[0].Block[:]), raw)
 				}
 				var backing [3][2]*byte
 				for j, provider := range f.p {
@@ -4121,7 +4121,7 @@ func TestTreeReplayBoundedFundingV1(t *testing.T) {
 				f := trSceneV1(t)
 				raw := trBodyV1(&f.op, body.kind, body.delete)
 				if body.kind == 2 {
-					treeNativeSeed(t, f.s, 4, f.op.Primitives[0].Block[:], raw)
+					treeNativeSeed(t, f.s, 4, bytes.Clone(f.op.Primitives[0].Block[:]), raw)
 				}
 				peak := body.q + body.b + 2*(74912+65560+104) + 131192 + 288544 + 147968
 				var result tsResult
@@ -4440,7 +4440,7 @@ func trReadbackOldFirstV1(t *testing.T) {
 	t.Helper()
 	f := trSceneV1(t)
 	raw := trBodyV1(&f.op, 2, false)
-	treeNativeSeed(t, f.s, 4, f.op.Primitives[0].Block[:], raw)
+	treeNativeSeed(t, f.s, 4, bytes.Clone(f.op.Primitives[0].Block[:]), raw)
 	for j, p := range f.op.Primitives {
 		f.p[j].block, f.p[j].events = TreeBlockV1{TxCount: 1}, nil
 		p.Coverage.BlockMeta = f.p[j].block
@@ -4448,7 +4448,7 @@ func trReadbackOldFirstV1(t *testing.T) {
 	}
 	for i := range f.op.Pair.Mutations {
 		m := &f.op.Pair.Mutations[i]
-		treeNativeSeed(t, f.s, m.DBI.Rank, m.Key, m.Literal)
+		treeNativeSeed(t, f.s, m.DBI.Rank, bytes.Clone(m.Key), m.Literal)
 		m.BeforePresent = true
 	}
 	var result tsResult
@@ -4504,7 +4504,7 @@ func TestTreeReplayBoundedAuxiliaryV1(t *testing.T) {
 		f := trSceneV1(t)
 		trAuthorityV1(t, f)
 		raw := trBodyV1(&f.op, 2, false)
-		treeNativeSeed(t, f.s, 4, f.op.Primitives[0].Block[:], raw)
+		treeNativeSeed(t, f.s, 4, bytes.Clone(f.op.Primitives[0].Block[:]), raw)
 		ctxTreeSeed(t, f.s, 8, 100, 1, nil, nil)
 		header := ctxTreeHeader(t, 8, 100)
 		hash := sha3.Sum256(header)
@@ -4607,7 +4607,7 @@ func trLifecycleV1(t *testing.T, position TreePositionV1, role int, mode string,
 	f := trSceneV1(t)
 	if body == 2 {
 		raw := trBodyV1(&f.op, 2, false)
-		treeNativeSeed(t, f.s, 4, f.op.Primitives[0].Block[:], raw)
+		treeNativeSeed(t, f.s, 4, bytes.Clone(f.op.Primitives[0].Block[:]), raw)
 	}
 	marker, panicValue := errors.New("replay Source marker"), new(int)
 	primary := error(marker)
