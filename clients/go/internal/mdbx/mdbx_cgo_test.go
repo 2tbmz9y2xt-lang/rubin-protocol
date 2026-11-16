@@ -2775,7 +2775,8 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatalf("ambiguous txn ownership drifted: %s", name)
 		}
 	}
-	requireOrder("viewWithStartupCompletion", "panic cleanup/order drifted", "reader.active.Store(true)", "reader.expire()", "readPrimary", "s.abortReadLocked", "s.canonicalOwnerVerified = true")
+	requireOrder("viewWithStartupCompletion", "panic cleanup/order drifted", "reader.active.Store(true)", "reader.expire()", "readPrimary", "s.abortReadLocked", "s.observeServingReadV1(observed, true)", "s.canonicalOwnerVerified = true")
+	requireOrder("viewWithStartupCompletion", "serving native-opening deadline drifted", "servingOpeningV1(observed)", "C.rubin_mdbx_txn_begin", "reader.active.Store(true)", "callback(reader)")
 	if strings.Count(body("View"), "s.viewWithStartupCompletion(") != 1 || strings.Count(body("StartupVerifyCanonicalV1"), "s.viewWithStartupCompletion(") != 1 || strings.Count(string(source), "s.viewWithStartupCompletion(") != 2 {
 		t.Fatal("shared readonly lifecycle caller ownership drifted")
 	}
@@ -2791,6 +2792,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			"newReader": 1, "uint8": 1, "s.format.Load": 1, "uint64": 1, "limitsForPage": 1, "reader.captureLineageV1": 1, "reader.active.Store": 1,
 			"<closure>": 1, "reader.expire().retire": 1, "reader.expire": 1,
 			"readPrimary": 1, "s.abortReadLocked": 1, "startupPublicationAllowed": 1,
+			"s.observeServingReadV1": 2, "servingOpeningV1": 1, "s.notifyServingCompletionV1": 1,
 			"callback": 1, "startupCompletionResult": 1,
 		},
 		"StartupCanonicalNextV1": {
@@ -3122,6 +3124,10 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 		}
 	}
 	readBodies := body("ReadTreeAuthorityV1") + body("ReadTreeRootBindingV1") + body("ReadTreeEvidenceV1") + body("treeContext") + body("treeRecord") + body("treeNativeGet") + body("treeRequired") + body("treeEmptyCensus") + body("treeControlRows") + body("treeEvidenceOrigin") + body("treeResolvedEvidence") + body("readerDBI") + body("readerKey") + body("readerValueBounds") + body("treeMetaBounds") + body("validReaderFormat") + body("selectedFormat") + body("copiedGetResult") + body("copiedGetResultFor") + body("View") + body("viewWithStartupCompletion") + body("Get") + body("GetOptionalSide") + body("optionalSideResult") + body("GetInitial148OptionalSide") + body("initial148OptionalSideResult") + body("ReadRequiredSideLink") + body("ReadStorageAuthorityV1") + body("PrefixPage") + body("prefixPageInputError") + body("supportedPrefixPageDBI") + body("validPrefixPagePrefix") + body("validPrefixPageContinuation") + body("prefixPageMinimumBytes") + body("validatePrefixPageRequest") + body("validatePrefixPageLimits") + body("newPrefixPageScan") + body("prefixPageShapeError") + body("prefixPageNativeKey") + body("prefixPageFoundCode") + body("prefixPageValueShape") + body("prefixPageNativeRow") + body("prefixPageStoredRow") + body("prefixPageValueLength") + body("prefixPageNativeResult") + body("prefixPageStop") + body("copyPrefixPageRow") + body("advancePrefixPageSeek") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
+	readBodies += body("observeServingReadV1")
+	servingSource, err := os.ReadFile("serving_view_cgo.go")
+	mustEnvironment(t, err)
+	readBodies += updateNativeBody(t, servingSource, "servingOpeningV1")
 	for _, forbidden := range []string{"mdbx_cursor", "filepath.", "os.", "MDBX_TXN_READWRITE", "context.", "time.Sleep", "time.After", "retry"} {
 		if strings.Contains(readBodies, forbidden) {
 			t.Fatalf("read surface gained forbidden path: %s", forbidden)
