@@ -271,6 +271,7 @@ func TestLocationLiteralCorpus(t *testing.T) {
 	for _, v := range []DatabaseLocationV1{
 		{0, "/old", [32]byte{1}}, {3, "/old", [32]byte{1}}, {0, "", [32]byte{}},
 		{1, "/old", [32]byte{}}, {1, "old", [32]byte{1}},
+		{2, "D17", [32]byte{}},
 		{1, "/a/../b", [32]byte{1}}, {1, "/a//b", [32]byte{1}}, {1, "/a\x00b", [32]byte{1}},
 		{2, ".", [32]byte{1}}, {2, "..", [32]byte{1}}, {2, "a/b", [32]byte{1}},
 		{2, "a\\b", [32]byte{1}}, {2, "a\x00b", [32]byte{1}},
