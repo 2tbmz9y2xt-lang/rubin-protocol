@@ -1,17 +1,329 @@
 package policycontrol
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// X1/H1: real crossing and lost acknowledgement preserve their admission precedence.
+func TestDependentViewCrossingAndUnknown(t *testing.T) {
+	s := mustCreate(t, storeDir(t), testIdentity(1))
+	tx := controlTx(t, s, "crossing")
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	finish := func() { once.Do(func() { close(release) }); awaitDependent(t, done) }
+	s.fault = func(st stage) error {
+		if st == stageFileSync {
+			close(entered)
+			<-release
+		}
+		return nil
+	}
+	go func() { defer close(done); mustCommit(t, tx, NEW, 1) }()
+	t.Cleanup(finish)
+	awaitDependent(t, entered)
+	refuseDependent(t, s, ErrBusy, false)
+	finish()
+	must(t, s.WithDependentViewV1(func(v View) error {
+		if v.Sequence != 1 || v.Receipt.Successor != 1 || v.Receipt.Owner.Epoch != 1 {
+			t.Fatalf("crossing owner was disturbed: %+v", v)
+		}
+		return nil
+	}))
+	s.fault = failAt(stageAck)
+	r, err := controlTx(t, s, "unknown").Commit()
+	wantResult(t, r, UNKNOWN, 0)
+	if !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("lost acknowledgement setup: %v", err)
+	}
+	refuseDependent(t, s, ErrBusy, true)
+	s.fault = nil
+	r, err = s.Recover()
+	wantResult(t, r, NEW, 2)
+	must(t, err)
+	must(t, s.WithDependentViewV1(func(v View) error {
+		if v.Sequence != 2 || v.Receipt.Successor != 2 || v.Receipt.Owner.Epoch != 2 {
+			t.Fatalf("recovered owner was disturbed: %+v", v)
+		}
+		return nil
+	}))
+}
+
+// A3: the slot wins over no-request, valid-request and already-durable latch decisions.
+func TestDependentViewLatchStates(t *testing.T) {
+	s := mustCreate(t, storeDir(t), testIdentity(1))
+	before := fileBytes(t, s.dir)
+	g := &Guard{}
+	must(t, s.WithDependentViewV1(func(View) error {
+		wantLatch(t, s, LatchStatus{})
+		dependentBoth(t, func() { dependentLatchBusy(t, s, stableProof(g), LatchStatus{}) })
+		s.RequestLatch()
+		s.RequestLatch()
+		dependentBoth(t, func() { dependentLatchBusy(t, s, stableProof(g), LatchStatus{Requested: true}) })
+		wantLatch(t, s, LatchStatus{Requested: true})
+		return nil
+	}))
+	if !bytes.Equal(fileBytes(t, s.dir), before) {
+		t.Fatal("live-slot latch request changed P")
+	}
+	r, err := s.PersistLatch(stableProof(g))
+	wantResult(t, r, NEW, 1)
+	must(t, err)
+	before = fileBytes(t, s.dir)
+	must(t, s.WithDependentViewV1(func(View) error {
+		s.RequestLatch()
+		wantLatch(t, s, LatchStatus{Durable: true})
+		dependentBoth(t, func() { dependentLatchBusy(t, s, LatchProof{}, LatchStatus{Durable: true}) })
+		return nil
+	}))
+	r, err = s.PersistLatch(stableProof(g))
+	wantResult(t, r, OLD, 1)
+	must(t, err)
+	if !bytes.Equal(fileBytes(t, s.dir), before) {
+		t.Fatal("durable latch callback changed P")
+	}
+	if r, err := s.Recover(); r != (Result{}) || err != nil {
+		t.Fatalf("Recover after slot without pending: %+v %v", r, err)
+	}
+}
+
+// dependentLatchBusy pins the zero-result precedence over each underlying latch state.
+func dependentLatchBusy(t *testing.T, s *Store, proof LatchProof, want LatchStatus) {
+	t.Helper()
+	if r, err := s.PersistLatch(proof); r != (Result{}) || !sameDependentValue(err, ErrBusy) || s.Gate() != (Gate{}) {
+		t.Fatalf("live-slot persistence/gate (%+v): %+v %v %+v", want, r, err, s.Gate())
+	}
+	wantLatch(t, s, want)
+}
+
+// X3: both committed and aborted old transactions remain finished during use.
+func TestDependentViewFinishedTransactions(t *testing.T) {
+	s := mustCreate(t, storeDir(t), testIdentity(1))
+	aborted := mustBegin(t, s)
+	r, err := aborted.Abort()
+	wantResult(t, r, OLD, 0)
+	must(t, err)
+	committed := controlTx(t, s, "committed")
+	mustCommit(t, committed, NEW, 1)
+	before := fileBytes(t, s.dir)
+	must(t, s.WithDependentViewV1(func(View) error {
+		dependentBoth(t, func() {
+			for _, tx := range []*Tx{aborted, committed} {
+				for _, end := range []func() (Result, error){tx.Commit, tx.Abort} {
+					if r, err := end(); r != (Result{}) || !sameDependentValue(err, ErrFinished) {
+						t.Fatalf("finished transaction under slot: %+v %v", r, err)
+					}
+					if next, err := s.Begin(); next != nil || !sameDependentValue(err, ErrBusy) {
+						t.Fatalf("finished transaction released slot: %v %v", next, err)
+					}
+				}
+			}
+		})
+		return nil
+	}))
+	r, err = mustBegin(t, s).Abort()
+	wantResult(t, r, OLD, 1)
+	must(t, err)
+	if !bytes.Equal(fileBytes(t, s.dir), before) {
+		t.Fatal("finished transaction changed P")
+	}
+}
+
+// holdDependent holds an admitted real callback until the returned joined release.
+func holdDependent(t *testing.T, s *Store) func() {
+	t.Helper()
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := s.WithDependentViewV1(func(View) error { close(entered); <-release; return nil }); err != nil {
+			t.Errorf("held callback admission: %v", err)
+		}
+	}()
+	var once sync.Once
+	finish := func() { once.Do(func() { close(release) }); awaitDependent(t, done) }
+	t.Cleanup(finish)
+	awaitDependent(t, entered)
+	return finish
+}
+
+// H3: first retirement cannot release a later admitted callback.
+func TestDependentViewSuccessiveOwners(t *testing.T) {
+	s := mustCreate(t, storeDir(t), testIdentity(1))
+	first := holdDependent(t, s)
+	refuseDependent(t, s, ErrBusy, false)
+	first()
+	second := holdDependent(t, s)
+	first() // completed earlier cleanup is now an inert join
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		dependentOperations(t, s, View{Identity: testIdentity(1)})
+	}()
+	awaitDependent(t, done)
+	second()
+	r, err := mustBegin(t, s).Abort()
+	wantResult(t, r, OLD, 0)
+	must(t, err)
+}
+
+type dependentContender struct {
+	kind string
+	err  error
+}
+
+// receiveDependentContender requires the loser to report before winner release.
+func receiveDependentContender(t *testing.T, results <-chan dependentContender) dependentContender {
+	t.Helper()
+	select {
+	case got := <-results:
+		return got
+	case <-time.After(5 * time.Second):
+		t.Fatal("Begin/View contenders did not report while winner was held")
+		return dependentContender{}
+	}
+}
+
+// H1: a two-contender barrier admits exactly one held owner and returns its loser.
+func TestDependentViewBeginRace(t *testing.T) {
+	s := mustCreate(t, storeDir(t), testIdentity(1))
+	start, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	results := make(chan dependentContender, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		tx, err := s.Begin()
+		results <- dependentContender{"Begin", err}
+		if tx != nil {
+			<-release
+			r, err := tx.Abort()
+			wantResult(t, r, OLD, 0)
+			must(t, err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		err := s.WithDependentViewV1(func(v View) error {
+			results <- dependentContender{"View", nil}
+			if !reflect.DeepEqual(v, View{Identity: testIdentity(1)}) {
+				t.Errorf("racing callback basis: %+v", v)
+			}
+			<-release
+			return nil
+		})
+		if err != nil {
+			results <- dependentContender{"View", err}
+		}
+	}()
+	go func() { wg.Wait(); close(done) }()
+	var once sync.Once
+	finish := func() { once.Do(func() { close(release) }); awaitDependent(t, done) }
+	t.Cleanup(finish)
+	close(start)
+	a, b := receiveDependentContender(t, results), receiveDependentContender(t, results)
+	if a.kind == b.kind || (a.err == nil) == (b.err == nil) || (a.err != nil && !sameDependentValue(a.err, ErrBusy)) || (b.err != nil && !sameDependentValue(b.err, ErrBusy)) {
+		t.Fatalf("Begin/View race did not have one held winner and ErrBusy loser: %+v %+v", a, b)
+	}
+	finish()
+}
+
+// dependentChild reuses the existing process protocol, closing pipes and joining on every exit.
+func dependentChild(t *testing.T, s *Store) (func() string, func()) {
+	t.Helper()
+	id := testIdentity(1)
+	idHex := hex.EncodeToString(append(append(id.InstallationID[:], id.ChainID[:]...), id.GenesisHash[:]...))
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestChildContender$", "-test.count=1")
+	cmd.Env = append(os.Environ(), childEnv+"="+s.dir+"|"+idHex)
+	stdin, err := cmd.StdinPipe()
+	must(t, err)
+	stdout, err := cmd.StdoutPipe()
+	must(t, err)
+	if err := cmd.Start(); err != nil {
+		cancel()
+		_ = stdin.Close()
+		_ = stdout.Close()
+		t.Fatal(err)
+	}
+	finish := sync.OnceFunc(func() {
+		_ = stdin.Close()
+		if err := cmd.Wait(); err != nil {
+			t.Errorf("dependent child join: %v", err)
+		}
+		_ = stdout.Close()
+		cancel()
+	})
+	t.Cleanup(finish)
+	out := bufio.NewReader(stdout)
+	return func() string {
+		_, err := io.WriteString(stdin, "try\n")
+		must(t, err)
+		line, err := out.ReadString('\n')
+		must(t, err)
+		return line
+	}, finish
+}
+
+// H2: refused direct/concurrent Close retains actual process exclusion until exit.
+func TestDependentViewProcessLock(t *testing.T) {
+	s := mustCreate(t, storeDir(t), testIdentity(1))
+	ask, finish := dependentChild(t, s)
+	before := fileBytes(t, s.dir)
+	if got := ask(); got != "busy\n" {
+		t.Fatalf("child before callback: %q", got)
+	}
+	must(t, s.WithDependentViewV1(func(View) error {
+		if err := s.Close(); !sameDependentValue(err, ErrBusy) {
+			t.Fatalf("callback Close: %v", err)
+		}
+		if got := ask(); got != "busy\n" {
+			t.Fatalf("child after callback Close: %q", got)
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if got := ask(); got != "busy\n" {
+				t.Errorf("child before concurrent Close: %q", got)
+			}
+			if err := s.Close(); !sameDependentValue(err, ErrBusy) {
+				t.Errorf("concurrent Close: %v", err)
+			}
+			if got := ask(); got != "busy\n" {
+				t.Errorf("child after concurrent Close: %q", got)
+			}
+		}()
+		awaitDependent(t, done)
+		if !reflect.DeepEqual(mustView(t, s), View{Identity: testIdentity(1)}) || !bytes.Equal(fileBytes(t, s.dir), before) {
+			t.Fatal("refused Close changed readable P")
+		}
+		return nil
+	}))
+	must(t, s.Close())
+	if got := ask(); got != "open\n" {
+		t.Fatalf("child after actual Close: %q", got)
+	}
+	finish()
+	if !reflect.DeepEqual(mustView(t, mustOpen(t, s.dir, testIdentity(1))), View{Identity: testIdentity(1)}) || !bytes.Equal(fileBytes(t, s.dir), before) {
+		t.Fatal("reopen after process exclusion changed P")
+	}
+}
 
 func must(t *testing.T, err error) {
 	t.Helper()

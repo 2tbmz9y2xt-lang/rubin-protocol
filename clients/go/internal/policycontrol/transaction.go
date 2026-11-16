@@ -87,7 +87,7 @@ type attempt struct {
 }
 
 // Begin is try-or-refuse: it never waits, returns ErrClosed after Close and ErrBusy while
-// another transaction is held, a crossing runs or an attempted transaction is UNKNOWN.
+// another transaction or dependent callback is held, a crossing runs or an attempted transaction is UNKNOWN.
 func (s *Store) Begin() (*Tx, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -272,7 +272,7 @@ func (tx *Tx) Abort() (Result, error) {
 	return Result{Truth: OLD, sequence: tx.base.seq}, nil
 }
 
-// Recover classifies a retained UNKNOWN attempt. After Close: zero Result, ErrClosed; during a crossing or with a transaction held: zero Result, ErrBusy;
+// Recover classifies a retained UNKNOWN attempt. After Close: zero Result, ErrClosed; during a crossing or with a transaction or dependent callback held: zero Result, ErrBusy;
 // with no attempt: zero Result, nil. A retained crossing handle, an observed post-rename durability failure or an earlier ErrUnreadable readback stays UNKNOWN,
 // ErrUnresolved with no synchronization or read. Otherwise, under the held writer with no transaction, it establishes durability and reads P once: the exact
 // predecessor image is OLD, nil; the exact successor image NEW, nil; anything else UNKNOWN, ErrUnresolved, ErrIntegrity, ErrMissingControl or ErrUnreadable.
@@ -291,7 +291,7 @@ func (s *Store) enterRecover() (*attempt, Result, error) {
 	switch {
 	case s.closed:
 		return nil, Result{}, ErrClosed
-	case s.crossing || s.tx != nil:
+	case s.crossing || s.tx != nil || s.dependentView:
 		return nil, Result{}, ErrBusy
 	case p == nil:
 		return nil, Result{}, nil
@@ -336,11 +336,14 @@ func (s *Store) finishRecover(p *attempt) (Result, error) {
 	return Result{Truth: truth, sequence: s.st.seq}, nil
 }
 
-// Gate reports the P-dependent uses permitted now: none after Close or while a transaction is
-// held, crossing or UNKNOWN; AutomaticH1 also needs the durable latch.
+// Gate reports the P-dependent uses permitted now: none after Close, during a
+// transaction, dependent callback, crossing or UNKNOWN; AutomaticH1 also needs the durable latch.
 type Gate struct{ DependentEffects, AutomaticH1, LatchUse bool }
 
-func (s *Store) heldLocked() bool { return s.tx != nil || s.crossing || s.pending != nil }
+// heldLocked includes every owner that excludes a new P-dependent admission.
+func (s *Store) heldLocked() bool {
+	return s.tx != nil || s.crossing || s.pending != nil || s.dependentView
+}
 
 // Gate never waits and holds no lock over independent native work.
 func (s *Store) Gate() Gate {
