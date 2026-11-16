@@ -225,7 +225,7 @@ func (s *initial148RequiredScopeV1) rememberV1(op Outpoint, value []byte, presen
 	}
 	s.keys = append(s.keys, mdbx.TreeOutpointV1{Txid: op.Txid, Vout: op.Vout})
 	s.lengths = append(s.lengths, length)
-	s.index[s.recordSlotV1(op)] = uint32(len(s.keys))
+	s.index[s.recordSlotV1(op)] = uint32(uint64(len(s.keys)) & 0xffffffff)
 	if present {
 		s.obtainedBytes += uint64(length)
 		s.obtainedCount++
@@ -240,9 +240,9 @@ func (s *initial148RequiredScopeV1) recordSlotV1(op Outpoint) int {
 		hash = (hash ^ uint32(value)) * 16777619
 	}
 	for shift := 24; shift >= 0; shift -= 8 {
-		hash = (hash ^ uint32(byte(op.Vout>>shift))) * 16777619
+		hash = (hash ^ ((op.Vout >> shift) & 255)) * 16777619
 	}
-	slot := int(uint64(hash) % uint64(len(s.index)))
+	slot := int((uint64(hash) % uint64(len(s.index))) & uint64(math.MaxInt))
 	for s.index[slot] != 0 {
 		if Outpoint(s.keys[s.index[slot]-1]) == op {
 			return slot
