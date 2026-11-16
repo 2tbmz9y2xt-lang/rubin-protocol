@@ -1409,8 +1409,8 @@ func TestInitial148ReplayCapacityV1(t *testing.T) {
 }
 
 // TestInitial148ReplayReadbackV1 joins the complete native truth domain to
-// real validation/F2/F3. Third-image damage affects only the authority row;
-// restoring that fixture damage is explicit before reopening the owner.
+// real validation/F2/F3. Mixed-image damage affects only the body row;
+// reopening observes that damage before restoring the fixture's body bytes.
 func TestInitial148ReplayReadbackV1(t *testing.T) {
 	f := icbReplayVaultBlockV1(t, 200, 1)
 	for _, workers := range []int{-1, 4} {
@@ -1419,11 +1419,13 @@ func TestInitial148ReplayReadbackV1(t *testing.T) {
 			scenario   mdbx.SelectedDamageScenario
 			truth      mdbx.CommitTruth
 			unreadable bool
+			commits    uint64
+			drift      uint32
 		}{
-			{"OLD", mdbx.SelectedDamageCommitOld, 1, false},
-			{"NEW", mdbx.SelectedDamageCommitNew, 2, false},
-			{"mixed", mdbx.SelectedDamageCommitThird, 3, false},
-			{"unreadable", mdbx.SelectedDamageCommitUnreadable, 3, true},
+			{"OLD", mdbx.SelectedDamageCommitOld, 1, false, 1, 0},
+			{"NEW", mdbx.SelectedDamageCommitNew, 2, false, 1, 0},
+			{"mixed", mdbx.SelectedDamageProbeOnly, 3, false, 0, 1},
+			{"unreadable", mdbx.SelectedDamageCommitUnreadable, 3, true, 1, 0},
 		} {
 			t.Run(fmt.Sprintf("%s/workers%d", tc.name, workers), func(t *testing.T) {
 				w := icbReplayWorldV1(t, f)
@@ -1431,25 +1433,32 @@ func TestInitial148ReplayReadbackV1(t *testing.T) {
 				join := &icbReplayJoinV1{body: 1, paired: true, envelope: &a, inputs: f.inputs}
 				var got btResult
 				var evidence mdbx.SelectedDamageEvidence
-				var fixtureErr error
+				var fixtureErr, driftErr error
+				var drift uint32
+				hash := f.block.in.Endpoint.BlockHash
 				counts, observeErr := mdbx.FixturePairReadObservation(w.s, func(site uint32) {
 					if join.readback && (site == 1 || site == 2) && mdbx.FixtureReservationLive(w.owner) != join.sealed {
 						join.lateGrow = true
 					}
 				}, func() {
-					evidence, fixtureErr = mdbx.FixtureSelectedDamage(w.s, w.owner, tc.scenario, 0, btMeta(0x11, 2), func() { got, _ = icbReplayApplyV1(t, w, f.block, workers, join) })
+					evidence, fixtureErr = mdbx.FixtureSelectedDamage(w.s, w.owner, tc.scenario, 0, btMeta(0x11, 2), func() {
+						apply := func() { got, _ = icbReplayApplyV1(t, w, f.block, workers, join) }
+						if tc.drift == 1 {
+							drift, driftErr = mdbx.FixtureCleanupReadbackDrift(w.s, 4, hash[:], apply)
+							return
+						}
+						apply()
+					})
 				})
-				logicalMDBXAssert(t, observeErr == nil && fixtureErr == nil && evidence.Commits == 1 && counts.Comparisons != 0, "complete crossing observations: %+v/%+v/%v/%v", counts, evidence, observeErr, fixtureErr)
+				logicalMDBXAssert(t, observeErr == nil && fixtureErr == nil && evidence.Commits == tc.commits && counts.Comparisons != 0, "complete crossing observations: %+v/%+v/%v/%v", counts, evidence, observeErr, fixtureErr)
+				logicalMDBXAssert(t, driftErr == nil && drift == tc.drift, "complete crossing body drift: got%d want%d: %v", drift, tc.drift, driftErr)
 				icbReplayCrossedV1(t, w, got, tc.truth, tc.unreadable)
 				icbReplaySourceCallsV1(t, join, [3]int{0, 1, 1})
-				if tc.name == "mixed" {
-					planned := a
-					replay := *a.Authority.Replay
-					replay.Cursor = mdbx.ReplayCursorV1{Kind: 2, Height: f.block.in.Height, BlockHash: f.block.in.Endpoint.BlockHash}
-					planned.Authority.Replay = &replay
-					w.seedAuthority(t, planned)
-				}
 				w.reopen(t)
+				if tc.name == "mixed" {
+					w.read(t, 4, hash[:], []byte{0x7f})
+					w.seed(t, 4, hash[:], f.block.in.Raw)
+				}
 				block, spent := f.block, f.inputs
 				if tc.truth == 1 {
 					block, spent = f.prefix[len(f.prefix)-1], nil
