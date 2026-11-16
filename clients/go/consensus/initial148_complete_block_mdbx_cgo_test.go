@@ -2838,9 +2838,8 @@ func icbReplayLiteralBoundsV1(t *testing.T, native func(uint64, uint64, int, uin
 	registry := DefaultSuiteRegistry()
 	params, present := registry.Lookup(1)
 	logicalMDBXAssert(t, present && len(registry.suites) == 1 && params == (SuiteParams{SuiteID: 1, PubkeyLen: 2592, SigLen: 4627, VerifyCost: 8, AlgName: "ML-DSA-87"}), "current canonical native profile changed; rebind replay proof")
-	for _, height := range []uint64{0, 200, 721, 15840} {
-		logicalMDBXAssert(t, initial148DescriptorCountV1(icbFrozenV1(height)) == 0, "inactive deployment profile changed at%d", height)
-	}
+	_, hasDeployment := any(DefaultRotationProvider{}).(SimplicityDeploymentProvider)
+	logicalMDBXAssert(t, !hasDeployment, "current canonical deployment profile changed; rebind replay proof")
 	for _, n := range []uint64{0, 149, 150, 1048575, 1048576, 17000157, 17000175, 68000157} {
 		b, e, m, w := icbReplayEnvelopeV1(n)
 		logicalMDBXAssert(t, b <= 17000000 && e <= 414634 && m <= w && m == initial148RetainedTariffV1(n), "coupled endpoint n%d b%d e%d M%d W%d", n, b, e, m, w)

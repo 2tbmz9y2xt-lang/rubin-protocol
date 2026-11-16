@@ -32,9 +32,12 @@ type initial148RequiredScopeV1 struct {
 	request        initial148RequiredRequestV1
 	keys           []mdbx.TreeOutpointV1
 	lengths        []uint32
+	index          []uint32
 	counters       logicalStateCounters
 	first          error
 	calls          uint64
+	obtainedBytes  uint64
+	obtainedCount  uint64
 	active, sealed bool
 	haveCounters   bool
 }
@@ -56,6 +59,7 @@ func withInitial148RequiredStateV1(reader *mdbx.Reader, account *mdbx.OperationA
 		scope := initial148RequiredScopeV1{
 			reader: reader, account: account, request: request, active: true,
 			keys: make([]mdbx.TreeOutpointV1, 0, capacity), lengths: make([]uint32, 0, capacity),
+			index: make([]uint32, 2*capacity),
 		}
 		defer scope.expireV1()
 		err := use(&scope, scope.deriveV1)
@@ -120,10 +124,10 @@ func initial148RequiredParentV1(height uint64, parent mdbx.TreeEndpointV1) bool 
 	return parent.Kind == mdbx.TreeEndpointAppliedV1 && parent.Height == height-1
 }
 
-// expireV1 releases both record slices and their borrowed Reader/account bindings.
+// expireV1 releases all record slices and their borrowed Reader/account bindings.
 func (s *initial148RequiredScopeV1) expireV1() {
 	s.active, s.sealed = false, true
-	s.keys, s.lengths = nil, nil
+	s.keys, s.lengths, s.index = nil, nil, nil
 	s.reader, s.account = nil, nil
 	s.request = initial148RequiredRequestV1{}
 }
@@ -221,7 +225,34 @@ func (s *initial148RequiredScopeV1) rememberV1(op Outpoint, value []byte, presen
 	}
 	s.keys = append(s.keys, mdbx.TreeOutpointV1{Txid: op.Txid, Vout: op.Vout})
 	s.lengths = append(s.lengths, length)
+	s.index[s.recordSlotV1(op)] = uint32(len(s.keys))
+	if present {
+		s.obtainedBytes += uint64(length)
+		s.obtainedCount++
+	}
 	return s.residualV1()
+}
+
+// recordSlotV1 finds an exact key or empty slot in the at-most-half-full index.
+func (s *initial148RequiredScopeV1) recordSlotV1(op Outpoint) int {
+	hash := uint32(2166136261)
+	for _, value := range op.Txid {
+		hash = (hash ^ uint32(value)) * 16777619
+	}
+	for shift := 24; shift >= 0; shift -= 8 {
+		hash = (hash ^ uint32(byte(op.Vout>>shift))) * 16777619
+	}
+	slot := int(uint64(hash) % uint64(len(s.index)))
+	for s.index[slot] != 0 {
+		if Outpoint(s.keys[s.index[slot]-1]) == op {
+			return slot
+		}
+		slot++
+		if slot == len(s.index) {
+			slot = 0
+		}
+	}
+	return slot
 }
 
 // recordedV1 exposes obtained facts only while their key/length pairing is live.
@@ -229,12 +260,15 @@ func (s *initial148RequiredScopeV1) recordedV1(op Outpoint) (uint32, bool, bool)
 	if !s.active || s.sealed || s.first != nil {
 		return 0, false, false
 	}
-	for i, key := range s.keys {
-		if Outpoint(key) == op {
-			return s.lengths[i], s.lengths[i] != 0, true
-		}
+	if len(s.index) == 0 {
+		return 0, false, false
 	}
-	return 0, false, false
+	i := s.index[s.recordSlotV1(op)]
+	if i == 0 {
+		return 0, false, false
+	}
+	length := s.lengths[i-1]
+	return length, length != 0, true
 }
 
 func (s *initial148RequiredScopeV1) Counters() logicalStateCounterRead {
@@ -276,17 +310,10 @@ func (s *initial148RequiredScopeV1) residualV1() error {
 	if !s.haveCounters {
 		return nil
 	}
-	var total, count uint64
-	for _, length := range s.lengths {
-		if length != 0 {
-			total += uint64(length)
-			count++
-		}
-	}
-	if total > s.counters.bytes || count > s.counters.entries {
+	if s.obtainedBytes > s.counters.bytes || s.obtainedCount > s.counters.entries {
 		return initial148RequiredIntegrityV1("required subset exceeds parent counters")
 	}
-	if !validLogicalStateResidualEnvelope(s.counters.bytes-total, s.counters.entries-count) {
+	if !validLogicalStateResidualEnvelope(s.counters.bytes-s.obtainedBytes, s.counters.entries-s.obtainedCount) {
 		return initial148RequiredIntegrityV1("invalid required residual counters")
 	}
 	return nil

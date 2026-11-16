@@ -24,6 +24,40 @@ func TestInitial148RequiredFaultV1(t *testing.T) {
 	t.Run("plan-from-recorded-facts", irRecordedPlanV1)
 }
 
+// TestInitial148RequiredIndexedFactsV1 keeps colliding present and absent facts distinct.
+func TestInitial148RequiredIndexedFactsV1(t *testing.T) {
+	w := btNew(t)
+	presentOp, absentOp := Outpoint{Vout: 2}, Outpoint{Vout: 6} // Both start at slot 3 of 4.
+	w.pair(t, btMutation(1, btUTXOKey(1, presentOp), btValue(btFrame(1, 0, []byte{3}), 0, false)))
+	irCounterV1(t, w, 57, 1)
+	var result, first error
+	evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 1, nil, func() {
+		result = irRunV1(t, w, irEventsRequestV1(6, 65, 2), mdbx.TreeEndpointV1{Kind: 1, Height: 5, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
+			scope := view.(*initial148RequiredScopeV1)
+			logicalMDBXAssert(t, view.Lookup(presentOp).kind == logicalStateRowPresent, "collision present lookup failed")
+			length, present, known := scope.recordedV1(absentOp)
+			logicalMDBXAssert(t, length == 0 && !present && !known, "collision fact unexpectedly known: %d/%v/%v", length, present, known)
+			length, present, known = scope.recordedV1(presentOp)
+			logicalMDBXAssert(t, length == 57 && present && known, "indexed present fact: %d/%v/%v", length, present, known)
+			row := view.Lookup(absentOp)
+			logicalMDBXAssert(t, row.kind == logicalStateRowAbsent && row.cause == nil && logicalStateEntryZero(row.entry), "collision absent lookup failed")
+			length, present, known = scope.recordedV1(absentOp)
+			logicalMDBXAssert(t, length == 0 && !present && known && len(scope.keys) == 2, "indexed absent fact: %d/%v/%v", length, present, known)
+			entry := UtxoEntry{Value: 7, CreationHeight: 6}
+			plan, failure := buildLogicalStatePlan(6, view, []logicalTouchedState{{Outpoint: presentOp}, {Outpoint: absentOp, FinalPresent: true, Final: entry}}, 23)
+			want := logicalStatePlan[int]{Parent: logicalStateCounters{bytes: 57, entries: 1}, Result: logicalStateCounters{bytes: 56, entries: 1}, Metadata: 23, Deletes: []logicalStateDelete{{Outpoint: presentOp, EntryBytes: 57}}, Puts: []logicalStatePut{{Outpoint: absentOp, Entry: entry}}}
+			logicalMDBXAssert(t, failure == nil && reflect.DeepEqual(plan, want) && scope.calls == 2, "indexed plan facts: %+v/%v", plan, failure)
+			row = view.Lookup(absentOp)
+			logicalMDBXAssert(t, row.kind == logicalStateRowAbsent && row.cause == nil && scope.calls == 3, "indexed cached absence changed")
+			first = view.Lookup(presentOp).cause
+			irFailureV1(t, first, logicalStateFailureLocalInvariant, "required state record holds no value")
+			logicalMDBXAssert(t, any(view.Counters().cause) == any(first), "indexed present repeat lost sticky cause")
+			return nil
+		})
+	})
+	logicalMDBXAssert(t, err == nil && any(result) == any(first) && evidence.OldGets[1] == 2 && evidence.OldGets[0] == 1, "indexed fact/read count: %+v/%v/%v", evidence, result, err)
+}
+
 func irAbsentCountV1(t *testing.T) {
 	w := btNew(t)
 	op := Outpoint{Txid: [32]byte{91}}
