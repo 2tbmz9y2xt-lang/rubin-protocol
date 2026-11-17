@@ -48,8 +48,8 @@ func daBudgetPeer(t *testing.T, quota string) DAProvenance {
 // lengths-only computation.
 func daBudgetFiller(n int) []byte { return []byte(strings.Repeat("\xff", n)) }
 
-func daBudgetChunk(raw, payload int) daRelayChunk {
-	return daRelayChunk{txBytes: daBudgetFiller(raw), payload: daBudgetFiller(payload)}
+func daBudgetChunk(index uint16, raw, payload int) daRelayChunk {
+	return daRelayChunk{chunkIndex: index, txBytes: daBudgetFiller(raw), payload: daBudgetFiller(payload)}
 }
 
 func requireDABudgetDisposition(t *testing.T, err error, want RelayAdmissionDisposition, text string) {
@@ -113,14 +113,15 @@ func TestDACompletionBudget(t *testing.T) {
 		{"charge_literals", func(t *testing.T) {
 			stateB := &daCompleteSnapshot{}
 			stateB.prior.commit = daRelayCommit{member: &daRelayMemberIdentity{}, txBytes: daBudgetFiller(200)}
-			stateB.prior.chunks = map[uint16]daRelayChunk{0: daBudgetChunk(300, 1000), 1: daBudgetChunk(300, 1000)}
+			stateB.prior.chunks = map[uint16]daRelayChunk{0: daBudgetChunk(0, 300, 1000), 1: daBudgetChunk(1, 300, 1000)}
 			stateB.candidate.member = daRelayOwnerReadyMember{locator: daRelayLocator{kind: daRelayLocatorChunk, chunkIndex: 2}, txBytes: daBudgetFiller(300), payload: daBudgetFiller(1000)}
 			if got := daCompletionChargeOf(stateB); got != (daCompletionCharge{bytes: 4100}) {
 				t.Fatalf("State B charge=%+v want 4100", got)
 			}
 			stateA := &daCompleteSnapshot{}
-			// Index 9 is outside the incoming commit's chunk_count 2 and still counts.
-			stateA.prior.chunks = map[uint16]daRelayChunk{0: daBudgetChunk(400, 2000), 1: daBudgetChunk(400, 2000), 9: daBudgetChunk(400, 2000)}
+			// Chunk 9 (map key and chunkIndex) is outside the incoming commit's
+			// chunk_count 2 and still counts.
+			stateA.prior.chunks = map[uint16]daRelayChunk{0: daBudgetChunk(0, 400, 2000), 1: daBudgetChunk(1, 400, 2000), 9: daBudgetChunk(9, 400, 2000)}
 			stateA.candidate.member = daRelayOwnerReadyMember{locator: daRelayLocator{kind: daRelayLocatorCommit}, txBytes: daBudgetFiller(250), payload: daBudgetFiller(77)}
 			stateA.candidate.chunkCount = 2
 			if got := daCompletionChargeOf(stateA); got != (daCompletionCharge{bytes: 7450}) {
@@ -133,7 +134,7 @@ func TestDACompletionBudget(t *testing.T) {
 			if _, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: c}); err != nil {
 				t.Fatalf("exact global equality declined: %v", err)
 			}
-			b = seededDABudget(1, 1, daCompletionUse{used: global - c + 1}, nil)
+			b = seededDABudget(1, 1, daCompletionUse{used: global - c + 1 - 7, reserved: 7}, map[string]daCompletionUse{"other": {used: global - c + 1 - 7, reserved: 7}})
 			before := imageDACompletionBudget(b)
 			for _, quota := range []string{"q", "fresh"} {
 				requireDABudgetRefused(t, b, daBudgetContext(1, 1, 0), daBudgetPeer(t, quota), daCompletionCharge{bytes: c}, nil)
@@ -151,7 +152,7 @@ func TestDACompletionBudget(t *testing.T) {
 			if got := imageDACompletionBudget(b); got.global != (daCompletionUse{used: perSource, reserved: c}) || got.sources["q"] != (daCompletionUse{used: perSource - c - 5, reserved: 5 + c}) {
 				t.Fatalf("reserved state=%+v", got)
 			}
-			b = seededDABudget(1, 1, daCompletionUse{used: perSource - c + 1}, map[string]daCompletionUse{"q": {used: perSource - c + 1}})
+			b = seededDABudget(1, 1, daCompletionUse{used: perSource - c + 1 - 5, reserved: 5}, map[string]daCompletionUse{"q": {used: perSource - c + 1 - 5, reserved: 5}})
 			before := imageDACompletionBudget(b)
 			requireDABudgetRefused(t, b, daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: c}, nil)
 			if !reflect.DeepEqual(imageDACompletionBudget(b), before) {
@@ -628,10 +629,9 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			// Step-3 parse error return: no hook runs, so once the attempt is
 			// parked in reserve (step 2 has released DA) the test takes DA and
 			// owner and holds them until the attempt returns (settlement must not
-			// need them). The
-			// parked ChainState writer's read is an extra check only; the
-			// deterministic guard-held observation of a guard-only ordinary return
-			// is the planned row of settlement_lock_order.
+			// need them). The parked ChainState writer's read is an extra check
+			// only; the deterministic guard-held observation of a guard-only
+			// ordinary return is the planned row of settlement_lock_order.
 			a := newDABudgetAdmission(t, false, true)
 			corruptDABudgetTarget(a)
 			budget, owner := &a.f.relay.completionBudget, a.f.mp.pendingOutpoints
