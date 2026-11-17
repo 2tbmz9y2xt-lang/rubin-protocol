@@ -98,9 +98,7 @@ func TestBlockIngressBudget(t *testing.T) {
 			sink, cfg := unclaimedServiceSink(t)
 			requireRefused(t, cfg, 1073741823, rangeError)
 			cfg.InboundBlockBudgetBytes = 1073741824
-			newBoundService(t, cfg)
-			retained := detachedReorgHookRetains(t, newTestHarness(t, 1, "127.0.0.1:0", nil), sink)
-			require(t, retained, "detached commit not retained: the hook is not the next construction's")
+			requireFirstClaimant(t, sink, cfg, newBoundService(t, cfg))
 		}},
 	} {
 		t.Run(row.name, row.run)

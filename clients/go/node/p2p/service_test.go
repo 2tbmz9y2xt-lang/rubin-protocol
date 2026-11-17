@@ -1883,13 +1883,15 @@ func TestServiceHasBlockLocalStoreRows(t *testing.T) {
 	}
 }
 
-// requireFirstClaimant observes through a real reorganization that service owns the engine's
-// detached-reorg hook: once service is CLOSED and a later Service is OPEN and bound, the
-// disconnected DA commit is refused by service's closed path and not retained.
+// requireFirstClaimant observes through a real reorganization that the engine's detached-reorg
+// hook is service's own admitDetachedReorgDA: with service OPEN and a later Service constructed,
+// bound and then CLOSED, the disconnected DA commit is retained. A hook replaced by the later
+// claim reaches that CLOSED Service and an absent or empty hook admits nothing, so neither retains.
 func requireFirstClaimant(t *testing.T, sink *testHarness, cfg ServiceConfig, service *Service) {
 	t.Helper()
 	later := newBoundService(t, cfg)
-	require(t, service.Close() == nil && cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(later), "first claimant close and later binding")
+	require(t, cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(later) && later.Close() == nil, "later binding and close")
 	retained := detachedReorgHookRetains(t, newTestHarness(t, 1, "127.0.0.1:0", nil), sink)
-	require(t, !retained, "detached commit retained: the hook is not the first claimant's")
+	require(t, retained, "detached commit not retained: the hook is not the first claimant's")
+	require(t, service.Close() == nil, "close first claimant")
 }

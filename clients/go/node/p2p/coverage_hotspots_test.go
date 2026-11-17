@@ -65,12 +65,8 @@ func TestNewServiceInvalidConfigDoesNotConsumeDARelayClaim(t *testing.T) {
 			t.Fatalf("invalid config error=%v, want %q", err, test.want)
 		}
 		// Under F1 a later construction succeeds either way; the refused one claimed nothing
-		// only if the engine's detached-reorg hook reaches the next successful construction's
-		// admitDetachedReorgDA, which retains the disconnected commit while that Service is OPEN.
-		newBoundService(t, valid)
-		if !detachedReorgHookRetains(t, newTestHarness(t, 1, "127.0.0.1:0", nil), sink) {
-			t.Fatalf("after %q the detached commit was not retained: the hook is not the next construction's", test.want)
-		}
+		// only if the next successful construction is the first claimant.
+		requireFirstClaimant(t, sink, valid, newBoundService(t, valid))
 	}
 }
 
