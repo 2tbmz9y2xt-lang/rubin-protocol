@@ -1203,6 +1203,7 @@ type daTTLHoldShape struct {
 	records []daTTLHoldRecord
 	next    *daTTLHoldRecord
 	capErr  error
+	sets    int
 	members int
 	charged uint64
 }
@@ -1285,7 +1286,65 @@ func (in *daTTLHoldInputs) stateBShape(b testing.TB, name string, tag byte, mani
 		}
 		shape.charged += rec.charge
 		shape.members++
+		shape.sets++
 		shape.records = append(shape.records, rec)
+	}
+}
+
+// chunk signs a State A chunk of daID at index carrying payloadLen zero bytes; its charge is
+// its tx bytes plus its payload.
+func (in *daTTLHoldInputs) chunk(b testing.TB, daID [32]byte, index uint16, payloadLen int) daTTLHoldRecord {
+	payload := make([]byte, payloadLen)
+	tx := &consensus.Tx{TxKind: 0x02, DaPayload: payload, DaChunkCore: &consensus.DaChunkCore{DaID: daID, ChunkIndex: index, ChunkHash: sha3.Sum256(payload)}}
+	raw := in.sign(b, tx, 100_000_000)
+	return daTTLHoldRecord{raw: raw, charge: uint64(len(raw) + payloadLen)}
+}
+
+// fullRecordPayloads gives the fewest chunk payloads of one record charging at most
+// DA_ORPHAN_POOL_PER_DA_ID_MAX: CHUNK_BYTES each, then the largest last payload that fits.
+func (in *daTTLHoldInputs) fullRecordPayloads(b testing.TB) []int {
+	full := in.chunk(b, [32]byte{0xaf}, 0, consensus.CHUNK_BYTES).charge
+	n := daOrphanPoolPerDAIDMaxBytes / full
+	rem := daOrphanPoolPerDAIDMaxBytes - n*full
+	last := int((rem - (full - 2*consensus.CHUNK_BYTES)) / 2)
+	if charge := in.chunk(b, [32]byte{0xaf}, 1, last).charge; last <= 0xffff || charge > rem || charge+2 <= rem {
+		b.Fatalf("last payload %d charges %d, want the largest within %d", last, charge, rem)
+	}
+	return append(slices.Repeat([]int{consensus.CHUNK_BYTES}, int(n)), last)
+}
+
+// stateAShape admits records of chunks with the given payload lengths under fresh da_ids until
+// the next record would exceed DA_ORPHAN_POOL_SIZE; each PEER identity takes members in order
+// until the next would exceed DA_ORPHAN_POOL_PER_PEER_MAX. next is the next record's first chunk.
+func (in *daTTLHoldInputs) stateAShape(b testing.TB, name string, tag byte, payloads []int) daTTLHoldShape {
+	shape := daTTLHoldShape{name: name, capErr: errDARelayOrphanPoolCapExceeded}
+	identity, used := 0, uint64(0)
+	assign := func(rec *daTTLHoldRecord) {
+		if used+rec.charge > daOrphanPoolPerPeerMaxBytes {
+			identity, used = identity+1, 0
+		}
+		used += rec.charge
+		rec.quota = fmt.Sprintf("ttl-hold-%s-%d", name, identity)
+	}
+	for i := 0; ; i++ {
+		var record []daTTLHoldRecord
+		var charge uint64
+		for index, payload := range payloads {
+			rec := in.chunk(b, [32]byte{tag, byte(i >> 8), byte(i)}, uint16(index), payload)
+			record, charge = append(record, rec), charge+rec.charge
+		}
+		if shape.charged+charge > daOrphanPoolSizeBytes {
+			assign(&record[0])
+			shape.next = &record[0]
+			return shape
+		}
+		for j := range record {
+			assign(&record[j])
+		}
+		shape.records = append(shape.records, record...)
+		shape.charged += charge
+		shape.members += len(record)
+		shape.sets++
 	}
 }
 
@@ -1299,6 +1358,8 @@ func newDATTLHoldInputs(b testing.TB) *daTTLHoldInputs {
 	in := &daTTLHoldInputs{kp: kp, address: consensus.P2PKCovenantDataForPubkey(kp.PubkeyBytes()), utxos: map[consensus.Outpoint]consensus.UtxoEntry{}}
 	in.shapes = []daTTLHoldShape{
 		{name: "E"},
+		in.stateAShape(b, "M-A", 0xa1, []int{1}),
+		in.stateAShape(b, "F-A", 0xa2, in.fullRecordPayloads(b)),
 		in.stateBShape(b, "M-B", 0xb1, 0, 0),
 		in.stateBShape(b, "F-B", 0xb2, consensus.MAX_DA_MANIFEST_BYTES_PER_TX, consensus.MAX_DA_MANIFEST_BYTES_PER_TX),
 	}
@@ -1335,8 +1396,8 @@ func (in *daTTLHoldInputs) preState(b testing.TB, shape daTTLHoldShape, ttl uint
 		}
 	}
 	view := daRelayStateSnapshot(relay)
-	if len(view.sets) != len(shape.records) || view.commitBytes+view.orphanBytes != shape.charged {
-		b.Fatalf("%s: retained %d records charging %d, want %d charging %d", shape.name, len(view.sets), view.commitBytes+view.orphanBytes, len(shape.records), shape.charged)
+	if len(view.sets) != shape.sets || view.commitBytes+view.orphanBytes != shape.charged {
+		b.Fatalf("%s: retained %d records charging %d, want %d charging %d", shape.name, len(view.sets), view.commitBytes+view.orphanBytes, shape.sets, shape.charged)
 	}
 	for i, raw := range in.fill {
 		if err := f.mempool.AddTx(raw); err != nil {
@@ -1399,7 +1460,7 @@ func benchDATTLGuardHold(b *testing.B, in *daTTLHoldInputs, shape daTTLHoldShape
 		}
 		requireDATTLHoldEffect(b, before, daRelayStateSnapshot(f.engine.DARelayState()), ttl, bound)
 	}
-	b.ReportMetric(float64(len(shape.records)), "records")
+	b.ReportMetric(float64(shape.sets), "records")
 	b.ReportMetric(float64(shape.members), "members")
 	b.ReportMetric(float64(len(quotas)), "quotas")
 	b.ReportMetric(float64(shape.charged), "charged-bytes")
