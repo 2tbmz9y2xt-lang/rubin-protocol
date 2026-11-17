@@ -23,10 +23,13 @@ import (
 // binding surface (one identity snapshot, then one registration attempt with that Service's own
 // entry) that also returns the snapshotted Service. The production selection itself is observed
 // by the node rows in clients/go/node/da_ttl_callback_test.go.
+// errDATTLBindingAbsent is selectDATTL's report that no binding is published, so no entry ran.
+var errDATTLBindingAbsent = errors.New("no DA TTL binding is published")
+
 func selectDATTL(engine *node.SyncEngine, decrease func() error) (node.DATTLMutationService, error) {
 	service := engine.DATTLBindingService()
 	if service == nil {
-		return nil, nil
+		return nil, errDATTLBindingAbsent
 	}
 	return service, service.EnterDATTLMutation(decrease)
 }
@@ -443,4 +446,40 @@ func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
 	}()
 	require(t, recovered == "ttl body panic", "panic value=%v, want the original propagated unrecovered", recovered)
 	require(t, h.service.closeReturnsWithin(lifecycleWatchdog), "Close stranded after the panicking entry")
+}
+
+// TestDATTLCallbackEndToEndNonAcceptedResults pins R1 and the R2 rows end to end over the real
+// SyncEngine, DA owner and Service, counting through the retained image: a valid side-branch block
+// stored non-canonical (D1), a KNOWN_BLOCK_NOOP replay and a DisconnectTip decrease nothing, so the
+// record retained at count 3 survives the next two counted publications and expires only at the
+// third. The side block enters through SyncEngine.ApplyBlockWithReorg (no Service lease).
+func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
+	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
+	fork := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	fork.timestamp += 1000
+	sideBlock := fork.mineNextBlockBytes(t)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	p := testPeerForService(h.service, "remote", 5)
+	relay := func(height uint64) {
+		t.Helper()
+		summary, err := p.processRelayedBlock(blockAtHeight(t, source, height))
+		require(t, err == nil && summary != nil, "processRelayedBlock(%d)=(%+v,%v)", height, summary, err)
+	}
+	relay(1)
+	relay(2)
+	f := newDAIngressFixture(t, h)
+	commit := f.commit(daRelayTestID(0xd3), 2)
+	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
+	summary, err := h.syncEngine.ApplyBlockWithReorg(sideBlock, nil)
+	require(t, err == nil && summary != nil && len(summary.CanonicalAppliedBlocks) == 0 && h.chainState.Height == 2, "side block=(%+v,%v) height=%d, want stored non-canonical", summary, err, h.chainState.Height)
+	summary, err = p.processRelayedBlock(blockAtHeight(t, source, 2))
+	require(t, err == nil && summary == nil, "known block replay=(%+v,%v), want KNOWN_BLOCK_NOOP", summary, err)
+	relay(3)
+	disconnected, err := h.syncEngine.DisconnectTip()
+	require(t, err == nil && disconnected != nil && h.chainState.Height == 2, "DisconnectTip=(%+v,%v)", disconnected, err)
+	reconnected, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, 3), nil)
+	require(t, err == nil && reconnected != nil, "reconnect(3)=(%+v,%v)", reconnected, err)
+	f.requireRetained(commit, "count 1: two counted publications after the side block, replay and disconnect")
+	relay(4)
+	f.requireAbsent(commit, "the record the third counted publication expired")
 }

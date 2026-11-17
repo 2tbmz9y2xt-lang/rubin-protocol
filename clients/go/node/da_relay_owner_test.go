@@ -6736,7 +6736,6 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	// so none of its functions calls a legacy removal or apply primitive; the legacy exported
 	// cleanup names are the owner-aware wrappers since issue 678; the DARemoval guard stays unwired.
 	mutationFuncs := daOwnerFileFuncs(t, "da_relay_mutation.go")
-	relationFuncs := daOwnerFileFuncs(t, "da_relay_state.go")
 	// The censused set is DERIVED from the file, never listed by hand: every FuncDecl whose
 	// name carries "ownerready" case-insensitively. Completeness rests on the naming rule the
 	// surface is written to — each of its functions is named for the owner-ready record it
@@ -6779,66 +6778,26 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 		t.Fatal("whole-record removal does not release the prefetch reservation")
 	}
 	// RECORD-LOCAL WORK: the removal arms and their shared retirement helper never call the global locator traversal, the record deep clone
-	// or the Live projector, nor range locators. Locator WRITE SINKS (indexed assignment/IncDec, rebinding, delete, any call taking the map as an argument)
-	// are refused only on the pure-TTL path: the tick arm, which reaches `s` solely via s.sets, s.records, the whole-record arm and scanned same-file direct helpers.
-	// A bounded shape check, not a proof over arbitrary Go: which rows the retirement arms retire or keep is pinned by the runtime rows (TestAdmitDANonReplayPrunesOutOfRangeClaims, TestOwnerReadyRemovalPeerAndTTLSelectors, the OWNER-READY WRAPPER row below).
-	isIdent := func(expr ast.Expr, name string) bool { ident, ok := expr.(*ast.Ident); return ok && ident.Name == name }
+	// or the Live projector, nor range locators.
+	// The pure-TTL sink arm this scan once carried went with the deleted fenced tick
+	// (RUB-1847): the in-guard TTL body's record and locator effects are pinned by the
+	// TestDATTLCallbackBody rows.
+	// A bounded shape check, not a proof over arbitrary Go: which rows the retirement arms retire or keep is pinned by the runtime rows (TestAdmitDANonReplayPrunesOutOfRangeClaims, TestOwnerReadyRemovalPeerAndTTLSelectors, the OWNER-READY IN-GUARD BODY row below).
 	isLocators := func(expr ast.Expr) bool { sel, ok := expr.(*ast.SelectorExpr); return ok && sel.Sel.Name == "locators" }
-	locatorSink := func(node ast.Node) string {
-		var lhs []ast.Expr
-		switch node := node.(type) {
-		case *ast.AssignStmt:
-			lhs = node.Lhs
-		case *ast.IncDecStmt:
-			lhs = []ast.Expr{node.X}
-		case *ast.CallExpr:
-			if len(node.Args) == 2 && isIdent(node.Fun, "delete") && isLocators(node.Args[0]) {
-				return "delete"
-			}
-			if slices.ContainsFunc(node.Args, isLocators) {
-				return "call " + calleeName(node)
-			}
-		}
-		for _, expr := range lhs {
-			if index, ok := expr.(*ast.IndexExpr); ok && isLocators(index.X) || isLocators(expr) {
-				return "assignment"
-			}
-		}
-		return ""
-	}
-	var scan func(owner string, body *ast.BlockStmt, pureTTL, direct bool)
-	scan = func(owner string, body *ast.BlockStmt, pureTTL, direct bool) {
-		ast.Inspect(body, func(node ast.Node) bool {
-			if kind := locatorSink(node); pureTTL && kind != "" {
-				t.Fatalf("%s writes the locator index: %s", owner, kind)
-			}
+	for _, name := range []string{"removeOwnerReadyWholeRecordLocked", "dropOwnerReadyChunksLocked", "projectOwnerReadyRetirementLocked"} {
+		ast.Inspect(mutationFuncs[name].Body, func(node ast.Node) bool {
 			switch node := node.(type) {
 			case *ast.RangeStmt:
 				if isLocators(node.X) {
-					t.Fatalf("%s ranges over the locator index", owner)
+					t.Fatalf("%s ranges over the locator index", name)
 				}
 			case *ast.CallExpr:
-				if pureTTL {
-					if sel, ok := node.Fun.(*ast.SelectorExpr); ok && daNonReplaySelector(sel.X) == "s.relations" {
-						require(t, slices.Contains([]string{"recordValue", "scalarRecord"}, sel.Sel.Name), "%s reaches relation writer %s", owner, sel.Sel.Name)
-						scan(owner+"'s typed helper "+sel.Sel.Name, relationFuncs[sel.Sel.Name].Body, true, true)
-					}
-				}
 				if callee := calleeName(node); slices.Contains([]string{"checkRetiredLocatorRowsLocked", "checkDARecordImageLocatorsLocked", "projectDARecordImageLiveLocked", "cloneOwnerReady"}, callee) {
-					t.Fatalf("%s calls %s", owner, callee)
-				}
-				require(t, !pureTTL || !slices.ContainsFunc(node.Args, func(arg ast.Expr) bool { return isIdent(arg, "s") }), "%s hands the relay state to %s", owner, calleeName(node))
-			case *ast.SelectorExpr:
-				if pureTTL && isIdent(node.X, "s") && !slices.Contains([]string{"relations", "records", "removeOwnerReadyWholeRecordLocked"}, node.Sel.Name) {
-					require(t, !direct && mutationFuncs[node.Sel.Name] != nil, "%s reaches s.%s, which no sink scan covers", owner, node.Sel.Name)
-					scan(owner+"'s direct helper "+node.Sel.Name, mutationFuncs[node.Sel.Name].Body, true, true)
+					t.Fatalf("%s calls %s", name, callee)
 				}
 			}
 			return true
 		})
-	}
-	for _, name := range []string{"removeOwnerReadyWholeRecordLocked", "dropOwnerReadyChunksLocked", "projectOwnerReadyRetirementLocked"} {
-		scan(name, mutationFuncs[name].Body, false, false)
 	}
 	// LEGACY ROOT PIN: the private TTL root still decrements in place and mints NO revision.
 	legacyState := newDARelayStateForTest(t, defaultDARelayCaps())

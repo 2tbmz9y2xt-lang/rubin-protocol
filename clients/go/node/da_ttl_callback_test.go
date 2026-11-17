@@ -695,7 +695,7 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	f.engine.PublishDATTLBinding(s1)
 	f.engine.PublishDATTLBinding(refusing)
 	err = f.engine.enterSelectedDATTL(decrease)
-	require(t, err == closed && slices.Equal(attempts, []string{"closed"}) && decreases == 0, "refused registration: err=%v attempts=%v decreases=%d", err, attempts, decreases)
+	require(t, errors.Is(err, closed) && slices.Equal(attempts, []string{"closed"}) && decreases == 0, "refused registration: err=%v attempts=%v decreases=%d", err, attempts, decreases)
 	var nilEngine *SyncEngine
 	nilEngine.PublishDATTLBinding(s1)
 	require(t, nilEngine.DATTLBindingService() == nil && nilEngine.enterSelectedDATTL(decrease) == nil && decreases == 0, "nil engine binding")
@@ -719,7 +719,10 @@ func TestDATTLCallbackBindingChangesNoDAState(t *testing.T) {
 	beforeRelay, beforeOwner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 	firstCalls := 0
 	first := func([]byte) (func(bool), error) { firstCalls++; return func(bool) {}, nil }
-	later := func([]byte) (func(bool), error) { t.Error("later claimant's hook installed"); return nil, nil }
+	later := func([]byte) (func(bool), error) {
+		t.Error("later claimant's hook installed")
+		return func(bool) {}, nil
+	}
 	var attempts []string
 	require(t, engine.enterSelectedDATTL(func() error { t.Error("absent binding ran decrease"); return nil }) == nil, "absent selection")
 	for _, hook := range []func([]byte) (func(bool), error){first, later} {
@@ -734,8 +737,7 @@ func TestDATTLCallbackBindingChangesNoDAState(t *testing.T) {
 	require(t, engine.enterSelectedDATTL(func() error { return nil }) == nil && slices.Equal(attempts, []string{"S1", "S2"}), "admitted selection attempts=%v", attempts)
 	_, _ = engine.reorgDAAdmission(nil)
 	require(t, firstCalls == 1, "later claim replaced the first claimant's hook: first calls=%d", firstCalls)
-	require(t, reflect.DeepEqual(beforeRelay, daRelayStateSnapshot(f.relay)), "construction, binding or selection changed the DA relay image")
-	require(t, reflect.DeepEqual(beforeOwner, cloneDAAdmissionOwner(f.mp.pendingOutpoints)), "construction, binding or selection changed the pending-outpoint owner")
+	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, beforeRelay, beforeOwner)
 	require(t, f.relay.mu.TryLock(), "DA relay mutex leaked")
 	f.relay.mu.Unlock()
 }
@@ -782,4 +784,46 @@ type daTTLOrderedService struct {
 func (c *daTTLOrderedService) EnterDATTLMutation(decrease func() error) error {
 	c.selected.Store(c.id)
 	return decrease()
+}
+
+// TestDATTLCallbackRunsInsideTheTransitionHold replaces the retired fenced-writer row of
+// TestCanonicalDAWritersCannotInterleaveWithTheTransition on the new path (C2, H4): with the
+// admission guard held exclusively, a ReleasePeerQuotaKey started first parks on the guard, the
+// in-guard TTL body completes under that same hold, the writer does not run before the release,
+// and after it the writer runs against the decreased image without losing it.
+func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
+	f, r := newDATTLCallbackRecords(t)
+	f.state.admissionMu.Lock()
+	released := false
+	defer func() {
+		if !released {
+			f.state.admissionMu.Unlock()
+		}
+	}()
+	done := make(chan string, 1)
+	go func() { _ = f.relay.ReleasePeerQuotaKey("unrelated-peer"); done <- "release" }()
+	awaitCanonicalMOAdmissionRLock(t, "ReleasePeerQuotaKey", 1)
+	body := make(chan error, 1)
+	go func() { body <- f.relay.advanceOwnerReadyTTLInGuard() }()
+	select {
+	case err := <-body:
+		require(t, err == nil, "in-guard TTL body: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("TTL body blocked under the held exclusive admission guard")
+	}
+	select {
+	case writer := <-done:
+		t.Fatalf("%s ran while the admission guard was held", writer)
+	default:
+	}
+	f.state.admissionMu.Unlock()
+	released = true
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the writer never proceeded after the guard release")
+	}
+	after := daRelayStateSnapshot(f.relay)
+	requireDATTLCount(t, after, r.stateAID, 2)
+	requireDATTLCount(t, after, r.stateBID, 2)
 }
