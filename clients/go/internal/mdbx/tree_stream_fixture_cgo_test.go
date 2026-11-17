@@ -6870,6 +6870,36 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc.image(t, tsReopen(t, sc.s, sc.path), false)
 	})
+	// After a possibly crossed commit one durable change defeats both predicates: an extra member inside
+	// the witnessed node domain, the missing nontarget body, or the deleted raw root point re-appearing.
+	var extra [36]byte
+	for i := range extra {
+		extra[i] = 0x11
+	}
+	for _, c := range []struct {
+		name string
+		mode uint32
+		rank uint8
+		key  func(*psfScene) []byte
+	}{
+		{"extra-member", 3, 8, func(*psfScene) []byte { return obsoleteTreeNodeLiteral(9, extra, 0) }},
+		{"missing-member", 4, 4, func(sc *psfScene) []byte { return sc.key() }},
+		{"changed-root-point", 3, 0, func(*psfScene) []byte { return tsRootKey(9) }},
+	} {
+		t.Run("N7-neither/"+c.name, func(t *testing.T) {
+			sc := psfNew(t)
+			var r tsResult
+			evidence := ctxTreeFault(t, sc.s, c.mode, c.rank, c.key(sc), func() { r = sc.run(t, sc.o) })
+			if evidence.commits != 1 || evidence.drift != 1 || r.truth != 3 || r.stage != 3 {
+				t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
+			}
+			r.tuple(t, 3, 3, -1)
+			if _, ok := r.err.(*CommitError); !ok {
+				t.Fatalf("scope strict truth differs: cause %T %v", r.err, r.err)
+			}
+			tsConsumed(t, sc.s, sc.o, 3, r.err)
+		})
+	}
 	t.Run("N7-crossed-drift", func(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
