@@ -6784,7 +6784,8 @@ func psfRaw(t *testing.T, s *Store, rank uint8, key, want []byte) {
 	}
 }
 
-// psfF is F for the scene: M=1, D=4, W=2, P=0, L=1 with K and U from the literal row widths.
+// psfF is the scene's metadata envelope: one Mutation, four deletes, two witnesses, no points and one
+// selector, with key and witness bytes from the literal row widths.
 func psfF(t *testing.T) uint64 {
 	auth := psfAuthority(t)
 	nodes := obsoleteTreeFamily(9)
@@ -6819,8 +6820,8 @@ func psfDelete(t *testing.T, g uint64, mutations []Mutation, selectors []LargeIm
 }
 
 // UTXO, index-forward, counter and derived-owner rows, each holding the malformed disposable value
-// 0xde, are deleted by the typed raw path next to the untouched tree scene; no value is decoded. The
-// node and root rows are the scene's own rows deleted by the commit rows.
+// 0xde, are deleted by the typed raw path; no value is decoded. The scene's node and root rows are
+// not targets here and stay present.
 func psfClassDeletes(t *testing.T) {
 	sc := psfNew(t)
 	utxo := append(obsoleteGenerationLiteral(9), 0x44)
@@ -7219,19 +7220,47 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		}
 	})
 	t.Run("larger-candidate-preflight", func(t *testing.T) {
-		// The first write-snapshot get reports the body one byte longer than ORIGINAL OLD. The length
-		// mismatch is inequality, not a funded payload comparison (which would refuse with capacity).
-		// Fixture mode 31 fires at preflight, the first write_txn get; it does not reach final/readback.
+		// The first write-snapshot get reports the body one byte longer than ORIGINAL OLD. The account holds
+		// exactly what the equal-length body comparison needs, so funding the longer candidate would refuse
+		// with capacity; the length mismatch is inequality without funding. Mode 31 fires at preflight only.
 		sc := psfNew(t)
+		f, window := psfF(t), psfWindow(t, sc.s)
 		var r tsResult
-		evidence := ctxTreeFault(t, sc.s, 31, 4, sc.key(), func() { r = sc.run(t, sc.o) })
-		if evidence.gets != 1 || evidence.commits != 0 || r.stage != 1 {
-			t.Fatalf("scope sealed window grew: %+v stage%d %v", evidence, r.stage, r.err)
+		evidence := ctxTreeFault(t, sc.s, 31, 4, sc.key(), func() {
+			r = sc.run(t, reservationFilled(t, psPageGrant+f+window+2*uint64(len(psfBodyValue))))
+		})
+		if any(r.err) == any(errOperationReservationCapacity) || evidence.gets != 1 || evidence.commits != 0 || r.stage != 1 {
+			t.Fatalf("scope larger candidate funded: %+v stage%d %v", evidence, r.stage, r.err)
 		}
 		r.tuple(t, 1, 1, -1)
 		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc.image(t, tsReopen(t, sc.s, sc.path), false)
+	})
+	t.Run("larger-candidate-final", func(t *testing.T) {
+		// The selected body is present with length 0 in ORIGINAL OLD. Mode 13 upserts one byte at it inside the
+		// write transaction after its first put, so the final candidate is longer than ORIGINAL OLD: the length
+		// mismatch is inequality under the sealed limit, with no funded payload comparison.
+		sc := psfNew(t)
+		treeNativeSeed(t, sc.s, 4, sc.key(), []byte{})
+		psfRaw(t, sc.s, 4, sc.key(), []byte{})
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 13, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		if engine, direct := directTestEngineError(r.err); !direct || engine.Diagnostic != "final update image mismatch" {
+			t.Fatalf("scope sealed window grew: final %v", r.err)
+		}
+		if evidence.drift != 1 || evidence.commits != 0 || r.stage != 2 {
+			t.Fatalf("scope final mismatch committed: %+v stage%d %v", evidence, r.stage, r.err)
+		}
+		r.tuple(t, 1, 2, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "final update image mismatch", nil)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		reopened := tsReopen(t, sc.s, sc.path)
+		psfRaw(t, reopened, 4, sc.key(), []byte{})
+		for _, row := range obsoleteTreeFamily(9) {
+			psfRaw(t, reopened, 8, row.key, row.value)
+		}
+		psfRaw(t, reopened, 0, tsRootKey(9), []byte{0xee, 9})
 	})
 	t.Run("larger-candidate-readback", func(t *testing.T) {
 		// The selected body is present with length 0 in ORIGINAL OLD. Commit drift (mode 3) writes one byte
@@ -7298,7 +7327,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 			t.Fatalf("scope next operation differs: OLD abort %+v", evidence)
 		}
 		sc.image(t, sc.s, false)
-		// One byte less than F plus S and both body operands refuses the funded two-span comparison.
+		// One byte less than the envelope, window and both body operands refuses the funded two-span comparison.
 		r = sc.run(t, reservationFilled(t, psPageGrant+f+window+2*uint64(len(psfBodyValue))-1))
 		if any(r.err) != any(errOperationReservationCapacity) {
 			t.Fatalf("scope operand window not funded: %v", r.err)
@@ -7307,8 +7336,8 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc2 := psfNew(t)
 		r = sc2.run(t, reservationFilled(t, psPageGrant+f+window+2*uint64(len(psfBodyValue))))
-		// Without the preflight budget argument or the final/readback sealed limit, a typed scope with a
-		// nil budget refuses this funded commit with the capacity error.
+		// Without the preflight budget argument or the final sealed limit, a typed scope with a nil budget
+		// refuses this funded commit with the capacity error.
 		if r.err != nil || r.truth != 2 {
 			t.Fatalf("scope missing budget admitted: %v truth%d", r.err, r.truth)
 		}
@@ -7382,8 +7411,9 @@ func psfUndoScopeOp(t *testing.T) func(*Reader) TreeOperationV1 {
 }
 
 // Point loop: mode 36 makes the rank-2 index point differ in length (unfunded inequality); the
-// later rank-3 header point needs S plus two 148-byte operands, but the account holds F + S + one
-// operand + 64, so its preflight comparison must still refuse with the capacity singleton.
+// later rank-3 header point needs the window plus two 148-byte operands, but the account holds the
+// envelope, the window, one operand and 64 bytes, so its preflight comparison must still refuse with
+// the capacity singleton.
 func psfPointMismatchThenCapacity(t *testing.T) {
 	index := binary.BigEndian.AppendUint64(obsoleteGenerationLiteral(9), 1)
 	run := func(mode uint32, remaining func(f, window uint64) uint64) (*psfScene, tsResult, fixtureLargeEvidence) {
@@ -7416,7 +7446,8 @@ func psfPointMismatchThenCapacity(t *testing.T) {
 	treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
 }
 
-// psfUndoScopeF is F for psfUndoScopeOp: M=1, D=3, W=2, P=2 (index and header points), L=0.
+// psfUndoScopeF is psfUndoScopeOp's metadata envelope: one Mutation, three deletes, two witnesses, two
+// points (index and header) and no selector.
 func psfUndoScopeF(t *testing.T) uint64 {
 	auth := psfAuthority(t)
 	nodes := obsoleteTreeFamily(9)

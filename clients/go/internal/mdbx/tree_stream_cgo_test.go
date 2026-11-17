@@ -4567,6 +4567,7 @@ func TestTreeStreamPhysicalScopeV1(t *testing.T) {
 	t.Run("overlap", psOverlap)
 	t.Run("counts", psCounts)
 	t.Run("metadata", psMetadata)
+	t.Run("successor", psSuccessor)
 	t.Run("combined-cap", psCombinedCap)
 	t.Run("legacy", psLegacy)
 	t.Run("callback", psCallback)
@@ -4937,7 +4938,7 @@ func psCounts(t *testing.T) {
 		op.Pair.LargeConsulted = selectors(1, 1)[:1:1]
 		op.Pair.LargeConsulted = append(op.Pair.LargeConsulted, op.Pair.LargeConsulted[0])
 	})
-	run("D+W", true, 8*maxUpdateMutations, func(op *TreeOperationV1) {
+	run("deletes plus witnesses", true, 8*maxUpdateMutations, func(op *TreeOperationV1) {
 		op.Pair.ObsoleteDeletes = make([]ObsoleteRowV1, maxUpdateMutations)
 	})
 	// Counts 1 and 1440 of one known kind commit; the first selector's hash is zero.
@@ -4990,6 +4991,16 @@ func psMetadata(t *testing.T) {
 	mustEnvironment(t, r.err)
 	tsRead(t, s2, TreeSchemaV1DBIs()[0], tsCounterKey(9), nil)
 	tsFollowing(t, s2, o2)
+}
+
+// The successor of a key shorter than the bound is one exact-capacity copy with a trailing zero byte.
+func psSuccessor(t *testing.T) {
+	key := []byte{1, 2, 3}
+	var next []byte
+	allocs := testing.AllocsPerRun(100, func() { next = largeImageAdvance(key, 8) })
+	if allocs != 1 || len(next) != 4 || cap(next) != 4 || !bytes.Equal(next, []byte{1, 2, 3, 0}) || &next[0] == &key[0] {
+		t.Fatalf("scope successor copy differs: allocs%v len%d cap%d %x", allocs, len(next), cap(next), next)
+	}
 }
 
 // Ordinary counter targets and one raw counter delete share the aux cap 16384: 16384 ordinary rows
