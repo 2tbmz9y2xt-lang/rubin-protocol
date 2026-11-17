@@ -544,6 +544,36 @@ func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
 	require(t, h.service.closeReturnsWithin(lifecycleWatchdog), "Close stranded after the panicking entry")
 }
 
+// TestDATTLCallbackEndToEndPanicWhileCloseWaits pins the panic while Close waits
+// (RUBIN_L1_P2P_AUX.md Section 5, Table D): Close starts while the registered entry runs, reaches
+// DRAINING and waits on the entry's lease; the decrease then panics, the panic propagates
+// unrecovered, the lease is released once, and the waiting Close returns.
+func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	entered, unwind := make(chan struct{}), make(chan struct{})
+	recovered := make(chan any, 1)
+	go func() {
+		defer func() { recovered <- recover() }()
+		_ = h.service.EnterDATTLMutation(func() error { close(entered); <-unwind; panic("ttl body panic") })
+	}()
+	<-entered
+	closed := make(chan struct{})
+	go func() { _ = h.service.Close(); close(closed) }()
+	waitDraining(t, h.service)
+	select {
+	case <-closed:
+		t.Fatal("Close returned while the registered entry still held its lease")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(unwind)
+	require(t, <-recovered == "ttl body panic", "panic value, want the original propagated unrecovered")
+	select {
+	case <-closed:
+	case <-time.After(lifecycleWatchdog):
+		t.Fatal("the waiting Close stranded after the panicking entry")
+	}
+}
+
 // mineSideBlock mines a height-1 block on a fresh chain paying a fresh key, so its hash differs
 // from every block of the shared deterministic test chain: relayed to a node whose tip is at
 // height 2, it is a valid side-branch block with less work, stored non-canonical.
