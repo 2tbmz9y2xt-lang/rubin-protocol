@@ -139,6 +139,9 @@ func terminalH1V1(h *H1BindingV1, v policycontrol.View) string {
 		return ""
 	}
 	if sameAdmissionV1(h, in) {
+		if in.State == policycontrol.StateAutoBlocked && v.Sequence <= h.ObservedPSequence {
+			return "integrity"
+		}
 		return sameOwnerTerminalV1(in)
 	}
 	return laterOwnerV1(h, in, v.Sequence)
