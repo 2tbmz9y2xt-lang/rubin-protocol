@@ -6892,6 +6892,31 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		}
 		tsConsumed(t, sc.s, sc.o, 3, r.err)
 	})
+	t.Run("M15-same-prefix-sibling", func(t *testing.T) {
+		// Only the first generation-9 node is a target; its same-prefix sibling drifts at the write snapshot.
+		// Generation 8 holds byte-equal values under another generation prefix and stays untouched.
+		sc := psfNew(t)
+		build := sc.build(t)
+		one := func(r *Reader) TreeOperationV1 {
+			op := build(r)
+			op.Pair.ObsoleteDeletes = op.Pair.ObsoleteDeletes[1:2]
+			return op
+		}
+		sibling := obsoleteTreeFamily(9)[1]
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 14, 8, sibling.key, func() { r = psRun(t, sc.s, sc.o, LaneOperation, one) })
+		if evidence.drift != 1 || evidence.commits != 0 || r.stage != 1 {
+			t.Fatalf("independent residual changed: %+v stage%d %v", evidence, r.stage, r.err)
+		}
+		r.tuple(t, 1, 1, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		reopened := tsReopen(t, sc.s, sc.path)
+		psfRaw(t, reopened, 8, obsoleteTreeFamily(9)[0].key, obsoleteTreeFamily(9)[0].value)
+		for _, row := range obsoleteTreeFamily(8) {
+			psfRaw(t, reopened, 8, row.key, row.value)
+		}
+	})
 	t.Run("N8-operand-window", func(t *testing.T) {
 		sc := psfNew(t)
 		f, window := psfF(t), psfWindow(t, sc.s)
