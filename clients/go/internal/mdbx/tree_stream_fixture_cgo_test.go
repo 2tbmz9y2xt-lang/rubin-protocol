@@ -7151,6 +7151,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("H1-domain-mismatch-then-read-error", psfDomainMismatchThenError)
 	t.Run("H1-point-mismatch-then-capacity", psfPointMismatchThenCapacity)
 	t.Run("M14-retained", psfRetained)
+	t.Run("N5-callback-cleanup", psfCallbackCleanup)
 	t.Run("N4-selector-alias", func(t *testing.T) {
 		// At write site 3 the caller rewrites its own LargeConsulted value to an absent body; the body then
 		// drifts after the first write. The owned selector copy still compares the drifted body at final.
@@ -7417,4 +7418,41 @@ func psfRetained(t *testing.T) {
 		}
 		return nil
 	}))
+}
+
+// psfCallbackCleanup crosses each callback application error (plain, wrapped, typed-nil) with a consumed
+// (fixture mode 9: OLD abort reports EIO) and a retained (mode 10: OLD abort THREAD_MISMATCH) cleanup.
+func psfCallbackCleanup(t *testing.T) {
+	marker := errors.New("scope callback marker")
+	var typedNil *nilPointerError
+	for _, mode := range []uint32{9, 10} {
+		for _, application := range []error{marker, fmt.Errorf("scope wrapper: %w", marker), typedNil} {
+			sc := psfNew(t)
+			var r tsResult
+			evidence, err := fixtureLargeFault(sc.s, mode, 0, tsRootKey(9), func() {
+				mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+					return a.WithReservation(psPageGrant, func() error {
+						r = tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { return TreeOperationV1{}, application })
+						return nil
+					})
+				}))
+			})
+			mustEnvironment(t, err)
+			want := map[uint32]storeState{9: storeCLOSED, 10: storePOISONEDTHREAD}[mode]
+			if evidence.aborts != 1 || evidence.commits != 0 || r.err == nil || !errors.Is(r.err, application) || any(sc.s.terminal) != any(r.err) || sc.s.state != want {
+				t.Fatalf("scope next operation differs: mode%d %v evidence%+v state%s", mode, r.err, evidence, sc.s.state)
+			}
+			if reservationLive(sc.o) != 0 {
+				t.Fatalf("scope grant leaked: mode%d live%d", mode, reservationLive(sc.o))
+			}
+			calls := 0
+			mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+				next := tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return tsPair(9), nil })
+				if any(next.err) != any(r.err) || calls != 0 || sc.s.state != want {
+					t.Fatalf("scope next operation differs: mode%d %v calls%d %s", mode, next.err, calls, sc.s.state)
+				}
+				return nil
+			}))
+		}
+	}
 }
