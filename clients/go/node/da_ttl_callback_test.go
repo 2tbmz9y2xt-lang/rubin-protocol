@@ -882,3 +882,73 @@ func TestDATTLCallbackLatchedNewInvokesNothing(t *testing.T) {
 	require(t, f.engine.persistenceFaulted() && f.engine.chainState.view().tipHash == summary.BlockHash, "terminal NEW did not publish and latch")
 	require(t, slices.Equal(attempts, []string{"S"}), "TERMINAL_PERSISTENCE(new) invoked the entry: attempts=%v", attempts)
 }
+
+// daTTLEngineRecords retains one State A chunk at count 3 and one State B commit at count 1 in
+// the DA relay bound to f.engine, through the real admission over fresh spendable outputs.
+func daTTLEngineRecords(t *testing.T, f *pendingOutpointSyncFixture) (*daNonReplayFixture, [32]byte, [32]byte) {
+	t.Helper()
+	signer := mustNodeMLDSA87Keypair(t)
+	address := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
+	outpoints := make([]consensus.Outpoint, 0, 2)
+	for i := range 2 {
+		op := consensus.Outpoint{Txid: [32]byte{0xd7, byte(i)}}
+		f.engine.chainState.Utxos[op] = consensus.UtxoEntry{Value: 2_000_000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), address...), CreationHeight: 1}
+		outpoints = append(outpoints, op)
+	}
+	x := &daNonReplayFixture{t: t, signer: signer, address: address, state: f.engine.chainState, mp: f.mempool, relay: f.engine.DARelayState(), outpoints: outpoints}
+	stateA, stateB := [32]byte{0xa9}, [32]byte{0xb9}
+	x.ownerReadyChunk(stateA, 0, "ttl-e2e-a", daNonReplayPeer("ttl-e2e-peer"))
+	x.ownerReadyCommit(stateB, 1, LocalDAProvenance())
+	x.setOwnerReadyTTL(stateA, 3)
+	x.setOwnerReadyTTL(stateB, 1)
+	return x, stateA, stateB
+}
+
+// TestDATTLCallbackEndToEndBodyRefusalConsumed drives one ACCEPTED/NEW publication through the
+// real SyncEngine and DA relay, by the no-lease selection and by the lease entry; the entry gives
+// one State B record of the published image an inconsistent stored value before it runs the
+// in-guard body, which refuses with its own error. The
+// apply still returns its ACCEPTED/NEW summary and a nil error, and the whole DA image and owner
+// are unchanged (RUBIN_COMPACT_BLOCKS.md Section 5).
+func TestDATTLCallbackEndToEndBodyRefusalConsumed(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		t.Run(fmt.Sprintf("leased=%v", leased), func(t *testing.T) {
+			f := newPendingOutpointSyncFixture(t)
+			x, _, stateB := daTTLEngineRecords(t, f)
+			var results []error
+			var before daRelayStateView
+			var ownerBefore *PendingOutpointOwner
+			entry := func(decrease func() error) error {
+				x.mutateRelay(func(s *DARelayState) {
+					mutateOwnerReadyRecord(s, stateB, func(record *daRelaySetRecord) { record.wireBytes = 1 })
+				})
+				before, ownerBefore = daRelayStateSnapshot(x.relay), cloneDAAdmissionOwner(x.mp.pendingOutpoints)
+				err := decrease()
+				results = append(results, err)
+				return err
+			}
+			height := f.tipHeight + 1
+			coinbase := reorgTestCoinbaseForAddress(t, height, consensus.BlockSubsidy(height, f.alreadyGenerated), f.sourceAddress)
+			block := buildSingleTxBlock(t, f.tipHash, f.target, 500, coinbase)
+			var summary *ChainStateConnectSummary
+			var err error
+			if leased {
+				var finish func()
+				summary, finish, err = f.engine.ApplyBlockWithReorgDeferredUnderLease(block, nil, entry)
+				finish()
+			} else {
+				f.engine.PublishDATTLBinding(&daTTLFuncService{enter: entry})
+				summary, err = f.engine.ApplyBlock(block, nil)
+			}
+			require(t, err == nil && summary != nil && summary.BlockHeight == height, "apply=(%+v,%v), want ACCEPTED/NEW", summary, err)
+			require(t, len(results) == 1 && errors.Is(results[0], errDARelayImageIncompatible), "entry results=%v, want one %v", results, errDARelayImageIncompatible)
+			require(t, !f.engine.TerminalFaulted(), "the consumed refusal latched the engine")
+			requireDANonReplayUnchanged(t, x.relay, x.mp.pendingOutpoints, before, ownerBefore)
+		})
+	}
+}
+
+// daTTLFuncService is a binding whose entry is enter.
+type daTTLFuncService struct{ enter func(func() error) error }
+
+func (d *daTTLFuncService) EnterDATTLMutation(decrease func() error) error { return d.enter(decrease) }
