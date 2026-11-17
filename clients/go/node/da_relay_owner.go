@@ -195,8 +195,10 @@ func (s *DARelayState) admitDANonReplay(admission *DAAdmission, provenance daPro
 
 // admitDAComplete runs the RUBIN_COMPACT_BLOCKS.md Section 18.5 step-2a
 // completion budget for a PEER candidate with a captured target before any
-// step-3 work. The single deferred settlement runs after every DA and owner
-// release and before the caller releases the ChainState guard; only a State C
+// step-3 work. On every ordinary return and completion-hook panic the single
+// deferred settlement runs after every DA and owner release and before the
+// caller releases the ChainState guard; it also runs on a non-hook panic inside
+// the DA/owner interval, for which no lock order is stated. Only a State C
 // publication returns the charge, every other end (panic included) uses it.
 func (s *DARelayState) admitDAComplete(admission *DAAdmission, snapshot *daCompleteSnapshot) (daRelayAdmissionOutcome, error) {
 	if snapshot == nil || snapshot.candidate.member.member.provenance.kind != daProvenancePeer {

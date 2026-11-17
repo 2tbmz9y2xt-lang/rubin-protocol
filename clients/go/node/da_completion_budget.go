@@ -11,8 +11,9 @@ const (
 // daCompletionBudget is the volatile owner-lifetime completion work budget of
 // RUBIN_COMPACT_BLOCKS.md Section 18.5. Retained-state images never copy it.
 // Its mutex is never held across parse, cryptography, a DA or owner lock,
-// a callback, I/O or a wait, and is never acquired while a DA or owner lock
-// is held.
+// a callback, I/O or a wait. Every ordinary return and every completion-hook
+// panic acquires it with no DA or owner lock held; no lock-order statement is
+// made for a non-hook panic inside the DA/owner interval.
 type daCompletionBudget struct {
 	mu      sync.Mutex
 	present bool
@@ -177,10 +178,17 @@ func daCompletionResult(verdict daCompletionVerdict, quota string, charge uint64
 	case daCompletionDeclined:
 		return daCompletionReservation{}, selectRelayDisposition(txAdmitUnavailable("DA completion work budget unavailable"), RelayAdmissionUnavailable)
 	case daCompletionOverflow:
-		return daCompletionReservation{}, selectRelayDisposition(txAdmitRejected(errDARelayArithmeticOverflow.Error()), RelayAdmissionInternal)
+		return daCompletionReservation{}, daCompletionInternal(errDARelayArithmeticOverflow)
 	default:
-		return daCompletionReservation{}, selectRelayDisposition(txAdmitRejected(errDARelayImageIncompatible.Error()), RelayAdmissionInternal)
+		return daCompletionReservation{}, daCompletionInternal(errDARelayImageIncompatible)
 	}
+}
+
+// daCompletionInternal is the INTERNAL refusal carrying cause for errors.Is.
+func daCompletionInternal(cause error) error {
+	rejected := txAdmitRejected(cause.Error())
+	rejected.cause = cause
+	return selectRelayDisposition(rejected, RelayAdmissionInternal)
 }
 
 // settle resolves one reservation: accepted (step-11 State C publication only)
