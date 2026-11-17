@@ -1963,19 +1963,38 @@ func TestSetMempoolConcurrentCandidatesKeepOneDARelayPair(t *testing.T) {
 	}
 }
 
-func TestClaimDARelayStateSecondClaimRejected(t *testing.T) {
+func TestClaimDARelayStateLaterClaimKeepsFirstHook(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	want := f.engine.DARelayState()
-	admit := func([]byte) (completion func(bool), err error) { return }
+	calls := []int{0, 0}
+	first := func([]byte) (completion func(bool), err error) { calls[0]++; return }
+	later := func([]byte) (completion func(bool), err error) { calls[1]++; return }
 	if got := f.engine.DARelayState(); got != want {
 		t.Fatalf("getter=%p, want %p", got, want)
 	}
-	if got, err := f.engine.ClaimDARelayState(want, admit); err != nil || got != want {
+	if got, err := f.engine.ClaimDARelayState(want, first); err != nil || got != want {
 		t.Fatalf("first claim state=%p err=%v, want %p nil", got, err, want)
 	}
 	f.engine.SetMempool(f.mempool)
-	if got, err := f.engine.ClaimDARelayState(nil, nil); got != nil || err == nil || err.Error() != "sync engine DA relay state is already claimed" {
-		t.Fatalf("second claim state=%p err=%v", got, err)
+	for _, row := range []struct {
+		expected *DARelayState
+		admit    func([]byte) (func(bool), error)
+		want     string
+	}{
+		{nil, nil, "sync engine DA relay state binding mismatch"},
+		{&DARelayState{}, later, "sync engine DA relay state binding mismatch"},
+		{want, nil, "sync engine detached DA admission is not initialized"},
+	} {
+		if got, err := f.engine.ClaimDARelayState(row.expected, row.admit); got != nil || err == nil || err.Error() != row.want {
+			t.Fatalf("later refused claim state=%p err=%v, want %q", got, err, row.want)
+		}
+	}
+	if got, err := f.engine.ClaimDARelayState(want, later); err != nil || got != want {
+		t.Fatalf("later claim state=%p err=%v, want %p nil", got, err, want)
+	}
+	f.engine.reorgDAAdmission(nil)
+	if !f.engine.daRelayClaimed || calls[0] != 1 || calls[1] != 0 {
+		t.Fatalf("later claim replaced the first hook: claimed=%v calls=%v", f.engine.daRelayClaimed, calls)
 	}
 	for _, engine := range []*SyncEngine{nil, {}} {
 		if _, err := engine.ClaimDARelayState(nil, nil); err == nil || err.Error() != "sync engine DA relay state is not initialized" {
@@ -1984,7 +2003,7 @@ func TestClaimDARelayStateSecondClaimRejected(t *testing.T) {
 	}
 }
 
-func TestClaimDARelayStateConcurrentSingleWinner(t *testing.T) {
+func TestClaimDARelayStateConcurrentClaimsOneHook(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	want := f.engine.DARelayState()
 	type result struct {
@@ -2012,25 +2031,24 @@ func TestClaimDARelayStateConcurrentSingleWinner(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("reorg claim binding mismatch: concurrent claim did not return within 5s")
 		}
-		if got.err == nil {
-			if got.state != want {
-				t.Fatal("wrong winning state")
-			}
-			winners++
-			winningOwner = got.owner
-			continue
+		if got.err != nil || got.state != want {
+			t.Fatalf("concurrent claim state=%p err=%v, want %p nil", got.state, got.err, want)
 		}
-		if got.state != nil || got.err.Error() != "sync engine DA relay state is already claimed" {
-			t.Fatal("wrong losing claim")
-		}
+		winners++
 	}
-	if winners != 1 {
-		t.Fatalf("claim winners=%d, want one", winners)
+	if winners != 2 {
+		t.Fatalf("claim successes=%d, want two", winners)
 	}
 	if calls[0] != 0 || calls[1] != 0 {
 		t.Fatalf("reorg claim binding mismatch: claims invoked callbacks: %v", calls)
 	}
-	if _, err := f.engine.reorgDAAdmission(nil); !errors.Is(err, sentinels[winningOwner]) || errors.Unwrap(err) != nil || !errors.Is(sentinels[winningOwner], err) || calls[winningOwner] != 1 || calls[1-winningOwner] != 0 {
+	_, err := f.engine.reorgDAAdmission(nil)
+	for owner := range 2 {
+		if errors.Is(err, sentinels[owner]) {
+			winningOwner = owner
+		}
+	}
+	if winningOwner < 0 || !errors.Is(err, sentinels[winningOwner]) || errors.Unwrap(err) != nil || !errors.Is(sentinels[winningOwner], err) || calls[winningOwner] != 1 || calls[1-winningOwner] != 0 {
 		t.Fatalf("reorg claim binding mismatch: published callback owner=%d err=%v calls=%v", winningOwner, err, calls)
 	}
 }
@@ -2072,7 +2090,9 @@ func TestClaimDARelayStateAtomicReorgBinding(t *testing.T) {
 	require(t, got == want && err == nil, "reorg claim binding mismatch: B5 claim=(%p,%v), want %p/nil", got, err, want)
 	require(t, winnerCalls == 0 && f.engine.daRelayClaimed && f.engine.reorgDAAdmission != nil, "reorg claim binding mismatch: claimed=%v callback=%v calls=%d", f.engine.daRelayClaimed, f.engine.reorgDAAdmission != nil, winnerCalls)
 	got, err = f.engine.ClaimDARelayState(nil, nil)
-	require(t, got == nil && err != nil && err.Error() == "sync engine DA relay state is already claimed", "reorg claim binding mismatch: B2 claim=(%p,%v)", got, err)
+	require(t, got == nil && err != nil && err.Error() == "sync engine DA relay state binding mismatch", "reorg claim binding mismatch: B2 claim=(%p,%v)", got, err)
+	got, err = f.engine.ClaimDARelayState(want, func([]byte) (completion func(bool), err error) { t.Error("later claimant hook called"); return })
+	require(t, got == want && err == nil, "reorg claim binding mismatch: later claim=(%p,%v)", got, err)
 	require(t, f.engine.reorgDAAdmission != nil, "reorg claim binding mismatch: B2 replaced the winning callback")
 	f.engine.reorgDAAdmission([]byte{0xa5})
 	require(t, winnerCalls == 1, "reorg claim binding mismatch: published callback calls=%d, want 1", winnerCalls)

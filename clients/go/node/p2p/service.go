@@ -166,8 +166,10 @@ type peer struct {
 	inboundLease *inboundBlockLease
 }
 
-// NewService validates and normalizes cfg before atomically claiming the
-// SyncEngine's sole lifetime DA relay state; Close never releases that claim.
+// NewService validates and normalizes cfg, then claims the SyncEngine's DA relay
+// state (the first successful claimant keeps the detached-reorg hook), and as
+// its final step publishes this Service as the current Section 5 DA TTL binding.
+// A failed construction leaves the binding unchanged; Close never clears it.
 func NewService(cfg ServiceConfig) (*Service, error) {
 	if err := validateServiceConfig(cfg); err != nil {
 		return nil, err
@@ -199,6 +201,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	if _, err := cfg.SyncEngine.ClaimDARelayState(expectedRelay, service.admitDetachedReorgDA); err != nil {
 		return nil, err
 	}
+	cfg.SyncEngine.PublishDATTLBinding(service)
 	return service, nil
 }
 
@@ -289,6 +292,19 @@ func (s *Service) acquireWork() bool {
 	}
 	s.loopWG.Add(1)
 	return true
+}
+
+// EnterDATTLMutation is this Service's own DA TTL mutation entry for a
+// transition under no Service lease (Table A): it registers one call lease and
+// returns exactly "service already closed" with zero effects once Close has
+// published the non-OPEN state; otherwise it runs decrease once, returns its
+// result unchanged and releases the lease exactly once, unwind included.
+func (s *Service) EnterDATTLMutation(decrease func() error) error {
+	if !s.acquireWork() {
+		return errServiceClosed
+	}
+	defer s.releaseWork()
+	return decrease()
 }
 
 // releaseWork releases exactly one lease taken by acquireWork.

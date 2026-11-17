@@ -32,7 +32,14 @@ type testHarness struct {
 }
 
 func unclaimedServiceConfig(t *testing.T) ServiceConfig {
-	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	_, cfg := unclaimedServiceSink(t)
+	return cfg
+}
+
+// unclaimedServiceSink returns a fresh SyncEngine with no Service, as the sink the
+// detached-reorg observation drives, and a ServiceConfig over it.
+func unclaimedServiceSink(t *testing.T) (*testHarness, ServiceConfig) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	engine, err := node.NewSyncEngine(h.chainState, h.blockStore, h.syncCfg)
 	if err != nil {
 		t.Fatalf("NewSyncEngine: %v", err)
@@ -44,10 +51,10 @@ func unclaimedServiceConfig(t *testing.T) ServiceConfig {
 	engine.SetMempool(mempool)
 	cfg := h.service.cfg
 	cfg.SyncEngine = engine
-	return cfg
+	return &testHarness{chainState: h.chainState, blockStore: h.blockStore, syncEngine: engine}, cfg
 }
 
-func TestNewServiceCloseDoesNotReleaseEngineClaim(t *testing.T) {
+func TestNewServiceAfterCloseBindsFreshService(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	want := h.syncEngine.DARelayState()
 	if want == nil || h.service.daRelay != want {
@@ -56,8 +63,12 @@ func TestNewServiceCloseDoesNotReleaseEngineClaim(t *testing.T) {
 	if err := h.service.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if _, err := NewService(h.service.cfg); err == nil || err.Error() != "sync engine DA relay state is already claimed" {
-		t.Fatalf("NewService after Close: %v", err)
+	fresh, err := NewService(h.service.cfg)
+	if err != nil || fresh.daRelay != want || h.syncEngine.DATTLBindingService() != node.DATTLMutationService(fresh) {
+		t.Fatalf("NewService after Close: service=%p err=%v", fresh, err)
+	}
+	if err := fresh.Close(); err != nil {
+		t.Fatalf("Close(fresh): %v", err)
 	}
 }
 
@@ -68,16 +79,19 @@ func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
 		service, err := NewService(cfg)
 		require(t, err == nil, "NewService: %v", err)
 		require(t, service != nil && service.daRelay != nil && service.daRelay == cfg.SyncEngine.DARelayState() && service.cfg.Now != nil && service.addrMgr != nil && service.peers != nil && service.peerQuotaLocks != nil && service.inFlightDial != nil && service.reconnectState != nil && service.handshakeSlots != nil && service.blockSeen != nil && service.txSeen != nil && service.orphans != nil, "published incomplete Service: %+v", service)
-		_, err = NewService(cfg)
-		require(t, err != nil && err.Error() == "sync engine DA relay state is already claimed", "competing NewService error=%v", err)
+		require(t, cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(service), "first construction is not the binding")
+		later, err := NewService(cfg)
+		require(t, err == nil && later.daRelay == service.daRelay && cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(later), "later NewService=(%p,%v)", later, err)
 		err = service.Close()
 		require(t, err == nil, "Close: %v", err)
-		_, err = NewService(cfg)
-		require(t, err != nil && err.Error() == "sync engine DA relay state is already claimed", "post-Close NewService error=%v", err)
+		require(t, cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(later), "Close moved the binding")
+		postClose, err := NewService(cfg)
+		require(t, err == nil && postClose.daRelay == service.daRelay && cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(postClose), "post-Close NewService=(%p,%v)", postClose, err)
+		require(t, later.Close() == nil && postClose.Close() == nil, "Close later Services")
 	})
 
 	t.Run("constructor panic consumes no claim", func(t *testing.T) {
-		cfg := unclaimedServiceConfig(t)
+		sink, cfg := unclaimedServiceSink(t)
 		cfg.BootstrapPeers = []string{"127.0.0.9:19119"}
 		sentinel := &struct{}{}
 		cfg.Now = func() time.Time { panic(sentinel) }
@@ -88,15 +102,16 @@ func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
 			}()
 			_, _ = NewService(cfg)
 		}()
+		require(t, cfg.SyncEngine.DATTLBindingService() == nil, "panicking construction published a binding")
 		cfg.Now = time.Now
 		service, err := NewService(cfg)
-		require(t, err == nil, "NewService after panic: %v", err)
-		err = service.Close()
-		require(t, err == nil, "Close: %v", err)
+		require(t, err == nil && cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(service), "NewService after panic: %v", err)
+		// The panicking construction claimed nothing, so this Service is the first claimant.
+		requireFirstClaimant(t, sink, cfg, service)
 	})
 
 	t.Run("nil getter racing first binding fails mismatch", func(t *testing.T) {
-		base := newTestHarness(t, 0, "127.0.0.1:0", nil)
+		base := newTestHarness(t, 1, "127.0.0.1:0", nil)
 		engine, err := node.NewSyncEngine(base.chainState, base.blockStore, base.syncCfg)
 		require(t, err == nil, "NewSyncEngine: %v", err)
 		cfg := base.service.cfg
@@ -136,14 +151,15 @@ func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
 			t.Fatalf("reorg claim binding mismatch: racing NewService did not return within %s", lifecycleWatchdog)
 		}
 		require(t, raceErr != nil && raceErr.Error() == "sync engine DA relay state binding mismatch", "racing NewService error=%v", raceErr)
+		// C7b: the refused construction published no binding, so a selection invokes nothing.
+		require(t, engine.DATTLBindingService() == nil, "refused construction published a binding")
 		cfg.Now = time.Now
 		service, err := NewService(cfg)
-		require(t, err == nil, "NewService after refused race: %v", err)
-		err = service.Close()
-		require(t, err == nil, "Close: %v", err)
+		require(t, err == nil && engine.DATTLBindingService() == node.DATTLMutationService(service), "NewService after refused race: %v", err)
+		requireFirstClaimant(t, &testHarness{chainState: base.chainState, blockStore: base.blockStore, syncEngine: engine}, cfg, service)
 	})
 
-	t.Run("concurrent construction has one winner", func(t *testing.T) {
+	t.Run("concurrent constructions both succeed", func(t *testing.T) {
 		cfg := unclaimedServiceConfig(t)
 		start := make(chan struct{})
 		type constructionResult struct {
@@ -159,7 +175,7 @@ func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
 			}()
 		}
 		close(start)
-		winners := 0
+		winners, built := 0, map[node.DATTLMutationService]bool{}
 		for range 2 {
 			var result constructionResult
 			select {
@@ -167,16 +183,12 @@ func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
 			case <-time.After(lifecycleWatchdog):
 				t.Fatalf("reorg claim binding mismatch: concurrent NewService did not return within %s", lifecycleWatchdog)
 			}
-			if result.err == nil {
-				winners++
-				require(t, result.service != nil && result.service.daRelay == cfg.SyncEngine.DARelayState(), "winning Service=%+v", result.service)
-				err := result.service.Close()
-				require(t, err == nil, "Close: %v", err)
-				continue
-			}
-			require(t, result.service == nil && result.err.Error() == "sync engine DA relay state is already claimed", "losing construction=(%p,%v)", result.service, result.err)
+			require(t, result.err == nil && result.service != nil && result.service.daRelay == cfg.SyncEngine.DARelayState(), "construction=(%p,%v)", result.service, result.err)
+			winners++
+			built[result.service] = true
+			t.Cleanup(func() { _ = result.service.Close() })
 		}
-		require(t, winners == 1, "construction winners=%d, want 1", winners)
+		require(t, winners == 2 && built[cfg.SyncEngine.DATTLBindingService()], "constructions=%d, binding outside them", winners)
 	})
 }
 
@@ -1869,4 +1881,15 @@ func TestServiceHasBlockLocalStoreRows(t *testing.T) {
 	if os.IsNotExist(err) {
 		t.Fatalf("read failure must not be classified as NotFound: %v", err)
 	}
+}
+
+// requireFirstClaimant observes through a real reorganization that service owns the engine's
+// detached-reorg hook: once service is CLOSED and a later Service is OPEN and bound, the
+// disconnected DA commit is refused by service's closed path and not retained.
+func requireFirstClaimant(t *testing.T, sink *testHarness, cfg ServiceConfig, service *Service) {
+	t.Helper()
+	later := newBoundService(t, cfg)
+	require(t, service.Close() == nil && cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(later), "first claimant close and later binding")
+	retained := detachedReorgHookRetains(t, newTestHarness(t, 1, "127.0.0.1:0", nil), sink)
+	require(t, !retained, "detached commit retained: the hook is not the first claimant's")
 }

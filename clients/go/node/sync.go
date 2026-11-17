@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -106,12 +107,15 @@ const (
 )
 
 type SyncEngine struct {
-	chainState         *ChainState
-	blockStore         *BlockStore
-	mempool            *Mempool
-	daRelay            *DARelayState
-	daRelayClaimed     bool
-	reorgDAAdmission   func([]byte) (func(bool), error)
+	chainState       *ChainState
+	blockStore       *BlockStore
+	mempool          *Mempool
+	daRelay          *DARelayState
+	daRelayClaimed   bool
+	reorgDAAdmission func([]byte) (func(bool), error)
+	// daTTLBinding is the retained DA owner's current Section 5 TTL binding, nil while absent;
+	// its atomic operations are the one order of publications, selections and identity reads.
+	daTTLBinding       atomic.Pointer[daTTLBinding]
 	cfg                SyncConfig
 	stderr             io.Writer
 	mu                 sync.RWMutex
@@ -654,8 +658,14 @@ func (s *SyncEngine) EffectiveDAMempoolSize() (uint32, error) {
 	return uint32(relay.caps.stagedBytes), nil //nolint:gosec // G115: validateDAMempoolSize bounds the cap to <= 4294967295
 }
 
-// ClaimDARelayState atomically publishes the sole lifetime Service claim and
-// its detached-reorg admission callback.
+// ClaimDARelayState associates one Service construction with the bound DA relay
+// state. Refusals in order: nil engine or no bound relay ("not initialized"), a
+// nil or different expectedRelay ("binding mismatch"), a nil admitDetachedReorg
+// ("detached DA admission is not initialized"); a refusal mutates nothing. The
+// first successful call installs admitDetachedReorg as the detached-reorg
+// admission hook; every later successful call installs nothing, keeps the first
+// claimant's hook, and returns the same relay, so a later fresh Service is never
+// refused merely because an earlier one claimed.
 func (s *SyncEngine) ClaimDARelayState(expectedRelay *DARelayState, admitDetachedReorg func([]byte) (func(bool), error)) (*DARelayState, error) {
 	if s == nil {
 		return nil, errors.New("sync engine DA relay state is not initialized")
@@ -665,18 +675,74 @@ func (s *SyncEngine) ClaimDARelayState(expectedRelay *DARelayState, admitDetache
 	if s.daRelay == nil {
 		return nil, errors.New("sync engine DA relay state is not initialized")
 	}
-	if s.daRelayClaimed {
-		return nil, errors.New("sync engine DA relay state is already claimed")
-	}
 	if expectedRelay == nil || expectedRelay != s.daRelay {
 		return nil, errors.New("sync engine DA relay state binding mismatch")
 	}
 	if admitDetachedReorg == nil {
 		return nil, errors.New("sync engine detached DA admission is not initialized")
 	}
-	s.reorgDAAdmission = admitDetachedReorg
-	s.daRelayClaimed = true
+	if !s.daRelayClaimed {
+		s.reorgDAAdmission = admitDetachedReorg
+		s.daRelayClaimed = true
+	}
 	return s.daRelay, nil
+}
+
+// DATTLMutationService is a Service together with its own DA TTL mutation entry
+// (RUBIN_COMPACT_BLOCKS.md Section 5; RUBIN_L1_P2P_AUX.md Section 5, Table A).
+// EnterDATTLMutation, called for a transition under no Service lease, MUST
+// register exactly one call lease with that Service, admitted only while it is
+// OPEN; when DRAINING or CLOSED it MUST return the Service's stable closed error
+// without calling decrease. Once admitted it calls decrease exactly once, returns
+// its result unchanged, and releases the lease exactly once on every exit,
+// unwind included. It never consults the binding, retries or falls back.
+type DATTLMutationService interface {
+	EnterDATTLMutation(decrease func() error) error
+}
+
+// daTTLBinding is one indivisible Service/entry pair: the entry is the
+// Service's own method, so no other Service's entry can populate it.
+type daTTLBinding struct {
+	service DATTLMutationService
+}
+
+// PublishDATTLBinding replaces the current TTL binding with service. NewService
+// calls it only as its final construction step, after ClaimDARelayState
+// succeeded, which is the one relay association check; it compares no relay
+// itself. It is infallible: a nil engine or a nil service leaves the binding
+// unchanged. It touches no DA record, count, claim or lock; Close never clears it.
+func (s *SyncEngine) PublishDATTLBinding(service DATTLMutationService) {
+	if s == nil || service == nil {
+		return
+	}
+	s.daTTLBinding.Store(&daTTLBinding{service: service})
+}
+
+// DATTLBindingService returns the current TTL binding's Service, or nil while
+// the binding is absent, in the same order as publications and selections. It
+// takes no DA or owner lock and changes nothing.
+func (s *SyncEngine) DATTLBindingService() DATTLMutationService {
+	if s == nil {
+		return nil
+	}
+	binding := s.daTTLBinding.Load()
+	if binding == nil {
+		return nil
+	}
+	return binding.service
+}
+
+// enterSelectedDATTL is the no-lease selection: it snapshots the current binding
+// once, invokes nothing when absent, and otherwise attempts registration exactly
+// once with the snapshotted Service through its own entry, keeping that Service
+// even if a later publication replaces the binding. The entry result is
+// returned unchanged; no resnapshot, retry, fallback or fanout follows it.
+func (s *SyncEngine) enterSelectedDATTL(decrease func() error) error {
+	service := s.DATTLBindingService()
+	if service == nil {
+		return nil
+	}
+	return service.EnterDATTLMutation(decrease)
 }
 
 // bindMempoolUnderMutation performs the initialization-only binding under the

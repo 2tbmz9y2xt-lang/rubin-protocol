@@ -4470,8 +4470,8 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 	}
 	// OWNED CALLERS: remote, both local arms and detached-reorg ingress are the only
 	// AdmitDA selectors over every non-test Go source.
-	refs := productionReferenceCensus(t, "AdmitDA", "ClaimDARelayState", "NewPeerDAProvenance", "LocalDAProvenance", "DetachedReorgDAProvenance")
-	require(t, reflect.DeepEqual(refs, map[string][]string{"AdmitDA": {"AdmitLocalDA", "admitDetachedReorgDA", "announceLocalDA", "handleRelayDATx"}, "ClaimDARelayState": {"NewService"}, "NewPeerDAProvenance": {"remoteDAProvenance"}, "LocalDAProvenance": {"AdmitLocalDA", "announceLocalDA"}, "DetachedReorgDAProvenance": {"admitDetachedReorgDA"}}), "production references=%v", refs)
+	refs := productionReferenceCensus(t, "AdmitDA", "ClaimDARelayState", "NewPeerDAProvenance", "LocalDAProvenance", "DetachedReorgDAProvenance", "PublishDATTLBinding", "enterSelectedDATTL")
+	require(t, reflect.DeepEqual(refs, map[string][]string{"AdmitDA": {"AdmitLocalDA", "admitDetachedReorgDA", "announceLocalDA", "handleRelayDATx"}, "ClaimDARelayState": {"NewService"}, "PublishDATTLBinding": {"NewService"}, "enterSelectedDATTL": nil, "NewPeerDAProvenance": {"remoteDAProvenance"}, "LocalDAProvenance": {"AdmitLocalDA", "announceLocalDA"}, "DetachedReorgDAProvenance": {"admitDetachedReorgDA"}}), "production references=%v", refs)
 	newService, detached := declaredFunctions("p2p/service.go")["NewService"], declaredFunctions("p2p/da_relay_ingest.go")["admitDetachedReorgDA"]
 	if newService == nil || detached == nil {
 		t.Fatal("detached admission binding functions missing")
@@ -4534,9 +4534,16 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 		return true
 	})
 	tail := newService.Body.List
-	require(t, len(tail) >= 3 && tail[len(tail)-3].Pos() == serviceAt, "reorg claim binding mismatch: construction is not immediately before claim")
+	require(t, len(tail) >= 4 && tail[len(tail)-4].Pos() == serviceAt, "reorg claim binding mismatch: construction is not immediately before claim")
+	// TTL BINDING: the publication is the one statement between the successful claim and the
+	// return, so every fallible step precedes it and a refused claim publishes nothing.
+	publish, publishOK := tail[len(tail)-2].(*ast.ExprStmt)
+	require(t, publishOK, "TTL binding publication is not the statement before the return")
+	publishCall, publishCallOK := publish.X.(*ast.CallExpr)
+	require(t, publishCallOK && daNonReplaySelector(publishCall.Fun) == "cfg.SyncEngine.PublishDATTLBinding" && len(publishCall.Args) == 1, "TTL binding publication shape")
+	identifiers[publishCall.Args[0]] = "service"
 	require(t, writes["service"] == 1 && writes["expectedRelay"] == 1 && writes["service.daRelay"] == 0, "reorg claim binding mismatch: writes=%v", writes)
-	claimIf, ifOK := tail[len(tail)-2].(*ast.IfStmt)
+	claimIf, ifOK := tail[len(tail)-3].(*ast.IfStmt)
 	require(t, ifOK && claimIf.Else == nil && len(claimIf.Body.List) == 1, "reorg claim binding mismatch: claim statement shape")
 	init, initOK := claimIf.Init.(*ast.AssignStmt)
 	require(t, initOK && init.Tok == token.DEFINE && len(init.Lhs) == 2 && len(init.Rhs) == 1 && init.Rhs[0] == claimCall, "reorg claim binding mismatch: claim initializer")
