@@ -4670,6 +4670,20 @@ func psAccepted(t *testing.T) {
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
 	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(10), tsCounterLiteral(10, 1))
+	// Ordinary target plus a witness-only empty interval (generation 11 has no counter) is legal.
+	r = psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		page, err := reader.ObsoleteGenerationPageV1(11, ObsoleteCounterV1, nil, 1)
+		mustEnvironment(t, err)
+		if len(page.Rows) != 0 {
+			t.Fatalf("generation 11 counter page rows%d, want0", len(page.Rows))
+		}
+		op := tsPair(78)
+		op.Pair.ObsoleteConsulted = []ObsoletePageWitnessV1{page.Witness}
+		return op
+	})
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(11), nil)
 }
 
 // psGone requires the raw counter target to be absent after the owned plan committed.
@@ -4741,6 +4755,12 @@ func psProvenance(t *testing.T) {
 		return tsPair(31)
 	})
 	mustEnvironment(t, r.err)
+	// N4: after callback expiry the row read returns the existing inactive Reader refusal.
+	if n, err := earlier.Rows[0].ReadAt(make([]byte, 1), 0); n != 0 {
+		t.Fatalf("expired scope row returned %d bytes", n)
+	} else {
+		treeNativeError(t, err, "get", "InvalidInput", 22, "Reader is not active", nil)
+	}
 	foreign := []func(*Reader) TreeOperationV1{
 		func(*Reader) TreeOperationV1 {
 			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: earlier.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{earlier.Witness}}}
@@ -4795,6 +4815,16 @@ func psDuplicates(t *testing.T) {
 			covered, other := psScope(t, reader, 10), psScope(t, reader, 9)
 			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: other.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{covered.Witness}}}
 		},
+	}
+	// Precedence 4: one byte below each row's F the metadata charge refuses before the duplicate,
+	// coverage checks that need its scratch (witness: W=2 and U counts both occurrences).
+	short := map[string]uint64{"witness": psF(0, 0, 1, 2, 0, 0, 9, 18), "row": psF(0, 0, 2, 1, 0, 0, 18, 9), "uncovered": psF(0, 0, 1, 1, 0, 0, 9, 9)}
+	for _, name := range []string{"witness", "row", "uncovered"} {
+		r := psRun(t, s, reservationFilled(t, psPageGrant+short[name]-1), LaneOperation, builds[name])
+		if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
+			t.Fatalf("duplicate scope admitted: %s at F-1 %v %s", name, r.err, s.state)
+		}
+		r.tuple(t, 1, 1, -1)
 	}
 	for _, name := range []string{"witness", "row", "uncovered"} {
 		r := psRun(t, s, o, LaneOperation, builds[name])
@@ -4861,6 +4891,22 @@ func psCounts(t *testing.T) {
 		run(fmt.Sprint("kind", kind), false, 0, func(op *TreeOperationV1) {
 			op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: kind}}
 		})
+	}
+	// Precedence 4: the selector order and duplicate rows need admitted scratch, so one byte below F
+	// (D=1, W=1, L=2) refuses with the metadata charge first.
+	for _, edit := range []func(*TreeOperationV1){
+		func(op *TreeOperationV1) { op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 2}, {Kind: 1}} },
+		func(op *TreeOperationV1) { op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 1}, {Kind: 1}} },
+	} {
+		r := psRun(t, s, reservationFilled(t, psPageGrant+psF(0, 0, 1, 1, 0, 2, 9, 9)-1), LaneOperation, func(reader *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(reader)
+			edit(&op)
+			return op
+		})
+		if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
+			t.Fatalf("scope metadata high-water differs: selector order at F-1 %v %s", r.err, s.state)
+		}
+		r.tuple(t, 1, 1, -1)
 	}
 	run("order", false, 0, func(op *TreeOperationV1) { op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 2}, {Kind: 1}} })
 	run("duplicate", false, 0, func(op *TreeOperationV1) {
