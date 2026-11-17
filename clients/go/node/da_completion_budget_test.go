@@ -112,15 +112,18 @@ func seededDABudgetFrom(tipByte byte, height, fill uint64, named map[string]daCo
 
 // daBudgetSeed builds an owner-consistent pre-state: fill used bytes spread
 // over "fill<i>" sources of at most perSource each, plus named, with global
-// the sum of every source.
+// the sum of every source. A named key equal to a generated fill key panics.
 func daBudgetSeed(fill uint64, named map[string]daCompletionUse) (daCompletionUse, map[string]daCompletionUse) {
 	sum, sources := daCompletionUse{used: fill}, maps.Clone(named)
 	if sources == nil {
 		sources = map[string]daCompletionUse{}
 	}
 	for i := 0; fill > 0; i++ {
-		n := min(fill, perSource)
-		sources[fmt.Sprintf("fill%d", i)], fill = daCompletionUse{used: n}, fill-n
+		n, key := min(fill, perSource), fmt.Sprintf("fill%d", i)
+		if _, clash := sources[key]; clash {
+			panic("seed named source collides with " + key)
+		}
+		sources[key], fill = daCompletionUse{used: n}, fill-n
 	}
 	for _, use := range named {
 		sum.used, sum.reserved = sum.used+use.used, sum.reserved+use.reserved
@@ -149,6 +152,14 @@ func TestDACompletionBudget(t *testing.T) {
 		name string
 		run  func(t *testing.T)
 	}{
+		{"seed_named_fill_collision", func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != "seed named source collides with fill0" {
+					t.Fatalf("recover=%v", r)
+				}
+			}()
+			daBudgetSeed(1, map[string]daCompletionUse{"fill0": {used: 1}})
+		}},
 		{"charge_literals", func(t *testing.T) {
 			stateB := &daCompleteSnapshot{}
 			stateB.prior.commit = daRelayCommit{member: &daRelayMemberIdentity{}, txBytes: daBudgetFiller(200)}
@@ -1019,6 +1030,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			b := &f.relay.completionBudget
 			b.present, b.tip = true, tip
 			b.global, b.sources = daBudgetSeed(global-2*charge, nil)
+			pre := maps.Clone(b.sources)
 			errs := make([]error, n)
 			var start, done sync.WaitGroup
 			start.Add(1)
@@ -1032,7 +1044,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			}
 			start.Done()
 			done.Wait()
-			want := daCompletionBudgetImage{present: true, tip: tip, global: daCompletionUse{used: global}, sources: maps.Clone(b.sources)}
+			want := daCompletionBudgetImage{present: true, tip: tip, global: daCompletionUse{used: global}, sources: pre}
 			declined := 0
 			for i, err := range errs {
 				switch {
