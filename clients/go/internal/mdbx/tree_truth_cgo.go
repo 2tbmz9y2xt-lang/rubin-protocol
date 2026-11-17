@@ -727,10 +727,9 @@ func (t *treeSectionV1) commitV1(pair []ownedMutation, consulted []ownedConsulte
 	return updateNativeCommit(t.env, t.handles, pair, consulted, t.old, t.write, t.reached, truth)
 }
 
-// commitScopedV1 is commitV1 with the plan's residual scope, sealed, forwarded to the pair-only readback (D4 site 4).
+// commitScopedV1 is commitV1 with the plan's residual scope forwarded to the pair-only readback (D4 site 4).
 func (t *treeSectionV1) commitScopedV1(pair []ownedMutation, consulted []ownedConsulted, truth treeTruthV1, scope largeImageScope) updateNativeOutcome {
 	t.ended = true
-	scope.pairBudget, scope.pairLimit = nil, t.pairReadLimit
 	return updateNativeCommit(t.env, t.handles, pair, consulted, t.old, t.write, t.reached, truth, scope)
 }
 

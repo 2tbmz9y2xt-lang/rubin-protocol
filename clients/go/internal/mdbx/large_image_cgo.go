@@ -275,7 +275,9 @@ func (r *Reader) largeNext(selector LargeImageSelectorV1, seek []byte) (largeNat
 // The immediate successor uses one bounded copied key, including maximum-width keys.
 func largeImageAdvance(key []byte, maxKey uint64) []byte {
 	if uint64(len(key)) < maxKey {
-		return append(bytes.Clone(key), 0)
+		next := make([]byte, len(key)+1)
+		copy(next, key)
+		return next
 	}
 	next := bytes.Clone(key)
 	for i := len(next) - 1; i >= 0; i-- {

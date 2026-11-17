@@ -16,7 +16,7 @@ import (
 )
 
 // TreePairV1 contains ordinary non-tree targets and unchanged consulted rows.
-// Rows must be strictly (rank, key) ordered in each slice and disjoint. Rank 8
+// Mutations and Consulted rows must be strictly (rank, key) ordered in each slice and disjoint. Rank 8
 // is never a Pair row. AfterOldValueRef is forbidden. The operation owns copies
 // after admission. Pair slices, records and Key/Literal bytes remain immutable
 // through the first Source call, or operation completion if no Source is reached.
@@ -44,7 +44,9 @@ type TreePairV1 struct {
 	// physical evidence (nil and empty are equivalent). Any nonempty field selects the pair-only
 	// physical scope: a LaneOperation account, no primitives, Proof, HeaderSlot, EntryInventory or
 	// ContextConsulted, zero PrepaidReadBytes and at least one Mutation or ObsoleteDeletes row;
-	// any other shape is "invalid Update Batch". These fields are read only after the callback.
+	// after the ordinary Pair checks, which keep their own refusals, any other shape is "invalid
+	// Update Batch". ObsoleteDeletes may be unordered; LargeConsulted is strictly (Kind, Hash)
+	// ordered. These fields are read only after the callback.
 	ObsoleteDeletes   []ObsoleteRowV1
 	ObsoleteConsulted []ObsoletePageWitnessV1
 	LargeConsulted    []LargeImageSelectorV1
@@ -591,7 +593,8 @@ func treeEmptyOperationV1(op TreeOperationV1, raw bool) bool {
 	return len(op.Primitives) == 0 && len(op.Pair.Mutations) == 0 && !raw
 }
 
-// treeAdmitSlotV1 is treeAdmitV1 that also returns the verdict of its one Pair scan on whether op.HeaderSlot, as
+// treeAdmitSlotV1 is treeAdmitV1 (which passes raw=false) that also admits a Pair-mutation-free plan when raw
+// reports raw deletes, and returns the verdict of its one Pair scan on whether op.HeaderSlot, as
 // one more auxiliary mutation, exceeds a non-reverse Pair mutation cap; the verdict is false without a slot or on
 // error. Only that verdict, never a budget, is held in the frames live during the scan (RUB-1750 resource_boundary).
 func treeAdmitSlotV1(op TreeOperationV1, account *OperationAccount, databaseID [32]byte, raw bool) (bool, error) {

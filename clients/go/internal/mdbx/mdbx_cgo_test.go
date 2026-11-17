@@ -2058,15 +2058,20 @@ func TestUpdatePlanSurfaceOwnership(t *testing.T) {
 	}
 	// The raw extension remains Go-only admission; inspect its complete reachable
 	// control closure without excluding the new ordinary source from package inventory.
-	raw, err := os.ReadFile("obsolete_raw_cgo.go")
-	mustEnvironment(t, err)
-	rawFile, err := parser.ParseFile(fset, "obsolete_raw_cgo.go", raw, 0)
-	mustEnvironment(t, err)
+	var rawDecls []ast.Decl
+	for _, name := range []string{"obsolete_raw_cgo.go", "tree_stream_cgo.go"} {
+		raw, err := os.ReadFile(name)
+		mustEnvironment(t, err)
+		rawFile, err := parser.ParseFile(fset, name, raw, 0)
+		mustEnvironment(t, err)
+		rawDecls = append(rawDecls, rawFile.Decls...)
+	}
 	owners := map[string]bool{}
-	for _, name := range []string{"updateOwnedObsolete", "obsoleteWitnesses", "obsoleteAdmitRows", "obsoleteRowCurrent", "obsoleteCovered", "obsoleteCharge", "obsoleteCompileRows", "updateObsoleteScope", "obsoleteDomainOrdered", "obsoleteCoalesce", "obsoleteMergeable", "obsoleteCoalescePoints", "obsoleteRetainControls", "obsoleteControlKeys", "obsoleteControlKey", "obsoleteContains", "obsoleteUniqueWitnesses", "obsoleteDBI", "obsoleteMutationCmp", "obsoleteRowCmp", "obsoleteDomainCmp", "obsoletePointCmp", "obsoleteScopeArrays", "obsoleteWitnessPoints"} {
+	for _, name := range []string{"updateOwnedObsolete", "obsoleteWitnesses", "obsoleteAdmitRows", "obsoleteRowCurrent", "obsoleteCovered", "obsoleteCharge", "obsoleteCompileRows", "updateObsoleteScope", "obsoleteDomainOrdered", "obsoleteCoalesce", "obsoleteMergeable", "obsoleteCoalescePoints", "obsoleteRetainControls", "obsoleteControlKeys", "obsoleteControlKey", "obsoleteContains", "obsoleteUniqueWitnesses", "obsoleteDBI", "obsoleteMutationCmp", "obsoleteRowCmp", "obsoleteDomainCmp", "obsoletePointCmp", "obsoleteScopeArrays", "obsoleteWitnessPoints",
+		"treePrewriteBytesV1", "treeScopeBytesV1", "treeWitnessKeyBytesV1", "treeScopeRowsV1", "scopeCompileV1", "admitScopedV1", "treeScopePresentV1", "treeScopeShapeV1", "treeScopeAdmitV1", "treeScopeProvenanceV1", "treeEmptyOperationV1"} {
 		owners[name] = false
 	}
-	for _, declaration := range rawFile.Decls {
+	for _, declaration := range rawDecls {
 		function, ok := declaration.(*ast.FuncDecl)
 		if !ok {
 			continue

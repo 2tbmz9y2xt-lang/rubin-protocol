@@ -1056,10 +1056,22 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	if loan != 96 || control != 3661 || control-2709 > 1024 {
 		t.Fatal("selected fixed control increment", control)
 	}
-	// RUB-1663: two 72-byte Pair/operation transports and the 8-byte plan scope field.
-	control += 2*72 + 8
+	// RUB-1663: two 72-byte Pair/operation transports and the 8-byte plan scope field, measured from
+	// each changed type's growth over its baseline size.
+	control += uint64(unsafe.Sizeof(TreePairV1{})) - 72 + uint64(unsafe.Sizeof(TreeOperationV1{})) - 112 + uint64(unsafe.Sizeof(treePlanV1{})) - 152
 	if control != 3813 {
 		t.Fatal("scope fixed control census differs", control)
+	}
+	// RUB-1663 raw pair-only fixed grant: entry, operation, plan, three scope values, section, scope,
+	// compose, two Readers, two streams, two rows, read budget, six image records (144), two C metadata
+	// transports (80), admission budget, temporary Batch and fixed scalar/error transports (256).
+	rawFixed := uint64(unsafe.Sizeof(treePublicEntryV1{})) + uint64(unsafe.Sizeof(TreeOperationV1{})) + uint64(unsafe.Sizeof(treePlanV1{})) +
+		3*uint64(unsafe.Sizeof(largeImageScope{})) + uint64(unsafe.Sizeof(treeSectionV1{})) + uint64(unsafe.Sizeof(treeScopeV1{})) +
+		uint64(unsafe.Sizeof(treeComposeV1{})) + 2*uint64(unsafe.Sizeof(Reader{})) + 2*uint64(unsafe.Sizeof(largeResidualStream{})) +
+		2*uint64(unsafe.Sizeof(largeNativeRow{})) + uint64(unsafe.Sizeof(treePairReadBudgetV1{})) + 144 + 80 +
+		uint64(unsafe.Sizeof(updateBudget{})) + uint64(unsafe.Sizeof(Batch{})) + 256
+	if rawFixed != 3392 || rawFixed > 4096 {
+		t.Fatal("scope fixed control census differs: raw pair-only", rawFixed)
 	}
 	// A replay pair retains a second recorder/delta/key/iterator set under its
 	// second existing C hold; the fixed scope includes both observation slots.
