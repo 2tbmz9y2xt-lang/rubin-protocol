@@ -11,9 +11,10 @@ const (
 // daCompletionBudget is the volatile owner-lifetime completion work budget of
 // RUBIN_COMPACT_BLOCKS.md Section 18.5. Retained-state images never copy it.
 // Its mutex is never held across parse, cryptography, a DA or owner lock,
-// a callback, I/O or a wait. Every ordinary return and every completion-hook
-// panic acquires it with no DA or owner lock held; no lock-order statement is
-// made for a non-hook panic inside the DA/owner interval.
+// a callback, I/O or a wait. Step 2a, and the settlement of a reservation on
+// an ordinary return or a completion-hook panic, acquire it with no DA or owner
+// lock held; no lock-order statement is made for a non-hook panic inside the
+// DA/owner interval.
 type daCompletionBudget struct {
 	mu      sync.Mutex
 	present bool

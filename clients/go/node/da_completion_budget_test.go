@@ -74,7 +74,7 @@ func isDABudgetDecline(err error) bool {
 func requireDABudgetDecline(t *testing.T, err error) {
 	t.Helper()
 	if !isDABudgetDecline(err) {
-		t.Fatalf("err=%v disposition=%v want budget decline (TxAdmitUnavailable, UNAVAILABLE, %q)", err, relayDispositionOf(err), daBudgetDeclineText)
+		t.Fatalf("err=%v (%T, unwrap=%v) disposition=%v want budget decline: err itself an unwrapped *TxAdmitError with no cause, kind TxAdmitUnavailable, message %q, disposition UNAVAILABLE", err, err, errors.Unwrap(err), relayDispositionOf(err), daBudgetDeclineText)
 	}
 }
 
@@ -572,10 +572,11 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			}
 		}},
 		{"settlement_lock_order", func(t *testing.T) {
-			// Planned is step-3-side (guard only); effects is later (DA and owner
-			// released). Each stage ends by ordinary return and by panic. The
-			// planned ordinary return unbinds the plan so applyDACompleteCommit
-			// returns errDARelayImageIncompatible before the DA lock.
+			// Settlement after the planned hook is step-3-side (guard only);
+			// after the effects hook it is later (DA and owner released). Each
+			// stage ends by ordinary return and by panic. The planned ordinary
+			// return unbinds the plan so applyDACompleteCommit returns
+			// errDARelayImageIncompatible before the DA lock.
 			for _, row := range []struct {
 				stage  daCompleteStage
 				panics bool
@@ -624,8 +625,10 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			}
 		}},
 		{"settlement_step3_return", func(t *testing.T) {
-			// Step-3 parse error return: no hook runs, so the test holds DA and
-			// owner for the whole attempt (settlement must not need them). The
+			// Step-3 parse error return: no hook runs, so once the attempt is
+			// parked in reserve (step 2 has released DA) the test takes DA and
+			// owner and holds them until the attempt returns (settlement must not
+			// need them). The
 			// parked ChainState writer's read is an extra check only; the
 			// deterministic guard-held observation of a guard-only ordinary return
 			// is the planned row of settlement_lock_order.
