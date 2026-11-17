@@ -628,7 +628,8 @@ func (s *SyncEngine) SetMempool(mempool *Mempool) {
 }
 
 // DARelayState returns the read-only relay-state pointer bound with the
-// engine's initial mempool. It never consumes the lifetime Service claim.
+// engine's initial mempool. It records no claim and installs no detached-reorg
+// hook.
 func (s *SyncEngine) DARelayState() *DARelayState {
 	if s == nil {
 		return nil
@@ -646,7 +647,8 @@ func (s *SyncEngine) DARelayState() *DARelayState {
 // the cap is accepted only inside 536870912..4294967295 before the u32
 // narrowing; a nil engine, an engine with no bound relay, and a bound cap
 // outside that range (zero, below the minimum, above u32) return 0 and an
-// error; nothing is mutated and the lifetime Service claim is not consumed.
+// error; nothing is mutated, no claim is recorded and no detached-reorg hook is
+// installed.
 func (s *SyncEngine) EffectiveDAMempoolSize() (uint32, error) {
 	relay := s.DARelayState()
 	if relay == nil {
