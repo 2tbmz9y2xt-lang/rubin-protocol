@@ -1147,3 +1147,32 @@ func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
 		})
 	}
 }
+
+// TestDATTLCallbackEndToEndGenesisBootstrap drives bootstrapCanonicalGenesisIfEmpty on an empty
+// devnet engine with a bound DA relay: genesis is an ACCEPTED/NEW publication, so a published
+// binding is attempted exactly once, while under an absent binding the bootstrap invokes nothing,
+// publishes no binding and leaves the DA image unchanged (RUBIN_COMPACT_BLOCKS.md Section 5).
+func TestDATTLCallbackEndToEndGenesisBootstrap(t *testing.T) {
+	for _, bound := range []bool{true, false} {
+		t.Run(fmt.Sprintf("bound=%v", bound), func(t *testing.T) {
+			engine := newGenesisIdentityTestEngine(t, DevnetGenesisChainID())
+			mp, err := NewMempool(engine.chainState, engine.blockStore, devnetGenesisChainID)
+			require(t, err == nil, "NewMempool: %v", err)
+			engine.SetMempool(mp)
+			relay := engine.DARelayState()
+			require(t, relay != nil, "engine has no bound DA relay")
+			var attempts []string
+			if bound {
+				engine.PublishDATTLBinding(&daTTLRecordingService{name: "S", attempts: &attempts})
+			}
+			before := daRelayStateSnapshot(relay)
+			require(t, engine.BootstrapCanonicalGenesisIfEmpty() == nil && engine.chainState.view().tipHash == DevnetGenesisBlockHash(), "genesis bootstrap did not publish the devnet genesis")
+			if bound {
+				require(t, slices.Equal(attempts, []string{"S"}), "bound genesis bootstrap attempts=%v, want one", attempts)
+				return
+			}
+			require(t, engine.DATTLBindingService() == nil && len(attempts) == 0, "absent binding: binding=%v attempts=%v", engine.DATTLBindingService(), attempts)
+			require(t, reflect.DeepEqual(before, daRelayStateSnapshot(relay)), "absent-binding genesis bootstrap changed the DA image")
+		})
+	}
+}
