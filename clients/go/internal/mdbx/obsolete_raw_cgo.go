@@ -749,6 +749,11 @@ func obsoleteDomainEqual(old, candidate *Reader, domain obsoleteDomain, plan []o
 	})
 	left := largeResidualStream{reader: old, domain: &domain, seek: seek, plan: plan[start:]}
 	right := largeResidualStream{reader: candidate, domain: &domain, seek: seek, plan: plan[start:]}
+	return obsoleteStreamsEqual(&left, &right, domain.rank, fund)
+}
+
+// obsoleteStreamsEqual traverses both residual streams completely; only a read or funding error stops early.
+func obsoleteStreamsEqual(left, right *largeResidualStream, rank uint8, fund *largeImageScope) (bool, error) {
 	equal := true
 	for {
 		a, err := left.next()
@@ -762,7 +767,7 @@ func obsoleteDomainEqual(old, candidate *Reader, domain obsoleteDomain, plan []o
 		if a.done && b.done {
 			return equal, nil
 		}
-		match, err := obsoleteRowsFundedV1(a, b, domain.rank, fund)
+		match, err := obsoleteRowsFundedV1(a, b, rank, fund)
 		if err != nil {
 			return false, err
 		}

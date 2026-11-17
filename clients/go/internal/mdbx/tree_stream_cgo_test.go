@@ -4529,6 +4529,37 @@ func TestTreeStreamPhysicalScopeV1(t *testing.T) {
 	t.Run("counts", psCounts)
 	t.Run("metadata", psMetadata)
 	t.Run("legacy", psLegacy)
+	t.Run("callback", psCallback)
+}
+
+// N5/R3: callback error and panic win before any new field is inspected; the account is released once.
+func psCallback(t *testing.T) {
+	s, _, o := psStore(t)
+	marker := errors.New("scope callback marker")
+	garbage := TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: make([]ObsoleteRowV1, 3), LargeConsulted: []LargeImageSelectorV1{{Kind: 9}}}}
+	before := reservationLive(o)
+	mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+		r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return garbage, marker })
+		r.tuple(t, 1, 1, -1)
+		if !errors.Is(r.err, marker) {
+			t.Fatalf("scope callback error identity lost: %v", r.err)
+		}
+		return nil
+	}))
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+			tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { panic(marker) })
+			return nil
+		})
+	}()
+	if recovered != marker || reservationLive(o) != before || s.state != storeOPEN {
+		t.Fatalf("scope grant leaked: panic%v live%d state%s", recovered, reservationLive(o), s.state)
+	}
+	r := psRun(t, s, o, LaneOperation, psRawDelete(t, 9))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
 }
 
 // N2: a raw-only delete commits NEW, removes exactly its target and leaves the next operation healthy.
