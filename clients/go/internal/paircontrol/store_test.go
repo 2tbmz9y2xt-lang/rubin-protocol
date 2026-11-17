@@ -84,6 +84,18 @@ func wantNilStore(t *testing.T, s *Store, err error, op, code string) *ErrorV1 {
 	return wantLocal(t, ResultV1{}, err, op, code, ResultV1{})
 }
 
+func wantClosed(t *testing.T, s *Store) {
+	t.Helper()
+	got, err := s.ObserveV1()
+	wantLocal(t, ResultV1{}, err, "observe", "closed", ResultV1{})
+	if !reflect.DeepEqual(got, RecordV1{}) {
+		t.Fatal("closed Observe exposed record")
+	}
+	r, err := s.RecoverV1()
+	wantLocal(t, r, err, "recover", "closed", ResultV1{})
+	require(t, s.CloseV1())
+}
+
 func TestConstructorsAndReadOnly(t *testing.T) {
 	dir, id := directory(t), identity()
 	s, err := CreateV1(dir, id, NewInstallationProofV1{Identity: id})
@@ -110,14 +122,7 @@ func TestConstructorsAndReadOnly(t *testing.T) {
 	other, err = CreateV1(dir, id, NewInstallationProofV1{Identity: id})
 	wantNilStore(t, other, err, "create", "busy")
 	require(t, s.CloseV1())
-	require(t, s.CloseV1())
-	got, err := s.ObserveV1()
-	wantLocal(t, ResultV1{}, err, "observe", "closed", ResultV1{})
-	if got != (RecordV1{}) {
-		t.Fatal("closed Observe exposed record")
-	}
-	r, err = s.RecoverV1()
-	wantLocal(t, r, err, "recover", "closed", ResultV1{})
+	wantClosed(t, s)
 	r, err = s.PersistIntentV1(context.Background(), 0, replacement(), nil)
 	wantLocal(t, r, err, "persist_intent", "closed", ResultV1{})
 	s, err = OpenV1(dir, id)

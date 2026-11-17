@@ -111,7 +111,7 @@ func TestH1AdmissionAndDetachedBinding(t *testing.T) {
 }
 
 func TestH1RefusesUnqualifiedCurrentP(t *testing.T) {
-	for _, kind := range []string{"held_tx", "closed", "identity", "ownership", "diagnosis_height", "diagnosis_hash", "diagnosis_error", "diagnosis_source", "diagnosis_trigger", "old_location", "old_id", "destination", "destination_id", "observed_sequence", "extra_operator_p"} {
+	for _, kind := range []string{"held_tx", "closed", "identity", "ownership", "diagnosis_height", "diagnosis_hash", "diagnosis_error", "diagnosis_source", "diagnosis_trigger", "old_location", "old_id", "destination", "destination_id", "observed_sequence", "observed_sequence_below", "extra_operator_p"} {
 		t.Run(kind, func(t *testing.T) {
 			p, i := h1Policy(t)
 			s, dir := existing(t, selected())
@@ -166,6 +166,8 @@ func TestH1RefusesUnqualifiedCurrentP(t *testing.T) {
 				before = diskBytes(t, dir)
 			case "observed_sequence":
 				i.H1Binding.ObservedPSequence = 3
+			case "observed_sequence_below":
+				terminalPolicy(t, p, i, "live_advanced")
 			case "extra_operator_p":
 				i = replacement()
 			}
@@ -288,7 +290,7 @@ func terminalPolicy(t *testing.T, p *policycontrol.Store, i IntentV1, kind strin
 }
 
 func TestTerminalH1Bookkeeping(t *testing.T) {
-	for _, kind := range []string{"live", "live_advanced", "blocked", "success", "observed_later", "manual_later", "manual_blocked", "manual_same_epoch", "manual_same_id", "manual_same_d", "manual_short_owner", "manual_future_epoch", "manual_bad_old", "manual_bad_destination", "manual_absolute_destination", "blocked_changed_diagnosis", "rollback", "nil_not_later", "stale_outer", "precommit", "unknown"} {
+	for _, kind := range []string{"live", "live_advanced", "blocked", "blocked_not_later", "success", "observed_later", "manual_later", "manual_blocked", "manual_same_epoch", "manual_same_id", "manual_same_d", "manual_short_owner", "manual_future_epoch", "manual_bad_old", "manual_bad_destination", "manual_absolute_destination", "blocked_changed_diagnosis", "rollback", "nil_not_later", "stale_outer", "precommit", "unknown"} {
 		t.Run(kind, func(t *testing.T) {
 			p, i := h1Policy(t)
 			v := selected()
@@ -306,7 +308,7 @@ func TestTerminalH1Bookkeeping(t *testing.T) {
 			v.Sequence, v.Selector, v.Selected, v.Intent = 19, 3, nil, &i
 			v.Retired = &RetirementV1{originalPair(), 2, reference()}
 			terminalPolicy(t, p, i, kind)
-			if kind == "rollback" || kind == "nil_not_later" || kind == "blocked_changed_diagnosis" {
+			if kind == "rollback" || kind == "nil_not_later" || kind == "blocked_not_later" || kind == "blocked_changed_diagnosis" {
 				require(t, s.CloseV1())
 				if kind == "blocked_changed_diagnosis" {
 					v.Intent.H1Binding.Diagnosis.Error[0] ^= 1
@@ -321,6 +323,21 @@ func TestTerminalH1Bookkeeping(t *testing.T) {
 			require(t, err)
 			before := diskBytes(t, dir)
 			o := installFaults(t, s)
+			if kind == "blocked" {
+				t.Run("retire_refused", func(t *testing.T) {
+					r, err = s.RetireV1(context.Background(), 19, i.ID, reference(), p)
+					wantLocal(t, r, err, "retire", "refused", ResultV1{1, 19, false})
+					wantRecord(t, s, v)
+				})
+				t.Run("retry_refused", func(t *testing.T) {
+					r, err = s.PersistIntentV1(context.Background(), 19, i, p)
+					wantLocal(t, r, err, "persist_intent", "refused", ResultV1{1, 19, false})
+					wantRecord(t, s, v)
+				})
+				if len(o.events) != 0 {
+					t.Fatal("terminal P admitted a live H1 operation or file effect")
+				}
+			}
 			expected := uint64(19)
 			if kind == "stale_outer" {
 				expected = 18
@@ -335,7 +352,7 @@ func TestTerminalH1Bookkeeping(t *testing.T) {
 			switch kind {
 			case "live", "live_advanced":
 				wantLocal(t, r, err, "end_h1", "refused", ResultV1{1, 19, false})
-			case "rollback", "nil_not_later", "blocked_changed_diagnosis", "manual_same_epoch", "manual_same_id", "manual_same_d", "manual_short_owner", "manual_future_epoch", "manual_bad_old", "manual_bad_destination", "manual_absolute_destination":
+			case "rollback", "nil_not_later", "blocked_not_later", "blocked_changed_diagnosis", "manual_same_epoch", "manual_same_id", "manual_same_d", "manual_short_owner", "manual_future_epoch", "manual_bad_old", "manual_bad_destination", "manual_absolute_destination":
 				wantLocal(t, r, err, "end_h1", "integrity", ResultV1{1, 19, false})
 				if len(o.events) != 0 {
 					t.Fatal("terminal qualification rejection acquired outer OS effects")
@@ -473,12 +490,18 @@ func TestLostAcknowledgementRecovery(t *testing.T) {
 			if len(recorder.events) != n {
 				t.Fatal("blocked mutator performed effects")
 			}
-			if strings.HasPrefix(kind, "neither_old_") {
-				observed, err := s.ObserveV1()
-				blocked := wantLocal(t, ResultV1{}, err, "observe", "unresolved", ResultV1{})
-				if !reflect.DeepEqual(observed, RecordV1{}) || !reflect.ValueOf(blocked.Cause).Equal(reflect.ValueOf(original)) || len(recorder.events) != n {
-					t.Fatal("neither OLD-shaped image exposed qualified data or effects")
+			observed, err := s.ObserveV1()
+			blocked := wantLocal(t, ResultV1{}, err, "observe", "unresolved", ResultV1{})
+			want := RecordV1{}
+			if truth != 3 {
+				want = selected()
+				if truth == 2 {
+					i := replacement()
+					want.Sequence, want.Intent = 18, &i
 				}
+			}
+			if !reflect.DeepEqual(observed, want) || !reflect.ValueOf(blocked.Cause).Equal(reflect.ValueOf(original)) || len(recorder.events) != n {
+				t.Fatal("classified/unknown observation lost complete image, original error or no-I/O disposition")
 			}
 			require(t, s.CloseV1())
 		})
@@ -587,12 +610,20 @@ func TestOriginalObservationSurvivesUnrelatedPAdvances(t *testing.T) {
 		t.Fatal("valid epoch below original protected observation was refused")
 	}
 	advance("after")
+	v := selected()
+	v.Sequence, v.Intent = 18, &i
+	o := installFaults(t, s)
+	r, err = s.PersistIntentV1(context.Background(), 18, i, p)
+	require(t, err)
+	if r != (ResultV1{1, 18, false}) || len(o.events) != 0 {
+		t.Fatal("same H1 intent retry lost original observation or performed I/O")
+	}
+	wantRecord(t, s, v)
 	r, err = s.RetireV1(context.Background(), 18, i.ID, reference(), p)
 	require(t, err)
 	if r != (ResultV1{2, 19, false}) {
 		t.Fatal("unrelated latest owner displaced original admission")
 	}
-	v := selected()
 	v.Sequence, v.Selector, v.Selected, v.Intent = 19, 3, nil, &i
 	v.Retired = &RetirementV1{originalPair(), 2, reference()}
 	wantRecord(t, s, v)

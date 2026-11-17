@@ -724,14 +724,8 @@ func TestCloseConsumesReportedReleaseFailureOnce(t *testing.T) {
 	if o.releases != 1 || !bytes.Equal(before, diskBytes(t, dir)) {
 		t.Fatal("Close retried consumed flock or changed control")
 	}
-	v, err := s.ObserveV1()
-	wantLocal(t, ResultV1{}, err, "observe", "closed", ResultV1{})
-	if !reflect.DeepEqual(v, RecordV1{}) {
-		t.Fatal("closed owner returned a record")
-	}
-	r, err := s.RecoverV1()
-	wantLocal(t, r, err, "recover", "closed", ResultV1{})
-	r, err = s.PersistIntentV1(context.Background(), 17, replacement(), nil)
+	wantClosed(t, s)
+	r, err := s.PersistIntentV1(context.Background(), 17, replacement(), nil)
 	wantLocal(t, r, err, "persist_intent", "closed", ResultV1{})
 	// The adapter reports failure only after actual Release; fresh ownership is
 	// proved by this actual acquisition, never inferred from consumed Go state.

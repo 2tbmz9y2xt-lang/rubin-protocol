@@ -119,6 +119,9 @@ func TestRetirementGapAndRetainedRefusal(t *testing.T) {
 		r, err = s.RetireV1(context.Background(), 19, i.ID, changed, nil)
 		wantLocal(t, r, err, "retire", "refused", ResultV1{1, 19, false})
 		wantRecord(t, s, v)
+		r, err = s.RecordDamageV1(context.Background(), 19, originalPair(), reference())
+		wantLocal(t, r, err, "damage", "refused", ResultV1{1, 19, false})
+		wantRecord(t, s, v)
 		require(t, s.CloseV1())
 	}
 }
@@ -269,16 +272,22 @@ func TestEveryMutatorEntryGuard(t *testing.T) {
 				return s.EndH1V1(ctx, seq, id, p)
 			}
 		}
-		for _, state := range []string{"busy", "closed", "canceled", "nil_context", "stale", "unresolved"} {
+		for _, state := range []string{"busy", "closed", "closed_latched", "canceled", "nil_context", "stale", "unresolved"} {
 			t.Run(operation+"/"+state, func(t *testing.T) {
 				s, dir := existing(t, selected())
+				o := installFaults(t, s)
 				ctx, expected := context.Background(), uint64(17)
 				code, want := "busy", ResultV1{}
 				if state == "busy" {
 					s.mu.Lock()
 					defer s.mu.Unlock()
 				}
-				if state == "closed" {
+				if state == "closed" || state == "closed_latched" {
+					if state == "closed_latched" {
+						o.add(faultAt{"sync:dir", 2, errors.New("durability"), false})
+						r, err := s.PersistIntentV1(ctx, 17, replacement(), nil)
+						wantLocal(t, r, err, "persist_intent", "unresolved", ResultV1{3, 0, true})
+					}
 					require(t, s.CloseV1())
 					code = "closed"
 				}
@@ -295,7 +304,7 @@ func TestEveryMutatorEntryGuard(t *testing.T) {
 					expected, code, want = 16, "stale", ResultV1{1, 17, false}
 				}
 				if state == "unresolved" {
-					installFaults(t, s, faultAt{"sync:dir", 2, errors.New("durability"), false})
+					o.add(faultAt{"sync:dir", 2, errors.New("durability"), false})
 					_, err := s.PersistIntentV1(ctx, 17, replacement(), nil)
 					if err == nil {
 						t.Fatal("actual poisoned crossing was not reached")
@@ -303,6 +312,12 @@ func TestEveryMutatorEntryGuard(t *testing.T) {
 					code, want = "unresolved", ResultV1{3, 0, true}
 				}
 				before := diskBytes(t, dir)
+				n := len(o.events)
+				if code == "closed" {
+					t.Run("snapshot", func(t *testing.T) {
+						wantClosed(t, s)
+					})
+				}
 				r, err := call(s, ctx, expected, true)
 				wantLocal(t, r, err, operation, "refused", ResultV1{})
 				r, err = call(s, ctx, expected, false)
@@ -310,7 +325,7 @@ func TestEveryMutatorEntryGuard(t *testing.T) {
 				if state == "canceled" && !errors.Is(e, context.Canceled) {
 					t.Fatal("entry cancellation Cause was replaced")
 				}
-				if !bytes.Equal(before, diskBytes(t, dir)) {
+				if !bytes.Equal(before, diskBytes(t, dir)) || len(o.events) != n {
 					t.Fatal("entry guard mutated durable bytes")
 				}
 			})
