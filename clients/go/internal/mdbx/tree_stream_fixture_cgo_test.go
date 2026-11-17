@@ -7080,6 +7080,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 3, r.err)
 	})
 	t.Run("H1-domain-mismatch-then-read-error", psfDomainMismatchThenError)
+	t.Run("H1-point-mismatch-then-capacity", psfPointMismatchThenCapacity)
 	t.Run("M14-retained", psfRetained)
 	t.Run("N4-selector-alias", func(t *testing.T) {
 		// At write site 3 the caller rewrites its own LargeConsulted value to an absent body; the body then
@@ -7198,7 +7199,24 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 func psfDomainMismatchThenError(t *testing.T) {
 	sc := psfNew(t)
 	hash, _ := psfUndo(t, sc.s)
-	op := func(reader *Reader) TreeOperationV1 {
+	var r tsResult
+	evidence := ctxTreeFault(t, sc.s, 29, 5, append(bytes.Clone(hash[:]), 1), func() { r = psRun(t, sc.s, sc.o, LaneOperation, psfUndoScopeOp(t)) })
+	ce, ok := r.err.(*CommitError)
+	if !ok || evidence.drift != 1 || evidence.commits != 1 || evidence.gets == 0 || r.truth != 3 {
+		t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
+	}
+	var engine *EngineError
+	if !errors.As(ce.ReadbackCause, &engine) || engine.Class != EngineIO {
+		t.Fatalf("later scope error lost: %v", ce.ReadbackCause)
+	}
+	r.tuple(t, 3, 3, -1)
+	tsConsumed(t, sc.s, sc.o, 3, r.err)
+}
+
+// psfUndoScopeOp deletes generation 9's nodes under their witness with the authority target and also
+// consults the undo witness, whose rank-2 index and rank-3 header points follow the raw domains.
+func psfUndoScopeOp(t *testing.T) func(*Reader) TreeOperationV1 {
+	return func(reader *Reader) TreeOperationV1 {
 		nodes, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1440)
 		mustEnvironment(t, err)
 		index, err := reader.ObsoleteGenerationPageV1(9, 2, nil, 1440)
@@ -7211,18 +7229,54 @@ func psfDomainMismatchThenError(t *testing.T) {
 			ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness, undo.Witness},
 		}}
 	}
-	var r tsResult
-	evidence := ctxTreeFault(t, sc.s, 29, 5, append(bytes.Clone(hash[:]), 1), func() { r = psRun(t, sc.s, sc.o, LaneOperation, op) })
-	ce, ok := r.err.(*CommitError)
-	if !ok || evidence.drift != 1 || evidence.commits != 1 || evidence.gets == 0 || r.truth != 3 {
+}
+
+// H1/M16 point loop: mode 36 makes the rank-2 index point differ in length (unfunded inequality); the
+// later rank-3 header point needs S plus two 148-byte operands, but the account holds F + S + one
+// operand + 64, so its preflight comparison must still refuse with the capacity singleton.
+func psfPointMismatchThenCapacity(t *testing.T) {
+	index := binary.BigEndian.AppendUint64(obsoleteGenerationLiteral(9), 1)
+	run := func(mode uint32, remaining func(f, window uint64) uint64) (*psfScene, tsResult, fixtureLargeEvidence) {
+		sc := psfNew(t)
+		psfUndo(t, sc.s)
+		o := reservationFilled(t, remaining(psfUndoScopeF(t), psfWindow(t, sc.s)))
+		sc.o = o
+		if mode == 0 {
+			return sc, psRun(t, sc.s, o, LaneOperation, psfUndoScopeOp(t)), fixtureLargeEvidence{}
+		}
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, mode, 2, index, func() { r = psRun(t, sc.s, o, LaneOperation, psfUndoScopeOp(t)) })
+		return sc, r, evidence
+	}
+	short := func(f, window uint64) uint64 { return f + window + obsoleteHeaderWidth(3) + 64 }
+	sc, r, evidence := run(36, short)
+	if any(r.err) != any(errOperationReservationCapacity) || evidence.gets != 1 || evidence.aborts != 1 || evidence.commits != 0 {
 		t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
 	}
-	var engine *EngineError
-	if !errors.As(ce.ReadbackCause, &engine) || engine.Class != EngineIO {
-		t.Fatalf("later scope error lost: %v", ce.ReadbackCause)
+	r.tuple(t, 1, 1, -1)
+	tsConsumed(t, sc.s, sc.o, 1, r.err)
+	sc.image(t, tsReopen(t, sc.s, sc.path), false)
+	// Attribution: without the fault the same account refuses at the header point; with ample capacity
+	// the index-point mismatch alone is the OLD/write refusal.
+	if _, r, _ = run(0, short); any(r.err) != any(errOperationReservationCapacity) {
+		t.Fatalf("scope operand window not funded: %v", r.err)
 	}
-	r.tuple(t, 3, 3, -1)
-	tsConsumed(t, sc.s, sc.o, 3, r.err)
+	_, r, _ = run(36, func(f, window uint64) uint64 { return f + window + 2*obsoleteHeaderWidth(3) + 4096 })
+	r.tuple(t, 1, 1, -1)
+	treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+}
+
+// psfUndoScopeF is F for psfUndoScopeOp: M=1, D=3, W=2, P=2 (index and header points), L=0.
+func psfUndoScopeF(t *testing.T) uint64 {
+	auth := psfAuthority(t)
+	nodes := obsoleteTreeFamily(9)
+	k := uint64(len(auth.Key) + len(auth.Literal))
+	for _, row := range nodes {
+		k += uint64(len(row.key))
+	}
+	// Node witness: prefix 8 + last; undo witness: hash prefix 32 + last family key 34 + points 16 + 32.
+	u := uint64(8+len(nodes[2].key)) + 32 + 34 + 16 + 32
+	return psF(1, 0, 3, 2, 2, 0, k, u)
 }
 
 // N5/M14: mode 15 retains the readback abort (thread mismatch); the scope operation keeps that retained
