@@ -92,54 +92,51 @@ func testStepTreePathCapacityV1(t *testing.T) {
 }
 
 func testStepTreeStoredSourceV1(t *testing.T) {
-	t.Run("retained-abort-projection", testStepTreeStoredRetainedV1)
-	for _, abort := range []bool{false, true} {
-		t.Run(fmt.Sprint(abort), func(t *testing.T) {
-			w := stepTreeNewV1(t, 1, 1, nil)
-			stepTreeSeedV1(t, w, 4, w.hashes[1][:], w.raw[1])
-			var out ReplayStepOutcomeV1
-			var gets uint32
-			scenario := mdbx.SelectedDamageProbeOnly
-			if abort {
-				scenario = mdbx.SelectedDamageAbortEIO
-			}
-			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, scenario, 0, nil, func() {
-				var bodyErr error
-				gets, bodyErr = mdbx.FixtureBodyThirdGetEIO(w.s, w.hashes[1][:], func() { out = w.call(1) })
-				logicalMDBXAssert(t, bodyErr == nil, "stored source fixture: %v", bodyErr)
-			})
-			logicalMDBXAssert(t, err == nil && gets == 3 && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0, "stored source third read before writer: %+v/%d/%v", evidence, gets, err)
-			raw := out.Err
-			if abort {
-				parts, ok := raw.(interface{ Unwrap() []error })
-				logicalMDBXAssert(t, ok && len(parts.Unwrap()) == 2 && evidence.Faults == 1, "source and abort causes: %v", raw)
-				raw = parts.Unwrap()[0]
-				btfEngine(t, parts.Unwrap()[1], "abort", mdbx.EngineIO, 5, "error 5")
-			}
-			e, ok := any(out.Cause).(*mdbx.EngineError)
-			logicalMDBXAssert(t, ok && any(raw) == any(out.Cause) && out.NativeCalled && out.Result == "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)" && out.Decision == "" && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT" && out.Height == 1 && out.Block == w.hashes[1] && out.CanonicalTruth == "OLD" && out.Needed == nil && !out.HasObservation && e.Operation == "get" && e.Class == "IO" && e.Code == 5 && e.Diagnostic == "error 5" && e.Cause == nil && !e.ReopenRequired && e.TreeObservation == nil, "stored source original read projection: %+v", out)
-			calls := 0
-			next := w.s.View(func(*mdbx.Reader) error { calls++; return nil })
-			logicalMDBXAssert(t, calls == 0 && any(next) == any(out.Err), "stored source consumption changed")
-			w.btWorld.reopen(t)
-			stepTreeUnchangedV1(t, w, 1)
-			w.read(t, 4, w.hashes[1][:], w.raw[1])
-			btReservationsReleased(t, w.owner)
+	t.Run("abort-projection", testStepTreeStoredRetainedV1)
+	t.Run("native-read", func(t *testing.T) {
+		w := stepTreeNewV1(t, 1, 1, nil)
+		stepTreeSeedV1(t, w, 4, w.hashes[1][:], w.raw[1])
+		var out ReplayStepOutcomeV1
+		var gets uint32
+		evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
+			var bodyErr error
+			gets, bodyErr = mdbx.FixtureBodyThirdGetEIO(w.s, w.hashes[1][:], func() { out = w.call(1) })
+			logicalMDBXAssert(t, bodyErr == nil, "stored source fixture: %v", bodyErr)
 		})
-	}
+		logicalMDBXAssert(t, err == nil && gets == 3 && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0, "stored source third read before writer: %+v/%d/%v", evidence, gets, err)
+		e, ok := any(out.Cause).(*mdbx.EngineError)
+		logicalMDBXAssert(t, ok && any(out.Err) == any(out.Cause) && out.NativeCalled && out.Result == "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)" && out.Decision == "" && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT" && out.Height == 1 && out.Block == w.hashes[1] && out.CanonicalTruth == "OLD" && out.Needed == nil && !out.HasObservation && e.Operation == "get" && e.Class == "IO" && e.Code == 5 && e.Diagnostic == "error 5" && e.Cause == nil && !e.ReopenRequired && e.TreeObservation == nil, "stored source original read projection: %+v", out)
+		calls := 0
+		next := w.s.View(func(*mdbx.Reader) error { calls++; return nil })
+		logicalMDBXAssert(t, calls == 0 && any(next) == any(out.Err), "stored source consumption changed")
+		w.btWorld.reopen(t)
+		stepTreeUnchangedV1(t, w, 1)
+		w.read(t, 4, w.hashes[1][:], w.raw[1])
+		btReservationsReleased(t, w.owner)
+	})
 }
 
-// testStepTreeStoredRetainedV1 checks the selected read inside an abort error.
+// testStepTreeStoredRetainedV1 checks the selected read inside abort products.
 func testStepTreeStoredRetainedV1(t *testing.T) {
-	for _, role := range []string{"CURRENT", "LAG"} {
-		t.Run(role, func(t *testing.T) {
+	for _, row := range []struct {
+		role string
+		mode uint32
+	}{{"CURRENT", 9}, {"CURRENT", 10}, {"LAG", 9}, {"LAG", 10}} {
+		t.Run(fmt.Sprintf("%s/%d", row.role, row.mode), func(t *testing.T) {
 			source := &mdbx.EngineError{Operation: "get", Class: "IO", Code: 5, Diagnostic: "error 5"}
-			retained := &mdbx.EngineError{Operation: "abort", Class: "LocalInvariant", Code: -30416, Diagnostic: "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread", Cause: source, ReopenRequired: true}
-			i := &replayStepInvocation{out: ReplayStepOutcomeV1{NativeCalled: true, Truth: 1, Stage: 1, Index: -1, Err: retained, Role: role}}
+			var raw error = errors.Join(source, &mdbx.EngineError{Operation: "abort", Class: "IO", Code: 5, Diagnostic: "error 5"})
+			want := "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)"
+			if row.mode == 10 {
+				raw = &mdbx.EngineError{Operation: "abort", Class: "LocalInvariant", Code: -30416, Diagnostic: "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread", Cause: source, ReopenRequired: true}
+				want = "TERMINAL_LOCAL_INVARIANT(evidence)"
+			}
+			i := &replayStepInvocation{out: ReplayStepOutcomeV1{NativeCalled: true, Truth: 1, Stage: 1, Index: -1, Err: raw, Role: row.role}}
 			step := &replayStepCall{invocation: i, h: 5, x: [32]byte{7}, sourceRead148: source}
-			step.project148V1(retained)
-			logicalMDBXAssert(t, any(i.out.Cause) == any(source) && any(i.observation.incoming) == any(source) && any(i.out.Err) == any(retained) && i.out.Result == "TERMINAL_LOCAL_INVARIANT(evidence)" && i.out.Decision == "" && i.out.Truth == 1 && i.out.Stage == 1 && i.out.Index == -1 && i.out.Role == role && i.out.Height == 5 && i.out.Block == ([32]byte{7}) && i.out.CanonicalTruth == "OLD" && !i.out.HasObservation && i.out.Needed == nil && source.Cause == nil, "selected read survives retained abort projection: %+v", i.out)
-			btfAbortResult(t, i.out.Err, 10, source)
+			step.project148V1(raw)
+			logicalMDBXAssert(t, any(i.out.Cause) == any(source) && any(i.observation.incoming) == any(source) && any(i.out.Err) == any(raw) && i.out.NativeCalled && i.out.Result == want && i.out.Decision == "" && i.out.Truth == 1 && i.out.Stage == 1 && i.out.Index == -1 && i.out.Role == row.role && i.out.Height == 5 && i.out.Block == ([32]byte{7}) && i.out.CanonicalTruth == "OLD" && !i.out.HasObservation && i.out.Needed == nil && source.Cause == nil, "selected read survives abort projection: %+v", i.out)
+			btfEngine(t, i.out.Cause, "get", mdbx.EngineIO, 5, "error 5")
+			logicalMDBXAssert(t, source.TreeObservation == nil, "source fabricated tree observation")
+			btfAbortResult(t, i.out.Err, row.mode, source)
 		})
 	}
 }
