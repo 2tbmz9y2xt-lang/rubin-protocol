@@ -4713,8 +4713,8 @@ func psDuplicates(t *testing.T) {
 	}
 	for _, name := range []string{"witness", "row", "uncovered"} {
 		r := psRun(t, s, o, LaneOperation, builds[name])
-		if r.err == nil {
-			t.Fatalf("duplicate scope admitted: %s", name)
+		if r.err == nil || r.stage != 1 || s.state != storeOPEN {
+			t.Fatalf("duplicate scope admitted: %s stage%d %s %v", name, r.stage, s.state, r.err)
 		}
 		psRefused(t, s, r, false, name)
 	}
