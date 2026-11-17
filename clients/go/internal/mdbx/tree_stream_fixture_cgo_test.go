@@ -7079,6 +7079,8 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		r.tuple(t, 3, 3, -1)
 		tsConsumed(t, sc.s, sc.o, 3, r.err)
 	})
+	t.Run("H1-domain-mismatch-then-read-error", psfDomainMismatchThenError)
+	t.Run("M14-retained", psfRetained)
 	t.Run("N4-selector-alias", func(t *testing.T) {
 		// At write site 3 the caller rewrites its own LargeConsulted value to an absent body; the body then
 		// drifts after the first write. The owned selector copy still compares the drifted body at final.
@@ -7188,4 +7190,60 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 			t.Fatal("legacy scope funded", err)
 		}
 	})
+}
+
+// H1/M16: mode 29 adds an extra member to the rank-5 undo domain at commit, then fails every later
+// readback prefix read of another DBI: the raw-domain mismatch comes first and the rank-8 node domain
+// traversal must still reach its EIO.
+func psfDomainMismatchThenError(t *testing.T) {
+	sc := psfNew(t)
+	hash, _ := psfUndo(t, sc.s)
+	op := func(reader *Reader) TreeOperationV1 {
+		nodes, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1440)
+		mustEnvironment(t, err)
+		index, err := reader.ObsoleteGenerationPageV1(9, 2, nil, 1440)
+		mustEnvironment(t, err)
+		undo, err := reader.ObsoleteUndoPageV1(index.Rows[0], nil, 1440)
+		mustEnvironment(t, err)
+		return TreeOperationV1{Pair: TreePairV1{
+			Mutations:         []Mutation{psfAuthority(t)},
+			ObsoleteDeletes:   nodes.Rows,
+			ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness, undo.Witness},
+		}}
+	}
+	var r tsResult
+	evidence := ctxTreeFault(t, sc.s, 29, 5, append(bytes.Clone(hash[:]), 1), func() { r = psRun(t, sc.s, sc.o, LaneOperation, op) })
+	ce, ok := r.err.(*CommitError)
+	if !ok || evidence.drift != 1 || evidence.commits != 1 || evidence.gets == 0 || r.truth != 3 {
+		t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
+	}
+	var engine *EngineError
+	if !errors.As(ce.ReadbackCause, &engine) || engine.Class != EngineIO {
+		t.Fatalf("later scope error lost: %v", ce.ReadbackCause)
+	}
+	r.tuple(t, 3, 3, -1)
+	tsConsumed(t, sc.s, sc.o, 3, r.err)
+}
+
+// N5/M14: mode 15 retains the readback abort (thread mismatch); the scope operation keeps that retained
+// ownership, releases its grant and the next operation reuses the terminal refusal without a callback.
+func psfRetained(t *testing.T) {
+	sc := psfNew(t)
+	var r tsResult
+	_, err := fixtureLargeFault(sc.s, 15, 0, tsRootKey(9), func() { r = sc.run(t, sc.o) })
+	mustEnvironment(t, err)
+	if sc.s.state != storePOISONEDTHREAD || sc.s.txn == nil || any(sc.s.terminal) != any(r.err) || r.err == nil {
+		t.Fatalf("scope next operation differs: retained %s %v", sc.s.state, r.err)
+	}
+	if reservationLive(sc.o) != 0 {
+		t.Fatalf("scope grant leaked: retained live%d", reservationLive(sc.o))
+	}
+	calls := 0
+	mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+		next := tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return tsPair(9), nil })
+		if any(next.err) != any(r.err) || calls != 0 || sc.s.state != storePOISONEDTHREAD {
+			t.Fatalf("scope next operation differs: %v calls%d %s", next.err, calls, sc.s.state)
+		}
+		return nil
+	}))
 }

@@ -4532,35 +4532,79 @@ func TestTreeStreamPhysicalScopeV1(t *testing.T) {
 	t.Run("callback", psCallback)
 }
 
-// N5/R3: callback error and panic win before any new field is inspected; the account is released once.
+// N5/R3: callback error, panic and Goexit win before any new field is inspected; the caller grant held
+// inside the callback and the account are released once on every exit. The scene is seeded without the shared owner-live precondition so a leaked grant
+// fails this row's own assertion.
 func psCallback(t *testing.T) {
-	s, _, o := psStore(t)
+	s, _, _ := treeNativeStore(t)
+	o := reservationOwner(t, 805_306_368)
+	seeds := []TreeOperationV1{tsEntry(t)}
+	for _, g := range []uint64{9, 10} {
+		seeds = append(seeds, TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(g), AfterKind: 2, Literal: tsCounterLiteral(g, 1)}}}})
+	}
+	for _, op := range seeds {
+		mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+			tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }).tuple(t, 2, 3, -1)
+			return nil
+		}))
+	}
 	marker := errors.New("scope callback marker")
 	garbage := TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: make([]ObsoleteRowV1, 3), LargeConsulted: []LargeImageSelectorV1{{Kind: 9}}}}
 	before := reservationLive(o)
 	mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
-		r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return garbage, marker })
+		r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
+			return garbage, a.WithPhaseReservationV1(64, 0, func(func() error) error { return marker })
+		})
 		r.tuple(t, 1, 1, -1)
 		if !errors.Is(r.err, marker) {
 			t.Fatalf("scope callback error identity lost: %v", r.err)
 		}
 		return nil
 	}))
+	if reservationLive(o) != before || s.state != storeOPEN {
+		t.Errorf("scope grant leaked: error live%d want%d state%s", reservationLive(o), before, s.state)
+	}
 	var recovered any
 	func() {
 		defer func() { recovered = recover() }()
 		_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
-			tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { panic(marker) })
+			tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
+				return garbage, a.WithPhaseReservationV1(64, 0, func(func() error) error { panic(marker) })
+			})
 			return nil
 		})
 	}()
 	if recovered != any(marker) || reservationLive(o) != before || s.state != storeOPEN {
-		t.Fatalf("scope grant leaked: panic%v live%d state%s", recovered, reservationLive(o), s.state)
+		t.Errorf("scope grant leaked: panic%v live%d state%s", recovered, reservationLive(o), s.state)
+	}
+	psGoexit(t, s, o, garbage)
+	if reservationLive(o) != before || s.state != storeOPEN {
+		t.Errorf("scope grant leaked: Goexit live%d want%d state%s", reservationLive(o), before, s.state)
 	}
 	r := psRun(t, s, o, LaneOperation, psRawDelete(t, 9))
 	r.tuple(t, 2, 3, -1)
 	if r.err != nil || s.state != storeOPEN {
 		t.Fatalf("scope next operation differs: %v %s", r.err, s.state)
+	}
+}
+
+// psGoexit runs one Lane operation whose callback calls runtime.Goexit on its own goroutine.
+func psGoexit(t *testing.T, s *Store, o *OperationReservationOwner, garbage TreeOperationV1) {
+	t.Helper()
+	done := make(chan bool)
+	go func() {
+		returned := false
+		defer func() { done <- returned }()
+		_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+			tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
+				return garbage, a.WithPhaseReservationV1(64, 0, func(func() error) error { runtime.Goexit(); return nil })
+			})
+			return nil
+		})
+		returned = true
+	}()
+	if <-done {
+		t.Fatal("scope Goexit callback returned normally")
 	}
 }
 
