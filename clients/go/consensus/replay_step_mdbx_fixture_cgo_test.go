@@ -180,6 +180,47 @@ func testStepTreeLagV1(t *testing.T) {
 			if mode == "index-width" || mode == "owner-width" {
 				e, ok := out.Cause.(*mdbx.EngineError)
 				logicalMDBXAssert(t, ok && e.Operation == "get" && e.Class == "Integrity" && e.Code == -30796 && e.Diagnostic == "invalid tree native representation" && e.Cause != nil && !e.ReopenRequired && e.TreeObservation == nil && !out.HasObservation && out.Observation == (mdbx.TreeObservationV1{}) && errors.Is(out.Err, e), "recorded exact LAG Get and real Cause: %+v", out)
+				if mode == "index-width" {
+					t.Run("private-predicate-controls", func(t *testing.T) {
+						// Pure private predicate controls; altered copies are not native-produced
+						// tuples or public reproductions. The actual error and Cause stay untouched.
+						logicalMDBXAssert(t, replayStepLagWidth148V1(e), "actual native width must match")
+						var typedNil *mdbx.EngineError
+						for _, row := range []struct { name string; err error }{
+							{"nil", nil}, {"typed-nil", typedNil}, {"wrapped", fmt.Errorf("wrapped: %w", e)},
+						} {
+							logicalMDBXAssert(t, !replayStepLagWidth148V1(row.err), "private width predicate accepted %s", row.name)
+						}
+						for _, row := range []struct { name string; change func(*mdbx.EngineError) }{
+							{"operation", func(copy *mdbx.EngineError) { copy.Operation = "update" }},
+							{"class", func(copy *mdbx.EngineError) { copy.Class = mdbx.EngineIO }},
+							{"code", func(copy *mdbx.EngineError) { copy.Code = -30779 }},
+							{"diagnostic", func(copy *mdbx.EngineError) { copy.Diagnostic = "other integrity" }},
+							{"reopen", func(copy *mdbx.EngineError) { copy.ReopenRequired = true }},
+							{"cause", func(copy *mdbx.EngineError) { copy.Cause = nil }},
+							{"observation", func(copy *mdbx.EngineError) { copy.TreeObservation = &mdbx.TreeObservationV1{} }},
+						} {
+							copy := *e
+							row.change(&copy)
+							logicalMDBXAssert(t, !replayStepLagWidth148V1(&copy), "private width predicate accepted changed %s", row.name)
+						}
+						// Pure pre-held-evidence predicate controls need no Reader or later reads.
+						proof := replayStepCall{h: 5, a: w.a.Authority, parent: w.hashes[4], parentHeader: [148]byte(w.raw[4][:148]), parentEndpoint: w.endpoint(4)}
+						logicalMDBXAssert(t, proof.lagEvidence148V1(), "private qualified evidence baseline")
+						for _, row := range []struct { name string; change func(*replayStepCall) }{
+							{"header", func(copy *replayStepCall) { copy.parentHeader[108] ^= 1 }},
+							{"kind", func(copy *replayStepCall) { copy.parentEndpoint.Kind = mdbx.TreeEndpointPreGenesisV1 }},
+							{"height", func(copy *replayStepCall) { copy.parentEndpoint.Height++ }},
+							{"endpoint-hash", func(copy *replayStepCall) { copy.parentEndpoint.BlockHash[0] ^= 1 }},
+							{"cursor-hash", func(copy *replayStepCall) { copy.a.Replay.Cursor.BlockHash[0] ^= 1 }},
+						} {
+							copy, replay := proof, *proof.a.Replay
+							copy.a.Replay = &replay
+							row.change(&copy)
+							logicalMDBXAssert(t, !copy.lagEvidence148V1(), "private evidence predicate accepted changed %s", row.name)
+						}
+					})
+				}
 				if mode == "index-width" { logicalMDBXAssert(t, evidence.OldGets[7] == 2, "reciprocal Get followed expired index Reader: %+v", evidence) }
 			}
 			if mode == "root-malformed" { logicalMDBXAssert(t, out.HasObservation && out.Observation.Primitive == 0 && out.Observation.Generation == 2 && out.Observation.Block == w.hashes[5] && out.Observation.Height == 5, "LAG root observation0 is not native index1") }

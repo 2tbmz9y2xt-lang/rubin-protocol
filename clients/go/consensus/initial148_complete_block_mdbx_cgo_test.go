@@ -807,7 +807,10 @@ func TestInitial148ReplayCompleteBlockV1(t *testing.T) {
 				if mode == "success" { logicalMDBXAssert(t, c.result != nil && reflect.DeepEqual(*c.result, initial148CompleteBlockResultV1{}), "frame retained result after native") }
 				return runErr
 			})
-			result, escapeErr := escaped(nil, in)
+			escapeInput := in
+			// An unused closure must refuse before admission after its frame is released.
+			if mode == "unused" || mode == "earlier" { escapeInput.CapRegistry = nil }
+			result, escapeErr := escaped(nil, escapeInput)
 			logicalMDBXAssert(t, result == nil && escapeErr != nil && escapeErr.Error() == "complete initial148 validate is not available", "escaped replay validation")
 			switch mode {
 			case "success": logicalMDBXAssert(t, err == nil && out.attempted && out.validationErr == nil && out.required.derived, "successful delayed outcome: %+v/%v", out, err)
