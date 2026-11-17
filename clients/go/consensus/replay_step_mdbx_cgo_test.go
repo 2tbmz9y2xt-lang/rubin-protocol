@@ -41,7 +41,7 @@ func stepTreeNewV1(t *testing.T, tip, height uint64, genesis []byte, funding ...
 	if genesis == nil {
 		genesis = initial148BlockGenesis(t)
 	}
-	w := &stepTreeWorldV1{btWorld: btNew(t), height: height, view: &pathView148{headers148: map[[32]byte][148]byte{}}}
+	w := &stepTreeWorldV1{btWorld: riNew(t), height: height, view: &pathView148{headers148: map[[32]byte][148]byte{}}}
 	w.genesis = PublishedGenesisContextV1{Published: bytes.Clone(genesis), GenesisHash: sha3.Sum256(genesis[:148]), ChainID: sha3.Sum256(append([]byte("RUBIN-GENESIS-v1"), genesis...))}
 	w.raw, w.hashes = [][]byte{bytes.Clone(genesis)}, [][32]byte{w.genesis.GenesisHash}
 	w.rows = map[Outpoint]UtxoEntry{}

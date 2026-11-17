@@ -115,7 +115,7 @@ func testStepTreeRetentionV1(t *testing.T) {
 			}
 			var out ReplayStepOutcomeV1
 			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = w.call(5) })
-			logicalMDBXAssert(t, err == nil && evidence.BeginWrite == 1 && evidence.Commits == 1, "single retention commit")
+			logicalMDBXAssert(t, err == nil && evidence.BeginWrite == 1 && evidence.Commits == 1, "single retention commit: %+v/%+v/%v", out, evidence, err)
 			w.btWorld.reopen(t)
 			stepTreeProgressV1(t, w, 5, out)
 			var wantBody, wantUndo []byte
@@ -149,7 +149,7 @@ func testStepTreeOldActiveOnceV1(t *testing.T) {
 		}
 		var out ReplayStepOutcomeV1
 		evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = w.call(5) })
-		logicalMDBXAssert(t, err == nil && evidence.BeginWrite == 1 && evidence.Commits == 1, "reached compared below-promise artifacts")
+		logicalMDBXAssert(t, err == nil && evidence.BeginWrite == 1 && evidence.Commits == 1, "reached compared below-promise artifacts: %+v/%+v/%v", out, evidence, err)
 		ownerReads[i] = evidence.OldGets[7]
 		stepTreeProgressV1(t, w, 5, out)
 		var body, undo []byte
