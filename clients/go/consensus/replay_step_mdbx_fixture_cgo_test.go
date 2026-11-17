@@ -166,7 +166,7 @@ func testStepTreeOldActiveOnceV1(t *testing.T) {
 }
 
 func testStepTreeSourcesV1(t *testing.T) {
-	for _, mode := range []string{"context-index-absent", "context-parent", "context-work", "shared-header-absent", "counter-absent", "counter-IO", "root-IO", "root-malformed", "own-header-IO", "cursor"} {
+	for _, mode := range []string{"context-index-absent", "context-parent", "context-work", "shared-header-absent", "counter-absent", "counter-absent-abort-IO", "counter-IO", "root-IO", "root-malformed", "own-header-IO", "cursor"} {
 		t.Run(mode, func(t *testing.T) {
 			w := stepTreeNewV1(t, 12, 12, nil)
 			key, rank := stepKey(1, 11), uint8(2)
@@ -185,9 +185,12 @@ func testStepTreeSourcesV1(t *testing.T) {
 			case "shared-header-absent":
 				rank, key = 3, w.hashes[11][:]
 				stepTreeSeedV1(t, w, rank, key, nil)
-			case "counter-absent":
+			case "counter-absent", "counter-absent-abort-IO":
 				rank, key = 0, btMeta(0x10, 1)
 				stepTreeSeedV1(t, w, rank, key, nil)
+				if mode == "counter-absent-abort-IO" {
+					scenario = mdbx.SelectedDamageAbortEIO
+				}
 			case "counter-IO":
 				rank, key, scenario = 0, btMeta(0x10, 1), mdbx.SelectedDamageGetEIO
 			case "root-IO":
@@ -201,6 +204,12 @@ func testStepTreeSourcesV1(t *testing.T) {
 				w.a.Authority.Replay.Cursor.BlockHash[0] ^= 1
 				w.setAuthority(t)
 			}
+			var authority, currentRoot, lagRoot []byte
+			if mode == "counter-absent" || mode == "counter-absent-abort-IO" {
+				authority = rtImageRow(t, w.btWorld, []byte{2})
+				currentRoot = rtImageRow(t, w.btWorld, btMeta(0x11, 1))
+				lagRoot = rtImageRow(t, w.btWorld, btMeta(0x11, 2))
+			}
 			var out ReplayStepOutcomeV1
 			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, scenario, rank, key, func() { out = w.call(12) })
 			logicalMDBXAssert(t, err == nil && evidence.BeginWrite == 0 && evidence.Commits == 0 && out.NativeCalled && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT" && out.Cause != nil && out.Err != nil, "source product/site: %+v/%+v/%v", out, evidence, err)
@@ -210,24 +219,52 @@ func testStepTreeSourcesV1(t *testing.T) {
 				want, decision = "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)", ""
 			case "own-header-IO":
 				decision = ""
-			case "shared-header-absent", "counter-absent", "cursor":
+			case "shared-header-absent", "counter-absent-abort-IO", "cursor":
 				want, decision = selectedSideIntegrity, ""
 			}
 			logicalMDBXAssert(t, out.Result == want && out.Decision == decision, "source owning projection: %+v", out)
-			if mode == "counter-absent" {
+			if mode == "counter-absent" || mode == "counter-absent-abort-IO" {
+				raw := out.Err
+				if mode == "counter-absent-abort-IO" {
+					joined, ok := raw.(interface{ Unwrap() []error })
+					logicalMDBXAssert(t, ok && len(joined.Unwrap()) == 2 && evidence.Faults == 1, "actual application/abort join: %v/%+v", raw, evidence)
+					raw = joined.Unwrap()[0]
+					cleanup, ok := joined.Unwrap()[1].(*mdbx.EngineError)
+					logicalMDBXAssert(t, ok && cleanup.Operation == "abort" && cleanup.Class == "IO" && cleanup.Code == 5 && cleanup.Diagnostic == "error 5" && cleanup.Cause == nil && !cleanup.ReopenRequired && cleanup.TreeObservation == nil, "actual cleanup cause must remain separate: %v", out.Err)
+				}
+				outer, wrapped := raw.(*logicalStateFailure)
 				failure, ok := any(out.Cause).(*logicalStateFailure)
-				logicalMDBXAssert(t, ok && failure.kind == logicalStateFailureStoreIntegrity && failure.cause != nil && failure.cause.Error() == "required logical counters are absent or malformed" && !out.HasObservation && out.Observation == (mdbx.TreeObservationV1{}) && any(out.Err) == any(out.Cause), "required counter's exact no-observation result")
+				logicalMDBXAssert(t, wrapped && ok && outer != failure && outer.kind == logicalStateFailureStoreIntegrity && any(outer.cause) == any(failure) && failure.kind == logicalStateFailureStoreIntegrity && failure.cause != nil && failure.cause.Error() == "required logical counters are absent or malformed" && out.Height == 12 && out.Block == w.hashes[12] && !out.HasObservation && out.Observation == (mdbx.TreeObservationV1{}) && evidence.NodeGets == 0 && evidence.NodePulls == 0, "required counter's original outer/inner no-observation result: %+v", out)
 			}
 			if mode == "root-malformed" {
 				logicalMDBXAssert(t, out.HasObservation && out.Observation.Primitive == 0 && out.Observation.Generation == 1 && out.Observation.Rank == 0, "CURRENT actual root observation")
 			}
 			calls := 0
 			next := w.s.View(func(*mdbx.Reader) error { calls++; return nil })
-			consumed := scenario == mdbx.SelectedDamageGetEIO || mode == "root-malformed"
+			consumed := scenario == mdbx.SelectedDamageGetEIO || scenario == mdbx.SelectedDamageAbortEIO || mode == "root-malformed"
 			if consumed {
 				logicalMDBXAssert(t, any(next) == any(out.Err) && calls == 0, "native consumption was healed")
 			} else {
 				logicalMDBXAssert(t, next == nil && calls == 1, "application source refusal consumed Store")
+			}
+			if mode == "counter-absent" || mode == "counter-absent-abort-IO" {
+				if consumed {
+					w.btWorld.reopen(t)
+				}
+				stepTreeUnchangedV1(t, w, 12)
+				w.read(t, 0, []byte{2}, authority)
+				w.read(t, 0, btMeta(0x11, 1), currentRoot)
+				w.read(t, 0, btMeta(0x11, 2), lagRoot)
+				w.read(t, 0, btMeta(0x10, 1), nil)
+				for _, g := range []uint64{1, 2} {
+					w.read(t, 2, stepKey(g, 12), nil)
+					owner, _ := mdbx.CanonicalOwnerKey(g, w.hashes[12])
+					w.read(t, 7, owner, nil)
+				}
+				w.read(t, 3, w.hashes[12][:], nil)
+				w.read(t, 4, w.hashes[12][:], nil)
+				w.read(t, 5, mdbx.UndoManifestKey(w.hashes[12]), nil)
+				logicalMDBXAssert(t, w.step.path.release == nil && !w.step.path.guarded && w.step.path.dst148 == ([148]byte{}), "required failure retained the source guard")
 			}
 			btReservationsReleased(t, w.owner)
 		})

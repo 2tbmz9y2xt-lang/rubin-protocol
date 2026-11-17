@@ -624,9 +624,12 @@ func (c *replayStepCall) publication148V1() error {
 }
 
 // selectedOnly148V1 permits a qualified local projection only while the raw
-// product contains that exact result and the invocation sentinel alone.
+// product contains that result, its recorded application wrapper and sentinel.
 func (c *replayStepCall) selectedOnly148V1(selected error) bool {
 	for _, part := range genesisMDBXCauses(c.invocation.out.Err) {
+		if any(part) == any(c.invocation.observation.incoming) && initial148SelectedReadV1(part, c.complete148.required.cause) {
+			continue
+		}
 		if any(part) != any(selected) && any(part) != any(c.entry.sentinel) {
 			return false
 		}
