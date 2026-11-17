@@ -697,7 +697,10 @@ type DARelayState struct {
 	mu sync.Mutex
 	// rejectCache is owner-lifetime policy state. Atomic retained-state images
 	// deliberately omit it, and publication leaves the live instance untouched.
-	rejectCache               daRejectCache
+	rejectCache daRejectCache
+	// completionBudget is owner-lifetime volatile state like rejectCache:
+	// retained-state images and publication never copy or replace it.
+	completionBudget          daCompletionBudget
 	mempool                   *Mempool
 	caps                      daRelayCaps
 	prefetch                  daRelayPrefetchState

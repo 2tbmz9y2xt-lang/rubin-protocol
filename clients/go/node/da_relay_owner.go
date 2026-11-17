@@ -193,30 +193,56 @@ func (s *DARelayState) admitDANonReplay(admission *DAAdmission, provenance daPro
 	return s.applyDANonReplayPlan(admission, candidate, plan)
 }
 
+// admitDAComplete runs the RUBIN_COMPACT_BLOCKS.md Section 18.5 step-2a
+// completion budget for a PEER candidate with a captured target before any
+// step-3 work. A nil target or a non-PEER candidate reserves nothing, and a
+// refused reservation returns before step 3; neither runs a settlement. After a
+// successful reservation the single deferred settlement runs on every ordinary
+// return and completion-hook panic after every DA and owner release and before
+// the caller releases the ChainState guard; it also runs on a non-hook panic
+// inside the DA/owner interval, for which no lock order is stated. Only a State
+// C publication returns the charge, every other end (panic included) uses it.
 func (s *DARelayState) admitDAComplete(admission *DAAdmission, snapshot *daCompleteSnapshot) (daRelayAdmissionOutcome, error) {
-	prepared, err := prepareDACompleteSnapshot(snapshot, daRelayAdmissionOutcome{})
+	if snapshot == nil || snapshot.candidate.member.member.provenance.kind != daProvenancePeer {
+		outcome, _, err := s.completeDACandidate(admission, snapshot)
+		return outcome, err
+	}
+	reservation, err := s.completionBudget.reserve(admission.context, snapshot.candidate.member.member.provenance, daCompletionChargeOf(snapshot))
 	if err != nil {
 		return daRelayAdmissionOutcome{}, err
 	}
+	accepted := false
+	defer func() { s.completionBudget.settle(reservation, accepted) }()
+	outcome, plan, err := s.completeDACandidate(admission, snapshot)
+	accepted = err == nil && outcome.disposition == daRelayAdmissionRetained && plan.result.prepared != nil && plan.next.state == daRelayStateCompleteSet
+	return outcome, err
+}
+
+// completeDACandidate returns the applied plan only with a nil error.
+func (s *DARelayState) completeDACandidate(admission *DAAdmission, snapshot *daCompleteSnapshot) (daRelayAdmissionOutcome, *daCompleteCommitPlan, error) {
+	prepared, err := prepareDACompleteSnapshot(snapshot, daRelayAdmissionOutcome{})
+	if err != nil {
+		return daRelayAdmissionOutcome{}, nil, err
+	}
 	plan, err := s.prepareDACompleteCommit(admission, prepared)
 	if err != nil {
-		return daRelayAdmissionOutcome{}, err
+		return daRelayAdmissionOutcome{}, nil, err
 	}
 	if s.completeHook != nil {
 		s.completeHook(daCompletePlanned, plan)
 	}
 	outcome, rejected, err := s.applyDACompleteCommit(admission, plan)
 	if err != nil {
-		return daRelayAdmissionOutcome{}, err
+		return daRelayAdmissionOutcome{}, nil, err
 	}
 	if rejected {
 		if outcome != (daRelayAdmissionOutcome{}) {
-			return daRelayAdmissionOutcome{}, selectRelayDisposition(txAdmitRejected(errDARelayImageIncompatible.Error()), RelayAdmissionInternal)
+			return daRelayAdmissionOutcome{}, nil, selectRelayDisposition(txAdmitRejected(errDARelayImageIncompatible.Error()), RelayAdmissionInternal)
 		}
-		return daRelayAdmissionOutcome{}, selectRelayDisposition(txAdmitUnavailable("DA COMPLETE_SET capacity rejected"), RelayAdmissionCapacity)
+		return daRelayAdmissionOutcome{}, nil, selectRelayDisposition(txAdmitUnavailable("DA COMPLETE_SET capacity rejected"), RelayAdmissionCapacity)
 	}
 	// The sole public caller rejects any other disposition as INTERNAL.
-	return outcome, nil
+	return outcome, plan, nil
 }
 
 type daAdmissionObservationKind uint8
@@ -256,6 +282,16 @@ type daAdmissionObservation struct {
 // AdmitDA admits txBytes using provenance. It returns a zero DAAdmissionResult on error and a retained or duplicate disposition on success.
 // A bound, parsed candidate with tx_nonce 0 returns the stable-terminal TX_ERR_TX_NONCE_INVALID rejection before any guard,
 // retained, cache or owner access (RUBIN_COMPACT_BLOCKS.md Section 5.1 item 3).
+// A PEER completion attempt runs the RUBIN_COMPACT_BLOCKS.md Section 18.5 step 2a reservation before any step-3 work. A declined
+// reservation returns a RelayAdmissionUnavailable decline under the Section 18.5 zero-effect decline postcondition: any Section 5.3
+// miss reconciliation this call made before step 2a and any best-tip renewal made by that step 2a operation stay. A step 2a operation
+// whose charge or limit test overflows, or that observes a changed best tip while any reservation is outstanding, returns
+// RelayAdmissionInternal with the budget unchanged. After a successful reservation only a Section 18.5 step 11 State C acceptance
+// returns the charge; every other end keeps it as used for that quota_identity and globally until a later step 2a operation renews
+// on another best-tip identity. On every ordinary return and completion-hook panic the settlement runs at the Section 18.5 step 12
+// position (after the DA and owner releases, before the ChainState release), or with only the ChainState guard held when the attempt
+// ends in step 3. LOCAL and DETACHED_REORG completions never reach the budget; a PEER completion whose first-DA target snapshot copy
+// fails runs no step 2a operation or settlement and returns the existing retained-image-not-owner-ready error.
 func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (result DAAdmissionResult, err error) {
 	// Registered first so it runs last, after the admission hold is released.
 	// A panicking call has no final result: it is not observed, and its panic
