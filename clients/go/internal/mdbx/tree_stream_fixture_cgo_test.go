@@ -6974,6 +6974,11 @@ func psfBothIdentical(t *testing.T) {
 		}}
 	}
 	evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = psRun(t, sc.s, sc.o, LaneOperation, same) })
+	// The possibly-crossed readback compares under the sealed precommit limit; omitting that seal while the
+	// captured context stays typed turns the readback into the nil-budget capacity refusal.
+	if errors.Is(r.err, errOperationReservationCapacity) {
+		t.Fatalf("scope missing budget admitted: readback %v", r.err)
+	}
 	if evidence.commits != 1 || evidence.drift != 0 || r.truth != 1 || r.stage != 3 {
 		t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
 	}
