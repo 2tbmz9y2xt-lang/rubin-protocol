@@ -136,11 +136,24 @@ func startV1(dir string, id IdentityV1, proof *NewInstallationProofV1, ops fileO
 	return s, nil
 }
 
+// acquireDirectoryV1 binds the normalized path before acquiring its directory inode.
+func acquireDirectoryV1(dir string) (string, *filelock.Handle, filelock.Result, error) {
+	var err error
+	if dir != "" {
+		dir, err = filepath.Abs(dir)
+	}
+	if err != nil {
+		return "", nil, filelock.ResultInvalidOrUnopenable, err
+	}
+	h, result, err := filelock.AcquireDirectory(dir)
+	return dir, h, result, err
+}
+
 // acquireV1 accepts only a real held directory inode owner.
 func (s *Store) acquireV1(op string) *ErrorV1 {
-	h, result, err := filelock.AcquireDirectory(s.dir)
+	dir, h, result, err := acquireDirectoryV1(s.dir)
 	if h != nil && result == "" && err == nil {
-		s.lock = h
+		s.dir, s.lock = dir, h
 		return nil
 	}
 	code := "unreadable"

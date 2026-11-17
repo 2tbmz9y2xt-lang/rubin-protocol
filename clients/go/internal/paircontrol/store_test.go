@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -76,6 +78,14 @@ func wantLocal(t *testing.T, got ResultV1, err error, op, code string, want Resu
 	return e
 }
 
+func wantResult(t *testing.T, got ResultV1, err error, want ResultV1, label string) {
+	t.Helper()
+	require(t, err)
+	if got != want {
+		t.Fatal(label)
+	}
+}
+
 func wantNilStore(t *testing.T, s *Store, err error, op, code string) *ErrorV1 {
 	t.Helper()
 	if s != nil {
@@ -106,10 +116,7 @@ func TestConstructorsAndReadOnly(t *testing.T) {
 	wantLocal(t, attempt, err, "persist_intent", "refused", ResultV1{1, 0, false})
 	wantRecord(t, s, want)
 	r, err := s.RecoverV1()
-	require(t, err)
-	if r != (ResultV1{}) {
-		t.Fatal("no attempt Recover minted truth")
-	}
+	wantResult(t, r, err, ResultV1{}, "no attempt Recover minted truth")
 	before := diskBytes(t, dir)
 	for range 2 {
 		got, err := s.ObserveV1()
@@ -137,7 +144,7 @@ func TestConstructorsAndReadOnly(t *testing.T) {
 }
 
 func TestConstructorRefusals(t *testing.T) {
-	for _, name := range []string{"zero_identity", "bad_root", "zero_proof", "other_proof", "nonempty", "missing", "malformed", "other_identity", "pending", "symlink", "directory", "oversized", "wrong_mode"} {
+	for _, name := range []string{"zero_identity", "bad_root", "zero_proof", "other_proof", "nonempty", "missing", "malformed", "other_identity", "pending", "symlink", "directory", "oversized", "wrong_mode", "empty_create", "empty_open", "cwd_create", "cwd_open"} {
 		t.Run(name, func(t *testing.T) {
 			dir, id, proof := directory(t), identity(), NewInstallationProofV1{Identity: identity()}
 			creating, code := true, "refused"
@@ -179,6 +186,21 @@ func TestConstructorRefusals(t *testing.T) {
 			case "wrong_mode":
 				code = "unreadable"
 				require(t, os.Chmod(dir, 0o755))
+			case "empty_create", "empty_open", "cwd_create", "cwd_open":
+				creating, code = strings.HasSuffix(name, "create"), "unreadable"
+				if !creating {
+					code = "missing"
+				}
+				if name == "empty_open" {
+					writeFixture(t, dir, fixtureBytes(selected()))
+				}
+				t.Chdir(dir)
+				if strings.HasPrefix(name, "cwd_") {
+					require(t, os.Remove(dir))
+					dir = "relative"
+				} else {
+					dir = ""
+				}
 			}
 			var s *Store
 			var err error
@@ -187,7 +209,13 @@ func TestConstructorRefusals(t *testing.T) {
 			} else {
 				s, err = OpenV1(dir, id)
 			}
-			wantNilStore(t, s, err, map[bool]string{true: "create", false: "open"}[creating], code)
+			e := wantNilStore(t, s, err, map[bool]string{true: "create", false: "open"}[creating], code)
+			if strings.HasPrefix(name, "cwd_") {
+				var cause *os.SyscallError
+				if !errors.As(e.Cause, &cause) || cause.Syscall != "getwd" || cause.Err != syscall.ENOENT {
+					t.Fatal("absolute path failure lost original getwd cause")
+				}
+			}
 		})
 	}
 }

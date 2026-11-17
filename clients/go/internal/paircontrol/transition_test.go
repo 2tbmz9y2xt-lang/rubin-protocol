@@ -27,10 +27,7 @@ func TestReplacementDurability(t *testing.T) {
 				}
 				s, dir := existing(t, v)
 				r, err := s.PersistIntentV1(context.Background(), 17, i, nil)
-				require(t, err)
-				if r != (ResultV1{2, 18, false}) {
-					t.Fatalf("persist result %+v", r)
-				}
+				wantResult(t, r, err, ResultV1{2, 18, false}, "persist result %+v")
 				v.Sequence, v.Intent = 18, &i
 				wantBytes := fixtureBytes(v)
 				if !bytes.Equal(diskBytes(t, dir), wantBytes) {
@@ -83,11 +80,17 @@ func TestRetirementGapAndRetainedRefusal(t *testing.T) {
 		v, i := selected(), replacement()
 		i.Origin = mode
 		s, dir := existing(t, v)
-		r, err := s.PersistIntentV1(context.Background(), 17, i, nil)
-		require(t, err)
-		if r != (ResultV1{2, 18, false}) {
-			t.Fatal("intent was not persisted")
+		if mode == 1 {
+			require(t, s.CloseV1())
+			t.Chdir(filepath.Dir(dir))
+			var err error
+			s, err = OpenV1(filepath.Base(dir), identity())
+			require(t, err)
+			t.Cleanup(func() { require(t, s.CloseV1()) })
+			t.Chdir(directory(t))
 		}
+		r, err := s.PersistIntentV1(context.Background(), 17, i, nil)
+		wantResult(t, r, err, ResultV1{2, 18, false}, "intent was not persisted")
 		v.Sequence, v.Intent = 18, &i
 		r, err = s.RetireV1(context.Background(), 18, i.ID, reference(), nil)
 		if mode == 2 {
@@ -96,10 +99,7 @@ func TestRetirementGapAndRetainedRefusal(t *testing.T) {
 			require(t, s.CloseV1())
 			continue
 		}
-		require(t, err)
-		if r != (ResultV1{2, 19, false}) {
-			t.Fatal("retirement result")
-		}
+		wantResult(t, r, err, ResultV1{2, 19, false}, "retirement result")
 		v.Sequence, v.Selector, v.Selected = 19, 3, nil
 		v.Retired = &RetirementV1{originalPair(), 1, reference()}
 		require(t, s.CloseV1())
@@ -110,10 +110,7 @@ func TestRetirementGapAndRetainedRefusal(t *testing.T) {
 			t.Fatal("control retirement created a destination")
 		}
 		r, err = s.RetireV1(context.Background(), 19, i.ID, reference(), nil)
-		require(t, err)
-		if r != (ResultV1{1, 19, false}) {
-			t.Fatal("same retirement was not no-op OLD")
-		}
+		wantResult(t, r, err, ResultV1{1, 19, false}, "same retirement was not no-op OLD")
 		changed := reference()
 		changed.Opaque = []byte("other-result")
 		r, err = s.RetireV1(context.Background(), 19, i.ID, changed, nil)
@@ -149,10 +146,7 @@ func TestPositiveDamagePreservesExistingOwner(t *testing.T) {
 		r, err = s.RecordDamageV1(context.Background(), 16, originalPair(), reference())
 		wantLocal(t, r, err, "damage", "stale", ResultV1{1, 17, false})
 		r, err = s.RecordDamageV1(context.Background(), 17, originalPair(), reference())
-		require(t, err)
-		if r != (ResultV1{2, 18, false}) {
-			t.Fatal("damage raw control result")
-		}
+		wantResult(t, r, err, ResultV1{2, 18, false}, "damage raw control result")
 		v.Sequence, v.Selector, v.Selected = 18, 3, nil
 		v.Retired = &RetirementV1{originalPair(), 3, reference()}
 		require(t, s.CloseV1())
@@ -160,10 +154,7 @@ func TestPositiveDamagePreservesExistingOwner(t *testing.T) {
 		require(t, err)
 		wantRecord(t, s, v)
 		r, err = s.RecordDamageV1(context.Background(), 18, originalPair(), reference())
-		require(t, err)
-		if r != (ResultV1{1, 18, false}) {
-			t.Fatal("same positive disposition not idempotent")
-		}
+		wantResult(t, r, err, ResultV1{1, 18, false}, "same positive disposition not idempotent")
 		afterP, err := p.View()
 		require(t, err)
 		if !reflect.DeepEqual(beforeP, afterP) {
@@ -204,10 +195,7 @@ func TestAdmissionPriorityAndExhaustion(t *testing.T) {
 		t.Fatal("admission refusal changed durable preimage")
 	}
 	r, err = s.PersistIntentV1(context.Background(), 17, replacement(), nil)
-	require(t, err)
-	if r != (ResultV1{2, 18, false}) {
-		t.Fatal("fresh legal operation after refusals was not admitted")
-	}
+	wantResult(t, r, err, ResultV1{2, 18, false}, "fresh legal operation after refusals was not admitted")
 	v.Sequence = math.MaxUint64
 	s2, _ := existing(t, v)
 	o2 := installFaults(t, s2)
@@ -231,10 +219,7 @@ func TestAdmissionPriorityAndExhaustion(t *testing.T) {
 		s, dir := existing(t, v)
 		o := installFaults(t, s)
 		r, err := s.PersistIntentV1(context.Background(), math.MaxUint64-1, i, nil)
-		require(t, err)
-		if r != (ResultV1{2, math.MaxUint64, false}) {
-			t.Fatal("last legal increment did not establish NEW/max without latch")
-		}
+		wantResult(t, r, err, ResultV1{2, math.MaxUint64, false}, "last legal increment did not establish NEW/max without latch")
 		v.Sequence, v.Intent = math.MaxUint64, &i
 		wantRecord(t, s, v)
 		before, effects := diskBytes(t, dir), len(o.events)
@@ -415,10 +400,7 @@ func TestCompleteOriginalPairCAS(t *testing.T) {
 					t.Fatal("complete OLD mismatch changed aggregate")
 				}
 				r, err = call(replacement())
-				require(t, err)
-				if r != (ResultV1{2, 18, false}) {
-					t.Fatal("requalified exact OLD was refused")
-				}
+				wantResult(t, r, err, ResultV1{2, 18, false}, "requalified exact OLD was refused")
 			})
 		}
 	}

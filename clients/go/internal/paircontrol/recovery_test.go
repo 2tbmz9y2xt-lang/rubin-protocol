@@ -77,10 +77,7 @@ func TestH1AdmissionAndDetachedBinding(t *testing.T) {
 	v := selected()
 	s, _ := existing(t, v)
 	r, err := s.PersistIntentV1(context.Background(), 17, i, p)
-	require(t, err)
-	if r != (ResultV1{2, 18, false}) {
-		t.Fatal("H1 actual admission did not write NEW")
-	}
+	wantResult(t, r, err, ResultV1{2, 18, false}, "H1 actual admission did not write NEW")
 	v.Sequence, v.Intent = 18, &i
 	want := fixtureBytes(v)
 	i.H1Binding.Diagnosis.Error[0] ^= 1
@@ -104,10 +101,7 @@ func TestH1AdmissionAndDetachedBinding(t *testing.T) {
 	}
 	policyChange(t, p, originalOwner(i), func(tx *policycontrol.Tx) error { return tx.AutoBlock() })
 	r, err = s.EndH1V1(context.Background(), 18, i.ID, p)
-	require(t, err)
-	if r != (ResultV1{2, 19, false}) {
-		t.Fatal("mutated caller/returned backing changed next historical-owner operation")
-	}
+	wantResult(t, r, err, ResultV1{2, 19, false}, "mutated caller/returned backing changed next historical-owner operation")
 }
 
 func TestH1RefusesUnqualifiedCurrentP(t *testing.T) {
@@ -296,15 +290,9 @@ func TestTerminalH1Bookkeeping(t *testing.T) {
 			v := selected()
 			s, dir := existing(t, v)
 			r, err := s.PersistIntentV1(context.Background(), 17, i, p)
-			require(t, err)
-			if r != (ResultV1{2, 18, false}) {
-				t.Fatal("H1 setup intent not NEW")
-			}
+			wantResult(t, r, err, ResultV1{2, 18, false}, "H1 setup intent not NEW")
 			r, err = s.RetireV1(context.Background(), 18, i.ID, reference(), p)
-			require(t, err)
-			if r != (ResultV1{2, 19, false}) {
-				t.Fatal("H1 no-selection retirement not NEW")
-			}
+			wantResult(t, r, err, ResultV1{2, 19, false}, "H1 no-selection retirement not NEW")
 			v.Sequence, v.Selector, v.Selected, v.Intent = 19, 3, nil, &i
 			v.Retired = &RetirementV1{originalPair(), 2, reference()}
 			terminalPolicy(t, p, i, kind)
@@ -364,10 +352,7 @@ func TestTerminalH1Bookkeeping(t *testing.T) {
 			case "unknown":
 				wantLocal(t, r, err, "end_h1", "unresolved", ResultV1{3, 0, true})
 			default:
-				require(t, err)
-				if r != (ResultV1{2, 20, false}) {
-					t.Fatal("terminal bookkeeping result")
-				}
+				wantResult(t, r, err, ResultV1{2, 20, false}, "terminal bookkeeping result")
 				v.Sequence, v.Intent = 20, nil
 			}
 			afterP, err := p.View()
@@ -607,10 +592,7 @@ func TestOriginalObservationSurvivesUnrelatedPAdvances(t *testing.T) {
 	i.H1Binding.ObservedPSequence = view.Sequence
 	s, dir := existing(t, selected())
 	r, err := s.PersistIntentV1(context.Background(), 17, i, p)
-	require(t, err)
-	if r != (ResultV1{2, 18, false}) {
-		t.Fatal("valid epoch below original protected observation was refused")
-	}
+	wantResult(t, r, err, ResultV1{2, 18, false}, "valid epoch below original protected observation was refused")
 	advance("after")
 	v := selected()
 	v.Sequence, v.Intent = 18, &i
@@ -622,10 +604,7 @@ func TestOriginalObservationSurvivesUnrelatedPAdvances(t *testing.T) {
 	}
 	wantRecord(t, s, v)
 	r, err = s.RetireV1(context.Background(), 18, i.ID, reference(), p)
-	require(t, err)
-	if r != (ResultV1{2, 19, false}) {
-		t.Fatal("unrelated latest owner displaced original admission")
-	}
+	wantResult(t, r, err, ResultV1{2, 19, false}, "unrelated latest owner displaced original admission")
 	v.Sequence, v.Selector, v.Selected, v.Intent = 19, 3, nil, &i
 	v.Retired = &RetirementV1{originalPair(), 2, reference()}
 	wantRecord(t, s, v)
@@ -635,10 +614,7 @@ func TestOriginalObservationSurvivesUnrelatedPAdvances(t *testing.T) {
 	wantRecord(t, s, v)
 	policyChange(t, p, originalOwner(i), func(tx *policycontrol.Tx) error { return tx.AutoBlock() })
 	r, err = s.EndH1V1(context.Background(), 19, i.ID, p)
-	require(t, err)
-	if r != (ResultV1{2, 20, false}) {
-		t.Fatal("terminal bookkeeping returned the wrong outer result")
-	}
+	wantResult(t, r, err, ResultV1{2, 20, false}, "terminal bookkeeping returned the wrong outer result")
 	v.Sequence, v.Intent = 20, nil
 	wantRecord(t, s, v)
 	require(t, s.CloseV1())
@@ -660,10 +636,7 @@ func TestNewOuterH1OwnerRejectsHistoricalEnd(t *testing.T) {
 	h.Admission.Destination = leafBytes(newIntent.Destination)
 	h.Admission.Ownership = append([]byte{0, 0, 0, 0, 0, 0, 0, 4}, newIntent.ID[:]...)
 	r, err := s.PersistIntentV1(context.Background(), 19, newIntent, p)
-	require(t, err)
-	if r != (ResultV1{2, 20, false}) {
-		t.Fatal("separately admitted new outer owner was not persisted")
-	}
+	wantResult(t, r, err, ResultV1{2, 20, false}, "separately admitted new outer owner was not persisted")
 	v := selected()
 	v.Sequence, v.Intent = 20, &newIntent
 	for _, expected := range []uint64{18, 20} {
