@@ -3971,7 +3971,13 @@ func tpProfileV1(t *testing.T) {
 			op.Pair.PreserveReplayObservations = true
 			row.edit(&op)
 			slices.SortFunc(op.Pair.Mutations, func(a, b Mutation) int { return treeMutationCmpV1(a, treeRowKeyV1{rank: b.DBI.Rank, key: b.Key}) })
-			tsRefusal(t, tpRunV1(t, s, owner, op, 7), false)
+			result := tpRunV1(t, s, owner, op, 7)
+			if row.name == "inventory" {
+				result.tuple(t, 1, 1, -1)
+				treeNativeError(t, result.err, "update", "InvalidInput", 22, "invalid ENTRY inventory", nil)
+			} else {
+				tsRefusal(t, result, false)
+			}
 			if calls != 0 || s.state != storeOPEN {
 				t.Fatal("unsupported replay reached Source or consumed Store", calls, s.state)
 			}

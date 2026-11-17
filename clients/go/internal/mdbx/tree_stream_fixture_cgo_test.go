@@ -3927,6 +3927,7 @@ func tpContextV1(t *testing.T) {
 					f.op.Pair.ContextConsulted = &CanonicalContextWindowV1{Generation: 9, FirstHeight: 1, Count: 2}
 				}
 				a := treeRoleReplayV1(TreeSourceGenesisReplayV1, TreeProgressNoneV1, ReplayCursorV1{Kind: 2, Height: 4, BlockHash: tdTxid(0xa0)})
+				a.Authority.Lifecycle = StorageLifecycleRecoveryRequiredV1
 				a.Authority.ActiveGenerationID, a.LagGenerationID, a.Authority.NextGenerationID = 7, 8, 10
 				a.Authority.Replay.TargetGenerationID, a.TargetLagGenerationID = 1, 2
 				a.Authority.Replay.Target = RecoveryTargetV1{ChainID: [32]byte{11}, GenesisHash: [32]byte{12}, TipHash: [32]byte{13}, TipHeight: 6, CumulativeChainwork: [40]byte{39: 3}}
