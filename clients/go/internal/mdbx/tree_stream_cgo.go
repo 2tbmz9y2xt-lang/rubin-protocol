@@ -17,7 +17,7 @@ import (
 
 // TreePairV1 contains ordinary non-tree targets and unchanged consulted rows.
 // Mutations and Consulted rows must be strictly (rank, key) ordered in each slice and disjoint. Rank 8
-// is never a Pair row. AfterOldValueRef is forbidden. The operation owns copies
+// is never a Mutations or Consulted row. AfterOldValueRef is forbidden. The operation owns copies
 // after admission. Pair slices, records and Key/Literal bytes remain immutable
 // through the first Source call, or operation completion if no Source is reached.
 type TreePairV1 struct {
@@ -51,9 +51,11 @@ type TreePairV1 struct {
 	// closed-account refusal, the metadata charge refuses with the operation-reservation capacity
 	// error; then a duplicate witness or delete, an uncovered delete, or a delete overlapping a
 	// Mutation or Consulted row is "invalid Update Batch"; the combined Update Batch caps refuse
-	// with "Update Batch exceeds bound"; last, an unknown-kind or not strictly (Kind, Hash) ordered
-	// selector, or a Consulted row inside a selector, is "invalid Update Batch". ObsoleteDeletes
-	// may be unordered.
+	// with "Update Batch exceeds bound"; then an unknown-kind or not strictly (Kind, Hash) ordered
+	// selector, or a Consulted row inside a selector, is "invalid Update Batch"; last, more than
+	// 2391106 coalesced domains, points and selectors, or their control keys above 137676154 bytes,
+	// is "Update Batch exceeds bound". ObsoleteDeletes may be unordered and may delete rank-8 and
+	// generation root rows.
 	ObsoleteDeletes   []ObsoleteRowV1
 	ObsoleteConsulted []ObsoletePageWitnessV1
 	LargeConsulted    []LargeImageSelectorV1
@@ -224,10 +226,10 @@ func (s *TreeDeltaSinkV1) WindowV1() []byte {
 // any native read; then ORIGINAL OLD qualification per ascending offset (index
 // present with 104 bytes, header key not a Pair row nor HeaderSlot.Hash, header
 // present with 148 bytes; "canonical context OLD image is incomplete"). One primitive requires TreeOperation; pair-only plans
-// also admit LaneOperation and need at least one target. Rank 8 and references
-// are forbidden in Pairs, as are primitive-owned undo families and generation
-// root bindings. Meta keys 0, 1, 3 and 0x12 are immutable targets; 2 is literal-only,
-// 0x10 and 0x11 allow literal/delete, and all valid meta keys may be consulted.
+// also admit LaneOperation and need at least one Mutation or ObsoleteDeletes row. Rank 8 and
+// references are forbidden in Pair Mutations and Consulted rows, as are primitive-owned undo
+// families and generation root bindings; ObsoleteDeletes may delete such rows covered by its tokens.
+// Meta keys 0, 1, 3 and 0x12 are immutable targets; 2 is literal-only, 0x10 and 0x11 allow literal/delete, and all valid meta keys may be consulted.
 // Non-reverse Pair caps are 2,391,106 mutations, 137,676,154 key bytes,
 // 155,659,727 literal bytes, 414,634 UTXO deletes, 1,545,454 UTXO literals,
 // 16,384 other mutations and 16,384 consulted rows. Mutation shape/order/value
@@ -430,26 +432,27 @@ func treePrewriteBytesV1(op TreeOperationV1) uint64 {
 // delete key and witness key byte.
 func treeScopeBytesV1(pair *TreePairV1) uint64 {
 	d, w := uint64(len(pair.ObsoleteDeletes)), uint64(len(pair.ObsoleteConsulted))
-	p := uint64(obsoleteWitnessPoints(pair.ObsoleteConsulted))
 	n := treePlanChargeAddV1(treePlanCopyBytesV1(*pair), 1, 4096)
 	n = treePlanChargeAddV1(n, d, 128+8)
 	n = treePlanChargeAddV1(n, w, 176+8+3*32)
-	n = treePlanChargeAddV1(n, p, 32+32)
 	n = treePlanChargeAddV1(n, uint64(len(pair.LargeConsulted)), 33)
 	for _, row := range pair.ObsoleteDeletes {
 		n = treePlanChargeAddV1(n, uint64(len(row.span.key)), 1)
 	}
 	for _, token := range pair.ObsoleteConsulted {
-		n = treePlanChargeAddV1(n, treeWitnessKeyBytesV1(token.scope), 1)
+		n = treeWitnessChargeV1(n, token.scope)
 	}
 	return n
 }
 
-// treeWitnessKeyBytesV1 is the byte length of one witness's domain bounds and point keys.
-func treeWitnessKeyBytesV1(witness *obsoleteWitness) uint64 {
-	n := uint64(len(witness.domain.prefix) + len(witness.domain.after) + len(witness.domain.last))
+// treeWitnessChargeV1 adds one witness's domain bound bytes and, per point, 64 bytes plus its key bytes.
+func treeWitnessChargeV1(n uint64, witness *obsoleteWitness) uint64 {
+	n = treePlanChargeAddV1(n, uint64(len(witness.domain.prefix)), 1)
+	n = treePlanChargeAddV1(n, uint64(len(witness.domain.after)), 1)
+	n = treePlanChargeAddV1(n, uint64(len(witness.domain.last)), 1)
 	for _, point := range witness.points {
-		n += uint64(len(point.key))
+		n = treePlanChargeAddV1(n, 1, 32+32)
+		n = treePlanChargeAddV1(n, uint64(len(point.key)), 1)
 	}
 	return n
 }

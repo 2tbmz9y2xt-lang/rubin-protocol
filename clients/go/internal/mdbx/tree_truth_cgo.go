@@ -437,8 +437,9 @@ func treeSealScopesV1(scopes []largeImageScope, limit uint64) {
 	}
 }
 
-// scopedMatchV1 compares the plan and an optional scope under OLD/write; a scope copy draws from the
-// caller's mutable preflight budget, which stays on the caller's stack.
+// scopedMatchV1 compares an optional scope, excluding the plan's targets, under OLD/write; a nil
+// scope compares nothing. A scope copy draws from the caller's mutable preflight budget, which
+// stays on the caller's stack.
 func (t *treeSectionV1) scopedMatchV1(pair []ownedMutation, budget *treePairReadBudgetV1, scope *largeImageScope) error {
 	if scope == nil {
 		return updateNativeScopedMatch(t.old, t.write, t.handles, pair, nil, "OLD/write snapshot mismatch")

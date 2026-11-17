@@ -423,6 +423,8 @@ func (stream *largeResidualStream) next() (largeNativeRow, error) {
 			return row, err
 		}
 		stream.done = stream.selector.Kind == LargeImageBlockBodyV1
+		// The consumed seek is dropped before the successor copy is built.
+		stream.seek = nil
 		stream.seek = largeImageAdvance(row.key, stream.reader.maxKey)
 		if !stream.excluded(row.key) {
 			return row, nil
@@ -488,22 +490,22 @@ func largeDomainEqual(old, candidate *Reader, selector LargeImageSelectorV1, pla
 	}
 }
 
-func largeResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ownedMutation) (bool, error) {
+func largeResidualEqual(old, candidate *Reader, scope *largeImageScope, plan []ownedMutation) (bool, error) {
 	if err := scope.fundV1(); err != nil {
 		return false, err
 	}
-	equal, err := contextEqual(old, candidate, scope)
+	equal, err := contextEqual(old, candidate, *scope)
 	if err != nil {
 		return false, err
 	}
 	for _, selector := range scope.selectors {
-		match, err := largeDomainEqual(old, candidate, selector, plan, &scope)
+		match, err := largeDomainEqual(old, candidate, selector, plan, scope)
 		if err != nil {
 			return false, err
 		}
 		equal = equal && match
 	}
-	return obsoleteResidualEqual(old, candidate, &scope, plan, equal)
+	return obsoleteResidualEqual(old, candidate, scope, plan, equal)
 }
 
 func obsoleteResidualEqual(old, candidate *Reader, scope *largeImageScope, plan []ownedMutation, equal bool) (bool, error) {
