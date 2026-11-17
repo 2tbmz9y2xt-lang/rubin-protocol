@@ -4809,7 +4809,7 @@ func psOrdinaryFirst(t *testing.T) {
 	})
 	treeNativeError(t, r.err, "update", "InvalidInput", 22, "unpaired canonical owner mutation", nil)
 	r.tuple(t, 1, 1, -1)
-	tsConsumed(t, s, o, 1, s.terminal)
+	tsConsumed(t, s, o, 1, r.err)
 }
 
 // Zero, fabricated and earlier-invocation tokens refuse before any charge.

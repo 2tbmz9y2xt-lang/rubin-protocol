@@ -6856,6 +6856,169 @@ func psfClassDeletes(t *testing.T) {
 	sc.image(t, reopened, false)
 }
 
+// With the account closed before the hold, the physical-scope shape, count and provenance rows win
+// over the saved closed-account refusal; a valid raw-only plan returns that saved refusal, which
+// precedes the metadata charge.
+func psfClosedBeforeHold(t *testing.T) {
+	for _, mode := range []string{"shape", "count", "provenance", "valid"} {
+		t.Run(mode, func(t *testing.T) {
+			s, _, o := psStore(t)
+			kind := LaneOperation
+			if mode == "shape" {
+				kind = TreeOperation
+			}
+			var closed *OperationAccount
+			mustEnvironment(t, o.WithOperation(kind, func(a *OperationAccount) error {
+				closed = a
+				return nil
+			}))
+			var result tsResult
+			calls := 0
+			func() {
+				var unwind treeUnwindV1
+				defer func() { unwind.resumeV1() }()
+				s.operations.Lock()
+				defer s.operations.Unlock()
+				result.truth, result.stage, result.index, unwind, result.err = s.treeEntryLockedV1(closed, func(r *Reader) (TreeOperationV1, error) {
+					calls++
+					op := psRawDelete(t, 9)(r)
+					switch mode {
+					case "count":
+						op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881)
+					case "provenance":
+						op.Pair.ObsoleteDeletes = []ObsoleteRowV1{{}}
+					}
+					return op, nil
+				})
+			}()
+			switch mode {
+			case "valid":
+				result.tuple(t, 1, 1, -1)
+				if any(result.err) != any(errOperationReservationInput) {
+					t.Fatalf("saved original hold singleton replaced: %v", result.err)
+				}
+			case "count":
+				tsRefusal(t, result, true)
+			default:
+				tsRefusal(t, result, false)
+			}
+			if calls != 1 || s.state != storeOPEN || reservationLive(o) != 0 {
+				t.Fatalf("fallback callback/cleanup count: calls%d %s live%d", calls, s.state, reservationLive(o))
+			}
+			tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), tsCounterLiteral(9, 1))
+			tsFollowing(t, s, o)
+		})
+	}
+}
+
+// Every physical-scope admission refusal, before and after the metadata charge, aborts ORIGINAL OLD
+// exactly once, reaches no commit and leaves the Store OPEN with its rows unchanged.
+func psfAdmissionAborts(t *testing.T) {
+	key := tsCounterKey(9)
+	rows := []struct {
+		name     string
+		capacity bool
+		build    func(*Reader) TreeOperationV1
+	}{
+		{"shape", false, func(r *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(r)
+			op.Pair.PrepaidReadBytes = 1
+			return op
+		}},
+		{"count", true, func(r *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(r)
+			op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881)
+			return op
+		}},
+		{"provenance", false, func(r *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(r)
+			op.Pair.ObsoleteDeletes = []ObsoleteRowV1{{}}
+			return op
+		}},
+		{"duplicate witness", false, func(r *Reader) TreeOperationV1 {
+			page := psScope(t, r, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: page.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness, page.Witness}}}
+		}},
+		{"duplicate delete", false, func(r *Reader) TreeOperationV1 {
+			page := psScope(t, r, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: []ObsoleteRowV1{page.Rows[0], page.Rows[0]}, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness}}}
+		}},
+		{"uncovered", false, func(r *Reader) TreeOperationV1 {
+			covered, other := psScope(t, r, 10), psScope(t, r, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: other.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{covered.Witness}}}
+		}},
+		{"target overlap", false, func(r *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(r)
+			op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 2, Literal: tsCounterLiteral(9, 2)}}
+			return op
+		}},
+		{"consulted overlap", false, func(r *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(r)
+			op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: key}}
+			return op
+		}},
+		{"selector order", false, func(r *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(r)
+			op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 2}, {Kind: 1}}
+			return op
+		}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			s, _, o := psStore(t)
+			var r tsResult
+			evidence := ctxTreeFault(t, s, 12, 0, []byte{9}, func() { r = psRunG(t, s, o, LaneOperation, psPageGrant+33*2881, row.build) })
+			psRefused(t, s, r, row.capacity, row.name)
+			if evidence.aborts != 1 || evidence.commits != 0 {
+				t.Fatalf("scope next operation differs: %s OLD abort %+v", row.name, evidence)
+			}
+			tsFollowing(t, s, o)
+		})
+	}
+}
+
+// Ordinary UTXO deletes and one raw UTXO-class delete share the UTXO delete cap 414634: 414634
+// ordinary rows plus the raw row exceed it after the metadata charge and abort ORIGINAL OLD; 414633
+// plus the raw row pass the cap and reach a later refusal.
+func psfCombinedUTXOCap(t *testing.T) {
+	for _, n := range []int{414_634, 414_633} {
+		s, _, o := psStore(t)
+		raw := append(obsoleteGenerationLiteral(9), 0x44)
+		treeNativeSeed(t, s, 1, raw, []byte{0xde})
+		backing := make([]byte, 44*n)
+		mutations := make([]Mutation, n)
+		for i := range mutations {
+			k := backing[44*i : 44*(i+1) : 44*(i+1)]
+			binary.BigEndian.PutUint64(k, 1000+uint64(i))
+			mutations[i] = Mutation{DBI: TreeSchemaV1DBIs()[1], Key: k, BeforePresent: true, AfterKind: AfterAbsent}
+		}
+		grant := psPageGrant + uint64(n)*(uint64(unsafe.Sizeof(Mutation{}))+44)
+		var r tsResult
+		evidence := ctxTreeFault(t, s, 12, 0, []byte{9}, func() {
+			r = psRunG(t, s, o, LaneOperation, grant, func(reader *Reader) TreeOperationV1 {
+				page, err := reader.ObsoleteGenerationPageV1(9, ObsoleteUTXOV1, nil, 1)
+				mustEnvironment(t, err)
+				if len(page.Rows) != 1 {
+					t.Fatalf("UTXO page rows%d, want1", len(page.Rows))
+				}
+				return TreeOperationV1{Pair: TreePairV1{Mutations: mutations, ObsoleteDeletes: page.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness}}}
+			})
+		})
+		if n == 414_634 {
+			psRefused(t, s, r, true, "combined UTXO delete cap")
+			if evidence.aborts != 1 || evidence.commits != 0 {
+				t.Fatalf("scope next operation differs: UTXO cap OLD abort %+v", evidence)
+			}
+			psfRaw(t, s, 1, raw, []byte{0xde})
+			continue
+		}
+		// At the bound admission completes and the refusal comes from the write section.
+		if engine, direct := directTestEngineError(r.err); r.err == nil || r.stage != UpdateStageWriteStartedDefinitelyPrecommit || s.state != storeCLOSED || (direct && engine.Diagnostic == "Update Batch exceeds bound") {
+			t.Fatalf("combined UTXO delete cap refused at its bound: stage%d %s %v", r.stage, s.state, r.err)
+		}
+	}
+}
+
 // A Reader EIO inside the callback stays the result whether the callback ignores, returns or wraps
 // it with a physical-scope plan whose selector count is above its bound; the scope is never read.
 func psfCallbackReaderError(t *testing.T) {
@@ -6898,7 +7061,7 @@ func psfCallbackReaderError(t *testing.T) {
 			if reservationLive(o) != 0 {
 				t.Fatal("scope grant leaked", reservationLive(o))
 			}
-			tsConsumed(t, s, o, 1, s.terminal)
+			tsConsumed(t, s, o, 1, r.err)
 		})
 	}
 }
@@ -7075,6 +7238,9 @@ func psfDormant(t *testing.T) {
 }
 
 func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
+	t.Run("pre-hold-close-window", psfClosedBeforeHold)
+	t.Run("admission-aborts", psfAdmissionAborts)
+	t.Run("combined-utxo-cap", psfCombinedUTXOCap)
 	t.Run("large-domains", psfLargeDomains)
 	t.Run("target-in-family", psfTargetInFamily)
 	t.Run("both-identical-OLD-first", psfBothIdentical)
