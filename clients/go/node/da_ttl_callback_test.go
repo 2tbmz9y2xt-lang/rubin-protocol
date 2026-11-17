@@ -226,6 +226,28 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			token := r.setup.sets[r.stateAID].chunks[0].member.token
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.byToken[token].finalized = false })
 		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		// A survivor is no victim, so only the member proof's outpoint-row comparison sees a
+		// missing or different row for its input.
+		{"survivor outpoint row missing", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { delete(o.byOutpoint, r.stateA.inputs[0]) })
+		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		{"survivor outpoint row different", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) {
+				row := o.byOutpoint[r.stateA.inputs[0]]
+				row.txid[0] ^= 0xff
+				o.byOutpoint[r.stateA.inputs[0]] = row
+			})
+		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		// An expiring member is a victim, so the victim preflight's input match refuses the same
+		// edit first.
+		{"expiring outpoint row different", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.setOwnerReadyTTL(r.stateAID, 1)
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) {
+				row := o.byOutpoint[r.stateA.inputs[0]]
+				row.txid[0] ^= 0xff
+				o.byOutpoint[r.stateA.inputs[0]] = row
+			})
+		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "DA victim input mismatch") }},
 		{"revision above the high-water", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			f.mutateRelay(func(s *DARelayState) { s.records = s.relations.recordValue(r.stateAID).revision - 1 })
 		}, daTTLWrapped(errDARelayImageIncompatible, "revision")},

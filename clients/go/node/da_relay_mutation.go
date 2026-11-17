@@ -1080,9 +1080,13 @@ type ownerReadyTTLPlan struct {
 // revision and received time at or below the stored high-waters), every locator row, the
 // record's per-da_id orphan byte entry against its own accounting, the stored staged, orphan,
 // commit-overhead and per-peer totals and the per-da_id entry count against the selected
-// records' sums (those records are their only contributors), and every selected member's exact
-// owner token. On success each selected record with a count above one decreases by one with one
-// fresh revision, and each record at count one is removed with the owner-ready expiry effect:
+// records' sums (those records are their only contributors). On a bound relay it then checks
+// every selected member's token (non-zero, this owner's, held once, each input named once) and,
+// under the owner lock, every expiring member's victim claim and inputs and every selected
+// member's exact owner-token claim and the owner row of each of its inputs. On an unbound relay
+// (nil mempool) no claim domain is reachable, so that arm reads no owner token, claim or row.
+// On success each selected record with a count above one decreases by one with one fresh
+// revision, and each record at count one is removed with the owner-ready expiry effect:
 // members, locator rows, accounting, prefetch reservation and, on a bound relay, finalized
 // owner claims. On failure it changes nothing, releases every relation reservation it prepared
 // exactly once (discard) and returns its own error. Postcondition: no DA record, locator,
