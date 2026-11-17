@@ -984,6 +984,23 @@ func TestTreeStreamDirectionRelationV1(t *testing.T) {
 }
 
 func TestTreeStreamResourceLayoutV1(t *testing.T) {
+	// RUB-1663 derived 64-bit layouts (changed and new types), observed before the census below.
+	for _, row := range []struct{ got, want uintptr }{
+		{unsafe.Sizeof(TreeOperationV1{}), 184},
+		{unsafe.Sizeof(treePlanV1{}), 160},
+		{unsafe.Sizeof(TreePairV1{}), 144},
+		{unsafe.Sizeof(largeImageScope{}), 240},
+		{unsafe.Sizeof(obsoleteDomain{}), 88},
+		{unsafe.Sizeof(obsoletePoint{}), 32},
+		{unsafe.Sizeof(ObsoleteRowV1{}), 8},
+		{unsafe.Sizeof(ObsoletePageWitnessV1{}), 8},
+		{unsafe.Sizeof(LargeImageSelectorV1{}), 33},
+		{unsafe.Sizeof(ConfigV1{}), 48},
+	} {
+		if row.got != row.want {
+			t.Fatalf("scope fixed control census differs: layout%d want%d", row.got, row.want)
+		}
+	}
 	for _, row := range []struct{ got, want uintptr }{
 		{unsafe.Sizeof(ownedMutation{}), 128},
 		{unsafe.Sizeof(ownedConsulted{}), 48},
@@ -996,16 +1013,6 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 		{unsafe.Sizeof(treeSectionV1{}), 168},
 		{unsafe.Sizeof(treeScopeV1{}), 504},
 		{unsafe.Sizeof(treeComposeV1{}), 112},
-		{unsafe.Sizeof(TreeOperationV1{}), 184},
-		{unsafe.Sizeof(treePlanV1{}), 160},
-		{unsafe.Sizeof(TreePairV1{}), 144},
-		{unsafe.Sizeof(largeImageScope{}), 240},
-		{unsafe.Sizeof(obsoleteDomain{}), 88},
-		{unsafe.Sizeof(obsoletePoint{}), 32},
-		{unsafe.Sizeof(ObsoleteRowV1{}), 8},
-		{unsafe.Sizeof(ObsoletePageWitnessV1{}), 8},
-		{unsafe.Sizeof(LargeImageSelectorV1{}), 33},
-		{unsafe.Sizeof(ConfigV1{}), 48},
 		{unsafe.Sizeof(Reader{}), 216},
 		{unsafe.Sizeof(treePublicEntryV1{}), 40},
 		{unsafe.Sizeof(operationHold{}), 24},
