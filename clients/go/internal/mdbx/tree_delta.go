@@ -376,69 +376,6 @@ func (d *treeDeltaV1) groupFirstV1(e *treeDescV1) (*treeDescV1, bool) {
 	return g, g == e
 }
 
-func (d *treeDeltaV1) applyV1(emit treeEmitterV1) error {
-	r := d.rec
-	if !r.body.pair {
-		err := emit.referV1(schemaDBIs[4], d.keys.block[:])
-		if err != nil {
-			return err
-		}
-	}
-	for s := range r.descs {
-		e := d.eventAtV1(s)
-		g, first := d.groupFirstV1(e)
-		if !first {
-			continue
-		}
-		err := d.applyGroupV1(emit, g)
-		if err != nil {
-			return err
-		}
-	}
-	if err := d.familyRowV1(emit, d.manifestKeyV1(), d.keys.manifest[:]); err != nil {
-		return err
-	}
-	if d.rec.observation == nil {
-		return nil
-	}
-	return emit.emitV1(treeTargetV1{dbi: schemaDBIs[0], key: d.keys.counterKey[:], after: treeImageV1{present: true, value: d.keys.counter[:]}})
-}
-
-// applyGroupV1 emits one group's effects at its first event in the S11 order.
-func (d *treeDeltaV1) applyGroupV1(emit treeEmitterV1, g *treeDescV1) error {
-	spend := g.kind == treeSpendV1
-	if spend && d.forwardV1() {
-		err := d.forwardFamilyV1(emit, g)
-		if err != nil {
-			return err
-		}
-	}
-	err := d.utxoEffectV1(emit, g)
-	if err != nil || !spend || d.forwardV1() {
-		return err
-	}
-	return d.familyRowV1(emit, d.entryKeyV1(g), nil)
-}
-
-// forwardFamilyV1 borrows one original value only for a missing-family write.
-func (d *treeDeltaV1) forwardFamilyV1(emit treeEmitterV1, g *treeDescV1) error {
-	if !d.rec.referenceOnly || d.familyEffectV1() != treeEffectPresentV1 {
-		return d.familyRowV1(emit, d.entryKeyV1(g), g.img)
-	}
-	image, err := d.original.getV1(schemaDBIs[1], d.utxoKeyV1(g))
-	if err != nil {
-		return err
-	}
-	if !image.present || !treeUTXOValueOKV1(image.value) {
-		return treeIntegrity(operationUpdate, errSchema)
-	}
-	if err := d.rec.ledger.chargeV1(treeValueBytesV1); err != nil {
-		return err
-	}
-	defer d.rec.ledger.releaseV1(treeValueBytesV1)
-	return d.familyRowV1(emit, d.entryKeyV1(g), image.value)
-}
-
 // familyRowV1 emits one own-family row's effect; value is the present-target value (forward entry or manifest).
 func (d *treeDeltaV1) familyRowV1(emit treeEmitterV1, key, value []byte) error {
 	switch d.familyEffectV1() {
