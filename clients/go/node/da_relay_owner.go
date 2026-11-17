@@ -282,7 +282,7 @@ type daAdmissionObservation struct {
 // AdmitDA admits txBytes using provenance. It returns a zero DAAdmissionResult on error and a retained or duplicate disposition on success.
 // A bound, parsed candidate with tx_nonce 0 returns the stable-terminal TX_ERR_TX_NONCE_INVALID rejection before any guard,
 // retained, cache or owner access (RUBIN_COMPACT_BLOCKS.md Section 5.1 item 3).
-// A PEER completion attempt whose completion budget declines returns a RelayAdmissionUnavailable rejection, and one whose budget
+// A PEER completion attempt whose completion budget declines returns a RelayAdmissionUnavailable decline, and one whose budget
 // operation overflows or finds a changed best tip with reserved work returns RelayAdmissionInternal, each before any step-3 work;
 // LOCAL and DETACHED_REORG completions never reach the budget (RUBIN_COMPACT_BLOCKS.md Section 18.5 step 2a).
 func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (result DAAdmissionResult, err error) {
