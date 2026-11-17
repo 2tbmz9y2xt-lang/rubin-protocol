@@ -726,19 +726,36 @@ func icbGenesisInputV1(t *testing.T, flip int) (initial148CompleteBlockInputV1, 
 func TestInitial148ReplayCompleteBlockV1(t *testing.T) {
 	t.Run("entry-input", func(t *testing.T) {
 		w := btNew(t)
-		run := func(func(*mdbx.Reader, initial148CompleteBlockInputV1) (*initial148CompleteBlockResultV1, error)) error { t.Fatal("invalid entry ran"); return nil }
-		for _, a := range []*mdbx.OperationAccount{nil, {}} {
-			out, err := withInitial148ReplayCompleteBlockV1(a, run)
-			logicalMDBXAssert(t, err != nil && !out.attempted && out.validationErr == nil, "invalid account entered delayed frame")
-		}
+		authority := rtImageRow(t, w, []byte{2})
+		runCalls := 0
+		out, err := withInitial148ReplayCompleteBlockV1(nil, func(func(*mdbx.Reader, initial148CompleteBlockInputV1) (*initial148CompleteBlockResultV1, error)) error { runCalls++; return nil })
+		failure, ok := err.(*logicalStateFailure)
+		logicalMDBXAssert(t, ok && failure.kind == logicalStateFailureLocalInvariant && failure.Error() == "invalid complete initial148 request" && out == (initial148CompleteBlockOutcomeV1{}) && runCalls == 0, "nil account direct guard")
 		var closed *mdbx.OperationAccount
 		icbWithAccountV1(t, w, func(a *mdbx.OperationAccount) {
 			closed = a
 			out, err := withInitial148ReplayCompleteBlockV1(a, nil)
-			logicalMDBXAssert(t, err != nil && !out.attempted && out.validationErr == nil, "nil run entered frame")
+			failure, ok := err.(*logicalStateFailure)
+			logicalMDBXAssert(t, ok && failure.kind == logicalStateFailureLocalInvariant && failure.Error() == "invalid complete initial148 request" && out == (initial148CompleteBlockOutcomeV1{}), "nil run direct guard")
 		})
-		out, err := withInitial148ReplayCompleteBlockV1(closed, run)
-		logicalMDBXAssert(t, err != nil && !out.attempted && out.validationErr == nil, "closed delayed account entered run")
+		for _, a := range []*mdbx.OperationAccount{{}, closed} {
+			var native btResult
+			runCalls, callbackCalls := 0, 0
+			out, err := withInitial148ReplayCompleteBlockV1(a, func(validate func(*mdbx.Reader, initial148CompleteBlockInputV1) (*initial148CompleteBlockResultV1, error)) error {
+				runCalls++
+				native.truth, native.stage, native.index, native.err = w.s.UpdateTreeV1(a, func(reader *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+					callbackCalls++
+					_, err := validate(reader, icbInputV1())
+					return mdbx.TreeOperationV1{}, err
+				})
+				return native.err
+			})
+			engine, ok := err.(*mdbx.EngineError)
+			logicalMDBXAssert(t, runCalls == 1 && callbackCalls == 0 && native.truth == 1 && native.stage == 1 && native.index == -1 && err == native.err && ok && engine.Operation == "update" && engine.Class == "InvalidInput" && engine.Code == 22 && engine.Diagnostic == "closed operation account" && engine.Cause == nil && !engine.ReopenRequired && engine.TreeObservation == nil && out == (initial148CompleteBlockOutcomeV1{}), "opaque invalid account must reach actual native input owner: %+v/%+v", native, out)
+			w.read(t, 0, []byte{2}, authority)
+			for _, g := range []uint64{1, 2} { btState(t, w, g, mdbx.TreeEndpointV1{}, map[Outpoint]UtxoEntry{}) }
+			rpFollowing(t, w)
+		}
 		btReservationsReleased(t, w.owner)
 	})
 	for _, mode := range []string{"success", "nil-cap", "nil-registry", "rotation", "identity", "height-context", "target", "validation", "unused", "earlier", "second", "ignored", "admission-second", "ignored-admission"} {

@@ -84,7 +84,7 @@ func withInitial148ReplayCompleteBlockV1(account *mdbx.OperationAccount, run fun
 	}
 	f := &initial148CompleteBlockFrameV1{account: account, reduce: func() error { return nil }}
 	used := false
-	err := account.WithReservation(0, func() error { return f.runV1(func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+	err := f.runV1(func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
 		err := run(func(reader *mdbx.Reader, input initial148CompleteBlockInputV1) (*initial148CompleteBlockResultV1, error) {
 			if !f.active || used {
 				return nil, localLogicalStateFailure("complete initial148 validate is not available")
@@ -102,7 +102,7 @@ func withInitial148ReplayCompleteBlockV1(account *mdbx.OperationAccount, run fun
 			return err
 		}
 		return f.outcome.validationErr
-	}) })
+	})
 	if err == nil {
 		err = f.outcome.validationErr
 	}

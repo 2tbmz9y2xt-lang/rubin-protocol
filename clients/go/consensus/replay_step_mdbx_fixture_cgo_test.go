@@ -21,6 +21,7 @@ func TestReplayStepTreeV1Fixture(t *testing.T) {
 	t.Run("R9_LAG", testStepTreeLagV1)
 	t.Run("A3_R4_R5_H1", testStepTreeUndoV1)
 	t.Run("R6_H1_capacity_abort", testStepTreeCapacityAbortV1)
+	t.Run("R6_floor", testStepTreeFloorV1)
 	t.Run("H1_H3_native", testStepTreeNativeV1)
 	t.Run("A5_R9_H2", testStepTreeContextFaultV1)
 	t.Run("H1_unwind", testStepTreeUnwindV1)
@@ -231,6 +232,65 @@ func testStepTreeUndoV1(t *testing.T) {
 			for _, g := range []uint64{1, 2} { btState(t, w.btWorld, g, w.endpoint(199), w.rows) }
 			btReservationsReleased(t, w.owner)
 		})
+	}
+}
+
+// testStepTreeFloorV1 reaches public STEP before funding; bare account tests
+// cannot detect a zero-charge admission inserted outside the native operation.
+func testStepTreeFloorV1(t *testing.T) {
+	for _, limit := range []uint64{0, 805306367} {
+		for _, authority := range []string{"replay", "not-applicable", "malformed"} {
+			t.Run(fmt.Sprintf("limit%d/%s", limit, authority), func(t *testing.T) {
+				w := stepTreeNewV1(t, 0, 0, nil)
+				if authority == "not-applicable" {
+					w.a.Authority.Phase, w.a.Authority.Lifecycle, w.a.Authority.Replay = mdbx.StoragePhaseNoneV1, mdbx.StorageLifecycleStableV1, nil
+					w.a.TargetLagGenerationID, w.a.SourceKind = 0, mdbx.TreeSourceNoneV1
+					w.setAuthority(t)
+				}
+				before := rtImageRow(t, w.btWorld, []byte{2})
+				if authority == "malformed" { stepTreeSeedV1(t, w, 0, []byte{2}, []byte{0xff}) }
+				owner, err := mdbx.NewOperationReservationOwner(limit)
+				logicalMDBXAssert(t, err == nil, "valid below-floor owner")
+				w.owner = owner
+				var out ReplayStepOutcomeV1
+				evidence, err := mdbx.FixtureSelectedDamage(w.s, owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = w.call(0) })
+				logicalMDBXAssert(t, err == nil && out.NativeCalled && evidence.BeginOld == 1 && evidence.OldGets[0] == 1 && evidence.BeginWrite == 0 && evidence.BeginRead == 0 && evidence.Commits == 0 && evidence.Deletes == 0 && evidence.NodeGets == 0 && evidence.NodePulls == 0 && evidence.OldPulls == ([8]uint64{}), "below-floor STEP must read actual authority before funding: %+v/%+v/%v", out, evidence, err)
+				for rank := 1; rank < len(evidence.OldGets); rank++ { logicalMDBXAssert(t, evidence.OldGets[rank] == 0, "postauthority data rank%d read before successful precheck", rank) }
+				logicalMDBXAssert(t, out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT" && out.CanonicalTruth == "OLD" && out.Height == 0 && out.Block == ([32]byte{}) && !out.HasObservation && out.Observation == (mdbx.TreeObservationV1{}) && out.Needed == nil, "authority/funding exact raw position: %+v", out)
+				switch authority {
+				case "replay":
+					logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(out.Cause) && out.Err == out.Cause && out.Result == "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)" && out.Decision == "", "in-callback below-floor direct capacity: %+v", out)
+				case "not-applicable":
+					logicalMDBXAssert(t, out.Err != nil && out.Cause == nil && out.Result == "" && out.Decision == "not applicable", "earlier authority decision precedes below-floor capacity: %+v", out)
+				case "malformed":
+					engine, ok := out.Cause.(*mdbx.EngineError)
+					logicalMDBXAssert(t, ok && out.Err == out.Cause && out.Result == selectedSideIntegrity && out.Decision == "" && engine.Operation == "get" && engine.Class == "Integrity" && engine.Code == -30796 && engine.Diagnostic == "invalid tree native representation" && engine.Cause != nil && !engine.ReopenRequired && engine.TreeObservation == nil, "earlier malformed authority retains exact native integrity: %+v", out)
+				}
+				logicalMDBXAssert(t, w.step.path.slot == nil && w.step.path.release == nil && !w.step.path.guarded && w.step.path.dst148 == ([148]byte{}) && w.view.versions == 0 && w.view.protects == 0 && w.view.headerCalls == 0 && w.view.releases == 0 && mdbx.FixtureReservationLive(owner) == 0, "refused funding reached PATH or retained gross")
+				calls := 0
+				next := w.s.View(func(*mdbx.Reader) error { calls++; return nil })
+				if authority == "malformed" { logicalMDBXAssert(t, calls == 0 && next == out.Err, "native authority failure consumption was healed")
+				} else {
+					logicalMDBXAssert(t, calls == 1 && next == nil, "capacity/application abort consumed healthy Store")
+					w.read(t, 0, []byte{2}, before)
+					for _, g := range []uint64{1, 2} {
+						btState(t, w.btWorld, g, mdbx.TreeEndpointV1{}, map[Outpoint]UtxoEntry{})
+						w.read(t, 2, stepKey(g, 0), nil)
+						key, _ := mdbx.CanonicalOwnerKey(g, w.hashes[0]); w.read(t, 7, key, nil)
+					}
+					w.read(t, 3, w.hashes[0][:], nil); w.read(t, 4, w.hashes[0][:], nil); w.read(t, 5, mdbx.UndoManifestKey(w.hashes[0]), nil)
+				}
+				callback := 0
+				primary := errors.New("next below-floor operation")
+				err = owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+					truth, stage, index, got := w.s.UpdateTreeV1(a, func(*mdbx.Reader) (mdbx.TreeOperationV1, error) { callback++; return mdbx.TreeOperationV1{}, primary })
+					want, count := primary, 1; if authority == "malformed" { want, count = out.Err, 0 }
+					logicalMDBXAssert(t, truth == 1 && stage == 1 && index == -1 && got == want && callback == count, "actual next Store/account operation: %d/%d/%d/%v", truth, stage, index, got)
+					return nil
+				})
+				logicalMDBXAssert(t, err == nil && mdbx.FixtureReservationLive(owner) == 0, "next operation leaked gross funding")
+			})
+		}
 	}
 }
 
