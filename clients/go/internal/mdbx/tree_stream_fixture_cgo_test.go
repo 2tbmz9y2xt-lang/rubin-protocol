@@ -7209,6 +7209,21 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 			psfRaw(t, reopened, 8, row.key, row.value)
 		}
 	})
+	t.Run("N8-larger-candidate-preflight", func(t *testing.T) {
+		// The first write-snapshot get reports the body one byte longer than ORIGINAL OLD. The length
+		// mismatch is inequality, not a funded payload comparison (which would refuse with capacity).
+		// Fixture mode 31 fires at preflight, the first write_txn get; it does not reach final/readback.
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 31, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		if evidence.gets != 1 || evidence.commits != 0 || r.stage != 1 {
+			t.Fatalf("scope sealed window grew: %+v stage%d %v", evidence, r.stage, r.err)
+		}
+		r.tuple(t, 1, 1, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		sc.image(t, tsReopen(t, sc.s, sc.path), false)
+	})
 	t.Run("M15-equal-digest-other-generation", func(t *testing.T) {
 		// Only the generation-9 one-leaf is a target; the generation-8 node domain is also compared and its
 		// one-leaf holds a byte-equal value under another generation key. That row drifts at the write snapshot.
