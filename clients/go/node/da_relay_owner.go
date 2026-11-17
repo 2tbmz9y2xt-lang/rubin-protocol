@@ -193,30 +193,52 @@ func (s *DARelayState) admitDANonReplay(admission *DAAdmission, provenance daPro
 	return s.applyDANonReplayPlan(admission, candidate, plan)
 }
 
+// admitDAComplete runs the RUBIN_COMPACT_BLOCKS.md Section 18.5 step-2a
+// completion budget for a PEER candidate with a captured target before any
+// step-3 work. The single deferred settlement runs after every DA and owner
+// release and before the caller releases the ChainState guard; only a State C
+// publication returns the charge, every other end (panic included) uses it.
 func (s *DARelayState) admitDAComplete(admission *DAAdmission, snapshot *daCompleteSnapshot) (daRelayAdmissionOutcome, error) {
-	prepared, err := prepareDACompleteSnapshot(snapshot, daRelayAdmissionOutcome{})
+	if snapshot == nil || snapshot.candidate.member.member.provenance.kind != daProvenancePeer {
+		outcome, _, err := s.completeDACandidate(admission, snapshot)
+		return outcome, err
+	}
+	reservation, err := s.completionBudget.reserve(admission.context, snapshot.candidate.member.member.provenance, daCompletionChargeOf(snapshot))
 	if err != nil {
 		return daRelayAdmissionOutcome{}, err
 	}
+	accepted := false
+	defer func() { s.completionBudget.settle(reservation, accepted) }()
+	outcome, plan, err := s.completeDACandidate(admission, snapshot)
+	accepted = err == nil && outcome.disposition == daRelayAdmissionRetained && plan.result.prepared != nil && plan.next.state == daRelayStateCompleteSet
+	return outcome, err
+}
+
+// completeDACandidate returns the applied plan only with a nil error.
+func (s *DARelayState) completeDACandidate(admission *DAAdmission, snapshot *daCompleteSnapshot) (daRelayAdmissionOutcome, *daCompleteCommitPlan, error) {
+	prepared, err := prepareDACompleteSnapshot(snapshot, daRelayAdmissionOutcome{})
+	if err != nil {
+		return daRelayAdmissionOutcome{}, nil, err
+	}
 	plan, err := s.prepareDACompleteCommit(admission, prepared)
 	if err != nil {
-		return daRelayAdmissionOutcome{}, err
+		return daRelayAdmissionOutcome{}, nil, err
 	}
 	if s.completeHook != nil {
 		s.completeHook(daCompletePlanned, plan)
 	}
 	outcome, rejected, err := s.applyDACompleteCommit(admission, plan)
 	if err != nil {
-		return daRelayAdmissionOutcome{}, err
+		return daRelayAdmissionOutcome{}, nil, err
 	}
 	if rejected {
 		if outcome != (daRelayAdmissionOutcome{}) {
-			return daRelayAdmissionOutcome{}, selectRelayDisposition(txAdmitRejected(errDARelayImageIncompatible.Error()), RelayAdmissionInternal)
+			return daRelayAdmissionOutcome{}, nil, selectRelayDisposition(txAdmitRejected(errDARelayImageIncompatible.Error()), RelayAdmissionInternal)
 		}
-		return daRelayAdmissionOutcome{}, selectRelayDisposition(txAdmitUnavailable("DA COMPLETE_SET capacity rejected"), RelayAdmissionCapacity)
+		return daRelayAdmissionOutcome{}, nil, selectRelayDisposition(txAdmitUnavailable("DA COMPLETE_SET capacity rejected"), RelayAdmissionCapacity)
 	}
 	// The sole public caller rejects any other disposition as INTERNAL.
-	return outcome, nil
+	return outcome, plan, nil
 }
 
 type daAdmissionObservationKind uint8
