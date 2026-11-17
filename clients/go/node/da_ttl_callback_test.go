@@ -1162,16 +1162,19 @@ func TestDATTLCallbackEndToEndGenesisBootstrap(t *testing.T) {
 			relay := engine.DARelayState()
 			require(t, relay != nil, "engine has no bound DA relay")
 			var attempts []string
+			var stages []daTTLStage
+			relay.ttlHook = func(at daTTLStage) { stages = append(stages, at) }
+			defer func() { relay.ttlHook = nil }()
 			if bound {
 				engine.PublishDATTLBinding(&daTTLRecordingService{name: "S", attempts: &attempts})
 			}
 			before := daRelayStateSnapshot(relay)
 			require(t, engine.BootstrapCanonicalGenesisIfEmpty() == nil && engine.chainState.view().tipHash == DevnetGenesisBlockHash(), "genesis bootstrap did not publish the devnet genesis")
 			if bound {
-				require(t, slices.Equal(attempts, []string{"S"}), "bound genesis bootstrap attempts=%v, want one", attempts)
+				require(t, slices.Equal(attempts, []string{"S"}) && slices.Equal(stages, []daTTLStage{daTTLPlanned, daTTLApplied}), "bound genesis bootstrap attempts=%v body stages=%v, want one attempt and one body run", attempts, stages)
 				return
 			}
-			require(t, engine.DATTLBindingService() == nil && len(attempts) == 0, "absent binding: binding=%v attempts=%v", engine.DATTLBindingService(), attempts)
+			require(t, engine.DATTLBindingService() == nil && len(stages) == 0, "absent binding: binding=%v body stages=%v, want no body run", engine.DATTLBindingService(), stages)
 			after := daRelayStateSnapshot(relay)
 			require(t, reflect.DeepEqual(after.sets, before.sets) && reflect.DeepEqual(after.locators, before.locators) && after.records == before.records, "absent-binding genesis bootstrap changed the DA records")
 		})
