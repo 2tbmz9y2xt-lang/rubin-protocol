@@ -58,14 +58,18 @@ func TestNewServiceInvalidConfigDoesNotConsumeDARelayClaim(t *testing.T) {
 		{"nil blockstore", func(c *ServiceConfig) { c.BlockStore = nil; c.TxMetadataFunc = nil }},
 		{"nil tx metadata func", func(c *ServiceConfig) { c.TxMetadataFunc = nil }},
 	} {
-		valid := unclaimedServiceConfig(t)
+		sink, valid := unclaimedServiceSink(t)
 		invalid := valid
 		test.bad(&invalid)
 		if _, err := NewService(invalid); err == nil || err.Error() != test.want {
 			t.Fatalf("invalid config error=%v, want %q", err, test.want)
 		}
-		if _, err := NewService(valid); err != nil {
-			t.Fatalf("valid config after %q: %v", test.want, err)
+		// Under F1 a later construction succeeds either way; the refused one claimed nothing
+		// only if the engine's detached-reorg hook reaches the next successful construction's
+		// admitDetachedReorgDA, which retains the disconnected commit while that Service is OPEN.
+		newBoundService(t, valid)
+		if !detachedReorgHookRetains(t, newTestHarness(t, 1, "127.0.0.1:0", nil), sink) {
+			t.Fatalf("after %q the detached commit was not retained: the hook is not the next construction's", test.want)
 		}
 	}
 }

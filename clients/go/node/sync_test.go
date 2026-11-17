@@ -197,10 +197,10 @@ func TestSyncEffectiveDAMempoolSize(t *testing.T) {
 		t.Fatalf("claim after observation: claimed=%p err=%v", claimed, err)
 	}
 	if engine.reorgDAAdmission == nil {
-		t.Fatal("observation recorded a claim or installed a hook: the later first claimant's hook was not installed")
+		t.Fatal("claim after observation installed no detached-reorg hook")
 	}
 	if _, err := engine.reorgDAAdmission(nil); err != nil || hookCalls != 1 {
-		t.Fatalf("observation recorded a claim or installed a hook: hook err=%v calls=%d, want the later first claimant's hook", err, hookCalls)
+		t.Fatalf("installed hook is not the claim's own: hook err=%v calls=%d, want nil and 1", err, hookCalls)
 	}
 	// The configured 536870912 stays while the bound relay moves: the relay is the only source.
 	engine.daRelay = boundTo(1073741824, 0).daRelay

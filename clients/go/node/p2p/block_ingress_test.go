@@ -95,11 +95,12 @@ func TestBlockIngressBudget(t *testing.T) {
 			requireRefused(t, cfg, 1, "nil peer manager")
 		}},
 		{"config_error_precedes_claim", func(t *testing.T) {
-			cfg := unclaimedServiceConfig(t)
+			sink, cfg := unclaimedServiceSink(t)
 			requireRefused(t, cfg, 1073741823, rangeError)
 			cfg.InboundBlockBudgetBytes = 1073741824
-			_, err := NewService(cfg)
-			must(t, err, "NewService on the engine of the failed construction")
+			newBoundService(t, cfg)
+			retained := detachedReorgHookRetains(t, newTestHarness(t, 1, "127.0.0.1:0", nil), sink)
+			require(t, retained, "detached commit not retained: the hook is not the next construction's")
 		}},
 	} {
 		t.Run(row.name, row.run)
