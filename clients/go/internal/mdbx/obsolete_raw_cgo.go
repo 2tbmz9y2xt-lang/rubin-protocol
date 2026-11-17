@@ -431,7 +431,7 @@ func obsoleteWitnesses(batch Batch, reader *Reader) error {
 		if witness == nil || witness.reader != reader || !reader.updateOld {
 			return updateInvalidBatch()
 		}
-		identities = append(identities, uintptr(unsafe.Pointer(witness)))
+		identities = append(identities, uintptr(unsafe.Pointer(token.scope)))
 	}
 	return obsoleteUniqueWitnesses(identities)
 }

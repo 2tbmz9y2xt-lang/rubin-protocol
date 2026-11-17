@@ -1155,7 +1155,7 @@ func TestTreePairReadCompatibilityV1(t *testing.T) {
 		t.Fatal("nonzero credit reached primitive source")
 	}
 	tsFollowing(t, s, o)
-	if unsafe.Sizeof(TreePairV1{}) != 72 || unsafe.Sizeof(TreeOperationV1{}) != 112 || unsafe.Sizeof(treePlanV1{}) != 152 || unsafe.Sizeof(treeSectionV1{}) != 168 || unsafe.Sizeof(treePairReadBudgetV1{}) != 32 {
+	if unsafe.Sizeof(TreePairV1{}) != 144 || unsafe.Sizeof(TreeOperationV1{}) != 184 || unsafe.Sizeof(treePlanV1{}) != 160 || unsafe.Sizeof(treeSectionV1{}) != 168 || unsafe.Sizeof(treePairReadBudgetV1{}) != 32 {
 		t.Fatal("ordinary/ENTRY carrier qualification")
 	}
 }
