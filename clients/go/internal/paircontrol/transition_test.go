@@ -222,6 +222,31 @@ func TestAdmissionPriorityAndExhaustion(t *testing.T) {
 	require(t, err)
 	wantRecord(t, fresh, v)
 	require(t, fresh.CloseV1())
+	t.Run("last_increment_and_noop", func(t *testing.T) {
+		v, i := selected(), replacement()
+		v.Sequence = math.MaxUint64 - 1
+		s, dir := existing(t, v)
+		o := installFaults(t, s)
+		r, err := s.PersistIntentV1(context.Background(), math.MaxUint64-1, i, nil)
+		require(t, err)
+		if r != (ResultV1{2, math.MaxUint64, false}) {
+			t.Fatal("last legal increment did not establish NEW/max without latch")
+		}
+		v.Sequence, v.Intent = math.MaxUint64, &i
+		wantRecord(t, s, v)
+		before, effects := diskBytes(t, dir), len(o.events)
+		r, err = s.PersistIntentV1(context.Background(), math.MaxUint64, i, nil)
+		require(t, err)
+		if r != (ResultV1{1, math.MaxUint64, false}) || len(o.events) != effects || !bytes.Equal(before, diskBytes(t, dir)) {
+			t.Fatal("identical intent at max was rejected, latched or performed I/O")
+		}
+		r, err = s.RetireV1(context.Background(), math.MaxUint64, i.ID, reference(), nil)
+		e := wantLocal(t, r, err, "retire", "refused", ResultV1{1, math.MaxUint64, true})
+		if len(o.events) != effects || !bytes.Equal(before, diskBytes(t, dir)) {
+			t.Fatal("nonempty retirement at max changed complete image or acquired filesystem effects")
+		}
+		checkBlockedNext(t, s, o, e, r, v, v)
+	})
 }
 
 func TestEveryMutatorEntryGuard(t *testing.T) {
