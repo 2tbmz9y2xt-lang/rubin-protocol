@@ -4794,8 +4794,9 @@ func psMetadata(t *testing.T) {
 		t.Fatalf("scope metadata high-water differs: empty %d", got)
 	}
 	r := psRun(t, s, reservationFilled(t, f-1), LaneOperation, psRawDelete(t, 9))
-	if any(r.err) != any(errOperationReservationCapacity) {
-		t.Fatalf("scope metadata high-water differs: F-1 = %v", r.err)
+	// A smaller production F passes this charge and is refused only later by the window, after the section begins.
+	if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
+		t.Fatalf("scope metadata high-water differs: F-1 = %v %s", r.err, s.state)
 	}
 	r.tuple(t, 1, 1, -1)
 	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), tsCounterLiteral(9, 1))
