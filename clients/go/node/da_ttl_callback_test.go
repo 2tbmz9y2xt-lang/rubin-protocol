@@ -1187,3 +1187,238 @@ func TestDATTLCallbackEndToEndGenesisBootstrap(t *testing.T) {
 		})
 	}
 }
+
+// daTTLHoldRecord is one signed DA transaction of a guard-hold shape, admitted with PEER
+// provenance under quota, and the charge the DA relay books for it.
+type daTTLHoldRecord struct {
+	raw    []byte
+	quota  string
+	charge uint64
+}
+
+// daTTLHoldShape is one retained DA image: records admitted in order, then next, which the
+// default caps refuse with capErr. E has no records and no next.
+type daTTLHoldShape struct {
+	name    string
+	records []daTTLHoldRecord
+	next    *daTTLHoldRecord
+	capErr  error
+	members int
+	charged uint64
+}
+
+// daTTLHoldInputs are the signed transactions of every pre-state: each spends its own
+// one-output ML-DSA-87 P2PK funding output from utxos. fill stops before fillNext would exceed
+// the standard mempool byte or count cap.
+type daTTLHoldInputs struct {
+	kp       *consensus.MLDSA87Keypair
+	address  []byte
+	utxos    map[consensus.Outpoint]consensus.UtxoEntry
+	fill     [][]byte
+	fillNext []byte
+	shapes   []daTTLHoldShape
+}
+
+const (
+	daTTLHoldMempoolMaxTxs   = 65_536
+	daTTLHoldMempoolMaxBytes = 256 << 20
+)
+
+// sign gives tx one fresh funding input worth fee+1000 and a last P2PK output of 1000.
+func (in *daTTLHoldInputs) sign(b testing.TB, tx *consensus.Tx, fee uint64) []byte {
+	b.Helper()
+	n := len(in.utxos)
+	op := consensus.Outpoint{Txid: [32]byte{0xd8, byte(n >> 16), byte(n >> 8), byte(n)}}
+	in.utxos[op] = consensus.UtxoEntry{Value: fee + 1000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: in.address, CreationHeight: 1}
+	tx.Version, tx.TxNonce = 1, uint64(n)+1
+	tx.Inputs = []consensus.TxInput{{PrevTxid: op.Txid, PrevVout: op.Vout}}
+	tx.Outputs = append(tx.Outputs, consensus.TxOutput{Value: 1000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: in.address})
+	if err := consensus.SignTransaction(tx, in.utxos, devnetGenesisChainID, in.kp); err != nil {
+		b.Fatalf("SignTransaction: %v", err)
+	}
+	raw, err := consensus.MarshalTx(tx)
+	if err != nil {
+		b.Fatalf("MarshalTx: %v", err)
+	}
+	return raw
+}
+
+// buildFill signs one-input one-output transfers until the next would exceed a mempool cap.
+func (in *daTTLHoldInputs) buildFill(b testing.TB) {
+	used := 0
+	for {
+		raw := in.sign(b, &consensus.Tx{}, 200_000)
+		if used+len(raw) > daTTLHoldMempoolMaxBytes || len(in.fill) == daTTLHoldMempoolMaxTxs {
+			in.fillNext = raw
+			return
+		}
+		used += len(raw)
+		in.fill = append(in.fill, raw)
+	}
+}
+
+// commit signs a State B commit-only record: one CORE_DA_COMMIT output, chunk_count 1,
+// batch_sig_suite 0, the given manifest and batch_sig lengths; its charge is its tx bytes.
+func (in *daTTLHoldInputs) commit(b testing.TB, daID [32]byte, manifest, batchSig int) daTTLHoldRecord {
+	b.Helper()
+	commitment := sha3.Sum256(daID[:])
+	tx := &consensus.Tx{
+		TxKind:       0x01,
+		Outputs:      []consensus.TxOutput{{CovenantType: consensus.COV_TYPE_DA_COMMIT, CovenantData: commitment[:]}},
+		DaPayload:    make([]byte, manifest),
+		DaCommitCore: &consensus.DaCommitCore{DaID: daID, ChunkCount: 1, BatchSig: make([]byte, batchSig)},
+	}
+	raw := in.sign(b, tx, 5_000_000)
+	return daTTLHoldRecord{raw: raw, quota: "ttl-hold-b", charge: uint64(len(raw))}
+}
+
+// stateBShape admits commits under one quota identity until the next would exceed
+// DA_ORPHAN_POOL_SIZE or DA_ORPHAN_COMMIT_OVERHEAD_MAX.
+func (in *daTTLHoldInputs) stateBShape(b testing.TB, name string, tag byte, manifest, batchSig int) daTTLHoldShape {
+	caps := defaultDARelayCaps()
+	shape := daTTLHoldShape{name: name, capErr: errDARelayOrphanCommitCapExceeded}
+	for i := 0; ; i++ {
+		rec := in.commit(b, [32]byte{tag, byte(i >> 8), byte(i)}, manifest, batchSig)
+		if total := shape.charged + rec.charge; total > caps.orphanPoolBytes || total > caps.orphanCommitOverheadBytes {
+			shape.next = &rec
+			return shape
+		}
+		shape.charged += rec.charge
+		shape.members++
+		shape.records = append(shape.records, rec)
+	}
+}
+
+func newDATTLHoldInputs(b testing.TB) *daTTLHoldInputs {
+	b.Helper()
+	kp, err := consensus.NewMLDSA87Keypair()
+	if err != nil {
+		b.Fatalf("NewMLDSA87Keypair: %v", err)
+	}
+	b.Cleanup(kp.Close)
+	in := &daTTLHoldInputs{kp: kp, address: consensus.P2PKCovenantDataForPubkey(kp.PubkeyBytes()), utxos: map[consensus.Outpoint]consensus.UtxoEntry{}}
+	in.shapes = []daTTLHoldShape{
+		{name: "E"},
+		in.stateBShape(b, "M-B", 0xb1, 0, 0),
+		in.stateBShape(b, "F-B", 0xb2, consensus.MAX_DA_MANIFEST_BYTES_PER_TX, consensus.MAX_DA_MANIFEST_BYTES_PER_TX),
+	}
+	in.buildFill(b)
+	return in
+}
+
+// preState copies the template chain, funds every input, sets the orphan TTL, admits the shape
+// through AdmitDA, checks that the caps refuse its next record, then admits the mempool fill.
+func (in *daTTLHoldInputs) preState(b testing.TB, shape daTTLHoldShape, ttl uint64) *pendingOutpointSyncFixture {
+	b.Helper()
+	cfg := DefaultMempoolConfig()
+	cfg.MaxTransactions, cfg.MaxBytes = daTTLHoldMempoolMaxTxs, daTTLHoldMempoolMaxBytes
+	f := newPendingOutpointSyncFixtureWithMempool(b, cfg)
+	maps.Copy(f.engine.chainState.Utxos, in.utxos)
+	relay := f.engine.DARelayState()
+	relay.caps.orphanTTLBlocks = ttl
+	admit := func(rec daTTLHoldRecord) error {
+		provenance, err := NewPeerDAProvenance(rec.quota, rec.quota)
+		if err != nil {
+			b.Fatalf("NewPeerDAProvenance: %v", err)
+		}
+		_, err = relay.AdmitDA(rec.raw, provenance)
+		return err
+	}
+	for i, rec := range shape.records {
+		if err := admit(rec); err != nil {
+			b.Fatalf("%s record %d: AdmitDA: %v", shape.name, i, err)
+		}
+	}
+	if shape.next != nil {
+		if err := admit(*shape.next); !errors.Is(err, shape.capErr) {
+			b.Fatalf("%s next record: AdmitDA=%v, want %v", shape.name, err, shape.capErr)
+		}
+	}
+	view := daRelayStateSnapshot(relay)
+	if len(view.sets) != len(shape.records) || view.commitBytes+view.orphanBytes != shape.charged {
+		b.Fatalf("%s: retained %d records charging %d, want %d charging %d", shape.name, len(view.sets), view.commitBytes+view.orphanBytes, len(shape.records), shape.charged)
+	}
+	for i, raw := range in.fill {
+		if err := f.mempool.AddTx(raw); err != nil {
+			b.Fatalf("fill %d: AddTx: %v", i, err)
+		}
+	}
+	stats := f.mempool.Stats()
+	if stats.TxCount != len(in.fill) || (stats.BytesUsed+len(in.fillNext) <= daTTLHoldMempoolMaxBytes && stats.TxCount < daTTLHoldMempoolMaxTxs) {
+		b.Fatalf("mempool count=%d bytes=%d next=%d, want %d entries with the next over a cap", stats.TxCount, stats.BytesUsed, len(in.fillNext), len(in.fill))
+	}
+	return f
+}
+
+// requireDATTLHoldEffect checks the timed block's DA effect: with the binding every record is
+// decreased once (removed at TTL 1); without it no record changes.
+func requireDATTLHoldEffect(b testing.TB, before, after daRelayStateView, ttl uint64, bound bool) {
+	b.Helper()
+	switch {
+	case !bound:
+		if !reflect.DeepEqual(before.sets, after.sets) {
+			b.Fatal("the unbound apply changed a DA record")
+		}
+	case ttl == 1:
+		if len(after.sets) != 0 {
+			b.Fatalf("%d records left after the TTL 1 decrease, want 0", len(after.sets))
+		}
+	default:
+		if len(after.sets) != len(before.sets) {
+			b.Fatalf("%d records after the decrease, want %d", len(after.sets), len(before.sets))
+		}
+		for daID, record := range after.sets {
+			if record.ttlBlocksRemaining != ttl-1 {
+				b.Fatalf("record %x ttl=%d, want %d", daID[:3], record.ttlBlocksRemaining, ttl-1)
+			}
+		}
+	}
+}
+
+func benchDATTLGuardHold(b *testing.B, in *daTTLHoldInputs, shape daTTLHoldShape, ttl uint64, bound bool) {
+	b.ReportAllocs()
+	quotas := map[string]struct{}{}
+	for _, rec := range shape.records {
+		quotas[rec.quota] = struct{}{}
+	}
+	for range b.N {
+		b.StopTimer()
+		f := in.preState(b, shape, ttl)
+		if bound {
+			f.engine.PublishDATTLBinding(&daTTLFuncService{enter: func(decrease func() error) error { return decrease() }})
+		}
+		height := f.tipHeight + 1
+		coinbase := reorgTestCoinbaseForAddress(b, height, consensus.BlockSubsidy(height, f.alreadyGenerated), f.sourceAddress)
+		block := buildSingleTxBlockTB(b, f.tipHash, f.target, 500, coinbase)
+		before := daRelayStateSnapshot(f.engine.DARelayState())
+		b.StartTimer()
+		summary, err := f.engine.ApplyBlock(block, nil)
+		b.StopTimer()
+		if err != nil || summary == nil || summary.BlockHeight != height {
+			b.Fatalf("ApplyBlock=(%+v,%v), want ACCEPTED/NEW at %d", summary, err, height)
+		}
+		requireDATTLHoldEffect(b, before, daRelayStateSnapshot(f.engine.DARelayState()), ttl, bound)
+	}
+	b.ReportMetric(float64(len(shape.records)), "records")
+	b.ReportMetric(float64(shape.members), "members")
+	b.ReportMetric(float64(len(quotas)), "quotas")
+	b.ReportMetric(float64(shape.charged), "charged-bytes")
+	b.ReportMetric(float64(len(in.fill)), "fill-txs")
+}
+
+// BenchmarkDATTLCallbackGuardHold times one ACCEPTED/NEW ApplyBlock over a full standard mempool
+// and one retained DA shape, with a binding whose entry runs the decrease directly and with no
+// binding; the difference is the guard hold the in-guard TTL decrease adds
+// (RUBIN_COMPACT_BLOCKS.md Section 5).
+func BenchmarkDATTLCallbackGuardHold(b *testing.B) {
+	in := newDATTLHoldInputs(b)
+	for _, shape := range in.shapes {
+		for _, ttl := range []uint64{3, 1} {
+			for _, bound := range []bool{true, false} {
+				b.Run(fmt.Sprintf("%s/ttl=%d/bound=%v", shape.name, ttl, bound), func(b *testing.B) {
+					benchDATTLGuardHold(b, in, shape, ttl, bound)
+				})
+			}
+		}
+	}
+}
