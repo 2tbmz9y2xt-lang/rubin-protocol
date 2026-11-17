@@ -533,6 +533,23 @@ func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
 	require(t, h.service.closeReturnsWithin(lifecycleWatchdog), "Close stranded after the panicking entry")
 }
 
+// mineSideBlock mines a height-1 block on a fresh chain paying a fresh key, so its hash differs
+// from every block of the shared deterministic test chain: relayed to a node whose tip is at
+// height 2, it is a valid side-branch block with less work, stored non-canonical.
+func mineSideBlock(t *testing.T) []byte {
+	t.Helper()
+	fork := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	cfg := node.DefaultMinerConfig()
+	cfg.MineAddress = consensus.P2PKCovenantDataForPubkey(mustP2PMLDSA87Keypair(t).PubkeyBytes())
+	miner, err := node.NewMiner(fork.chainState, fork.blockStore, fork.syncEngine, cfg)
+	must(t, err, "NewMiner(side)")
+	mined, err := miner.MineOne(context.Background(), nil)
+	must(t, err, "MineOne(side)")
+	block, err := fork.blockStore.GetBlockByHash(mined.Hash)
+	must(t, err, "GetBlockByHash(side)")
+	return block
+}
+
 // TestDATTLCallbackEndToEndNonAcceptedResults pins R1 and the R2 rows end to end over the real
 // SyncEngine, DA owner and Service, counting through the retained image: a valid side-branch block
 // stored non-canonical (D1), a KNOWN_BLOCK_NOOP replay and a DisconnectTip decrease nothing, so the
@@ -540,9 +557,7 @@ func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
 // third. The side block enters through SyncEngine.ApplyBlockWithReorg (no Service lease).
 func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
-	fork := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	fork.timestamp += 1000
-	sideBlock := fork.mineNextBlockBytes(t)
+	sideBlock := mineSideBlock(t)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	p := testPeerForService(h.service, "remote", 5)
 	relay := func(height uint64) {
@@ -555,6 +570,10 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	f := newDAIngressFixture(t, h)
 	commit := f.commit(daRelayTestID(0xd3), 2)
 	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
+	sideHash, err := consensus.BlockHash(sideBlock[:consensus.BLOCK_HEADER_BYTES])
+	must(t, err, "BlockHash(side block)")
+	known, err := h.service.hasBlock(sideHash)
+	require(t, err == nil && !known, "the side block is already known: err=%v", err)
 	summary, err := h.syncEngine.ApplyBlockWithReorg(sideBlock, nil)
 	require(t, err == nil && summary != nil && len(summary.CanonicalAppliedBlocks) == 0 && h.chainState.Height == 2, "side block=(%+v,%v) height=%d, want stored non-canonical", summary, err, h.chainState.Height)
 	summary, err = p.processRelayedBlock(blockAtHeight(t, source, 2))
@@ -575,9 +594,7 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 // publications and expires only at the third.
 func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
-	fork := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	fork.timestamp += 1000
-	sideBlock := fork.mineNextBlockBytes(t)
+	sideBlock := mineSideBlock(t)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	p := testPeerForService(h.service, "remote", 5)
 	relay := func(height uint64) {
@@ -590,10 +607,12 @@ func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 	f := newDAIngressFixture(t, h)
 	commit := f.commit(daRelayTestID(0xd4), 2)
 	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
-	_, err := p.processRelayedBlock(sideBlock)
-	must(t, err, "processRelayedBlock(side block)")
 	sideHash, err := consensus.BlockHash(sideBlock[:consensus.BLOCK_HEADER_BYTES])
 	must(t, err, "BlockHash(side block)")
+	known, err := h.service.hasBlock(sideHash)
+	require(t, err == nil && !known, "the side block is already known: err=%v", err)
+	_, err = p.processRelayedBlock(sideBlock)
+	must(t, err, "processRelayedBlock(side block)")
 	stored, err := h.blockStore.GetBlockByHash(sideHash)
 	require(t, err == nil && bytes.Equal(stored, sideBlock) && h.chainState.Height == 2 && h.chainState.TipHash != sideHash, "side block stored=%v err=%v height=%d, want stored non-canonical", stored != nil, err, h.chainState.Height)
 	relay(3)
