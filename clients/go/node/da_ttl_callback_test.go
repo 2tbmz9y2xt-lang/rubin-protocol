@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 // runDATTLBodyInGuard runs the in-guard TTL body while the test holds the ChainState admission
@@ -845,4 +847,38 @@ func TestDATTLCallbackDecrementReachability(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("TTL decrement reachability=%v, want %v", got, want)
 	}
+}
+
+// TestDATTLCallbackLatchedNewInvokesNothing pins that a TERMINAL_PERSISTENCE(new) publication,
+// which publishes the complete NEW image of an ACCEPTED apply and then latches, invokes no DA TTL
+// entry (RUBIN_COMPACT_BLOCKS.md Section 5): the bound entry, attempted once by the preceding
+// ordinary ACCEPTED/NEW publication on the same engine and DA relay, records no further attempt.
+func TestDATTLCallbackLatchedNewInvokesNothing(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	require(t, f.engine.DARelayState() != nil, "fixture engine has no bound DA relay")
+	var attempts []string
+	f.engine.PublishDATTLBinding(&daTTLRecordingService{name: "S", attempts: &attempts})
+	f.extendCanonical(t, 1, 400)
+	require(t, slices.Equal(attempts, []string{"S"}), "ordinary ACCEPTED/NEW publication: attempts=%v, want one", attempts)
+
+	prevWrite := writeFileAtomicFn
+	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
+	injected := false
+	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+		if path != f.store.indexPath || injected {
+			return prevWrite(path, data, mode)
+		}
+		injected = true
+		if err := prevWrite(path, data, mode); err != nil {
+			return err
+		}
+		return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
+	}
+	height := f.tipHeight + 1
+	coinbase := reorgTestCoinbaseForAddress(t, height, consensus.BlockSubsidy(height, f.alreadyGenerated), f.sourceAddress)
+	block := buildSingleTxBlock(t, f.tipHash, f.target, 401, coinbase)
+	summary, err := f.engine.ApplyBlock(block, nil)
+	require(t, injected && err != nil && summary != nil && summary.BlockHeight == height, "ApplyBlock=(%+v,%v) injected=%v, want the published NEW summary with a terminal error", summary, err, injected)
+	require(t, f.engine.persistenceFaulted() && f.engine.chainState.view().tipHash == summary.BlockHash, "terminal NEW did not publish and latch")
+	require(t, slices.Equal(attempts, []string{"S"}), "TERMINAL_PERSISTENCE(new) invoked the entry: attempts=%v", attempts)
 }
