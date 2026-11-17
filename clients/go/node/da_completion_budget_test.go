@@ -3,7 +3,9 @@ package node
 import (
 	"crypto/sha3"
 	"errors"
+	"fmt"
 	"maps"
+	"math"
 	"reflect"
 	"runtime"
 	"slices"
@@ -57,6 +59,17 @@ func requireDABudgetDisposition(t *testing.T, err error, want RelayAdmissionDisp
 	}
 }
 
+// requireDABudgetRefused runs one refused reserve and requires the zero
+// reservation together with the exact disposition and error text.
+func requireDABudgetRefused(t *testing.T, b *daCompletionBudget, context PendingOutpointAdmissionContext, provenance DAProvenance, charge daCompletionCharge, want RelayAdmissionDisposition, text string) {
+	t.Helper()
+	reservation, err := b.reserve(context, provenance, charge)
+	if reservation != (daCompletionReservation{}) {
+		t.Fatalf("refused reserve returned reservation %+v", reservation)
+	}
+	requireDABudgetDisposition(t, err, want, text)
+}
+
 func seededDABudget(tipByte byte, height uint64, global daCompletionUse, sources map[string]daCompletionUse) *daCompletionBudget {
 	return &daCompletionBudget{present: true, tip: daCompletionTip{hash: [32]byte{tipByte}, height: height}, global: global, sources: sources}
 }
@@ -92,8 +105,7 @@ func TestDACompletionBudget(t *testing.T) {
 			b = seededDABudget(1, 1, daCompletionUse{used: global - c + 1}, nil)
 			before := imageDACompletionBudget(b)
 			for _, quota := range []string{"q", "fresh"} {
-				_, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, quota), daCompletionCharge{bytes: c})
-				requireDABudgetDisposition(t, err, RelayAdmissionUnavailable, "DA completion work budget unavailable")
+				requireDABudgetRefused(t, b, daBudgetContext(1, 1, 0), daBudgetPeer(t, quota), daCompletionCharge{bytes: c}, RelayAdmissionUnavailable, "DA completion work budget unavailable")
 			}
 			if !reflect.DeepEqual(imageDACompletionBudget(b), before) {
 				t.Fatal("global decline changed the budget")
@@ -110,8 +122,7 @@ func TestDACompletionBudget(t *testing.T) {
 			}
 			b = seededDABudget(1, 1, daCompletionUse{used: perSource - c + 1}, map[string]daCompletionUse{"q": {used: perSource - c + 1}})
 			before := imageDACompletionBudget(b)
-			_, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: c})
-			requireDABudgetDisposition(t, err, RelayAdmissionUnavailable, "DA completion work budget unavailable")
+			requireDABudgetRefused(t, b, daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: c}, RelayAdmissionUnavailable, "DA completion work budget unavailable")
 			if !reflect.DeepEqual(imageDACompletionBudget(b), before) {
 				t.Fatal("source decline changed the budget")
 			}
@@ -154,8 +165,7 @@ func TestDACompletionBudget(t *testing.T) {
 			}
 			// Same hash at another height is another identity; a decline keeps the renewal.
 			b = seededDABudget(2, 2, daCompletionUse{used: 9}, map[string]daCompletionUse{"q": {used: 9}})
-			_, err := b.reserve(daBudgetContext(2, 3, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: perSource + 1})
-			requireDABudgetDisposition(t, err, RelayAdmissionUnavailable, "DA completion work budget unavailable")
+			requireDABudgetRefused(t, b, daBudgetContext(2, 3, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: perSource + 1}, RelayAdmissionUnavailable, "DA completion work budget unavailable")
 			want = daCompletionBudgetImage{present: true, tip: daCompletionTip{hash: [32]byte{2}, height: 3}}
 			if got := imageDACompletionBudget(b); !reflect.DeepEqual(got, want) {
 				t.Fatalf("decline after renewal=%+v want %+v", got, want)
@@ -164,12 +174,19 @@ func TestDACompletionBudget(t *testing.T) {
 		{"generation_unchanged", func(t *testing.T) {
 			b := seededDABudget(1, 1, daCompletionUse{used: global - 100}, map[string]daCompletionUse{"q": {used: 50}})
 			before := imageDACompletionBudget(b)
-			_, err := b.reserve(daBudgetContext(1, 1, 99), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 101})
-			requireDABudgetDisposition(t, err, RelayAdmissionUnavailable, "DA completion work budget unavailable")
+			requireDABudgetRefused(t, b, daBudgetContext(1, 1, 99), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 101}, RelayAdmissionUnavailable, "DA completion work budget unavailable")
 			if !reflect.DeepEqual(imageDACompletionBudget(b), before) {
 				t.Fatal("generation change renewed the budget")
 			}
-			// HasTip does not participate either.
+			// HasTip does not participate: a stored no-tip identity (zero hash,
+			// height 0) observed again from a zero context does not renew, so a
+			// charge that fits only after renewal declines with no change.
+			b = seededDABudget(0, 0, daCompletionUse{used: global - 100}, map[string]daCompletionUse{"q": {used: 50}})
+			before = imageDACompletionBudget(b)
+			requireDABudgetRefused(t, b, PendingOutpointAdmissionContext{}, daBudgetPeer(t, "q"), daCompletionCharge{bytes: 101}, RelayAdmissionUnavailable, "DA completion work budget unavailable")
+			if !reflect.DeepEqual(imageDACompletionBudget(b), before) {
+				t.Fatal("HasTip=false renewed a present no-tip identity")
+			}
 			noTip := &daCompletionBudget{}
 			if _, err := noTip.reserve(PendingOutpointAdmissionContext{}, daBudgetPeer(t, "q"), daCompletionCharge{bytes: 120}); err != nil {
 				t.Fatal(err)
@@ -196,8 +213,8 @@ func TestDACompletionBudget(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = relay.completionBudget.reserve(daBudgetContext(1, 1, 7), reconnected, daCompletionCharge{bytes: 120})
-			requireDABudgetDisposition(t, err, RelayAdmissionUnavailable, "DA completion work budget unavailable")
+			// Same tip and generation: only the reconnect differs.
+			requireDABudgetRefused(t, &relay.completionBudget, daBudgetContext(1, 1, 0), reconnected, daCompletionCharge{bytes: 120}, RelayAdmissionUnavailable, "DA completion work budget unavailable")
 			if !reflect.DeepEqual(imageDACompletionBudget(&relay.completionBudget), before) {
 				t.Fatal("reconnect reset the budget")
 			}
@@ -228,10 +245,11 @@ func TestDACompletionBudget(t *testing.T) {
 			for _, b := range []*daCompletionBudget{
 				seededDABudget(1, 1, daCompletionUse{used: 5}, map[string]daCompletionUse{"q": {used: 5}}),
 				{},
+				// Same identity with zero counters: no renewal is involved.
+				seededDABudget(2, 2, daCompletionUse{}, nil),
 			} {
 				before := imageDACompletionBudget(b)
-				_, err := b.reserve(daBudgetContext(2, 2, 0), daBudgetPeer(t, "q"), charge)
-				requireDABudgetDisposition(t, err, RelayAdmissionInternal, errDARelayArithmeticOverflow.Error())
+				requireDABudgetRefused(t, b, daBudgetContext(2, 2, 0), daBudgetPeer(t, "q"), charge, RelayAdmissionInternal, errDARelayArithmeticOverflow.Error())
 				if !reflect.DeepEqual(imageDACompletionBudget(b), before) {
 					t.Fatal("charge overflow changed the budget")
 				}
@@ -241,8 +259,7 @@ func TestDACompletionBudget(t *testing.T) {
 				seededDABudget(1, 1, daCompletionUse{}, map[string]daCompletionUse{"q": {used: ^uint64(0) - 1}}),
 			} {
 				before := imageDACompletionBudget(b)
-				_, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 2})
-				requireDABudgetDisposition(t, err, RelayAdmissionInternal, errDARelayArithmeticOverflow.Error())
+				requireDABudgetRefused(t, b, daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 2}, RelayAdmissionInternal, errDARelayArithmeticOverflow.Error())
 				if !reflect.DeepEqual(imageDACompletionBudget(b), before) {
 					t.Fatal("test overflow changed the budget")
 				}
@@ -252,15 +269,17 @@ func TestDACompletionBudget(t *testing.T) {
 			b := seededDABudget(1, 1, daCompletionUse{used: 3, reserved: 4}, map[string]daCompletionUse{"q": {used: 3, reserved: 4}})
 			before := imageDACompletionBudget(b)
 			for _, tip := range []byte{2, 3} {
-				_, err := b.reserve(daBudgetContext(tip, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 120})
-				requireDABudgetDisposition(t, err, RelayAdmissionInternal, errDARelayImageIncompatible.Error())
+				requireDABudgetRefused(t, b, daBudgetContext(tip, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 120}, RelayAdmissionInternal, errDARelayImageIncompatible.Error())
 				if !reflect.DeepEqual(imageDACompletionBudget(b), before) {
 					t.Fatal("renewal with reserved_global changed the budget")
 				}
 			}
-			// Dual violation: nonzero reserved_global at a changed identity wins over charge overflow.
-			_, err := b.reserve(daBudgetContext(2, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{overflow: true})
-			requireDABudgetDisposition(t, err, RelayAdmissionInternal, errDARelayImageIncompatible.Error())
+			// Both violations together: INTERNAL with no change; neither the spec
+			// nor the contract orders the two errors, so no text is pinned.
+			reservation, err := b.reserve(daBudgetContext(2, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{overflow: true})
+			if reservation != (daCompletionReservation{}) || err == nil || relayDispositionOf(err) != RelayAdmissionInternal {
+				t.Fatalf("dual violation=(%+v,%v)", reservation, err)
+			}
 			if !reflect.DeepEqual(imageDACompletionBudget(b), before) {
 				t.Fatal("dual violation changed the budget")
 			}
@@ -345,6 +364,17 @@ func (a daBudgetAdmission) budget() daCompletionBudgetImage {
 	return imageDACompletionBudget(&a.f.relay.completionBudget)
 }
 
+// retained captures the retained DA image and owner claims; requireRetained
+// compares the current ones with that capture.
+func (a daBudgetAdmission) retained() (daRelayStateView, *PendingOutpointOwner) {
+	return daRelayStateSnapshot(a.f.relay), cloneDAAdmissionOwner(a.f.mp.pendingOutpoints)
+}
+
+func (a daBudgetAdmission) requireRetained(t *testing.T, relay daRelayStateView, owner *PendingOutpointOwner) {
+	t.Helper()
+	requireDANonReplayUnchanged(t, a.f.relay, a.f.mp.pendingOutpoints, relay, owner)
+}
+
 func (a daBudgetAdmission) requireUsed(t *testing.T, tip daCompletionTip) {
 	t.Helper()
 	want := daCompletionBudgetImage{present: true, tip: tip, global: daCompletionUse{used: a.charge}, sources: map[string]daCompletionUse{"q": {used: a.charge}}}
@@ -383,15 +413,40 @@ func (o *PendingOutpointOwner) stableContextForBudgetTest(t *testing.T) PendingO
 	return context
 }
 
-func daBudgetWaitSettling(t *testing.T) {
+// daBudgetWaitFrame waits until some goroutine stack shows frame.
+func daBudgetWaitFrame(t *testing.T, frame string) {
 	t.Helper()
 	buf := make([]byte, 1<<20)
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); runtime.Gosched() {
-		if strings.Contains(string(buf[:runtime.Stack(buf, true)]), "(*daCompletionBudget).settle") {
+		if strings.Contains(string(buf[:runtime.Stack(buf, true)]), frame) {
 			return
 		}
 	}
-	t.Fatal("settlement never waited on the budget mutex")
+	t.Fatalf("no goroutine reached %s", frame)
+}
+
+// daBudgetLockProbe reports whether the DA, owner and ChainState admission
+// locks are free, leaving each as it found it.
+func daBudgetLockProbe(a daBudgetAdmission) (daFree, ownerFree, guardFree bool) {
+	if daFree = a.f.relay.mu.TryLock(); daFree {
+		a.f.relay.mu.Unlock()
+	}
+	if ownerFree = a.f.mp.pendingOutpoints.mu.TryLock(); ownerFree {
+		a.f.mp.pendingOutpoints.mu.Unlock()
+	}
+	if guardFree = a.f.state.admissionMu.TryLock(); guardFree {
+		a.f.state.admissionMu.RWMutex.Unlock()
+	}
+	return daFree, ownerFree, guardFree
+}
+
+// corruptDABudgetTarget makes step 3 fail on the retained commit bytes.
+func corruptDABudgetTarget(a daBudgetAdmission) {
+	a.f.mutateRelay(func(s *DARelayState) {
+		record := s.relations.recordValue([32]byte{1})
+		record.commit.txBytes = daBudgetFiller(len(record.commit.txBytes))
+		s.relations.putRecord(record.daID, record)
+	})
 }
 
 func daBudgetAdmissionCases() []daBudgetCase {
@@ -419,16 +474,21 @@ func daBudgetAdmissionCases() []daBudgetCase {
 		}},
 		{"chunk_last_mismatch", func(t *testing.T) {
 			a := newDABudgetAdmission(t, false, false)
+			relay, owner := a.retained()
 			if _, err := a.f.relay.AdmitDA(a.last.raw, daNonReplayPeer("q")); !errors.Is(err, ErrDARelayPayloadCommitmentMismatch) {
 				t.Fatalf("chunk-last mismatch err=%v", err)
 			}
 			a.requireUsed(t, a.tip(t))
+			a.requireRetained(t, relay, owner)
 		}},
 		{"final_duplicate", func(t *testing.T) {
 			a := newDABudgetAdmission(t, false, true)
+			var relay daRelayStateView
+			var owner *PendingOutpointOwner
 			a.f.relay.completeHook = func(stage daCompleteStage, p *daCompleteCommitPlan) {
 				if stage == daCompletePlanned {
 					a.f.mutateRelay(func(s *DARelayState) { s.relations.putLocator(a.last.txid, p.source.candidate.member.locator) })
+					relay, owner = a.retained()
 				}
 			}
 			result, err := a.f.relay.AdmitDA(a.last.raw, daNonReplayPeer("q"))
@@ -436,9 +496,12 @@ func daBudgetAdmissionCases() []daBudgetCase {
 				t.Fatalf("final duplicate=(%+v,%v)", result, err)
 			}
 			a.requireUsed(t, a.tip(t))
+			a.requireRetained(t, relay, owner)
 		}},
 		{"target_drift", func(t *testing.T) {
 			a := newDABudgetAdmission(t, false, true)
+			var relay daRelayStateView
+			var owner *PendingOutpointOwner
 			a.f.relay.completeHook = func(stage daCompleteStage, _ *daCompleteCommitPlan) {
 				if stage == daCompletePlanned {
 					a.f.mutateRelay(func(s *DARelayState) {
@@ -446,17 +509,24 @@ func daBudgetAdmissionCases() []daBudgetCase {
 						record.revision++
 						s.relations.putRecord(record.daID, record)
 					})
+					relay, owner = a.retained()
 				}
 			}
 			_, err := a.f.relay.AdmitDA(a.last.raw, daNonReplayPeer("q"))
 			requireDABudgetDisposition(t, err, RelayAdmissionUnavailable, "retained DA record moved")
 			a.requireUsed(t, a.tip(t))
+			a.requireRetained(t, relay, owner)
 		}},
 		{"panic_settlement", func(t *testing.T) {
 			for _, stage := range []daCompleteStage{daCompletePlanned, daCompleteEffects} {
 				a := newDABudgetAdmission(t, false, true)
 				sentinel := &struct{ stage daCompleteStage }{stage}
+				var relay daRelayStateView
+				var owner *PendingOutpointOwner
 				a.f.relay.completeHook = func(at daCompleteStage, _ *daCompleteCommitPlan) {
+					if at == daCompletePlanned {
+						relay, owner = a.retained()
+					}
 					if at == stage {
 						panic(sentinel)
 					}
@@ -465,55 +535,101 @@ func daBudgetAdmissionCases() []daBudgetCase {
 					t.Fatalf("stage %d panic=%v", stage, got)
 				}
 				a.requireUsed(t, a.tip(t))
+				a.requireRetained(t, relay, owner)
 				if !a.f.relay.mu.TryLock() || !a.f.mp.pendingOutpoints.mu.TryLock() || !a.f.state.admissionMu.TryLock() {
 					t.Fatalf("stage %d leaked a lock", stage)
 				}
 			}
 		}},
 		{"settlement_lock_order", func(t *testing.T) {
-			// Planned panics (step-3-side, guard only); effects returns and publishes.
-			for _, stage := range []daCompleteStage{daCompletePlanned, daCompleteEffects} {
+			// Planned is step-3-side (guard only); effects is later (DA and owner
+			// released). Each stage ends by ordinary return and by panic.
+			for _, row := range []struct {
+				stage  daCompleteStage
+				panics bool
+			}{{daCompletePlanned, true}, {daCompleteEffects, false}, {daCompleteEffects, true}} {
 				a := newDABudgetAdmission(t, false, true)
 				budget := &a.f.relay.completionBudget
+				sentinel := &struct{ stage daCompleteStage }{row.stage}
 				a.f.relay.completeHook = func(at daCompleteStage, _ *daCompleteCommitPlan) {
-					if at != stage {
+					if at != row.stage {
 						return
 					}
 					budget.mu.Lock()
-					if at == daCompletePlanned {
-						panic("planned")
+					if row.panics {
+						panic(sentinel)
 					}
 				}
 				done := make(chan any)
 				go func() { done <- daBudgetPanicAdmission(a, daNonReplayPeer("q")) }()
-				daBudgetWaitSettling(t)
-				daFree := a.f.relay.mu.TryLock()
-				if daFree {
-					a.f.relay.mu.Unlock()
-				}
-				ownerFree := a.f.mp.pendingOutpoints.mu.TryLock()
-				if ownerFree {
-					a.f.mp.pendingOutpoints.mu.Unlock()
-				}
-				guardFree := a.f.state.admissionMu.TryLock()
-				if guardFree {
-					a.f.state.admissionMu.RWMutex.Unlock()
-				}
+				daBudgetWaitFrame(t, "(*daCompletionBudget).settle")
+				daFree, ownerFree, guardFree := daBudgetLockProbe(a)
 				budget.mu.Unlock()
-				<-done
+				recovered := <-done
 				if !daFree || !ownerFree || guardFree {
-					t.Fatalf("stage %d settlement locks: DA free=%v owner free=%v guard free=%v", stage, daFree, ownerFree, guardFree)
+					t.Fatalf("%+v settlement locks: DA free=%v owner free=%v guard free=%v", row, daFree, ownerFree, guardFree)
 				}
+				if row.panics != (recovered == sentinel) || (!row.panics && recovered != nil) {
+					t.Fatalf("%+v panic=%v", row, recovered)
+				}
+				if row.panics {
+					a.requireUsed(t, a.tip(t))
+				}
+			}
+		}},
+		{"settlement_step3_return", func(t *testing.T) {
+			// Step-3 error return: no hook runs, so the test holds DA and owner
+			// for the whole attempt (settlement must not need them). A ChainState
+			// writer parked before step 2a completes reads the budget once the
+			// guard is released; settlement after that release could still win
+			// this read, so the guard half is deterministic only on the hook rows.
+			a := newDABudgetAdmission(t, false, true)
+			corruptDABudgetTarget(a)
+			budget, owner := &a.f.relay.completionBudget, a.f.mp.pendingOutpoints
+			budget.mu.Lock()
+			done := make(chan error, 1)
+			go func() {
+				_, err := a.f.relay.AdmitDA(a.last.raw, daNonReplayPeer("q"))
+				done <- err
+			}()
+			daBudgetWaitFrame(t, "(*daCompletionBudget).reserve")
+			if !a.f.relay.mu.TryLock() {
+				budget.mu.Unlock()
+				t.Fatal("DA lock held at step 2a")
+			}
+			if !owner.mu.TryLock() {
+				a.f.relay.mu.Unlock()
+				budget.mu.Unlock()
+				t.Fatal("owner lock held at step 2a")
+			}
+			afterGuard := make(chan daCompletionBudgetImage, 1)
+			go func() {
+				a.f.state.admissionMu.Lock()
+				afterGuard <- imageDACompletionBudget(budget)
+				a.f.state.admissionMu.RWMutex.Unlock()
+			}()
+			daBudgetWaitFrame(t, "(*RWMutex).Lock")
+			budget.mu.Unlock()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("step-3 settlement waited on a DA or owner lock")
+			}
+			a.f.relay.mu.Unlock()
+			owner.mu.Unlock()
+			if err == nil || relayDispositionOf(err) == RelayAdmissionUnavailable {
+				t.Fatalf("step-3 err=%v", err)
+			}
+			want := daCompletionBudgetImage{present: true, tip: a.tip(t), global: daCompletionUse{used: a.charge}, sources: map[string]daCompletionUse{"q": {used: a.charge}}}
+			if got := <-afterGuard; !reflect.DeepEqual(got, want) {
+				t.Fatalf("budget at guard release=%+v want %+v", got, want)
 			}
 		}},
 		{"before_step3", func(t *testing.T) {
 			for _, full := range []bool{true, false} {
 				a := newDABudgetAdmission(t, false, true)
-				a.f.mutateRelay(func(s *DARelayState) {
-					record := s.relations.recordValue([32]byte{1})
-					record.commit.txBytes = daBudgetFiller(len(record.commit.txBytes))
-					s.relations.putRecord(record.daID, record)
-				})
+				corruptDABudgetTarget(a)
 				if full {
 					a.seed(a.tip(t), daCompletionUse{used: global}, nil)
 				}
@@ -577,6 +693,205 @@ func daBudgetAdmissionCases() []daBudgetCase {
 				}
 			}
 		}},
+		{"refusal_terminations", func(t *testing.T) {
+			// A5: each refusal after a successful reservation converts it to used
+			// and leaves retained state and claims as they were when step 3 ended.
+			for _, row := range []struct {
+				name     string
+				arrange  func(a daBudgetAdmission)
+				planned  func(t *testing.T, a daBudgetAdmission)
+				effects  func(s *DARelayState)
+				want     func(t *testing.T, err error)
+				consumed bool
+			}{
+				{
+					name: "capacity", arrange: func(a daBudgetAdmission) { daCompleteCommitFillCountLimit(a.f, 65536, 2_000_000) },
+					want: func(t *testing.T, err error) {
+						requireDABudgetDisposition(t, err, RelayAdmissionCapacity, "DA COMPLETE_SET capacity rejected")
+					}, consumed: true,
+				},
+				{name: "reserve_conflict", planned: func(t *testing.T, a daBudgetAdmission) {
+					mustReserve(t, a.f.mp.pendingOutpoints, [32]byte{80}, a.last.inputs[0])
+				}, want: func(t *testing.T, err error) {
+					requireDABudgetDisposition(t, err, RelayAdmissionConflict, fmt.Sprintf("mempool double-spend conflict with %x", [32]byte{80}))
+				}},
+				{name: "reserve_unavailable", planned: func(_ *testing.T, a daBudgetAdmission) {
+					a.f.mp.pendingOutpoints.tokenHighWater = math.MaxUint64
+				}, want: func(t *testing.T, err error) {
+					requireDABudgetDisposition(t, err, RelayAdmissionUnavailable, "pending-outpoint token sequence exhausted")
+				}},
+				{
+					name: "publication_preflight", effects: func(s *DARelayState) { s.orphanBytesByDAID = nil },
+					want: func(t *testing.T, err error) {
+						if !errors.Is(err, errDARelayImageIncompatible) || relayDispositionOf(err) != RelayAdmissionInternal {
+							t.Fatalf("preflight err=%v", err)
+						}
+					},
+				},
+				{name: "internal", planned: func(_ *testing.T, a daBudgetAdmission) {
+					a.f.mutateRelay(func(s *DARelayState) { s.nextReceivedTime = math.MaxUint64 })
+				}, want: func(t *testing.T, err error) {
+					if !errors.Is(err, errDARelayArithmeticOverflow) || relayDispositionOf(err) != RelayAdmissionInternal {
+						t.Fatalf("internal err=%v", err)
+					}
+				}},
+			} {
+				t.Run(row.name, func(t *testing.T) {
+					a := newDABudgetAdmission(t, false, true)
+					if row.arrange != nil {
+						row.arrange(a)
+					}
+					var relay daRelayStateView
+					var owner *PendingOutpointOwner
+					a.f.relay.completeHook = func(stage daCompleteStage, _ *daCompleteCommitPlan) {
+						switch {
+						case stage == daCompletePlanned:
+							if row.planned != nil {
+								row.planned(t, a)
+							}
+							relay, owner = a.retained()
+						case row.effects != nil:
+							row.effects(a.f.relay)
+						}
+					}
+					result, err := a.f.relay.AdmitDA(a.last.raw, daNonReplayPeer("q"))
+					if result != (DAAdmissionResult{}) {
+						t.Fatalf("refusal result=%+v", result)
+					}
+					row.want(t, err)
+					a.requireUsed(t, a.tip(t))
+					if row.effects != nil {
+						relay.daIDBytes = nil
+					}
+					if row.consumed {
+						owner.tokenHighWater++
+					}
+					a.requireRetained(t, relay, owner)
+				})
+			}
+		}},
+		{"repeated_reserve_refusal", func(t *testing.T) {
+			// A13: repeated Reserve-refused matching completions exhaust one
+			// source; the next attempt declines before step 3 until a later
+			// step 2a observes another stored best-tip identity.
+			a := newDABudgetAdmission(t, false, true)
+			tip := a.tip(t)
+			a.seed(tip, daCompletionUse{used: perSource - 2*a.charge}, map[string]daCompletionUse{"q": {used: perSource - 2*a.charge}})
+			steps := 0
+			a.f.relay.completeHook = func(stage daCompleteStage, _ *daCompleteCommitPlan) {
+				if stage == daCompletePlanned {
+					steps++
+					a.f.mp.pendingOutpoints.tokenHighWater = math.MaxUint64
+				}
+			}
+			const exhausted = "pending-outpoint token sequence exhausted"
+			for i := 0; i < 2; i++ {
+				_, err := a.f.relay.AdmitDA(a.last.raw, daNonReplayPeer("q"))
+				requireDABudgetDisposition(t, err, RelayAdmissionUnavailable, exhausted)
+			}
+			for i := 0; i < 2; i++ {
+				_, err := a.f.relay.AdmitDA(a.last.raw, daNonReplayPeer("q"))
+				requireDABudgetDisposition(t, err, RelayAdmissionUnavailable, "DA completion work budget unavailable")
+			}
+			if got := a.budget(); steps != 2 || got.global != (daCompletionUse{used: perSource}) || got.sources["q"] != (daCompletionUse{used: perSource}) {
+				t.Fatalf("steps=%d exhausted budget=%+v", steps, got)
+			}
+			b := &a.f.relay.completionBudget
+			b.mu.Lock()
+			b.tip = daCompletionTip{hash: [32]byte{0xee}, height: tip.height + 1}
+			b.mu.Unlock()
+			_, err := a.f.relay.AdmitDA(a.last.raw, daNonReplayPeer("q"))
+			requireDABudgetDisposition(t, err, RelayAdmissionUnavailable, exhausted)
+			if steps != 3 {
+				t.Fatalf("renewed attempt reached step 3 %d times", steps)
+			}
+			a.requireUsed(t, tip)
+		}},
+		{"no_step2a", func(t *testing.T) {
+			// A1: noncompletions, an exact replay, a first-DA plan duplicate and
+			// a failed first-DA snapshot (direct private call with a nil target)
+			// run no step 2a: a stale stored identity would otherwise renew.
+			f := newDANonReplayFixture(t, 20)
+			b := &f.relay.completionBudget
+			b.present, b.tip = true, daCompletionTip{hash: [32]byte{0xee}, height: 77}
+			b.global, b.sources = daCompletionUse{used: global}, map[string]daCompletionUse{"q": {used: perSource}}
+			before := imageDACompletionBudget(b)
+			commit := f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{5}, chunkCount: 2, commitment: [32]byte{9}, commitmentOutputs: 1})
+			for _, want := range []DAAdmissionDisposition{DAAdmissionRetained, DAAdmissionDuplicate} {
+				result, err := f.relay.AdmitDA(commit.raw, daNonReplayPeer("q"))
+				if err != nil || result.Disposition != want || !reflect.DeepEqual(imageDACompletionBudget(b), before) {
+					t.Fatalf("want %v: (%+v,%v) budget=%+v", want, result, err, imageDACompletionBudget(b))
+				}
+			}
+			// Noncompleting chunk 0, then an occupied-index non-exact duplicate
+			// that exits at the first-DA plan.
+			for _, row := range []struct {
+				payload string
+				want    DAAdmissionDisposition
+			}{{"a", DAAdmissionRetained}, {"b", DAAdmissionDuplicate}} {
+				tx := f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{5}, payload: []byte(row.payload)})
+				result, err := f.relay.AdmitDA(tx.raw, daNonReplayPeer("q"))
+				if err != nil || result.Disposition != row.want || !reflect.DeepEqual(imageDACompletionBudget(b), before) {
+					t.Fatalf("chunk %q: (%+v,%v) budget=%+v", row.payload, result, err, imageDACompletionBudget(b))
+				}
+			}
+			chunk := f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{5}, chunkIndex: 1, payload: []byte("x")})
+			admission := f.begin(chunk)
+			defer admission.Close()
+			if _, err := f.relay.admitDAComplete(admission, nil); err == nil || !reflect.DeepEqual(imageDACompletionBudget(b), before) {
+				t.Fatalf("failed snapshot err=%v budget=%+v", err, imageDACompletionBudget(b))
+			}
+		}},
+		{"concurrent_admissions", func(t *testing.T) {
+			// A11 through AdmitDA: four chunk-last mismatches from distinct quota
+			// identities race for room for exactly two charges.
+			f := newDANonReplayFixture(t, 20)
+			const n = 4
+			raws, charge := make([][]byte, n), uint64(0)
+			for i := range raws {
+				id, payload := [32]byte{byte(10 + i)}, []byte("complete payload")
+				chunk := f.signed(daNonReplayTxSpec{kind: 2, daID: id, payload: payload, inputCount: 2})
+				commit := f.signed(daNonReplayTxSpec{kind: 1, daID: id, chunkCount: 1, commitment: [32]byte{99}, commitmentOutputs: 1})
+				f.admit(commit, DetachedReorgDAProvenance())
+				c := uint64(len(commit.raw) + len(chunk.raw) + len(payload))
+				if i > 0 && c != charge {
+					t.Fatalf("unequal charges %d %d", c, charge)
+				}
+				raws[i], charge = chunk.raw, c
+			}
+			context := f.mp.pendingOutpoints.stableContextForBudgetTest(t)
+			tip := daCompletionTip{hash: context.StableTip.Hash, height: context.StableTip.Height}
+			b := &f.relay.completionBudget
+			b.present, b.tip, b.global = true, tip, daCompletionUse{used: global - 2*charge}
+			errs := make([]error, n)
+			var start, done sync.WaitGroup
+			start.Add(1)
+			for i := range raws {
+				done.Add(1)
+				go func() {
+					defer done.Done()
+					start.Wait()
+					_, errs[i] = f.relay.AdmitDA(raws[i], daNonReplayPeer(string(rune('a'+i))))
+				}()
+			}
+			start.Done()
+			done.Wait()
+			want := daCompletionBudgetImage{present: true, tip: tip, global: daCompletionUse{used: global}, sources: map[string]daCompletionUse{}}
+			declined := 0
+			for i, err := range errs {
+				switch {
+				case errors.Is(err, ErrDARelayPayloadCommitmentMismatch):
+					want.sources[string(rune('a'+i))] = daCompletionUse{used: charge}
+				case err != nil && strings.Contains(err.Error(), "DA completion work budget unavailable") && relayDispositionOf(err) == RelayAdmissionUnavailable:
+					declined++
+				default:
+					t.Fatalf("attempt %d err=%v", i, err)
+				}
+			}
+			if got := imageDACompletionBudget(b); declined != 2 || !reflect.DeepEqual(got, want) {
+				t.Fatalf("declined=%d budget=%+v want %+v", declined, got, want)
+			}
+		}},
 		{"concurrent_reservations", func(t *testing.T) {
 			const c = uint64(1000)
 			b := seededDABudget(1, 1, daCompletionUse{used: global - 3*c}, nil)
@@ -593,6 +908,8 @@ func daBudgetAdmissionCases() []daBudgetCase {
 					if err == nil {
 						reserved[i] = true
 						b.settle(reservation, false)
+					} else if reservation != (daCompletionReservation{}) {
+						t.Errorf("declined reserve returned %+v", reservation)
 					}
 				}()
 			}
