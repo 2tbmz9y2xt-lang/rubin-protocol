@@ -736,12 +736,16 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			}
 		}},
 		{"before_step3", func(t *testing.T) {
-			// The full row observes the decline instead of the step-3 parse refusal
-			// that the corrupt control gets from the same target, and that the
-			// planned hook did not run; it counts no parse or hash calls. The clean
-			// control shows the hook runs once step 3 completes.
-			for _, row := range []struct{ full, corrupt bool }{{true, true}, {false, true}, {false, false}} {
-				a := newDABudgetAdmission(t, false, true)
+			// Each full row observes the decline instead of the step-3 refusal its
+			// control gets from the same target, and that the planned hook did not
+			// run. The corrupt target fails the commit parse; the mismatch target
+			// parses and fails only the payload-commitment comparison. Neither counts
+			// parse or hash calls, so step-3 work whose result is discarded is not
+			// observed. The clean control shows the hook runs once step 3 completes.
+			for _, row := range []struct{ full, corrupt, mismatch bool }{
+				{true, true, false}, {false, true, false}, {true, false, true}, {false, false, true}, {false, false, false},
+			} {
+				a := newDABudgetAdmission(t, false, !row.mismatch)
 				if row.corrupt {
 					corruptDABudgetTarget(a)
 				}
@@ -754,6 +758,10 @@ func daBudgetAdmissionCases() []daBudgetCase {
 				switch {
 				case row.full:
 					requireDABudgetDecline(t, err)
+				case row.mismatch:
+					if !errors.Is(err, ErrDARelayPayloadCommitmentMismatch) {
+						t.Fatalf("control step-3 commitment err=%v", err)
+					}
 				case row.corrupt:
 					if err == nil || relayDispositionOf(err) == RelayAdmissionUnavailable {
 						t.Fatalf("control step-3 parse err=%v", err)
@@ -761,7 +769,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 				case err != nil || result.Disposition != DAAdmissionRetained:
 					t.Fatalf("clean control=(%+v,%v)", result, err)
 				}
-				if want := !row.full && !row.corrupt; hooked != want {
+				if want := !row.full && !row.corrupt && !row.mismatch; hooked != want {
 					t.Fatalf("%+v hooked=%v want %v", row, hooked, want)
 				}
 			}
