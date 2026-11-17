@@ -494,9 +494,13 @@ func largeResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ow
 	if err := scope.fundV1(); err != nil {
 		return false, err
 	}
-	equal, err := contextEqual(old, candidate, scope)
-	if err != nil {
-		return false, err
+	equal := true
+	if scope.contextPresent {
+		var err error
+		equal, err = contextEqual(old, candidate, scope)
+		if err != nil {
+			return false, err
+		}
 	}
 	for _, selector := range scope.selectors {
 		match, err := largeDomainEqual(old, candidate, selector, plan, &scope)
