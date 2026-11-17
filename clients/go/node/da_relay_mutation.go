@@ -1059,7 +1059,6 @@ func (s *DARelayState) advanceOwnerReadyTTL() error {
 // parallel.
 type ownerReadyTTLPlan struct {
 	selected, survivors, removed                   []daRelaySetRecord
-	daBytes                                        []uint64
 	victims                                        []DAAdmissionVictim
 	records, stagedBytes, orphanBytes, commitBytes uint64
 	peerBytes                                      map[string]uint64
@@ -1070,16 +1069,19 @@ type ownerReadyTTLPlan struct {
 // ChainState admissionMu EXCLUSIVELY, after the D1 publication; this body never acquires that
 // guard (no lockAdmissionFence, no RLockUnlessTerminal), because sync.RWMutex is not reentrant.
 //
-// It plans over exactly the State A and State B records of the published image — State C
-// records are skipped unchecked, the relay state is not cloned and the standard owner domain
-// is not scanned — and checks every selected record, locator, accounting value and exact owner
-// token with checked arithmetic before any mutation. On success each selected record with a
-// count above one decreases by one with one fresh revision, and each record at count one is
-// removed with the owner-ready expiry effect: members, locator rows, accounting, prefetch
-// reservation and, on a bound relay, finalized owner claims. On failure it changes nothing and
-// returns its own error. Postcondition: no DA record, locator, charge or claim outside the
-// selected set changes. DARelayState.mu and the owner lock it takes are released by defer on
-// every exit, unwind included; the apply phase runs no fallible step.
+// It plans over exactly the State A and State B records of the published image, walking the
+// relations' State A/B bucket, so no State C record is visited, the relay state is not cloned
+// and the standard owner domain is not scanned. Before any mutation it checks, with checked
+// arithmetic, every selected record (stored under its own da_id, State A or B, owner-ready),
+// every locator row, the record's per-da_id orphan byte entry against its own accounting and
+// each expiring record's charges against the totals, and every selected member's exact owner
+// token. On success each selected record with a count above one decreases by one with one
+// fresh revision, and each record at count one is removed with the owner-ready expiry effect:
+// members, locator rows, accounting, prefetch reservation and, on a bound relay, finalized
+// owner claims. On failure it changes nothing, releases every relation reservation it prepared
+// exactly once (discard) and returns its own error. Postcondition: no DA record, locator,
+// charge or claim outside the selected set changes. DARelayState.mu and the owner lock it takes
+// are released by defer on every exit, unwind included; the apply phase runs no fallible step.
 func (s *DARelayState) advanceOwnerReadyTTLInGuard() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1112,37 +1114,44 @@ func (s *DARelayState) ownerReadyTTLOwnerLocked() (*PendingOutpointOwner, error)
 
 func (s *DARelayState) planOwnerReadyTTLLocked() (ownerReadyTTLPlan, error) {
 	plan := ownerReadyTTLPlan{records: s.records, stagedBytes: s.stagedBytes, orphanBytes: s.orphanBytes, commitBytes: s.orphanCommitOverheadBytes, peerBytes: map[string]uint64{}}
-	for _, daID := range s.sortedOwnerReadyTTLDAIDsLocked() {
-		if err := s.planOwnerReadyTTLRecordLocked(&plan, s.relations.recordValue(daID)); err != nil {
+	daIDs := s.relations.incompleteKeys()
+	slices.SortFunc(daIDs, func(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) })
+	for _, daID := range daIDs {
+		if err := s.planOwnerReadyTTLRecordLocked(&plan, daID); err != nil {
 			return ownerReadyTTLPlan{}, err
 		}
 	}
 	return plan, nil
 }
 
-// sortedOwnerReadyTTLDAIDsLocked lists the State A and State B records in da_id order, so map
-// iteration cannot change the plan or the first refusal.
-func (s *DARelayState) sortedOwnerReadyTTLDAIDsLocked() [][32]byte {
-	var daIDs [][32]byte
-	for daID, record := range s.relations.records() {
-		if record.state != daRelayStateCompleteSet {
-			daIDs = append(daIDs, daID)
-		}
+// ownerReadyTTLSelectedRecordLocked refuses an index entry whose row is absent, State C or
+// carries another da_id before any other check reads the record.
+func (s *DARelayState) ownerReadyTTLSelectedRecordLocked(daID [32]byte) (daRelaySetRecord, error) {
+	record, present := s.relations.record(daID)
+	if !present || record.state == daRelayStateCompleteSet || record.daID != daID {
+		return daRelaySetRecord{}, errDARelayTTLRecordKeyMismatch
 	}
-	slices.SortFunc(daIDs, func(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) })
-	return daIDs
+	return record, nil
 }
 
-func (s *DARelayState) planOwnerReadyTTLRecordLocked(plan *ownerReadyTTLPlan, record daRelaySetRecord) error {
+func (s *DARelayState) planOwnerReadyTTLRecordLocked(plan *ownerReadyTTLPlan, daID [32]byte) error {
+	record, err := s.ownerReadyTTLSelectedRecordLocked(daID)
+	if err != nil {
+		return err
+	}
 	if err := checkOwnerReadyRetainedRecordLocked(record); err != nil {
 		return err
 	}
 	if err := s.checkOwnerReadyTTLLocatorsLocked(record); err != nil {
 		return err
 	}
+	accounting, err := s.checkOwnerReadyTTLDAIDBytesLocked(record)
+	if err != nil {
+		return err
+	}
 	plan.selected = append(plan.selected, record)
 	if record.ttlBlocksRemaining == 1 {
-		return s.planOwnerReadyTTLExpiryLocked(plan, record)
+		return s.planOwnerReadyTTLExpiryLocked(plan, record, accounting)
 	}
 	survivor := record
 	survivor.ttlBlocksRemaining--
@@ -1167,19 +1176,25 @@ func (s *DARelayState) checkOwnerReadyTTLLocatorsLocked(record daRelaySetRecord)
 	return nil
 }
 
-func (s *DARelayState) planOwnerReadyTTLExpiryLocked(plan *ownerReadyTTLPlan, record daRelaySetRecord) error {
+// checkOwnerReadyTTLDAIDBytesLocked requires the record's per-da_id orphan byte entry to equal
+// its own accounting: present and equal when the record carries orphan bytes, absent otherwise.
+func (s *DARelayState) checkOwnerReadyTTLDAIDBytesLocked(record daRelaySetRecord) (daRelayRecordAccounting, error) {
 	accounting, err := record.ownerReadyAccounting()
 	if err != nil {
-		return err
+		return daRelayRecordAccounting{}, err
 	}
-	daBytes, err := checkedApplyUint64Delta(s.orphanBytesByDAID[record.daID], accounting.orphanBytes, 0)
-	if err != nil {
-		return err
+	stored, present := s.orphanBytesByDAID[record.daID]
+	if stored != accounting.orphanBytes || present != (accounting.orphanBytes != 0) {
+		return daRelayRecordAccounting{}, errDARelayImageIncompatible
 	}
+	return accounting, nil
+}
+
+func (s *DARelayState) planOwnerReadyTTLExpiryLocked(plan *ownerReadyTTLPlan, record daRelaySetRecord, accounting daRelayRecordAccounting) error {
 	if err := plan.releaseOwnerReadyAccounting(accounting, s.orphanBytesByPeerQuotaKey); err != nil {
 		return err
 	}
-	plan.removed, plan.daBytes = append(plan.removed, record), append(plan.daBytes, daBytes)
+	plan.removed = append(plan.removed, record)
 	plan.victims = append(plan.victims, ownerReadyRecordVictims(record)...)
 	return nil
 }
@@ -1224,17 +1239,41 @@ func (s *DARelayState) commitOwnerReadyTTLPlanLocked(owner *PendingOutpointOwner
 		}
 	}
 	relations := s.prepareOwnerReadyTTLRelationsLocked(plan)
+	failure, refusal := s.applyOwnerReadyTTLPlanUnderOwner(owner, plan, relations, batch, members)
+	if refusal == ownerReadyTTLApplied {
+		return nil
+	}
+	s.relations.discard(relations)
+	if refusal == ownerReadyTTLVictimRefused {
+		return txAdmitFromPendingOutpointError(&failure)
+	}
+	return errDARelayImageIncompatible
+}
+
+type ownerReadyTTLRefusal uint8
+
+const (
+	ownerReadyTTLApplied ownerReadyTTLRefusal = iota
+	ownerReadyTTLVictimRefused
+	ownerReadyTTLMemberUnbound
+)
+
+// applyOwnerReadyTTLPlanUnderOwner holds the owner lock only for the claim proof and the apply;
+// it returns plain values so the caller builds any refusal error after the lock is released.
+func (s *DARelayState) applyOwnerReadyTTLPlanUnderOwner(owner *PendingOutpointOwner, plan ownerReadyTTLPlan, relations *daRelayRelationPublication, batch []DAAdmissionVictim, members []*daRelayMemberIdentity) (PendingOutpointError, ownerReadyTTLRefusal) {
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
-	if err := checkOwnerReadyTTLClaimsLocked(owner, batch, members); err != nil {
-		s.relations.discard(relations)
-		return err
+	if failure, failed := owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
+		return failure, ownerReadyTTLVictimRefused
+	}
+	if !ownerReadyTTLMembersBoundLocked(owner, members) {
+		return PendingOutpointError{}, ownerReadyTTLMemberUnbound
 	}
 	s.applyOwnerReadyTTLPlanLocked(plan, relations)
 	for _, victim := range batch {
 		owner.dropClaimLocked(victim.Token)
 	}
-	return nil
+	return PendingOutpointError{}, ownerReadyTTLApplied
 }
 
 // ownerReadyTTLMembers lists the selected records' members, refusing a foreign or zero token,
@@ -1257,21 +1296,19 @@ func ownerReadyTTLMembers(owner *PendingOutpointOwner, selected []daRelaySetReco
 	return members, nil
 }
 
-func checkOwnerReadyTTLClaimsLocked(owner *PendingOutpointOwner, batch []DAAdmissionVictim, members []*daRelayMemberIdentity) error {
-	if failure, failed := owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
-		return txAdmitFromPendingOutpointError(&failure)
-	}
+// ownerReadyTTLMembersBoundLocked proves every selected member's exact owner token and inputs.
+func ownerReadyTTLMembersBoundLocked(owner *PendingOutpointOwner, members []*daRelayMemberIdentity) bool {
 	for _, member := range members {
 		if !ownerReadyMemberClaimBound(owner, owner.byToken[member.token], member) {
-			return errDARelayImageIncompatible
+			return false
 		}
 		for _, input := range member.inputs {
 			if owner.byOutpoint[input] != (pendingOutpointRow{token: member.token, txid: member.txid}) {
-				return errDARelayImageIncompatible
+				return false
 			}
 		}
 	}
-	return nil
+	return true
 }
 
 // prepareOwnerReadyTTLRelationsLocked reserves the removal rows of every expiring record before
@@ -1294,8 +1331,8 @@ func (s *DARelayState) applyOwnerReadyTTLPlanLocked(plan ownerReadyTTLPlan, rela
 	for _, survivor := range plan.survivors {
 		s.relations.scalarRecord(survivor.daID, survivor)
 	}
-	for i, record := range plan.removed {
-		s.applyProjectedDAIDBytes(record.daID, plan.daBytes[i])
+	for _, record := range plan.removed {
+		s.applyProjectedDAIDBytes(record.daID, 0) // the plan proved the entry equals the record's whole charge
 		s.prefetch.releaseSet(record.daID)
 	}
 	s.applyProjectedPeerBytes(plan.peerBytes)

@@ -231,10 +231,11 @@ type daRelayMemberRow struct {
 }
 
 type daRelayRecordRow struct {
-	key     [32]byte
-	value   daRelaySetRecord
-	present bool
-	members []*daRelayMemberRow
+	key        [32]byte
+	value      daRelaySetRecord
+	present    bool
+	members    []*daRelayMemberRow
+	incomplete daRelayRelationLink
 }
 
 type daRelayRelationKey struct {
@@ -253,7 +254,12 @@ type daRelayRelationLink struct {
 	bucket         *daRelayRelationBucket
 	member         *daRelayMemberRow
 	locator        *daRelayLocatorRow
+	record         *daRelayRecordRow
 }
+
+// daRelayIncompleteKey is the relation bucket of every present State A and State B record row,
+// so the in-guard TTL body walks exactly those rows and never a State C row.
+var daRelayIncompleteKey = daRelayRelationKey{dimension: 6}
 
 type daRelayRelations struct {
 	sets         map[[32]byte]*daRelayRecordRow
@@ -358,9 +364,30 @@ func (r *daRelayRelations) prepareRecord(p *daRelayRelationPublication, key [32]
 	}
 	if present {
 		row.members = r.prepareRecordMembers(p, key, value)
+		r.prepareIncomplete(p, row)
 	}
 	p.oldRecords = append(p.oldRecords, old)
 	p.newRecords = append(p.newRecords, row)
+}
+
+// prepareIncomplete reserves the State A/B bucket for a present row; publishRecord links it
+// only when the published value is not State C, so a value rewritten after preparation counts.
+func (r *daRelayRelations) prepareIncomplete(p *daRelayRelationPublication, row *daRelayRecordRow) {
+	row.incomplete = daRelayRelationLink{bucket: r.prepareBucket(p, daRelayIncompleteKey), record: row}
+}
+
+// incompleteKeys lists the keys of the State A and State B record rows; the walk is bounded by
+// those rows.
+func (r *daRelayRelations) incompleteKeys() [][32]byte {
+	bucket := r.buckets[daRelayIncompleteKey]
+	if bucket == nil {
+		return nil
+	}
+	var keys [][32]byte
+	for link := bucket.head; link != nil; link = link.next {
+		keys = append(keys, link.record.key)
+	}
+	return keys
 }
 
 func (r *daRelayRelations) prepareRecordMembers(p *daRelayRelationPublication, key [32]byte, value daRelaySetRecord) []*daRelayMemberRow {
@@ -447,6 +474,7 @@ func (r *daRelayRelations) publishRecords(p *daRelayRelationPublication) {
 	for _, row := range p.oldRecords {
 		if row.present {
 			r.setCount--
+			row.incomplete.detach()
 			for _, member := range row.members {
 				for i := range member.links {
 					member.links[i].detach()
@@ -461,6 +489,10 @@ func (r *daRelayRelations) publishRecords(p *daRelayRelationPublication) {
 
 func (r *daRelayRelations) publishRecord(row *daRelayRecordRow) {
 	r.sets[row.key] = row
+	if !row.present || row.value.state == daRelayStateCompleteSet {
+		row.incomplete.bucket = nil // never linked, so a later detach is a no-op
+	}
+	row.incomplete.attach()
 	if row.present {
 		r.setCount++
 		for _, member := range row.members {
@@ -539,6 +571,8 @@ func (r *daRelayRelations) removeLocator(key [32]byte) {
 	r.publish(p)
 }
 
+// scalarRecord replaces a present row's value in place; every caller keeps the record's state,
+// so the row's State A/B bucket membership stays exact.
 func (r *daRelayRelations) scalarRecord(key [32]byte, value daRelaySetRecord) {
 	r.sets[key].value = value
 }
@@ -572,6 +606,7 @@ func (r *daRelayRelations) cloneRecord(key [32]byte, source *daRelayRecordRow) {
 		r.prepareMember(p, &copy)
 		row.members = append(row.members, &copy)
 	}
+	r.prepareIncomplete(p, row)
 	r.sets[key] = row
 	p.newRecords = append(p.newRecords, row)
 	r.publish(p)
@@ -675,6 +710,7 @@ var (
 	errDAProvenanceInvalid              = errors.New("invalid da provenance")
 	errDARelayMemberIncomplete          = errors.New("da relay member is not owner-ready")
 	errDARelayImageIncompatible         = errors.New("da relay retained image is not owner-ready")
+	errDARelayTTLRecordKeyMismatch      = errors.New("da relay State A/B index names a row that is absent, State C or stored under another da_id")
 	errDARelayRecordStale               = errors.New("da relay record image is stale")
 	errDARelayLocatorMismatch           = errors.New("da relay locator mismatch")
 )

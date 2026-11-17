@@ -3,6 +3,7 @@ package node
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -129,5 +130,138 @@ func TestDATTLCallbackBodyRefusalChangesNothing(t *testing.T) {
 			}
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 		})
+	}
+}
+
+// requireDATTLIndexExact pins the relations' State A/B bucket to exactly the present records
+// that are not State C, so the bounded walk can miss no State A or B record.
+func requireDATTLIndexExact(t *testing.T, relay *DARelayState) {
+	t.Helper()
+	relay.mu.Lock()
+	defer relay.mu.Unlock()
+	want := map[[32]byte]bool{}
+	for daID, record := range relay.relations.records() {
+		if record.state != daRelayStateCompleteSet {
+			want[daID] = true
+		}
+	}
+	got := map[[32]byte]bool{}
+	for _, daID := range relay.relations.incompleteKeys() {
+		if got[daID] {
+			t.Fatalf("State A/B index lists %x twice", daID[:1])
+		}
+		got[daID] = true
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("State A/B index=%v, want %v", got, want)
+	}
+}
+
+// TestDATTLCallbackBodyRefusalArms is the body-level C11 row per refusal arm: each arm returns
+// its own error and leaves the DA image and the owner unchanged; removing the arm lets the body
+// apply and fails the row at its error assertion.
+func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		corrupt func(*daNonReplayFixture, daTTLCallbackRecords)
+		want    func(error) bool
+	}{
+		{"locator row moved", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) {
+				s.relations.putLocator(r.stateA.txid, daRelayLocator{daID: r.stateAID, kind: daRelayLocatorChunk, chunkIndex: 1})
+			})
+		}, func(err error) bool { return errors.Is(err, errDARelayLocatorMismatch) }},
+		{"survivor per-da_id entry differs", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.orphanBytesByDAID[r.stateAID]++ })
+		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		{"expiring per-da_id entry larger", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.setOwnerReadyTTL(r.stateAID, 1)
+			f.mutateRelay(func(s *DARelayState) { s.orphanBytesByDAID[r.stateAID]++ })
+		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		{"State B carries a per-da_id entry", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.orphanBytesByDAID[r.stateBID] = 5 })
+		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		{"record stored under another da_id", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) {
+				record := s.relations.recordValue(r.stateAID)
+				record.daID = [32]byte{0xa8}
+				s.relations.scalarRecord(r.stateAID, record)
+			})
+		}, func(err error) bool { return errors.Is(err, errDARelayTTLRecordKeyMismatch) }},
+		{"victim claim not finalized", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.setOwnerReadyTTL(r.stateAID, 1)
+			token := r.setup.sets[r.stateAID].chunks[0].member.token
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.byToken[token].finalized = false })
+		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "DA victim claim mismatch") }},
+		{"nil chainstate", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.mempool.chainState = nil })
+		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "nil chainstate") }},
+		{"nil pending-outpoint owner", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.mempool.pendingOutpoints = nil })
+		}, func(err error) bool {
+			return err != nil && strings.Contains(err.Error(), "nil pending-outpoint owner")
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f, r := newDATTLCallbackRecords(t)
+			owner := f.mp.pendingOutpoints
+			row.corrupt(f, r)
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(owner)
+			if err := runDATTLBodyInGuard(t, f); !row.want(err) {
+				t.Fatalf("body: err=%v, want this arm's refusal", err)
+			}
+			requireDANonReplayUnchanged(t, f.relay, owner, before, ownerBefore)
+		})
+	}
+}
+
+// TestDATTLCallbackBodyUnboundRelay is the unbound arm: a relay with no mempool reaches no claim
+// domain, so the DA image is the whole change and a live owner it cannot see stays untouched.
+func TestDATTLCallbackBodyUnboundRelay(t *testing.T) {
+	f, r := newDATTLCallbackRecords(t)
+	owner := f.mp.pendingOutpoints
+	ownerBefore := cloneDAAdmissionOwner(owner)
+	f.mutateRelay(func(s *DARelayState) { s.mempool = nil })
+	if err := runDATTLBodyInGuard(t, f); err != nil {
+		t.Fatalf("unbound body: %v", err)
+	}
+	view := daRelayStateSnapshot(f.relay)
+	requireDATTLCount(t, view, r.stateAID, 2)
+	requireDATTLCount(t, view, r.stateBID, 2)
+	if !reflect.DeepEqual(cloneDAAdmissionOwner(owner), ownerBefore) {
+		t.Fatal("unbound body changed an owner it cannot reach")
+	}
+}
+
+// TestDATTLCallbackBodyWalksOnlyStateAB is the F2 row: a State C record that would fail every
+// owner-ready check is never visited, and the State A/B index stays exact across admission,
+// decrease, expiry and the whole-clone ReleasePeerQuotaKey swap.
+func TestDATTLCallbackBodyWalksOnlyStateAB(t *testing.T) {
+	f, r := newDATTLCallbackRecords(t)
+	requireDATTLIndexExact(t, f.relay)
+	if err := f.relay.ReleasePeerQuotaKey("unrelated-peer"); err != nil {
+		t.Fatalf("ReleasePeerQuotaKey: %v", err)
+	}
+	requireDATTLIndexExact(t, f.relay)
+	f.mutateRelay(func(s *DARelayState) {
+		mutateOwnerReadyRecord(s, r.stateCID, func(record *daRelaySetRecord) { record.wireBytes = 1 })
+	})
+	requireDATTLIndexExact(t, f.relay)
+	if err := runDATTLBodyInGuard(t, f); err != nil {
+		t.Fatalf("body visited State C: %v", err)
+	}
+	requireDATTLCount(t, daRelayStateSnapshot(f.relay), r.stateAID, 2)
+	requireDATTLIndexExact(t, f.relay)
+	for _, want := range []uint64{1, 0} {
+		if err := runDATTLBodyInGuard(t, f); err != nil {
+			t.Fatalf("body with a corrupt State C record: %v", err)
+		}
+		view := daRelayStateSnapshot(f.relay)
+		if want != 0 {
+			requireDATTLCount(t, view, r.stateAID, want)
+		} else if _, present := view.sets[r.stateAID]; present {
+			t.Fatal("State A survived its expiry after the clone swap")
+		}
+		requireDATTLIndexExact(t, f.relay)
 	}
 }
