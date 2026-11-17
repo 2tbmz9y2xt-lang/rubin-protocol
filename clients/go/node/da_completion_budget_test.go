@@ -105,6 +105,45 @@ func seededDABudget(tipByte byte, height uint64, global daCompletionUse, sources
 	return &daCompletionBudget{present: true, tip: daCompletionTip{hash: [32]byte{tipByte}, height: height}, global: global, sources: sources}
 }
 
+func seededDABudgetFrom(tipByte byte, height, fill uint64, named map[string]daCompletionUse) *daCompletionBudget {
+	global, sources := daBudgetSeed(fill, named)
+	return seededDABudget(tipByte, height, global, sources)
+}
+
+// daBudgetSeed builds an owner-consistent pre-state: fill used bytes spread
+// over "fill<i>" sources of at most perSource each, plus named, with global
+// the sum of every source.
+func daBudgetSeed(fill uint64, named map[string]daCompletionUse) (daCompletionUse, map[string]daCompletionUse) {
+	sum, sources := daCompletionUse{used: fill}, maps.Clone(named)
+	if sources == nil {
+		sources = map[string]daCompletionUse{}
+	}
+	for i := 0; fill > 0; i++ {
+		n := min(fill, perSource)
+		sources[fmt.Sprintf("fill%d", i)], fill = daCompletionUse{used: n}, fill-n
+	}
+	for _, use := range named {
+		sum.used, sum.reserved = sum.used+use.used, sum.reserved+use.reserved
+		if use.used+use.reserved > perSource {
+			panic("seed source above perSource")
+		}
+	}
+	if sum.used+sum.reserved > global {
+		panic("seed above global")
+	}
+	return sum, sources
+}
+
+// requireDABudgetSettled settles reservation and requires the exact image.
+func requireDABudgetSettled(t *testing.T, b *daCompletionBudget, reservation daCompletionReservation, accepted bool, global daCompletionUse, sources map[string]daCompletionUse) {
+	t.Helper()
+	b.settle(reservation, accepted)
+	want := daCompletionBudgetImage{present: true, tip: daCompletionTip{hash: [32]byte{1}, height: 1}, global: global, sources: sources}
+	if got := imageDACompletionBudget(b); !reflect.DeepEqual(got, want) {
+		t.Fatalf("settle %+v accepted=%v: %+v want %+v", reservation, accepted, got, want)
+	}
+}
+
 func TestDACompletionBudget(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -130,11 +169,14 @@ func TestDACompletionBudget(t *testing.T) {
 		}},
 		{"global_equal", func(t *testing.T) {
 			const c = uint64(5000)
-			b := seededDABudget(1, 1, daCompletionUse{used: global - c - 7, reserved: 7}, map[string]daCompletionUse{"other": {used: global - c - 7, reserved: 7}})
+			b := seededDABudgetFrom(1, 1, global-c-7, map[string]daCompletionUse{"other": {reserved: 7}})
 			if _, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: c}); err != nil {
 				t.Fatalf("exact global equality declined: %v", err)
 			}
-			b = seededDABudget(1, 1, daCompletionUse{used: global - c + 1 - 7, reserved: 7}, map[string]daCompletionUse{"other": {used: global - c + 1 - 7, reserved: 7}})
+			if got := imageDACompletionBudget(b); got.global != (daCompletionUse{used: global - c - 7, reserved: 7 + c}) || got.sources["q"] != (daCompletionUse{reserved: c}) || got.sources["other"] != (daCompletionUse{reserved: 7}) {
+				t.Fatalf("reserved state=%+v", got)
+			}
+			b = seededDABudgetFrom(1, 1, global-c+1-7, map[string]daCompletionUse{"other": {reserved: 7}})
 			before := imageDACompletionBudget(b)
 			for _, quota := range []string{"q", "fresh"} {
 				requireDABudgetRefused(t, b, daBudgetContext(1, 1, 0), daBudgetPeer(t, quota), daCompletionCharge{bytes: c}, nil)
@@ -145,14 +187,14 @@ func TestDACompletionBudget(t *testing.T) {
 		}},
 		{"source_equal", func(t *testing.T) {
 			const c = uint64(3000)
-			b := seededDABudget(1, 1, daCompletionUse{used: perSource}, map[string]daCompletionUse{"q": {used: perSource - c - 5, reserved: 5}})
+			b := seededDABudgetFrom(1, 1, 0, map[string]daCompletionUse{"q": {used: perSource - c - 5, reserved: 5}, "other": {used: 40, reserved: 9}})
 			if _, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: c}); err != nil {
 				t.Fatalf("exact source equality declined: %v", err)
 			}
-			if got := imageDACompletionBudget(b); got.global != (daCompletionUse{used: perSource, reserved: c}) || got.sources["q"] != (daCompletionUse{used: perSource - c - 5, reserved: 5 + c}) {
+			if got := imageDACompletionBudget(b); got.global != (daCompletionUse{used: perSource - c - 5 + 40, reserved: 5 + 9 + c}) || got.sources["q"] != (daCompletionUse{used: perSource - c - 5, reserved: 5 + c}) {
 				t.Fatalf("reserved state=%+v", got)
 			}
-			b = seededDABudget(1, 1, daCompletionUse{used: perSource - c + 1 - 5, reserved: 5}, map[string]daCompletionUse{"q": {used: perSource - c + 1 - 5, reserved: 5}})
+			b = seededDABudgetFrom(1, 1, 0, map[string]daCompletionUse{"q": {used: perSource - c + 1 - 5, reserved: 5}})
 			before := imageDACompletionBudget(b)
 			requireDABudgetRefused(t, b, daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: c}, nil)
 			if !reflect.DeepEqual(imageDACompletionBudget(b), before) {
@@ -163,31 +205,37 @@ func TestDACompletionBudget(t *testing.T) {
 			}
 		}},
 		{"settle_accepted_returns", func(t *testing.T) {
-			b := seededDABudget(1, 1, daCompletionUse{used: 11}, map[string]daCompletionUse{"other": {used: 11}})
-			reservation, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 900})
-			if err != nil || reservation != (daCompletionReservation{quota: "q", charge: 900}) {
-				t.Fatalf("reservation=%+v err=%v", reservation, err)
+			// "other" holds a reservation, so returning q's charges must subtract
+			// only them; the second return deletes the zero q entry.
+			b := seededDABudgetFrom(1, 1, 0, map[string]daCompletionUse{"other": {used: 11, reserved: 13}})
+			first, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 900})
+			if err != nil || first != (daCompletionReservation{quota: "q", charge: 900}) {
+				t.Fatalf("reservation=%+v err=%v", first, err)
 			}
-			b.settle(reservation, true)
-			want := daCompletionBudgetImage{present: true, tip: daCompletionTip{hash: [32]byte{1}, height: 1}, global: daCompletionUse{used: 11}, sources: map[string]daCompletionUse{"other": {used: 11}}}
-			if got := imageDACompletionBudget(b); !reflect.DeepEqual(got, want) {
-				t.Fatalf("accepted settle=%+v want %+v", got, want)
-			}
-		}},
-		{"settle_failed_converts", func(t *testing.T) {
-			b := &daCompletionBudget{}
-			reservation, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 900})
+			second, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 50})
 			if err != nil {
 				t.Fatal(err)
 			}
-			b.settle(reservation, false)
-			want := daCompletionBudgetImage{present: true, tip: daCompletionTip{hash: [32]byte{1}, height: 1}, global: daCompletionUse{used: 900}, sources: map[string]daCompletionUse{"q": {used: 900}}}
-			if got := imageDACompletionBudget(b); !reflect.DeepEqual(got, want) {
-				t.Fatalf("failed settle=%+v want %+v", got, want)
+			requireDABudgetSettled(t, b, first, true, daCompletionUse{used: 11, reserved: 63}, map[string]daCompletionUse{"other": {used: 11, reserved: 13}, "q": {reserved: 50}})
+			requireDABudgetSettled(t, b, second, true, daCompletionUse{used: 11, reserved: 13}, map[string]daCompletionUse{"other": {used: 11, reserved: 13}})
+		}},
+		{"settle_failed_converts", func(t *testing.T) {
+			// q already has used bytes and "other" a reservation, so each
+			// conversion must move only the settled charge.
+			b := seededDABudgetFrom(1, 1, 0, map[string]daCompletionUse{"other": {used: 11, reserved: 13}, "q": {used: 3}})
+			first, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 900})
+			if err != nil {
+				t.Fatal(err)
 			}
+			second, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 50})
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireDABudgetSettled(t, b, first, false, daCompletionUse{used: 914, reserved: 63}, map[string]daCompletionUse{"other": {used: 11, reserved: 13}, "q": {used: 903, reserved: 50}})
+			requireDABudgetSettled(t, b, second, false, daCompletionUse{used: 964, reserved: 13}, map[string]daCompletionUse{"other": {used: 11, reserved: 13}, "q": {used: 953}})
 		}},
 		{"renewal_changed_tip", func(t *testing.T) {
-			b := seededDABudget(1, 1, daCompletionUse{used: global}, map[string]daCompletionUse{"q": {used: perSource}, "other": {used: 4}})
+			b := seededDABudgetFrom(1, 1, global-perSource, map[string]daCompletionUse{"q": {used: perSource}})
 			if _, err := b.reserve(daBudgetContext(2, 2, 0), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 600}); err != nil {
 				t.Fatal(err)
 			}
@@ -204,7 +252,7 @@ func TestDACompletionBudget(t *testing.T) {
 			}
 		}},
 		{"generation_unchanged", func(t *testing.T) {
-			b := seededDABudget(1, 1, daCompletionUse{used: global - 100}, map[string]daCompletionUse{"q": {used: 50}})
+			b := seededDABudgetFrom(1, 1, global-150, map[string]daCompletionUse{"q": {used: 50}})
 			before := imageDACompletionBudget(b)
 			requireDABudgetRefused(t, b, daBudgetContext(1, 1, 99), daBudgetPeer(t, "q"), daCompletionCharge{bytes: 101}, nil)
 			if !reflect.DeepEqual(imageDACompletionBudget(b), before) {
@@ -213,7 +261,7 @@ func TestDACompletionBudget(t *testing.T) {
 			// HasTip does not participate: a stored no-tip identity (zero hash,
 			// height 0) observed again from a zero context does not renew, so a
 			// charge that fits only after renewal declines with no change.
-			b = seededDABudget(0, 0, daCompletionUse{used: global - 100}, map[string]daCompletionUse{"q": {used: 50}})
+			b = seededDABudgetFrom(0, 0, global-150, map[string]daCompletionUse{"q": {used: 50}})
 			before = imageDACompletionBudget(b)
 			requireDABudgetRefused(t, b, PendingOutpointAdmissionContext{}, daBudgetPeer(t, "q"), daCompletionCharge{bytes: 101}, nil)
 			if !reflect.DeepEqual(imageDACompletionBudget(b), before) {
@@ -366,9 +414,10 @@ func (a daBudgetAdmission) tip(t *testing.T) daCompletionTip {
 	return daCompletionTip{hash: context.StableTip.Hash, height: context.StableTip.Height}
 }
 
-func (a daBudgetAdmission) seed(tip daCompletionTip, global daCompletionUse, sources map[string]daCompletionUse) {
+func (a daBudgetAdmission) seed(tip daCompletionTip, fill uint64, named map[string]daCompletionUse) {
 	b := &a.f.relay.completionBudget
-	b.present, b.tip, b.global, b.sources = true, tip, global, sources
+	b.present, b.tip = true, tip
+	b.global, b.sources = daBudgetSeed(fill, named)
 }
 
 func (a daBudgetAdmission) budget() daCompletionBudgetImage {
@@ -676,16 +725,17 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			}
 		}},
 		{"before_step3", func(t *testing.T) {
-			// The corrupt target fails step-3 parsing, so a decline with it proves
-			// zero step-3 parse calls; the clean control proves the hook observes
-			// a completed step 3.
+			// The full row observes the decline instead of the step-3 parse refusal
+			// that the corrupt control gets from the same target, and that the
+			// planned hook did not run; it counts no parse or hash calls. The clean
+			// control shows the hook runs once step 3 completes.
 			for _, row := range []struct{ full, corrupt bool }{{true, true}, {false, true}, {false, false}} {
 				a := newDABudgetAdmission(t, false, true)
 				if row.corrupt {
 					corruptDABudgetTarget(a)
 				}
 				if row.full {
-					a.seed(a.tip(t), daCompletionUse{used: global}, nil)
+					a.seed(a.tip(t), global, nil)
 				}
 				hooked := false
 				a.f.relay.completeHook = func(daCompleteStage, *daCompleteCommitPlan) { hooked = true }
@@ -707,7 +757,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 		}},
 		{"decline_zero_effect", func(t *testing.T) {
 			a := newDABudgetAdmission(t, false, true)
-			a.seed(a.tip(t), daCompletionUse{used: 7}, map[string]daCompletionUse{"q": {used: perSource - a.charge + 1}})
+			a.seed(a.tip(t), 7, map[string]daCompletionUse{"q": {used: perSource - a.charge + 1}})
 			relay, owner, budget := daRelayStateSnapshot(a.f.relay), cloneDAAdmissionOwner(a.f.mp.pendingOutpoints), a.budget()
 			cache := daBudgetRejectCache(&a.f.relay.rejectCache)
 			result, err := a.f.relay.AdmitDA(a.last.raw, daNonReplayPeer("q"))
@@ -729,7 +779,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			// A13: repeated chunk-last mismatches exhaust one source, then decline before step 3.
 			a := newDABudgetAdmission(t, false, false)
 			tip := a.tip(t)
-			a.seed(tip, daCompletionUse{used: perSource - 2*a.charge}, map[string]daCompletionUse{"q": {used: perSource - 2*a.charge}})
+			a.seed(tip, 0, map[string]daCompletionUse{"q": {used: perSource - 2*a.charge}})
 			for i := 0; i < 2; i++ {
 				if _, err := a.f.relay.AdmitDA(a.last.raw, daNonReplayPeer("q")); !errors.Is(err, ErrDARelayPayloadCommitmentMismatch) {
 					t.Fatalf("attempt %d err=%v", i, err)
@@ -744,7 +794,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 		{"local_reorg_bypass", func(t *testing.T) {
 			for _, provenance := range []DAProvenance{LocalDAProvenance(), DetachedReorgDAProvenance()} {
 				a := newDABudgetAdmission(t, false, true)
-				a.seed(daCompletionTip{height: 99}, daCompletionUse{used: global}, map[string]daCompletionUse{"q": {used: perSource}})
+				a.seed(daCompletionTip{height: 99}, global-perSource, map[string]daCompletionUse{"q": {used: perSource}})
 				before := a.budget()
 				result, err := a.f.relay.AdmitDA(a.last.raw, provenance)
 				if err != nil || result.Disposition != DAAdmissionRetained || !reflect.DeepEqual(a.budget(), before) {
@@ -835,7 +885,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			// step 2a observes another stored best-tip identity.
 			a := newDABudgetAdmission(t, false, true)
 			tip := a.tip(t)
-			a.seed(tip, daCompletionUse{used: perSource - 2*a.charge}, map[string]daCompletionUse{"q": {used: perSource - 2*a.charge}})
+			a.seed(tip, 0, map[string]daCompletionUse{"q": {used: perSource - 2*a.charge}})
 			steps := 0
 			a.f.relay.completeHook = func(stage daCompleteStage, _ *daCompleteCommitPlan) {
 				if stage == daCompletePlanned {
@@ -873,7 +923,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			f := newDANonReplayFixture(t, 20)
 			b := &f.relay.completionBudget
 			b.present, b.tip = true, daCompletionTip{hash: [32]byte{0xee}, height: 77}
-			b.global, b.sources = daCompletionUse{used: global}, map[string]daCompletionUse{"q": {used: perSource}}
+			b.global, b.sources = daBudgetSeed(global-perSource, map[string]daCompletionUse{"q": {used: perSource}})
 			before := imageDACompletionBudget(b)
 			commit := f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{5}, chunkCount: 2, commitment: [32]byte{9}, commitmentOutputs: 1})
 			for _, want := range []DAAdmissionDisposition{DAAdmissionRetained, DAAdmissionDuplicate} {
@@ -912,7 +962,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			a.f.admit(other, daNonReplayPeer("q"))
 			context := a.f.mp.pendingOutpoints.stableContextForBudgetTest(t)
 			tip := a.tip(t)
-			a.seed(tip, daCompletionUse{used: perSource - a.charge + 1}, map[string]daCompletionUse{"q": {used: perSource - a.charge + 1}})
+			a.seed(tip, 0, map[string]daCompletionUse{"q": {used: perSource - a.charge + 1}})
 			before := a.budget()
 			if err := a.f.relay.ReleasePeerQuotaKey("q"); err != nil {
 				t.Fatal(err)
@@ -967,7 +1017,8 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			context := f.mp.pendingOutpoints.stableContextForBudgetTest(t)
 			tip := daCompletionTip{hash: context.StableTip.Hash, height: context.StableTip.Height}
 			b := &f.relay.completionBudget
-			b.present, b.tip, b.global = true, tip, daCompletionUse{used: global - 2*charge}
+			b.present, b.tip = true, tip
+			b.global, b.sources = daBudgetSeed(global-2*charge, nil)
 			errs := make([]error, n)
 			var start, done sync.WaitGroup
 			start.Add(1)
@@ -981,7 +1032,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			}
 			start.Done()
 			done.Wait()
-			want := daCompletionBudgetImage{present: true, tip: tip, global: daCompletionUse{used: global}, sources: map[string]daCompletionUse{}}
+			want := daCompletionBudgetImage{present: true, tip: tip, global: daCompletionUse{used: global}, sources: maps.Clone(b.sources)}
 			declined := 0
 			for i, err := range errs {
 				switch {
@@ -999,7 +1050,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 		}},
 		{"concurrent_reservations", func(t *testing.T) {
 			const c = uint64(1000)
-			b := seededDABudget(1, 1, daCompletionUse{used: global - 3*c}, nil)
+			b := seededDABudgetFrom(1, 1, global-3*c, nil)
 			var start, done sync.WaitGroup
 			start.Add(1)
 			reserved := make([]bool, 8)
