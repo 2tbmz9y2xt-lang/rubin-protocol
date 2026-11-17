@@ -212,7 +212,7 @@ func TestConstructorRefusals(t *testing.T) {
 			e := wantNilStore(t, s, err, map[bool]string{true: "create", false: "open"}[creating], code)
 			if strings.HasPrefix(name, "cwd_") {
 				var cause *os.SyscallError
-				if !errors.As(e.Cause, &cause) || cause.Syscall != "getwd" || cause.Err != syscall.ENOENT {
+				if !errors.As(e.Cause, &cause) || cause.Syscall != "getwd" || !errors.Is(cause.Err, syscall.ENOENT) {
 					t.Fatal("absolute path failure lost original getwd cause")
 				}
 			}
