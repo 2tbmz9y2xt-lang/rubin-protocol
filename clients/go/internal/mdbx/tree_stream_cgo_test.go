@@ -4503,7 +4503,8 @@ func psRun(t *testing.T, s *Store, o *OperationReservationOwner, kind OperationK
 }
 
 // psRunG is psRun whose caller holds one real grant g on the invocation's own account from before the
-// callback creates or reads its input through UpdateTreeV1's return; g never enters F, S or operand terms.
+// callback creates or reads its input through UpdateTreeV1's return; g stays outside the engine's metadata
+// and read-window charges.
 func psRunG(t *testing.T, s *Store, o *OperationReservationOwner, kind OperationKind, g uint64, build func(*Reader) TreeOperationV1) tsResult {
 	t.Helper()
 	var r tsResult
@@ -4553,7 +4554,7 @@ func psRefused(t *testing.T, s *Store, r tsResult, capacity bool, label string) 
 	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(10), tsCounterLiteral(10, 1))
 }
 
-// psF is the envelope F computed from its literal formula, independently of production.
+// psF is the physical-scope metadata envelope computed from its literal formula, independently of production.
 func psF(m, c, d, w, p, l, k, u uint64) uint64 {
 	return 4096 + 128*(m+d) + 48*c + k + 176*w + 8*w + 8*d + 32*p + 32*(p+3*w) + 33*l + u
 }
@@ -4719,7 +4720,8 @@ func psGone(t *testing.T, s *Store, key []byte) {
 	}))
 }
 
-// Every forbidden companion of a nonempty new field refuses under the closed shape.
+// Each forbidden companion of a nonempty physical-scope field refuses with "invalid Update Batch" ahead of
+// a selector count over its bound.
 func psShape(t *testing.T) {
 	s, _, o := psStore(t)
 	edits := []struct {
@@ -4742,17 +4744,18 @@ func psShape(t *testing.T) {
 		}},
 	}
 	for _, row := range edits {
-		r := psRun(t, s, o, row.kind, func(reader *Reader) TreeOperationV1 {
+		r := psRunG(t, s, o, row.kind, psPageGrant+33*2882, func(reader *Reader) TreeOperationV1 {
 			op := psRawDelete(t, 9)(reader)
 			row.edit(&op)
+			op.Pair.LargeConsulted = append(op.Pair.LargeConsulted, make([]LargeImageSelectorV1, 2881)...)
 			return op
 		})
-		if s.state != storeOPEN || r.err == nil {
-			t.Fatalf("scope shape admitted: %s", row.name)
+		if s.state != storeOPEN || !treeNativeIsInvalid(r.err) {
+			t.Fatalf("scope shape admitted: %s %v", row.name, r.err)
 		}
 		psRefused(t, s, r, false, row.name)
 	}
-	// Consulted-only scopes are not a mutation: the existing empty-operation row refuses.
+	// Witnesses with no Mutation or delete refuse with the existing empty-operation refusal.
 	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
 		return TreeOperationV1{Pair: TreePairV1{ObsoleteConsulted: []ObsoletePageWitnessV1{psScope(t, reader, 9).Witness}}}
 	})
@@ -4804,7 +4807,7 @@ func psProvenance(t *testing.T) {
 		},
 	}
 	for i, build := range foreign {
-		// One byte below F still yields the charge-free provenance refusal.
+		// One byte below the metadata envelope still yields the charge-free provenance refusal.
 		f := psF(0, 0, 1, 1, 0, 0, 9, 9)
 		r = psRun(t, s, reservationFilled(t, psPageGrant+f-1), LaneOperation, build)
 		if r.err != nil && s.state == storeOPEN && treeNativeIsInvalid(r.err) {
@@ -4820,7 +4823,7 @@ func treeNativeIsInvalid(err error) bool {
 	return direct && engine.Diagnostic == "invalid Update Batch"
 }
 
-// Duplicate witness identity, duplicate raw delete and an uncovered row refuse.
+// A repeated witness, a repeated delete and a delete outside its witness refuse.
 func psDuplicates(t *testing.T) {
 	s, _, o := psStore(t)
 	builds := map[string]func(*Reader) TreeOperationV1{
@@ -4837,13 +4840,13 @@ func psDuplicates(t *testing.T) {
 			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: other.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{covered.Witness}}}
 		},
 	}
-	// Precedence 4: one byte below each row's F the metadata charge refuses before the duplicate,
-	// coverage checks that need its scratch (witness: W=2 and U counts both occurrences).
+	// One byte below each row's metadata envelope the charge refuses before the duplicate and
+	// coverage checks that need its scratch (the repeated witness is counted twice).
 	short := map[string]uint64{"witness": psF(0, 0, 1, 2, 0, 0, 9, 18), "row": psF(0, 0, 2, 1, 0, 0, 18, 9), "uncovered": psF(0, 0, 1, 1, 0, 0, 9, 9)}
 	for _, name := range []string{"witness", "row", "uncovered"} {
 		r := psRun(t, s, reservationFilled(t, psPageGrant+short[name]-1), LaneOperation, builds[name])
 		if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
-			t.Fatalf("duplicate scope admitted: %s at F-1 %v %s", name, r.err, s.state)
+			t.Fatalf("duplicate scope admitted: %s one byte below the envelope %v %s", name, r.err, s.state)
 		}
 		r.tuple(t, 1, 1, -1)
 	}
@@ -4854,7 +4857,7 @@ func psDuplicates(t *testing.T) {
 		}
 		psRefused(t, s, r, false, name)
 	}
-	// Two separately acquired equal witness domains coalesce and commit.
+	// Two witness values from separate reads of generation 9 commit together with its delete.
 	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
 		a, b := psScope(t, reader, 9), psScope(t, reader, 9)
 		return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: a.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{a.Witness, b.Witness}}}
@@ -4902,7 +4905,7 @@ func psCounts(t *testing.T) {
 		return out
 	}
 	run("2881", true, 33*2881, func(op *TreeOperationV1) {
-		op.Pair.LargeConsulted = append([]LargeImageSelectorV1{{Kind: 0}}, selectors(1, 2880)...)
+		op.Pair.LargeConsulted = append(append([]LargeImageSelectorV1{{Kind: 0}}, selectors(1, 1440)...), selectors(2, 1440)...)
 	})
 	run("1441 bodies", true, 33*1442, func(op *TreeOperationV1) {
 		op.Pair.LargeConsulted = append([]LargeImageSelectorV1{{Kind: 255}}, selectors(1, 1441)...)
@@ -4913,8 +4916,8 @@ func psCounts(t *testing.T) {
 			op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: kind}}
 		})
 	}
-	// Precedence 4: the selector order and duplicate rows need admitted scratch, so one byte below F
-	// (D=1, W=1, L=2) refuses with the metadata charge first.
+	// The selector order and duplicate checks need admitted scratch, so one byte below the envelope
+	// (one delete, one witness, two selectors) refuses with the metadata charge first.
 	for _, edit := range []func(*TreeOperationV1){
 		func(op *TreeOperationV1) { op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 2}, {Kind: 1}} },
 		func(op *TreeOperationV1) { op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 1}, {Kind: 1}} },
@@ -4925,7 +4928,7 @@ func psCounts(t *testing.T) {
 			return op
 		})
 		if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
-			t.Fatalf("scope metadata high-water differs: selector order at F-1 %v %s", r.err, s.state)
+			t.Fatalf("scope metadata high-water differs: selector order one byte below the envelope %v %s", r.err, s.state)
 		}
 		r.tuple(t, 1, 1, -1)
 	}
@@ -4937,7 +4940,7 @@ func psCounts(t *testing.T) {
 	run("D+W", true, 8*maxUpdateMutations, func(op *TreeOperationV1) {
 		op.Pair.ObsoleteDeletes = make([]ObsoleteRowV1, maxUpdateMutations)
 	})
-	// Boundaries 1 and 1440 of a known kind with zero hashes are legal physical domains.
+	// Counts 1 and 1440 of one known kind commit; the first selector's hash is zero.
 	for _, n := range []int{1, 1440} {
 		s2, _, o2 := psStore(t)
 		r := psRunG(t, s2, o2, LaneOperation, psPageGrant+33*uint64(n), func(reader *Reader) TreeOperationV1 {
@@ -4951,8 +4954,8 @@ func psCounts(t *testing.T) {
 	}
 }
 
-// F is charged before allocation; F-1 refuses at admission with OPEN, and the
-// scoped read window S is a separate same-account charge refused after the section begins.
+// The metadata envelope is charged before allocation and one byte less refuses at admission with
+// OPEN; the scoped read window is a separate same-account charge refused after the section begins.
 func psMetadata(t *testing.T) {
 	s, _, o := psStore(t)
 	f := psF(0, 0, 1, 1, 0, 0, 9, 9)
@@ -4960,9 +4963,10 @@ func psMetadata(t *testing.T) {
 		t.Fatalf("scope metadata high-water differs: empty %d", got)
 	}
 	r := psRun(t, s, reservationFilled(t, psPageGrant+f-1), LaneOperation, psRawDelete(t, 9))
-	// A smaller production F passes this charge and is refused only later by the window, after the section begins.
+	// A smaller production envelope passes this charge and is refused only later by the window, after the
+	// section begins.
 	if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
-		t.Fatalf("scope metadata high-water differs: F-1 = %v %s", r.err, s.state)
+		t.Fatalf("scope metadata high-water differs: one byte below the envelope %v %s", r.err, s.state)
 	}
 	r.tuple(t, 1, 1, -1)
 	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), tsCounterLiteral(9, 1))
@@ -4972,7 +4976,7 @@ func psMetadata(t *testing.T) {
 	var maxKey uint64
 	mustEnvironment(t, s.View(func(reader *Reader) error { maxKey = reader.maxKey; return nil }))
 	window := 4 * (maxKey + 1)
-	// F alone admits; the scoped preflight window then refuses after beginTreeSectionV1 (CLOSED).
+	// The envelope alone admits; the scoped preflight window then refuses after beginTreeSectionV1 (CLOSED).
 	r = psRun(t, s, reservationFilled(t, psPageGrant+f+window-1), LaneOperation, psRawDelete(t, 9))
 	if any(r.err) != any(errOperationReservationCapacity) {
 		t.Fatalf("scope operand window not funded: %v", r.err)
@@ -4980,7 +4984,7 @@ func psMetadata(t *testing.T) {
 	r.tuple(t, 1, 1, -1)
 	tsConsumed(t, s, o, 1, errOperationReservationCapacity)
 	s2, _, o2 := psStore(t)
-	// Bound equality: exactly G+F+S remaining admits the raw-only plan.
+	// Bound equality: exactly the caller grant, envelope and window remaining admits the raw-only plan.
 	r = psRun(t, s2, reservationFilled(t, psPageGrant+f+window), LaneOperation, psRawDelete(t, 9))
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)

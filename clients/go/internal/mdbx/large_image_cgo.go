@@ -79,7 +79,7 @@ type largeImageScope struct {
 
 func (scope *largeImageScope) typedV1() bool { return scope.databaseID != [32]byte{} }
 
-// windowV1 is S = 4*(maxKey+1): two residual streams, each one copied key and one seek.
+// windowV1 is 4*(maxKey+1): two residual streams, each one copied key and one seek.
 func (scope *largeImageScope) windowV1() uint64 {
 	if scope.maxKey >= ^uint64(0)/4 {
 		return ^uint64(0)
@@ -87,7 +87,7 @@ func (scope *largeImageScope) windowV1() uint64 {
 	return 4 * (scope.maxKey + 1)
 }
 
-// fundV1 covers S before any typed acquisition; legacy scopes keep their zero-budget path.
+// fundV1 covers the window before any typed acquisition; legacy scopes keep their zero-budget path.
 func (scope *largeImageScope) fundV1() error {
 	if !scope.typedV1() {
 		return nil
@@ -95,7 +95,7 @@ func (scope *largeImageScope) fundV1() error {
 	return scope.pairBudget.coverV1(scope.windowV1(), scope.pairLimit)
 }
 
-// rowsEqualV1 funds both typed operands plus S before C use; presence or length
+// rowsEqualV1 funds both typed operands plus the window before C use; presence or length
 // inequality is decided without payload use.
 func (scope *largeImageScope) rowsEqualV1(a, b largeNativeRow) (bool, error) {
 	if !scope.typedV1() {

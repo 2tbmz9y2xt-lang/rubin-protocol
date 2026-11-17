@@ -417,7 +417,7 @@ func (t *treeSectionV1) pairPreflightV1(pair []ownedMutation, consulted []ownedC
 	if err != nil {
 		return err
 	}
-	return t.pairReadPreflightV1(pair, consulted)
+	return t.pairReadPreflightV1(pair, consulted, nil)
 }
 
 // pairPreflightScopedV1 is pairPreflightV1 with the plan's one residual scope (context window or physical
@@ -427,23 +427,33 @@ func (t *treeSectionV1) pairPreflightScopedV1(pair []ownedMutation, consulted []
 	if err != nil {
 		return err
 	}
-	return t.pairReadPreflightV1(pair, consulted, scope)
+	return t.pairReadPreflightV1(pair, consulted, &scope)
 }
 
-// treeSealScopesV1 sets each synchronous scope copy's funding: the mutable preflight budget, or nil and the seal.
-func treeSealScopesV1(scopes []largeImageScope, budget *treePairReadBudgetV1, limit uint64) {
+// treeSealScopesV1 sets each synchronous scope copy's funding to the sealed limit with no mutable budget.
+func treeSealScopesV1(scopes []largeImageScope, limit uint64) {
 	for i := range scopes {
-		scopes[i].pairBudget, scopes[i].pairLimit = budget, limit
+		scopes[i].pairBudget, scopes[i].pairLimit = nil, limit
 	}
+}
+
+// scopedMatchV1 compares the plan and an optional scope under OLD/write; a scope copy draws from the
+// caller's mutable preflight budget, which stays on the caller's stack.
+func (t *treeSectionV1) scopedMatchV1(pair []ownedMutation, budget *treePairReadBudgetV1, scope *largeImageScope) error {
+	if scope == nil {
+		return updateNativeScopedMatch(t.old, t.write, t.handles, pair, nil, "OLD/write snapshot mismatch")
+	}
+	funded := *scope
+	funded.pairBudget, funded.pairLimit = budget, 0
+	return updateNativeScopedMatch(t.old, t.write, t.handles, pair, nil, "OLD/write snapshot mismatch", funded)
 }
 
 // pairReadPreflightV1 admits Pair/owner windows for both operation modes. The
 // section keeps the scalar high-water; primitives may still grow it before commit.
 // Scoped context work is funded independently.
-func (t *treeSectionV1) pairReadPreflightV1(pair []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) error {
+func (t *treeSectionV1) pairReadPreflightV1(pair []ownedMutation, consulted []ownedConsulted, scope *largeImageScope) error {
 	budget := treePairReadBudgetV1{credit: t.pairReadLimit, ledger: t.ledger}
 	defer t.publishReadV1(&budget)
-	treeSealScopesV1(scopes, &budget, 0)
 	var err error
 	for _, side := range canonicalSides {
 		err = canonicalNewPaired(pair, side, &budget)
@@ -465,7 +475,7 @@ func (t *treeSectionV1) pairReadPreflightV1(pair []ownedMutation, consulted []ow
 	if err != nil {
 		return err
 	}
-	err = updateNativeScopedMatch(t.old, t.write, t.handles, pair, nil, "OLD/write snapshot mismatch", scopes...)
+	err = t.scopedMatchV1(pair, &budget, scope)
 	if err != nil {
 		return err
 	}
@@ -512,7 +522,7 @@ func (t *treeSectionV1) pairReadFinalV1(pair []ownedMutation, consulted []ownedC
 	if err != nil {
 		return err
 	}
-	treeSealScopesV1(scopes, nil, t.pairReadLimit)
+	treeSealScopesV1(scopes, t.pairReadLimit)
 	return updateNativeScopedMatch(t.old, t.write, t.handles, pair, nil, "final update image mismatch", scopes...)
 }
 
@@ -897,7 +907,7 @@ func (r *treeReadbackStateV1) foldPairV1(pair []ownedMutation, consulted []owned
 	if err != nil {
 		return false, false, err
 	}
-	treeSealScopesV1(scopes, nil, r.nativeLimit)
+	treeSealScopesV1(scopes, r.nativeLimit)
 	return updateNativeReadbackScoped(r.old, r.read, r.handles, pair, nil, oldImage, newImage, scopes...)
 }
 

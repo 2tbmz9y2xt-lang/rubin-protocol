@@ -707,7 +707,7 @@ func obsoleteScopeArrays(tokens []ObsoletePageWitnessV1) ([]obsoleteDomain, []ob
 	return domains, points
 }
 
-// obsoleteWitnessPoints is P, the sum of witness point counts.
+// obsoleteWitnessPoints is the sum of witness point counts.
 func obsoleteWitnessPoints(tokens []ObsoletePageWitnessV1) int {
 	n := 0
 	for _, token := range tokens {

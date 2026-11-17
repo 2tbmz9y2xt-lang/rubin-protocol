@@ -41,12 +41,19 @@ type TreePairV1 struct {
 	// after; the caller must keep *ContextConsulted unchanged from the callback's return until that copy.
 	ContextConsulted *CanonicalContextWindowV1
 	// ObsoleteDeletes, ObsoleteConsulted and LargeConsulted carry only same-operation ORIGINAL OLD
-	// physical evidence (nil and empty are equivalent). Any nonempty field selects the pair-only
-	// physical scope: a LaneOperation account, no primitives, Proof, HeaderSlot, EntryInventory or
-	// ContextConsulted, zero PrepaidReadBytes and at least one Mutation or ObsoleteDeletes row;
-	// after the ordinary Pair checks, which keep their own refusals, any other shape is "invalid
-	// Update Batch". ObsoleteDeletes may be unordered; LargeConsulted is strictly (Kind, Hash)
-	// ordered. These fields are read only after the callback.
+	// physical evidence (nil and empty are equivalent) and are read only after the callback. Any
+	// nonempty field selects the pair-only physical scope: a LaneOperation account, no primitives,
+	// Proof, HeaderSlot, EntryInventory or ContextConsulted, zero PrepaidReadBytes and at least one
+	// Mutation or ObsoleteDeletes row. After the ordinary Pair checks, which keep their own refusals,
+	// the refusals are, in order: any other shape is "invalid Update Batch"; more than 2391106
+	// deletes plus witnesses, more than 2880 selectors or more than 1440 of one kind is "Update Batch
+	// exceeds bound"; a token not from this operation's Reader is "invalid Update Batch"; after the
+	// closed-account refusal, the metadata charge refuses with the operation-reservation capacity
+	// error; then a duplicate witness or delete, an uncovered delete, or a delete overlapping a
+	// Mutation or Consulted row is "invalid Update Batch"; the combined Update Batch caps refuse
+	// with "Update Batch exceeds bound"; last, an unknown-kind or not strictly (Kind, Hash) ordered
+	// selector, or a Consulted row inside a selector, is "invalid Update Batch". ObsoleteDeletes
+	// may be unordered.
 	ObsoleteDeletes   []ObsoleteRowV1
 	ObsoleteConsulted []ObsoletePageWitnessV1
 	LargeConsulted    []LargeImageSelectorV1
@@ -409,8 +416,8 @@ func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperati
 	return e.hold.grow(treePrewriteBytesV1(op))
 }
 
-// treePrewriteBytesV1 is the one post-admission charge: the metadata envelope F for a physical
-// scope, which covers its plan copy, otherwise the step-5 charge.
+// treePrewriteBytesV1 is the one post-admission charge: for a physical scope its metadata
+// envelope, which covers its plan copy; otherwise treeStepFiveBytesV1.
 func treePrewriteBytesV1(op TreeOperationV1) uint64 {
 	if treeScopePresentV1(&op.Pair) {
 		return treeScopeBytesV1(&op.Pair)
@@ -418,7 +425,9 @@ func treePrewriteBytesV1(op TreeOperationV1) uint64 {
 	return treeStepFiveBytesV1(op)
 }
 
-// treeScopeBytesV1 is F = 4096 + 128(M+D) + 48C + K + 176W + 8W + 8D + 32P + 32(P+3W) + 33L + U.
+// treeScopeBytesV1 is the physical-scope metadata envelope: 4096 fixed bytes, the ordinary plan
+// copy, 136 bytes per delete, 280 per witness, 64 per witness point, 33 per selector, and every
+// delete key and witness key byte.
 func treeScopeBytesV1(pair *TreePairV1) uint64 {
 	d, w := uint64(len(pair.ObsoleteDeletes)), uint64(len(pair.ObsoleteConsulted))
 	p := uint64(obsoleteWitnessPoints(pair.ObsoleteConsulted))
@@ -445,7 +454,7 @@ func treeWitnessKeyBytesV1(witness *obsoleteWitness) uint64 {
 	return n
 }
 
-// scopeCompileV1 compiles raw targets, then the owned large/raw scope, under the admitted F charge.
+// scopeCompileV1 compiles raw targets, then the owned large/raw scope, under the admitted metadata charge.
 // The scope carries the engine-captured format-3 context of this Store's ORIGINAL OLD Reader.
 func (e *treePublicEntryV1) scopeCompileV1(op TreeOperationV1, plan *treePlanV1) error {
 	if !treeScopePresentV1(&op.Pair) {
