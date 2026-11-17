@@ -114,6 +114,60 @@ func newDATTLCallbackRecords(t *testing.T) (*daNonReplayFixture, daTTLCallbackRe
 	return f, r
 }
 
+// requireDATTLOutsideSelectedUnchanged compares the full DA image and owner outside the selected
+// records: every other record, every locator of another record, and every owner claim and
+// outpoint row whose token no selected member holds are unchanged.
+func requireDATTLOutsideSelectedUnchanged(t *testing.T, before, after daRelayStateView, ownerBefore, ownerAfter *PendingOutpointOwner, selected ...[32]byte) {
+	t.Helper()
+	isSelected := map[[32]byte]bool{}
+	tokens := map[PendingOutpointToken]bool{}
+	for _, daID := range selected {
+		isSelected[daID] = true
+		record := before.sets[daID]
+		if record.commit.member != nil {
+			tokens[record.commit.member.token] = true
+		}
+		for _, chunk := range record.chunks {
+			if chunk.member != nil {
+				tokens[chunk.member.token] = true
+			}
+		}
+	}
+	for daID := range mergedKeys(before.sets, after.sets) {
+		if !isSelected[daID] && !reflect.DeepEqual(before.sets[daID], after.sets[daID]) {
+			t.Fatalf("record %x outside the selected set changed", daID[:1])
+		}
+	}
+	for txid := range mergedKeys(before.locators, after.locators) {
+		was, is := before.locators[txid], after.locators[txid]
+		if !isSelected[was.daID] && !isSelected[is.daID] && was != is {
+			t.Fatalf("locator %x outside the selected set changed: %+v -> %+v", txid[:1], was, is)
+		}
+	}
+	for token := range mergedKeys(ownerBefore.byToken, ownerAfter.byToken) {
+		if !tokens[token] && !reflect.DeepEqual(ownerBefore.byToken[token], ownerAfter.byToken[token]) {
+			t.Fatalf("owner claim %+v outside the selected set changed", token)
+		}
+	}
+	for op := range mergedKeys(ownerBefore.byOutpoint, ownerAfter.byOutpoint) {
+		was, is := ownerBefore.byOutpoint[op], ownerAfter.byOutpoint[op]
+		if !tokens[was.token] && !tokens[is.token] && was != is {
+			t.Fatalf("owner row %+v outside the selected set changed: %+v -> %+v", op, was, is)
+		}
+	}
+}
+
+func mergedKeys[K comparable, V any](a, b map[K]V) map[K]struct{} {
+	keys := make(map[K]struct{}, len(a)+len(b))
+	for k := range a {
+		keys[k] = struct{}{}
+	}
+	for k := range b {
+		keys[k] = struct{}{}
+	}
+	return keys
+}
+
 func requireDATTLCount(t *testing.T, view daRelayStateView, daID [32]byte, want uint64) {
 	t.Helper()
 	record, present := view.sets[daID]
@@ -129,10 +183,12 @@ func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	tokenA, tokenB := r.setup.sets[r.stateAID].chunks[0].member.token, r.setup.sets[r.stateBID].commit.member.token
 	for call, want := range []uint64{2, 1} {
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 		if err := runDATTLBodyInGuard(t, f); err != nil {
 			t.Fatalf("body call %d: %v", call+1, err)
 		}
 		view := daRelayStateSnapshot(f.relay)
+		requireDATTLOutsideSelectedUnchanged(t, before, view, ownerBefore, cloneDAAdmissionOwner(f.mp.pendingOutpoints), r.stateAID, r.stateBID)
 		requireDATTLCount(t, view, r.stateAID, want)
 		requireDATTLCount(t, view, r.stateBID, want)
 		if wantRecords := r.setup.records + 2*uint64(call+1); view.records != wantRecords {
@@ -142,10 +198,12 @@ func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
 			t.Fatalf("body call %d released the prefetch reservation of a surviving record", call+1)
 		}
 	}
+	before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 	if err := runDATTLBodyInGuard(t, f); err != nil {
 		t.Fatalf("body call 3: %v", err)
 	}
 	after := daRelayStateSnapshot(f.relay)
+	requireDATTLOutsideSelectedUnchanged(t, before, after, ownerBefore, cloneDAAdmissionOwner(f.mp.pendingOutpoints), r.stateAID, r.stateBID)
 	ownerReadyRecordAbsent(t, after, r.stateAID, r.stateA.txid)
 	ownerReadyRecordAbsent(t, after, r.stateBID, r.stateB.txid)
 	ownerReadyClaimGone(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), tokenA, r.stateA.inputs)
