@@ -7140,9 +7140,14 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("N8-operand-window", func(t *testing.T) {
 		sc := psfNew(t)
 		f, window := psfF(t), psfWindow(t, sc.s)
-		r := sc.run(t, reservationFilled(t, f-1))
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = sc.run(t, reservationFilled(t, f-1)) })
 		if any(r.err) != any(errOperationReservationCapacity) || sc.s.state != storeOPEN {
 			t.Fatalf("scope metadata high-water differs: %v %s", r.err, sc.s.state)
+		}
+		// The prewrite refusal aborts ORIGINAL OLD exactly once and never reaches a commit.
+		if evidence.aborts != 1 || evidence.commits != 0 {
+			t.Fatalf("scope next operation differs: OLD abort %+v", evidence)
 		}
 		sc.image(t, sc.s, false)
 		// F plus S and one body operand is one operand short of the funded two-span comparison.
