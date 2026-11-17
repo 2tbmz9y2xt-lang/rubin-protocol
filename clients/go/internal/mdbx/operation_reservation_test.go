@@ -597,7 +597,7 @@ func TestOperationReservationOwnerSurface(t *testing.T) {
 	if !slices.Equal(own.imports, []string{`"errors"`, `"sync"`}) {
 		t.Fatalf("surface imports: %v", own.imports)
 	}
-	if !slices.Equal(own.exports, []string{"IsOperationReservationCapacity", "LaneMaxBytes", "LaneOperation", "MaxOperationDataBytes", "MinReservationLimit", "NewOperationReservationOwner", "OperationAccount", "OperationKind", "OperationReservationOwner", "TreeLaneMaxBytes", "TreeOperation", "WithOperation", "WithPhaseReservationV1", "WithReservation", "WithReservation"}) {
+	if !slices.Equal(own.exports, []string{"IsOperationReservationCapacity", "LaneMaxBytes", "LaneOperation", "MaxOperationDataBytes", "MinReservationLimit", "NewOperationReservationOwner", "OperationAccount", "OperationKind", "OperationReservationOwner", "PrecheckV1", "TreeLaneMaxBytes", "TreeOperation", "WithOperation", "WithPhaseReservationV1", "WithReservation", "WithReservation"}) {
 		t.Fatalf("surface exports: %v", own.exports)
 	}
 	if len(own.fields) != 0 {
@@ -620,6 +620,300 @@ func accountRun(t *testing.T, label string, owner *OperationReservationOwner, ki
 func accountHeld(a *OperationAccount) uint64 {
 	held, _ := accountState(a)
 	return held
+}
+
+// TestOperationPrecheckV1 protects the one gross replay charge, distinct from
+// the retained ordinary-account tests: a subclaim release cannot fund a sibling.
+func TestOperationPrecheckV1(t *testing.T) {
+	t.Run("input", precheckInputV1)
+	t.Run("ever_positive", precheckFreshV1)
+	t.Run("capacity", precheckCapacityV1)
+	t.Run("subclaims", precheckSubclaimsV1)
+	t.Run("retained_close", precheckRetainedV1)
+	t.Run("retained_token", precheckRetainedTokenV1)
+	t.Run("retained_shrink", precheckRetainedShrinkV1)
+	t.Run("concurrent", precheckConcurrentV1)
+	t.Run("exits", precheckExitsV1)
+}
+
+type precheckStateV1 struct {
+	live, held, gross uint64
+	positive, closed bool
+}
+
+func precheckSnapshotV1(a *OperationAccount) precheckStateV1 {
+	s := a.shared.origin
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return precheckStateV1{s.live, a.shared.held, a.shared.gross, a.shared.everPositive, a.shared.closed}
+}
+
+func precheckInputV1(t *testing.T) {
+	for _, a := range []*OperationAccount{nil, {}} {
+		for _, bytes := range []uint64{0, 1, 400000000} {
+			wantReservationSentinel(t, "unopened", a.PrecheckV1(bytes), errOperationReservationInput, textReservationInput)
+		}
+	}
+	owner := reservationOwner(t, 0)
+	for _, kind := range []OperationKind{LaneOperation, TreeOperation} {
+		var saved *OperationAccount
+		accountRun(t, "input before capacity", owner, kind, func(a *OperationAccount) {
+			saved = a
+			wantReservationSentinel(t, "zero before capacity", a.PrecheckV1(0), errOperationReservationInput, textReservationInput)
+			if kind == LaneOperation {
+				wantReservationSentinel(t, "kind before capacity", a.PrecheckV1(1), errOperationReservationInput, textReservationInput)
+			}
+			if reservationLive(owner) != 0 || accountHeld(a) != 0 || a.shared.everPositive || a.shared.gross != 0 {
+				t.Fatal("input refusal changed fresh state")
+			}
+		})
+		before := precheckSnapshotV1(saved)
+		wantReservationSentinel(t, "closed before capacity", saved.PrecheckV1(1), errOperationReservationInput, textReservationInput)
+		if after := precheckSnapshotV1(saved); after != before { t.Fatalf("closed refusal changed %+v to %+v", before, after) }
+	}
+}
+
+func precheckFreshV1(t *testing.T) {
+	for _, charge := range []string{"token", "hold"} {
+		t.Run(charge, func(t *testing.T) {
+			owner := reservationOwner(t, 805306368)
+			accountRun(t, charge, owner, TreeOperation, func(a *OperationAccount) {
+				if charge == "token" {
+					holdOK(t, "zero token", a.WithReservation(0, func() error { return nil }))
+					holdOK(t, "positive token", a.WithReservation(1, func() error { return nil }))
+				} else {
+					holdOK(t, "positive hold", a.withHold(func(h *operationHold) error {
+						holdOK(t, "zero grow", h.grow(0))
+						holdOK(t, "positive grow", h.grow(1))
+						return h.shrink(1)
+					}))
+				}
+				wantReservationSentinel(t, "released positive is not fresh", a.PrecheckV1(400000000), errOperationReservationInput, textReservationInput)
+				if reservationLive(owner) != 0 || accountHeld(a) != 0 || a.shared.gross != 0 {
+					t.Fatal("ever-positive input refusal changed counters")
+				}
+			})
+		})
+	}
+	owner := reservationOwner(t, 805306368)
+	accountRun(t, "positive token still held", owner, TreeOperation, func(a *OperationAccount) {
+		holdOK(t, "ordinary positive token", a.WithReservation(1, func() error {
+			before := precheckSnapshotV1(a)
+			wantReservationSentinel(t, "held positive is not fresh", a.PrecheckV1(400000000), errOperationReservationInput, textReservationInput)
+			if after := precheckSnapshotV1(a); before != after || before.held != 1 || !before.positive { t.Fatalf("held input refusal: %+v -> %+v", before, after) }
+			return nil
+		}))
+	})
+	accountRun(t, "fresh zero token", owner, TreeOperation, func(a *OperationAccount) {
+		holdOK(t, "ordinary zero token", a.WithReservation(0, func() error { return nil }))
+		if before := precheckSnapshotV1(a); before != (precheckStateV1{}) { t.Fatalf("zero token changed freshness: %+v", before) }
+		holdOK(t, "fresh after zero token", a.PrecheckV1(400000000))
+		if after := precheckSnapshotV1(a); after != (precheckStateV1{live: 400000000, gross: 400000000, positive: true}) { t.Fatalf("zero-token precheck: %+v", after) }
+	})
+	accountRun(t, "zero native hold", owner, TreeOperation, func(a *OperationAccount) {
+		holdOK(t, "open zero hold", a.withHold(func(h *operationHold) error {
+			holdOK(t, "zero grow", h.grow(0))
+			return a.PrecheckV1(400000000)
+		}))
+		dup := *a
+		wantReservationSentinel(t, "shared duplicate", dup.PrecheckV1(400000000), errOperationReservationInput, textReservationInput)
+		if reservationLive(owner) != 400000000 || accountHeld(a) != 0 {
+			t.Fatal("zero hold or duplicate released gross funding")
+		}
+	})
+	if reservationLive(owner) != 0 {
+		t.Fatal("empty account close retained gross funding")
+	}
+}
+
+func precheckCapacityV1(t *testing.T) {
+	for _, limit := range []uint64{0, 805306367, 805306368, 18446744073709551615} {
+		owner := reservationOwner(t, limit)
+		accountRun(t, "capacity", owner, TreeOperation, func(a *OperationAccount) {
+			for _, bytes := range []uint64{402653185, 18446744073709551615} {
+				wantReservationSentinel(t, "ceiling", a.PrecheckV1(bytes), errOperationReservationCapacity, textReservationCapacity)
+				if reservationLive(owner) != 0 || a.shared.gross != 0 || a.shared.everPositive {
+					t.Fatal("capacity refusal changed state")
+				}
+			}
+			before := precheckSnapshotV1(a)
+			err := a.PrecheckV1(402653184)
+			if limit < 805306368 {
+				wantReservationSentinel(t, "R floor", err, errOperationReservationCapacity, textReservationCapacity)
+				if after := precheckSnapshotV1(a); after != before { t.Fatalf("R-floor refusal changed %+v to %+v", before, after) }
+				return
+			}
+			holdOK(t, "fresh retry after capacity", err)
+		})
+		if reservationLive(owner) != 0 {
+			t.Fatal("capacity test leaked gross amount")
+		}
+	}
+	for _, free := range []uint64{399999999, 400000000} {
+		t.Run(fmt.Sprint(free), func(t *testing.T) {
+			owner := reservationFilled(t, free)
+			accountRun(t, "aggregate", owner, TreeOperation, func(a *OperationAccount) {
+				err := a.PrecheckV1(400000000)
+				if free == 399999999 {
+					wantReservationSentinel(t, "T-1", err, errOperationReservationCapacity, textReservationCapacity)
+					if reservationLive(owner) != 405306369 || a.shared.everPositive || accountHeld(a) != 0 {
+						t.Fatal("T-1 refusal consumed admission")
+					}
+					err = a.PrecheckV1(399999999)
+				}
+				holdOK(t, "exact fresh admission", err)
+				if reservationLive(owner) != 805306368 {
+					t.Fatal("gross amount not charged exactly once")
+				}
+			})
+			if reservationLive(owner) != 805306368-free {
+				t.Fatal("gross release changed competing reservations")
+			}
+		})
+	}
+}
+
+func precheckSubclaimsV1(t *testing.T) {
+	owner := reservationFilled(t, 400000000)
+	accountRun(t, "subclaims", owner, TreeOperation, func(a *OperationAccount) {
+		holdOK(t, "precheck", a.PrecheckV1(400000000))
+		dup := *a
+		holdOK(t, "full subclaim despite full aggregate", dup.WithReservation(400000000, func() error {
+			if reservationLive(owner) != 805306368 || accountHeld(a) != 400000000 {
+				t.Fatal("subclaim recharged aggregate")
+			}
+			accountMustRefuse(t, "subclaim ceiling", a, 1)
+			return nil
+		}))
+		holdOK(t, "phase subclaim", a.WithPhaseReservationV1(31, 7, func(reduce func() error) error {
+			if accountHeld(a) != 31 { t.Fatal("phase did not hold initial bytes") }
+			holdOK(t, "phase reduce", reduce())
+			holdOK(t, "phase idempotence", reduce())
+			if accountHeld(a) != 7 || reservationLive(owner) != 805306368 { t.Fatal("phase released gross amount") }
+			return nil
+		}))
+		h1, d1 := startResizableHold(t, a, 11)
+		h2, d2 := startResizableHold(t, &dup, 13)
+		d1()
+		holdOK(t, "non-LIFO grow", h2.grow(399999987))
+		holdRefuse(t, "one over subclaim", h2, func() error { return h2.grow(1) }, errOperationReservationCapacity, textReservationCapacity)
+		if accountHeld(a) != 400000000 || reservationLive(owner) != 805306368 || h1.amount != 0 { t.Fatal("non-LIFO ownership") }
+		d2()
+		reservationMustRefuse(t, "gross survives subclaim retirement", owner, 1)
+	})
+	if reservationLive(owner) != 405306368 { t.Fatal("close did not return gross amount") }
+}
+
+func precheckRetainedV1(t *testing.T) {
+	owner := reservationFilled(t, 400000000)
+	var a *OperationAccount
+	var h1, h2 *operationHold
+	var d0, d1, d2 func()
+	accountRun(t, "retained close", owner, TreeOperation, func(open *OperationAccount) {
+		a = open
+		holdOK(t, "precheck", a.PrecheckV1(400000000))
+		_, d0 = startResizableHold(t, a, 0)
+		h1, d1 = startResizableHold(t, a, 11)
+		h2, d2 = startResizableHold(t, a, 13)
+	})
+	for _, admit := range []func() error{
+		func() error { return a.PrecheckV1(1) },
+		func() error { return a.WithReservation(0, func() error { t.Fatal("closed callback"); return nil }) },
+		func() error { return h1.grow(0) },
+	} { wantReservationSentinel(t, "closed admission", admit(), errOperationReservationInput, textReservationInput) }
+	reservationMustRefuse(t, "closed retained gross", owner, 1)
+	holdOK(t, "closed shrink", h2.shrink(13))
+	d2()
+	reservationMustRefuse(t, "last claim keeps gross", owner, 1)
+	d1()
+	d1()
+	if reservationLive(owner) != 405306368 || accountHeld(a) != 0 { t.Fatal("last release did not retire gross exactly once") }
+	d0()
+	if reservationLive(owner) != 405306368 { t.Fatal("retained zero hold retired gross twice") }
+	accountRun(t, "next operation", owner, TreeOperation, func(next *OperationAccount) { holdOK(t, "fresh T", next.PrecheckV1(400000000)) })
+}
+
+func precheckRetainedTokenV1(t *testing.T) {
+	owner := reservationFilled(t, 400000000)
+	var token operationReservationToken
+	var a *OperationAccount
+	accountRun(t, "retained token", owner, TreeOperation, func(open *OperationAccount) {
+		a = open
+		holdOK(t, "precheck", a.PrecheckV1(400000000))
+		var err error
+		token, err = a.shared.origin.reserve(a.shared, 17)
+		holdOK(t, "token", err)
+	})
+	if state := precheckSnapshotV1(a); state != (precheckStateV1{live: 805306368, held: 17, gross: 400000000, positive: true, closed: true}) { t.Fatalf("closed token state %+v", state) }
+	reservationMustRefuse(t, "retained token keeps T", owner, 1)
+	if !a.shared.origin.release(token) || a.shared.origin.release(token) { t.Fatal("retained token release identity") }
+	if state := precheckSnapshotV1(a); state != (precheckStateV1{live: 405306368, positive: true, closed: true}) { t.Fatalf("last token retirement %+v", state) }
+	accountRun(t, "after last token", owner, TreeOperation, func(next *OperationAccount) { holdOK(t, "next T", next.PrecheckV1(400000000)) })
+}
+
+func precheckRetainedShrinkV1(t *testing.T) {
+	owner := reservationFilled(t, 400000000)
+	var a *OperationAccount
+	var h *operationHold
+	var finish func()
+	accountRun(t, "retained shrink", owner, TreeOperation, func(open *OperationAccount) {
+		a = open
+		holdOK(t, "precheck", a.PrecheckV1(400000000))
+		h, finish = startResizableHold(t, a, 23)
+	})
+	reservationMustRefuse(t, "retained shrink keeps T", owner, 1)
+	holdOK(t, "last shrink", h.shrink(23))
+	if state := precheckSnapshotV1(a); state != (precheckStateV1{live: 405306368, positive: true, closed: true}) { t.Fatalf("last shrink retirement %+v", state) }
+	accountRun(t, "before zero frame ends", owner, TreeOperation, func(next *OperationAccount) { holdOK(t, "next T", next.PrecheckV1(400000000)) })
+	finish()
+	if reservationLive(owner) != 405306368 { t.Fatal("zero frame release retired gross twice") }
+}
+
+func precheckConcurrentV1(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	var saved *OperationAccount
+	var finish func()
+	accountRun(t, "concurrent", owner, TreeOperation, func(a *OperationAccount) {
+		saved = a
+		dup := *a
+		start, results := make(chan struct{}), make(chan error, 2)
+		for _, handle := range []*OperationAccount{a, &dup} {
+			go func() { <-start; results <- handle.PrecheckV1(400000000) }()
+		}
+		close(start)
+		first, second := <-results, <-results
+		if first != nil { first, second = second, first }
+		if first != nil || second != errOperationReservationInput || reservationLive(owner) != 400000000 { t.Fatal("concurrent duplicate", first, second) }
+		_, finish = startResizableHold(t, a, 19)
+		go finish()
+	})
+	finish()
+	if reservationLive(owner) != 0 || accountHeld(saved) != 0 { t.Fatal("concurrent close/release leaked or double-retired gross") }
+	accountRun(t, "after concurrent close", owner, TreeOperation, func(a *OperationAccount) { holdOK(t, "next admission", a.PrecheckV1(400000000)) })
+}
+
+func precheckExitsV1(t *testing.T) {
+	for _, mode := range []string{"nil", "error", "panic", "Goexit"} {
+		t.Run(mode, func(t *testing.T) {
+			owner := reservationOwner(t, 805306368)
+			primary := errors.New("prechecked application cause")
+			done := make(chan any, 1)
+			go func() {
+				defer func() { done <- recover() }()
+				err := owner.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					if err := a.PrecheckV1(400000000); err != nil { return err }
+					return a.WithReservation(7, func() error {
+						switch mode { case "panic": panic(primary); case "Goexit": runtime.Goexit(); case "error": return primary }
+						return nil
+					})
+				})
+				if mode == "error" && err != primary || mode == "nil" && err != nil { t.Errorf("application identity %v", err) }
+			}()
+			got := <-done
+			if mode == "panic" && got != primary || mode != "panic" && got != nil || reservationLive(owner) != 0 { t.Fatal("prechecked unwind", mode, got, reservationLive(owner)) }
+			accountRun(t, "next after unwind", owner, TreeOperation, func(a *OperationAccount) { holdOK(t, "next T", a.PrecheckV1(400000000)) })
+		})
+	}
 }
 
 // accountState reads the held sum and closed flag of a under its origin's mutex.

@@ -90,7 +90,7 @@ func rpfRun(t *testing.T, c *rpCase, keys []mdbx.TreeOutpointV1, alter func(repl
 					if lag != nil {
 						inputs = lag(inputs)
 					}
-					got = applyReplayPairV1(&c.store, a, c.request, prepare, inputs)
+					got = applyReplayPairV1(&c.store, a, prepare, inputs)
 					logicalMDBXAssert(t, c.store.account == a && c.store.calls == 1, "exactly one native call on one account")
 					logicalMDBXAssert(t, got.Truth == c.store.native.truth && got.Stage == c.store.native.stage && got.Index == c.store.native.index && any(got.Err) == any(c.store.native.err), "composer preserves exact captured native product")
 					return got.Err
@@ -432,18 +432,18 @@ func TestReplayPairSourceOrder(t *testing.T) {
 				c.request.Raw = nil
 			}
 			alter := func(prepare replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
-				return func(r *mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
-					// The composer captured the refused source request; the
-					// caller's classified Pair still uses coherent authority.
+				return func(r *mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+					// Classify Pair with coherent authority, then return the
+					// one refused source request for the composer's freeze.
 					c.request.Authority.TargetLagGenerationID = lagGeneration
-					result, rows, err := rpStoredRows(t, c, false)(prepare)(r)
+					request, result, rows, err := rpStoredRows(t, c, false)(prepare)(r)
 					if name == "CURRENT-F2" {
 						rows.BodyKind = 0
 					}
 					if name == "LAG-source" {
-						c.request.Authority.TargetLagGenerationID = 0
+						request.Authority.TargetLagGenerationID = 0
 					}
-					return result, rows, err
+					return request, result, rows, err
 				}
 			}
 			later := errors.New("later LAG grant must not run")
@@ -684,12 +684,12 @@ func TestReplayPairBorrowIsolation(t *testing.T) {
 	c, w := rpfCase(t, f, 1, true)
 	before := bytes.Clone(c.in.Raw)
 	alter := func(prepare replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
-		return func(r *mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
-			result, rows, err := prepare(r)
+		return func(r *mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+			request, result, rows, err := prepare(r)
 			if err == nil {
 				clear(result.transition.createdUtxos)
 			}
-			return result, rows, err
+			return request, result, rows, err
 		}
 	}
 	var borrowed []mdbx.Mutation
@@ -745,8 +745,8 @@ func TestReplayPairCallbackUnwind(t *testing.T) {
 					if stage != "CURRENT" {
 						return prepare
 					}
-					return func(*mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
-						return nil, replayPairRowsV1{}, invoke()
+					return func(*mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+						return replayPairRequestV1{}, nil, replayPairRowsV1{}, invoke()
 					}
 				}
 				inputs := replayPairWithLagInputsV1(c.inputs)
@@ -834,7 +834,7 @@ func TestReplayPairNativeCapacity(t *testing.T) {
 						}()
 						logicalMDBXAssert(t, <-ready == nil, "pre-native test filler acquisition")
 					}
-					got = applyReplayPairV1(&c.store, a, c.request, c.prepare(t, validate), c.inputs)
+					got = applyReplayPairV1(&c.store, a, c.prepare(t, validate), c.inputs)
 					logicalMDBXAssert(t, c.store.calls == 1 && c.store.account == a && got.Truth == c.store.native.truth && got.Stage == c.store.native.stage && got.Index == c.store.native.index && any(got.Err) == any(c.store.native.err), "capacity preserves exact native product/account")
 					return got.Err
 				})
@@ -882,8 +882,8 @@ func TestReplayPairCallbackDisposition(t *testing.T) {
 					if stage != "CURRENT" {
 						return prepare
 					}
-					return func(*mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
-						return nil, replayPairRowsV1{}, primary
+					return func(*mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+						return replayPairRequestV1{}, nil, replayPairRowsV1{}, primary
 					}
 				}
 				inputs := replayPairWithLagInputsV1(c.inputs)

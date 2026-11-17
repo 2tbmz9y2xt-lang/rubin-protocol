@@ -69,6 +69,8 @@ type operationAccountState struct {
 	ceiling uint64
 	held    uint64
 	closed  bool
+	gross   uint64
+	everPositive bool
 }
 
 // operationReservationGrant is the released-once record every copy of a token shares;
@@ -108,6 +110,56 @@ type OperationAccount struct {
 	shared *operationAccountState
 }
 
+// PrecheckV1 funds a fresh TreeOperation once. Subsequent claims share bytes
+// until account close and the last admitted claim have both completed.
+func (a *OperationAccount) PrecheckV1(bytes uint64) error {
+	if a == nil || a.shared == nil {
+		return errOperationReservationInput
+	}
+	account, s := a.shared, a.shared.origin
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if account.closed || account.ceiling != TreeLaneMaxBytes || bytes == 0 || account.everPositive {
+		return errOperationReservationInput
+	}
+	if !s.admits(account.ceiling, 0, bytes) {
+		return errOperationReservationCapacity
+	}
+	account.gross, account.everPositive = bytes, true
+	s.live += bytes
+	return nil
+}
+
+// admitsV1 checks subclaims under the same mutex as ordinary admission.
+func (a *operationAccountState) admitsV1(bytes uint64) bool {
+	if a.gross != 0 {
+		return bytes <= a.gross-a.held
+	}
+	return a.origin.admits(a.ceiling, a.held, bytes)
+}
+
+// chargeV1 changes subclaim ownership; prepaid claims never recharge aggregate R.
+func (a *operationAccountState) chargeV1(bytes uint64) {
+	a.held += bytes
+	a.everPositive = a.everPositive || bytes != 0
+	if a.gross == 0 {
+		a.origin.live += bytes
+	}
+}
+
+// releaseV1 retires gross funding only after close and the last subclaim.
+func (a *operationAccountState) releaseV1(bytes uint64) {
+	a.held -= bytes
+	if a.gross == 0 {
+		a.origin.live -= bytes
+		return
+	}
+	if a.closed && a.held == 0 {
+		a.origin.live -= a.gross
+		a.gross = 0
+	}
+}
+
 // operationHold owns one resizable charge until its withHold frame leaves. Its amount
 // and closed state, together with the account's sums, are guarded by the owner's mutex.
 type operationHold struct {
@@ -133,19 +185,22 @@ func (s *operationReservationState) admits(ceiling, held, bytes uint64) bool {
 func (s *operationReservationState) reserve(account *operationAccountState, bytes uint64) (operationReservationToken, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ceiling, held := LaneMaxBytes, uint64(0)
-	if account != nil {
+	var admitted bool
+	if account == nil {
+		admitted = s.admits(LaneMaxBytes, 0, bytes)
+	} else {
 		if account.closed {
 			return operationReservationToken{}, errOperationReservationInput
 		}
-		ceiling, held = account.ceiling, account.held
+		admitted = account.admitsV1(bytes)
 	}
-	if !s.admits(ceiling, held, bytes) {
+	if !admitted {
 		return operationReservationToken{}, errOperationReservationCapacity
 	}
-	s.live += bytes
-	if account != nil {
-		account.held += bytes
+	if account == nil {
+		s.live += bytes
+	} else {
+		account.chargeV1(bytes)
 	}
 	return operationReservationToken{origin: s, grant: &operationReservationGrant{bytes: bytes, account: account}}, nil
 }
@@ -165,9 +220,10 @@ func (s *operationReservationState) release(token operationReservationToken) boo
 		return false
 	}
 	g.released = true
-	s.live -= g.bytes
-	if g.account != nil {
-		g.account.held -= g.bytes
+	if g.account == nil {
+		s.live -= g.bytes
+	} else {
+		g.account.releaseV1(g.bytes)
 	}
 	return true
 }
@@ -177,6 +233,7 @@ func (s *operationReservationState) close(account *operationAccountState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	account.closed = true
+	account.releaseV1(0)
 }
 
 // withReservation charges bytes to account, runs callback once and releases the charge
@@ -279,8 +336,7 @@ func (a *OperationAccount) withHold(callback func(*operationHold) error) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		h.closed = true
-		h.account.held -= h.amount
-		s.live -= h.amount
+		h.account.releaseV1(h.amount)
 		h.amount = 0
 	}()
 	return callback(h)
@@ -299,12 +355,11 @@ func (h *operationHold) grow(bytes uint64) error {
 	if h.closed || a.closed {
 		return errOperationReservationInput
 	}
-	if !s.admits(a.ceiling, a.held, bytes) {
+	if !a.admitsV1(bytes) {
 		return errOperationReservationCapacity
 	}
 	h.amount += bytes
-	a.held += bytes
-	s.live += bytes
+	a.chargeV1(bytes)
 	return nil
 }
 
@@ -322,8 +377,7 @@ func (h *operationHold) shrink(bytes uint64) error {
 		return errOperationReservationInput
 	}
 	h.amount -= bytes
-	a.held -= bytes
-	s.live -= bytes
+	a.releaseV1(bytes)
 	return nil
 }
 

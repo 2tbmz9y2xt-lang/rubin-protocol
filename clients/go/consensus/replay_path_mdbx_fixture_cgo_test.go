@@ -5,11 +5,42 @@ package consensus
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
+
+// TestReplayPath148FixtureV1 distinguishes native width rejection from
+// hash-binding rejection and observes the corresponding next Store operation.
+func TestReplayPath148FixtureV1(t *testing.T) {
+	for _, width := range []int{116, 147, 148, 149} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			c := pathTreeCase148V1(t)
+			x := c.in.Endpoint.BlockHash
+			raw := make([]byte, width)
+			copy(raw, c.in.Raw[:148])
+			if width == 148 { raw[108] ^= 1 }
+			logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(c.w.s, 3, x[:], raw) == nil, "actual stored header width")
+			view := &pathView148{headers148: map[[32]byte][148]byte{x: [148]byte(c.in.Raw[:148])}}
+			p := &replayPathOwner{initial148: true, view148: view, limit: 32}
+			var selected error
+			err := pathTreeCall148V1(t, c, p, c.in.Raw, func(own replayPathOwn, err error) {
+				selected = err
+				logicalMDBXAssert(t, err != nil && own.h == 0 && own.x == x && own.resource != "" == (width != 148), "first stored observation: %+v/%v", own, err)
+			})
+			logicalMDBXAssert(t, err == selected && p.slot == nil && view.headerCalls == 0 && view.protects == 0, "stored failure fell through or retained partial slot")
+			next := c.w.s.View(func(*mdbx.Reader) error { return nil })
+			if width == 148 {
+				logicalMDBXAssert(t, next == nil, "clean binding refusal consumed Store")
+				return
+			}
+			engine, ok := selected.(*mdbx.EngineError)
+			logicalMDBXAssert(t, ok && engine.Operation == "get" && engine.Class == "Integrity" && engine.Code == -30796 && engine.Diagnostic == "invalid tree native representation" && engine.Cause != nil && !engine.ReopenRequired && engine.TreeObservation == nil && next == selected, "native width error/cause/disposition identity: %v/%v", selected, next)
+		})
+	}
+}
 
 // pathArmed runs one real producer invocation (pathWorld.call form: p.mu, the full grant, one aborted Update, then
 // finishLocked) under an armed native scenario. A native fault consumes the Store, so the Update tuple is not asserted;

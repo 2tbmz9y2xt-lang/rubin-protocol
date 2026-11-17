@@ -4,12 +4,458 @@ package consensus
 
 import (
 	"bytes"
+	"crypto/sha3"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"math/big"
+	"runtime"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
+
+func TestReplayStepTreeV1Fixture(t *testing.T) {
+	t.Run("A4", testStepTreeRetentionV1)
+	t.Run("R7_R8_R9_R10", testStepTreeSourcesV1)
+	t.Run("R9_LAG", testStepTreeLagV1)
+	t.Run("A3_R4_R5_H1", testStepTreeUndoV1)
+	t.Run("R6_H1_capacity_abort", testStepTreeCapacityAbortV1)
+	t.Run("H1_H3_native", testStepTreeNativeV1)
+	t.Run("A5_R9_H2", testStepTreeContextFaultV1)
+	t.Run("H1_unwind", testStepTreeUnwindV1)
+	t.Run("H1_retained", testStepTreeRetainedV1)
+	t.Run("R4_H4", testStepTreeGlobalRowsV1)
+	t.Run("R11", testStepTreeGrowthBeforeRootV1)
+	t.Run("R9_unequal", testStepTreeUnequalV1)
+}
+
+func stepTreeSeedV1(t *testing.T, w *stepTreeWorldV1, rank uint8, key, value []byte) {
+	t.Helper()
+	var err error
+	if value == nil { err = mdbx.FixtureStartupDeleteRow(w.s, rank, key) } else { err = mdbx.FixtureSeedRawRow(w.s, rank, key, value) }
+	logicalMDBXAssert(t, err == nil, "seed native row %d/%x: %v", rank, key, err)
+}
+
+func stepTreeUnchangedV1(t *testing.T, w *stepTreeWorldV1, h uint64) {
+	t.Helper()
+	err := w.s.View(func(r *mdbx.Reader) error {
+		a, _, err := r.ReadTreeAuthorityV1()
+		logicalMDBXAssert(t, err == nil && a.Authority.Replay.Cursor == (mdbx.ReplayCursorV1{Kind: 2, Height: h-1, BlockHash: w.hashes[h-1]}), "aborted cursor changed")
+		for _, g := range []uint64{1, 2} {
+			if g == 2 && !replayPairAppliesV1(w.a.Authority.Replay.Target.TipHeight, h) { continue }
+			root, _, err := r.ReadTreeRootBindingV1(g)
+			logicalMDBXAssert(t, err == nil && root.Endpoint == w.endpoint(h-1) && root.RootDigest == [32]byte(w.raw[h-1][108:140]), "role%d partial root/endpoint", g)
+		}
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "unchanged physical state: %v", err)
+}
+
+func testStepTreeRetentionV1(t *testing.T) {
+	t.Run("one-shared-old-active", testStepTreeOldActiveOnceV1)
+	t.Run("nonaligned15839_h1", func(t *testing.T) {
+		w := stepTreeNewV1(t, 15839, 1, nil)
+		w.a.Authority.Replay.TargetProfile = 1; w.setAuthority(t)
+		out := w.call(1); w.btWorld.reopen(t); stepTreeProgressV1(t, w, 1, out)
+		w.read(t, 4, w.hashes[1][:], w.raw[1]) // L_body=1, despite h1<B_target720.
+	})
+	for _, mode := range []string{"neither", "body", "undo", "both", "exact", "different", "above-tip"} {
+		t.Run(mode, func(t *testing.T) {
+			w := stepTreeNewV1(t, 15840, 5, nil)
+			w.a.Authority.Replay.TargetProfile = 1; w.setAuthority(t)
+			body := mode != "neither" && mode != "undo"
+			undo := mode != "neither" && mode != "body"
+			if body { stepTreeSeedV1(t, w, 4, w.hashes[5][:], w.raw[5]) }
+			manifest := stepManifest(5, 18691989860, 1, 0)
+			if undo { stepTreeSeedV1(t, w, 5, mdbx.UndoManifestKey(w.hashes[5]), manifest) }
+			if mode == "exact" || mode == "different" || mode == "above-tip" {
+				stepTreeSeedV1(t, w, 2, stepKey(3, 4), mdbx.ChainValue(w.hashes[4], w.hashes[3], w.endpoint(4).CumulativeChainwork))
+				owner, _ := mdbx.CanonicalOwnerKey(3, w.hashes[4]); stepTreeSeedV1(t, w, 7, owner, mdbx.CanonicalOwnerValue(4))
+				if mode != "above-tip" {
+					x, raw := w.hashes[5], w.raw[5][:148]
+					if mode == "different" { h, _ := ParseInitial148HeaderBytes(raw); h.Timestamp--; raw = initial148BlockMine(t, initial148BlockHead{version: h.Version, parent: h.PrevBlockHash, merkle: h.MerkleRoot, target: h.Target, root: h.UtxoRoot, timestamp: h.Timestamp}); x = sha3.Sum256(raw) }
+					stepTreeSeedV1(t, w, 3, x[:], raw)
+					stepTreeSeedV1(t, w, 2, stepKey(3, 5), mdbx.ChainValue(x, w.hashes[4], w.endpoint(5).CumulativeChainwork))
+					owner, _ := mdbx.CanonicalOwnerKey(3, x); stepTreeSeedV1(t, w, 7, owner, mdbx.CanonicalOwnerValue(5))
+				}
+			}
+			var out ReplayStepOutcomeV1
+			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = w.call(5) })
+			logicalMDBXAssert(t, err == nil && evidence.BeginWrite == 1 && evidence.Commits == 1, "single retention commit")
+			w.btWorld.reopen(t); stepTreeProgressV1(t, w, 5, out)
+			var wantBody, wantUndo []byte
+			if mode == "exact" { wantBody, wantUndo = w.raw[5], manifest }
+			w.read(t, 4, w.hashes[5][:], wantBody); w.read(t, 5, mdbx.UndoManifestKey(w.hashes[5]), wantUndo)
+		})
+	}
+}
+
+func testStepTreeOldActiveOnceV1(t *testing.T) {
+	var ownerReads [3]uint64
+	for i, mask := range []uint8{1, 2, 3} {
+		w := stepTreeNewV1(t, 15840, 5, nil)
+		w.a.Authority.Replay.TargetProfile = 1; w.setAuthority(t)
+		for _, h := range []uint64{4, 5} {
+			stepTreeSeedV1(t, w, 3, w.hashes[h][:], w.raw[h][:148])
+			stepTreeSeedV1(t, w, 2, stepKey(3, h), mdbx.ChainValue(w.hashes[h], w.hashes[h-1], w.endpoint(h).CumulativeChainwork))
+			owner, _ := mdbx.CanonicalOwnerKey(3, w.hashes[h]); stepTreeSeedV1(t, w, 7, owner, mdbx.CanonicalOwnerValue(h))
+		}
+		manifest := stepManifest(5, 18691989860, 1, 0)
+		if mask&1 != 0 { stepTreeSeedV1(t, w, 4, w.hashes[5][:], w.raw[5]) }
+		if mask&2 != 0 { stepTreeSeedV1(t, w, 5, mdbx.UndoManifestKey(w.hashes[5]), manifest) }
+		var out ReplayStepOutcomeV1
+		evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = w.call(5) })
+		logicalMDBXAssert(t, err == nil && evidence.BeginWrite == 1 && evidence.Commits == 1, "reached compared below-promise artifacts")
+		ownerReads[i] = evidence.OldGets[7]
+		stepTreeProgressV1(t, w, 5, out)
+		var body, undo []byte; if mask&1 != 0 { body = w.raw[5] }; if mask&2 != 0 { undo = manifest }
+		w.read(t, 4, w.hashes[5][:], body); w.read(t, 5, mdbx.UndoManifestKey(w.hashes[5]), undo)
+	}
+	logicalMDBXAssert(t, ownerReads[0] != 0 && ownerReads[0] == ownerReads[1] && ownerReads[1] == ownerReads[2], "body/undo/both must share one OLD-owner lookup, rank7 gets: %v", ownerReads)
+}
+
+func testStepTreeSourcesV1(t *testing.T) {
+	for _, mode := range []string{"context-index-absent", "context-parent", "context-work", "shared-header-absent", "counter-absent", "counter-IO", "root-IO", "root-malformed", "own-header-IO", "cursor"} {
+		t.Run(mode, func(t *testing.T) {
+			w := stepTreeNewV1(t, 12, 12, nil)
+			key, rank := stepKey(1, 11), uint8(2)
+			scenario := mdbx.SelectedDamageProbeOnly
+			switch mode {
+			case "context-index-absent": stepTreeSeedV1(t, w, rank, key, nil)
+			case "context-parent", "context-work":
+				entry := mdbx.ChainValue(w.hashes[11], w.hashes[10], w.endpoint(11).CumulativeChainwork)
+				if mode == "context-parent" { entry[32] ^= 1 } else { entry[103] ^= 1 }; stepTreeSeedV1(t, w, rank, key, entry)
+			case "shared-header-absent": rank, key = 3, w.hashes[11][:]; stepTreeSeedV1(t, w, rank, key, nil)
+			case "counter-absent": rank, key = 0, btMeta(0x10, 1); stepTreeSeedV1(t, w, rank, key, nil)
+			case "counter-IO": rank, key, scenario = 0, btMeta(0x10, 1), mdbx.SelectedDamageGetEIO
+			case "root-IO": rank, key, scenario = 0, btMeta(0x11, 1), mdbx.SelectedDamageGetEIO
+			case "root-malformed": rank, key = 0, btMeta(0x11, 1); stepTreeSeedV1(t, w, rank, key, []byte{0xff})
+			case "own-header-IO": rank, key, scenario = 3, w.hashes[12][:], mdbx.SelectedDamageGetEIO
+			case "cursor": w.a.Authority.Replay.Cursor.BlockHash[0] ^= 1; w.setAuthority(t)
+			}
+			var out ReplayStepOutcomeV1
+			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, scenario, rank, key, func() { out = w.call(12) })
+			logicalMDBXAssert(t, err == nil && evidence.BeginWrite == 0 && evidence.Commits == 0 && out.NativeCalled && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT" && out.Cause != nil && out.Err != nil, "source product/site: %+v/%+v/%v", out, evidence, err)
+			want, decision := replayEntryRecovery, "target local"
+			switch mode { case "counter-IO", "root-IO": want, decision = "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)", ""; case "own-header-IO": decision = ""; case "shared-header-absent", "cursor": want, decision = selectedSideIntegrity, "" }
+			logicalMDBXAssert(t, out.Result == want && out.Decision == decision, "source owning projection: %+v", out)
+			if mode == "counter-absent" {
+				failure, ok := out.Cause.(*logicalStateFailure)
+				logicalMDBXAssert(t, ok && failure.kind == logicalStateFailureStoreIntegrity && !out.HasObservation && out.Observation == (mdbx.TreeObservationV1{}) && out.Err == out.Cause, "required counter's exact no-observation result")
+			}
+			if mode == "root-malformed" { logicalMDBXAssert(t, out.HasObservation && out.Observation.Primitive == 0 && out.Observation.Generation == 1 && out.Observation.Rank == 0, "CURRENT actual root observation") }
+			calls := 0; next := w.s.View(func(*mdbx.Reader) error { calls++; return nil })
+			consumed := scenario == mdbx.SelectedDamageGetEIO || mode == "root-malformed"
+			if consumed { logicalMDBXAssert(t, next == out.Err && calls == 0, "native consumption was healed") } else { logicalMDBXAssert(t, next == nil && calls == 1, "application source refusal consumed Store") }
+			btReservationsReleased(t, w.owner)
+		})
+	}
+}
+
+func testStepTreeLagV1(t *testing.T) {
+	for _, mode := range []string{"index-absent", "index-width", "index-hash", "index-work", "owner-absent", "owner-width", "owner-height", "index-IO", "root-IO", "root-malformed"} {
+		t.Run(mode, func(t *testing.T) {
+			w := stepTreeNewV1(t, 15840, 5, nil)
+			key, rank := stepKey(2, 4), uint8(2)
+			scenario := mdbx.SelectedDamageProbeOnly
+			switch mode {
+			case "index-absent": stepTreeSeedV1(t, w, rank, key, nil)
+			case "index-width": stepTreeSeedV1(t, w, rank, key, []byte{1})
+			case "index-hash", "index-work": entry := mdbx.ChainValue(w.hashes[4], w.hashes[3], w.endpoint(4).CumulativeChainwork); if mode == "index-hash" { entry[0] ^= 1 } else { entry[103] ^= 1 }; stepTreeSeedV1(t, w, rank, key, entry)
+			case "owner-absent", "owner-width", "owner-height":
+				rank = 7; key, _ = mdbx.CanonicalOwnerKey(2, w.hashes[4]); value := []byte(nil)
+				if mode == "owner-width" { value = []byte{1} }; if mode == "owner-height" { value = mdbx.CanonicalOwnerValue(3) }; stepTreeSeedV1(t, w, rank, key, value)
+			case "index-IO": scenario = mdbx.SelectedDamageGetEIO
+			case "root-IO": rank, key, scenario = 0, btMeta(0x11, 2), mdbx.SelectedDamageGetEIO
+			case "root-malformed": rank, key = 0, btMeta(0x11, 2); stepTreeSeedV1(t, w, rank, key, []byte{1})
+			}
+			var invocation *replayStepInvocation
+			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, scenario, rank, key, func() { invocation = replayStepRun(w.step, w.s, w.owner, w.raw[5]) })
+			out := invocation.out
+			logicalMDBXAssert(t, err == nil && evidence.BeginWrite == 0 && evidence.Commits == 0 && out.Role == "LAG" && out.Index == -1 && out.Truth == 1 && out.Stage == 1 && out.Cause == invocation.observation.incoming, "reached LAG preserves original selection: %+v/%+v/%v", out, evidence, err)
+			decision := "target local"; if scenario == mdbx.SelectedDamageGetEIO { decision = "" }
+			logicalMDBXAssert(t, out.Result == replayEntryRecovery && out.Decision == decision, "LAG owning branch: %+v", out)
+			if mode == "index-width" || mode == "owner-width" {
+				e, ok := out.Cause.(*mdbx.EngineError)
+				logicalMDBXAssert(t, ok && e.Operation == "get" && e.Class == "Integrity" && e.Code == -30796 && e.Diagnostic == "invalid tree native representation" && e.Cause != nil && !e.ReopenRequired && e.TreeObservation == nil && !out.HasObservation && out.Observation == (mdbx.TreeObservationV1{}) && errors.Is(out.Err, e), "recorded exact LAG Get and real Cause: %+v", out)
+				if mode == "index-width" { logicalMDBXAssert(t, evidence.OldGets[7] == 2, "reciprocal Get followed expired index Reader: %+v", evidence) }
+			}
+			if mode == "root-malformed" { logicalMDBXAssert(t, out.HasObservation && out.Observation.Primitive == 0 && out.Observation.Generation == 2 && out.Observation.Block == w.hashes[5] && out.Observation.Height == 5, "LAG root observation0 is not native index1") }
+			consumed := scenario == mdbx.SelectedDamageGetEIO || mode == "index-width" || mode == "owner-width" || mode == "root-malformed"
+			calls := 0; next := w.s.View(func(*mdbx.Reader) error { calls++; return nil })
+			if consumed { logicalMDBXAssert(t, next == out.Err && calls == 0, "target-local projection healed native consumption") } else { logicalMDBXAssert(t, next == nil && calls == 1, "healthy application abort lost Store") }
+			btReservationsReleased(t, w.owner)
+		})
+	}
+}
+
+func testStepTreeUndoV1(t *testing.T) {
+	for _, mode := range []string{"equal", "extra", "missing", "differing", "truncated", "partial-IO", "body-second-IO"} {
+		t.Run(mode, func(t *testing.T) {
+			w, final := stepTreeGrowthWorldV1(t, "equal", 15840)
+			p, err := ParseInitial148BlockBytes(w.raw[1]); logicalMDBXAssert(t, err == nil, "undo funding identity")
+			generated := new(big.Int)
+			for h := uint64(0); h < 200; h++ { generated.Add(generated, new(big.Int).SetUint64(BlockSubsidyBig(h, generated))) }
+			manifest := stepManifest(200, generated.Uint64(), 10, 9)
+			stepTreeSeedV1(t, w, 5, mdbx.UndoManifestKey(w.hashes[200]), manifest)
+			var first []byte
+			for j := uint32(0); j < 9; j++ {
+				op := Outpoint{Txid: p.Txids[0], Vout: j}
+				key := mdbx.UndoEntryKey(w.hashes[200], op.Txid, j+1, 0, j)
+				if j == 0 { first = key }
+				if mode == "missing" && j == 8 { continue }
+				value := logicalMDBXValue(w.rows[op]); if mode == "differing" && j == 0 { value[0] ^= 1 }
+				stepTreeSeedV1(t, w, 5, key, value)
+			}
+			if mode == "extra" { stepTreeSeedV1(t, w, 5, mdbx.UndoEntryKey(w.hashes[200], p.Txids[0], 10, 0, 99), logicalMDBXValue(w.rows[Outpoint{Txid: p.Txids[0]}])) }
+			if mode == "truncated" { manifest[32] = 10; stepTreeSeedV1(t, w, 5, mdbx.UndoManifestKey(w.hashes[200]), manifest) }
+			if mode == "body-second-IO" { stepTreeSeedV1(t, w, 4, w.hashes[200][:], w.raw[200]) }
+			var out ReplayStepOutcomeV1
+			if mode == "partial-IO" {
+				evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 5, first, func() { out = w.call(200) })
+				logicalMDBXAssert(t, err == nil && evidence.OldGets[5] == 2 && evidence.Faults == 1 && out.Result == selectedSideCanonical && out.Decision == "" && out.Role == "CURRENT", "manifest bytes before non-EOF entry read: %+v/%+v", out, evidence)
+			} else if mode == "body-second-IO" {
+				gets, err := mdbx.FixtureBodySecondGetEIO(w.s, 4, w.hashes[200][:], func() { out = w.call(200) })
+				logicalMDBXAssert(t, err == nil && gets == 2 && out.Result == selectedSideCanonical && out.Role == "CURRENT", "complete body comparison before undo/old-active: %+v", out)
+			} else { out = w.call(200) }
+			if mode == "equal" {
+				w.btWorld.reopen(t); stepTreeProgressV1(t, w, 200, out)
+				for _, g := range []uint64{1, 2} { btState(t, w.btWorld, g, w.endpoint(200), final) }
+				w.read(t, 5, mdbx.UndoManifestKey(w.hashes[200]), nil)
+				return
+			}
+			if mode != "partial-IO" && mode != "body-second-IO" { logicalMDBXAssert(t, out.Result == selectedSideIntegrity && out.Decision == "", "complete original-order family rejection: %+v", out) }
+			logicalMDBXAssert(t, out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Cause != nil && out.Err != nil, "family error raw tuple")
+			w.btWorld.reopen(t); stepTreeUnchangedV1(t, w, 200)
+			for _, g := range []uint64{1, 2} { btState(t, w.btWorld, g, w.endpoint(199), w.rows) }
+			btReservationsReleased(t, w.owner)
+		})
+	}
+}
+
+func testStepTreeCapacityAbortV1(t *testing.T) {
+	w := stepTreeNewV1(t, 0, 0, nil)
+	w.owner, _ = reservationRemaining(t, 399999999)
+	var out ReplayStepOutcomeV1
+	evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageAbortEIO, 0, nil, func() { out = w.call(0) })
+	logicalMDBXAssert(t, err == nil && evidence.Faults == 1 && evidence.BeginWrite == 0 && evidence.OldGets[1] == 0 && evidence.OldGets[2] == 0 && evidence.OldGets[3] == 0 && evidence.OldGets[4] == 0, "T refusal before data: %+v/%v", evidence, err)
+	parts, ok := out.Err.(interface{ Unwrap() []error })
+	logicalMDBXAssert(t, ok && len(parts.Unwrap()) == 2 && parts.Unwrap()[0] == out.Cause && mdbx.IsOperationReservationCapacity(out.Cause) && out.Result == selectedSideCapacity && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT", "capacity leaf with actual abort IO: %+v", out)
+	abort, ok := parts.Unwrap()[1].(*mdbx.EngineError)
+	logicalMDBXAssert(t, ok && abort.Operation == "abort" && abort.Class == "IO" && abort.Code == 5 && abort.Diagnostic == "error 5" && abort.Cause == nil && !abort.ReopenRequired, "actual cleanup tuple %v", out.Err)
+	calls := 0; next := w.s.View(func(*mdbx.Reader) error { calls++; return nil })
+	logicalMDBXAssert(t, next == out.Err && calls == 0, "capacity+IO consumption changed")
+}
+
+func testStepTreeNativeV1(t *testing.T) {
+	for _, row := range []struct { name string; scenario mdbx.SelectedDamageScenario; truth mdbx.CommitTruth; stage mdbx.UpdateStage; index int }{
+		{"CURRENT-precommit", mdbx.SelectedDamagePutEIO, 1, 2, 0},
+		{"LAG-precommit", mdbx.SelectedDamagePutEIO, 1, 2, 1},
+		{"crossed-OLD", mdbx.SelectedDamageCommitOld, 1, 3, -1},
+		{"crossed-NEW", mdbx.SelectedDamageCommitNew, 2, 3, -1},
+		{"crossed-unreadable", mdbx.SelectedDamageCommitUnreadable, 3, 3, -1},
+		{"crossed-neither", mdbx.SelectedDamageCommitThird, 3, 3, -1},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			w := stepTreeNewV1(t, 15840, 5, nil)
+			key := []byte{2}; if row.index == 0 { key = btMeta(0x11, 1) }; if row.index == 1 { key = btMeta(0x11, 2) }
+			var out ReplayStepOutcomeV1
+			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, row.scenario, 0, key, func() { out = w.call(5) })
+			logicalMDBXAssert(t, err == nil && out.Truth == row.truth && out.Stage == row.stage && out.Index == row.index && out.Err != nil && out.Cause != nil && out.CanonicalTruth == "OLD" && evidence.BeginWrite == 1, "native exact product: %+v/%+v/%v", out, evidence, err)
+			if row.index >= 0 { role := "CURRENT"; if row.index == 1 { role = "LAG" }; logicalMDBXAssert(t, out.Role == role && out.Result == selectedSidePrecommit, "actual native primitive role") }
+			calls := 0; next := w.s.View(func(*mdbx.Reader) error { calls++; return nil })
+			logicalMDBXAssert(t, calls == 0 && next == out.Err, "terminal native truth/disposition lost")
+			w.btWorld.reopen(t)
+			if row.truth == 2 { stepTreeImageV1(t, w, 5)
+			} else if row.name != "crossed-neither" { stepTreeUnchangedV1(t, w, 5) }
+			btReservationsReleased(t, w.owner)
+		})
+	}
+}
+
+// stepTreeContextStoreV1 is a bounded native-to-STEP-private join probe. It
+// preserves the qualified STEP descriptor and rebinds only the submitted one
+// so the real native Q owner produces its incomplete-OLD tuple. This is not a
+// full public StepReplayMDBX G2 execution.
+type stepTreeContextStoreV1 struct {
+	store *mdbx.Store
+	original mdbx.CanonicalContextWindowV1
+	raw replayPairOutcomeV1
+}
+
+func (s *stepTreeContextStoreV1) UpdateTreeV1(account *mdbx.OperationAccount, prepare func(*mdbx.Reader) (mdbx.TreeOperationV1, error)) (mdbx.CommitTruth, mdbx.UpdateStage, int, error) {
+	s.raw.Truth, s.raw.Stage, s.raw.Index, s.raw.Err = s.store.UpdateTreeV1(account, func(reader *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+		op, err := prepare(reader)
+		if err != nil { return op, err }
+		s.original = *op.Pair.ContextConsulted
+		absent := s.original; absent.Generation = 999
+		op.Pair.ContextConsulted = &absent
+		return op, nil
+	})
+	return s.raw.Truth, s.raw.Stage, s.raw.Index, s.raw.Err
+}
+
+func testStepTreeContextFaultV1(t *testing.T) {
+	t.Run("G2_private_join", testStepTreeContextJoinV1)
+	for _, h := range []uint64{10080, 20160} {
+		for _, late := range []bool{false, true} {
+			t.Run(fmt.Sprintf("drift%d/late%v", h, late), func(t *testing.T) {
+				w := stepTreeNewV1(t, h, h, nil)
+				k := h-10080; if late { k = h-1 }
+				var out ReplayStepOutcomeV1
+				drift, err := mdbx.FixtureWriteSnapshotDrift(w.s, 2, stepKey(1, k), func() { out = w.call(h) })
+				e, ok := out.Cause.(*mdbx.EngineError)
+				logicalMDBXAssert(t, err == nil && drift == 1 && ok && out.Result == replayEntryStale && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Cause == out.Err && e.Operation == "update" && e.Class == "StateMismatch" && e.Code == -30779 && e.Diagnostic == "OLD/write snapshot mismatch" && !out.HasObservation, "actual first/last full-window drift: %+v/%d/%v", out, drift, err)
+				btReservationsReleased(t, w.owner)
+			})
+		}
+	}
+}
+
+func testStepTreeContextJoinV1(t *testing.T) {
+	w := stepTreeNewV1(t, 12, 12, nil)
+	i := &replayStepInvocation{out: ReplayStepOutcomeV1{Truth: 1, Stage: 1, Index: -1, CanonicalTruth: "OLD"}}
+	c := &replayStepCall{owner: w.step, invocation: i, entry: replayEntryCall{sentinel: errors.New("context join decision")}}
+	store := &stepTreeContextStoreV1{store: w.s}
+	w.step.path.mu.Lock()
+	err := w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+		defer w.step.path.finishLocked(); defer c.release148V1(); c.account = a
+		out, runErr := withInitial148ReplayCompleteBlockV1(a, func(validate func(*mdbx.Reader, initial148CompleteBlockInputV1) (*initial148CompleteBlockResultV1, error)) error {
+			c.validate148, i.out.NativeCalled = validate, true
+			raw := applyReplayPairV1(store, a, func(r *mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) { return c.prepare148V1(r, w.raw[12]) }, c.lagInputs148V1)
+			i.out.Truth, i.out.Stage, i.out.Index, i.out.Err, i.out.Role = raw.Truth, raw.Stage, raw.Index, raw.Err, raw.Role
+			logicalMDBXAssert(t, store.original == (mdbx.CanonicalContextWindowV1{Generation: 1, FirstHeight: 1, Count: 11}) && *c.context == store.original, "qualified original STEP window was changed")
+			return raw.Err
+		})
+		c.complete148 = out; c.project148V1(runErr)
+		return nil
+	})
+	w.step.path.mu.Unlock()
+	e, ok := i.out.Cause.(*mdbx.EngineError)
+	logicalMDBXAssert(t, err == nil && ok && i.out.Err == store.raw.Err && i.out.Cause == store.raw.Err && i.out.Truth == store.raw.Truth && i.out.Stage == store.raw.Stage && i.out.Index == -1 && i.out.Role == "" && i.out.Result == selectedSideInvariant && e.Class == "StateMismatch" && e.Operation == "update" && e.Code == -30779 && e.Diagnostic == "canonical context OLD image is incomplete" && e.Cause == nil && !e.ReopenRequired && !i.out.HasObservation, "actual native Q -> STEP invariant: %+v", i.out)
+	stepTreeUnchangedV1(t, w, 12)
+	btReservationsReleased(t, w.owner)
+}
+
+func testStepTreeUnwindV1(t *testing.T) {
+	for _, mode := range []string{"nil", "panic", "Goexit"} {
+		t.Run(mode, func(t *testing.T) {
+			w := stepTreeNewV1(t, 0, 0, nil)
+			primary := errors.New("STEP point provider unwind")
+			if mode == "panic" { w.view.panicWith = primary }; if mode == "Goexit" { w.view.panicWith = func() { runtime.Goexit() } }
+			done := make(chan any, 1)
+			var observation mdbx.PairReadObservation
+			var fixtureErr error
+			var out ReplayStepOutcomeV1
+			funded, changed := false, false
+			go func() {
+				defer func() { done <- recover() }()
+				observation, fixtureErr = mdbx.FixturePairReadObservation(w.s, func(uint32) {
+					live := mdbx.FixtureReservationLive(w.owner)
+					if live == 400000000 { funded = true }; if funded && live != 400000000 { changed = true }
+				}, func() { out = w.call(0) })
+			}()
+			got := <-done
+			logicalMDBXAssert(t, mode == "panic" && got == primary || mode != "panic" && got == nil, "provider unwind identity: %v", got)
+			logicalMDBXAssert(t, !changed && mdbx.FixtureReservationLive(w.owner) == 0 && w.step.path.release == nil && !w.step.path.guarded && w.step.path.dst148 == ([148]byte{}) && w.view.releases == 1, "gross/source retirement after native unwind")
+			if mode == "nil" { logicalMDBXAssert(t, fixtureErr == nil && funded && observation.Writes != 0, "actual writer funding"); stepTreeProgressV1(t, w, 0, out) } else {
+				logicalMDBXAssert(t, w.step.path.slot == nil && w.s.View(func(*mdbx.Reader) error { return nil }) == nil, "clean provider abort consumed Store or kept partial slot")
+			}
+			btReservationsReleased(t, w.owner)
+		})
+	}
+}
+
+func testStepTreeRetainedV1(t *testing.T) {
+	for _, mode := range []uint32{9, 10} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			w := stepTreeNewV1(t, 1, 1, nil)
+			parsed, err := ParseInitial148BlockBytes(w.raw[1]); logicalMDBXAssert(t, err == nil, "bound cleanup fixture")
+			parsed.Txs[0].TxNonce = 1
+			tx, err := MarshalTx(parsed.Txs[0]); logicalMDBXAssert(t, err == nil, "cleanup coinbase")
+			w.replace(t, 1, w.body(t, tx))
+			var invocation *replayStepInvocation
+			state, _, err := mdbx.FixtureStartupCleanup(w.s, mode, false, func() { invocation = replayStepRun(w.step, w.s, w.owner, w.raw[1]) })
+			out := invocation.out
+			original, ok := out.Cause.(*TxError)
+			wantState, wantResult := "CLOSED", "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)"
+			if mode == 10 { wantState, wantResult = "POISONED_THREAD", selectedSideInvariant }
+			logicalMDBXAssert(t, err == nil && state == wantState && ok && original.Code == BLOCK_ERR_COINBASE_INVALID && out.Cause == invocation.observation.incoming && out.Height == 1 && out.Block == w.hashes[1] && out.Decision == "consensus invalid" && out.Result == wantResult && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT" && !out.HasObservation, "selected invalidity with actual consumed/retained cleanup: %+v/%s/%v", out, state, err)
+			var primary error
+			if mode == 9 {
+				joined, ok := out.Err.(interface{ Unwrap() []error }); logicalMDBXAssert(t, ok && len(joined.Unwrap()) == 2, "raw application/cleanup join")
+				primary = joined.Unwrap()[0]
+			} else { engine, ok := out.Err.(*mdbx.EngineError); logicalMDBXAssert(t, ok, "retained raw error"); primary = engine.Cause }
+			logicalMDBXAssert(t, primary != nil && primary != out.Cause, "logical sentinel and original TxError were conflated")
+			btfAbortResult(t, out.Err, mode, primary)
+			btfCached(t, w.btWorld, btResult{truth: out.Truth, stage: out.Stage, index: out.Index, err: out.Err})
+			logicalMDBXAssert(t, w.step.path.release == nil && !w.step.path.guarded && w.step.path.dst148 == ([148]byte{}), "cleanup retained caller source guard")
+			btReservationsReleased(t, w.owner)
+			if mode == 10 { logicalMDBXAssert(t, mdbx.FixtureStartupRelease(w.s) == nil, "release observed retained fixture handle") }
+		})
+	}
+}
+
+func testStepTreeGlobalRowsV1(t *testing.T) {
+	for _, family := range []string{"header-root", "body", "stored-unbound"} {
+		t.Run(family, func(t *testing.T) {
+			w := stepTreeNewV1(t, 15840, 5, nil)
+			rank, value := uint8(4), bytes.Clone(w.raw[5])
+			if family == "header-root" { rank, value = 3, bytes.Clone(w.raw[5][:148]); value[108] ^= 1
+			} else if family == "stored-unbound" { value[148] = 0
+			} else { value[len(value)-1] ^= 1 }
+			stepTreeSeedV1(t, w, rank, w.hashes[5][:], value)
+			var out ReplayStepOutcomeV1
+			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = w.call(5) })
+			logicalMDBXAssert(t, err == nil && out.Result == selectedSideIntegrity && out.Decision == "" && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT" && out.Cause != nil && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.OldGets[5] == 0 && evidence.OldGets[7] == 0, "hash-global first result precedes undo/membership/LAG: %+v/%+v", out, evidence)
+			w.btWorld.reopen(t); stepTreeUnchangedV1(t, w, 5)
+			btReservationsReleased(t, w.owner)
+		})
+	}
+}
+
+func testStepTreeGrowthBeforeRootV1(t *testing.T) {
+	w, _ := stepTreeGrowthWorldV1(t, "over", 200)
+	var out ReplayStepOutcomeV1
+	evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, btMeta(0x11, 1), func() { out = w.call(200) })
+	selected, ok := out.Cause.(*TxError)
+	logicalMDBXAssert(t, err == nil && ok && selected.Code == BLOCK_ERR_STATE_GROWTH_EXCEEDED && out.Decision == "consensus invalid" && evidence.NodeGets == 0 && evidence.NodePulls == 0 && evidence.BeginWrite == 0 && evidence.Commits == 0, "growth rejection suppresses D: %+v/%+v", out, evidence)
+	stepTreeUnchangedV1(t, w, 200)
+	btReservationsReleased(t, w.owner)
+}
+
+func testStepTreeUnequalV1(t *testing.T) {
+	w := stepTreeNewV1(t, 15840, 5, nil)
+	parent, _ := mdbx.CanonicalOwnerKey(2, w.hashes[4])
+	extra := btTransaction(999, 0, nil, [][]byte{btFrame(1, 0, []byte{99})}, nil, []byte{0}, nil)
+	rows := map[Outpoint]UtxoEntry{{Txid: extra.id}: btEntry(1, 0, []byte{99}, 4, true)}
+	root := canonicalUTXORoot(rows)
+	raw := btBody(148, 99, w.hashes[3], extra); copy(raw[108:140], root[:])
+	req := btRequest(raw, 4)
+	req.Generation, req.Kind, req.Undo, req.BodyKind, req.CanonicalBeforePresent = 2, mdbx.TreeKindDirectApplyV1, mdbx.UndoTransientV1, 3, true
+	req.Endpoint.CumulativeChainwork = w.endpoint(4).CumulativeChainwork
+	seed, _, _ := w.btWorld.run(t, []blockTreeRequestV1{req}, func(_ []blockTreeEffectV1, _ []*btObserved, op *mdbx.TreeOperationV1) {
+		op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[7], Key: parent, BeforePresent: true, AfterKind: mdbx.AfterAbsent}); btSort(op.Pair.Mutations)
+	})
+	seed.want(t, 2, 3, -1); logicalMDBXAssert(t, seed.err == nil, "native coherent LAG extra leaf")
+	var binding mdbx.RootBindingV1
+	err := w.s.View(func(r *mdbx.Reader) error { var err error; binding, _, err = r.ReadTreeRootBindingV1(2); return err })
+	logicalMDBXAssert(t, err == nil && binding.RootDigest == root, "real alternative LAG root")
+	binding.Endpoint = w.endpoint(4)
+	encoded, err := binding.Encode(); logicalMDBXAssert(t, err == nil, "restore qualified endpoint")
+	alternateOwner, _ := mdbx.CanonicalOwnerKey(2, req.Block)
+	meta, index := btMutation(0, btMeta(0x11, 2), encoded), btMutation(2, stepKey(2, 4), mdbx.ChainValue(w.hashes[4], w.hashes[3], w.endpoint(4).CumulativeChainwork))
+	meta.BeforePresent, index.BeforePresent = true, true
+	w.pair(t, meta, index, btMutation(7, parent, mdbx.CanonicalOwnerValue(4)), mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[7], Key: alternateOwner, BeforePresent: true, AfterKind: mdbx.AfterAbsent})
+	var out ReplayStepOutcomeV1
+	counts, err := mdbx.FixturePairReadObservation(w.s, nil, func() { out = w.call(5) })
+	unequal, ok := out.Cause.(*replayPairUnequalV1)
+	logicalMDBXAssert(t, err == nil && ok && unequal.Generation == 2 && unequal.Height == 5 && unequal.Block == w.hashes[5] && unequal.Derived == root && unequal.Accepted == [32]byte(w.raw[5][108:140]) && out.Result == selectedSideInvariant && out.Decision == "" && out.Role == "LAG" && out.Index == -1 && out.Truth == 1 && out.Stage == 1 && !out.HasObservation && counts.Writes == 0, "coherent unequal accepted-prefix root is local invariant: %+v", out)
+	w.read(t, 2, stepKey(1, 5), nil); w.read(t, 2, stepKey(2, 5), nil)
+	btState(t, w.btWorld, 2, w.endpoint(4), rows)
+	btReservationsReleased(t, w.owner)
+}
 
 func stepArmed(t *testing.T, w *stepWorld, h uint64, scenario mdbx.SelectedDamageScenario, rank uint8, key []byte) (ReplayStepOutcomeV1, mdbx.SelectedDamageEvidence) {
 	t.Helper()

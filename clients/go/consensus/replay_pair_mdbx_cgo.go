@@ -41,7 +41,7 @@ type replayPairRequestV1 struct {
 }
 
 type (
-	replayPairPrepareCurrentV1 func(*mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error)
+	replayPairPrepareCurrentV1 func(*mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error)
 	replayPairWithLagInputsV1  func(*mdbx.Reader, *initial148CompleteBlockResultV1, func([]mdbx.TreeOutpointV1) error) error
 )
 
@@ -78,8 +78,8 @@ func replayPairAppliesV1(target, height uint64) bool {
 
 // applyReplayPairV1 must run synchronously inside initial148CompleteRunV1.
 // Sources and validated M remain live through its one native call and unwind.
-func applyReplayPairV1(store replayPairStoreV1, account *mdbx.OperationAccount, request replayPairRequestV1, prepareCurrent replayPairPrepareCurrentV1, withLagInputs replayPairWithLagInputsV1) replayPairOutcomeV1 {
-	c := replayPairCallV1{account: account, request: request, prepare: prepareCurrent, lagInputs: withLagInputs}
+func applyReplayPairV1(store replayPairStoreV1, account *mdbx.OperationAccount, prepareCurrent replayPairPrepareCurrentV1, withLagInputs replayPairWithLagInputsV1) replayPairOutcomeV1 {
+	c := replayPairCallV1{account: account, prepare: prepareCurrent, lagInputs: withLagInputs}
 	out := replayPairOutcomeV1{Index: -1}
 	out.Truth, out.Stage, out.Index, out.Err = store.UpdateTreeV1(account, c.planV1)
 	out.Role = c.role
@@ -107,13 +107,14 @@ func (c *replayPairCallV1) planV1(reader *mdbx.Reader) (mdbx.TreeOperationV1, er
 	if c.prepare == nil {
 		return mdbx.TreeOperationV1{}, localLogicalStateFailure("nil replay CURRENT preparation")
 	}
-	result, rows, err := c.prepare(reader)
+	request, result, rows, err := c.prepare(reader)
 	if err != nil {
 		return mdbx.TreeOperationV1{}, err
 	}
 	if result == nil {
 		return mdbx.TreeOperationV1{}, localLogicalStateFailure("nil replay CURRENT result")
 	}
+	c.request = request
 	req := c.currentRequestV1(result, rows)
 	current, err := prepareBlockTreeEffectV1(&c.sources[0], reader, c.account, req)
 	if err != nil {

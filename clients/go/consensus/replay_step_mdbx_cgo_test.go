@@ -4,9 +4,12 @@ package consensus
 
 import (
 	"bytes"
+	"crypto/sha3"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/big"
+	"maps"
 	"reflect"
 	"slices"
 	"sync"
@@ -15,6 +18,438 @@ import (
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
+
+// stepTreeWorldV1 extends the native btWorld with a constant-UTXO, valid
+// anchor-only history. Literal roots and byte accounting remain independent
+// of the STEP result; no admission, validity or root receipt is supplied.
+type stepTreeWorldV1 struct {
+	*btWorld
+	step *ReplayStepOwnerV1
+	view *pathView148
+	genesis PublishedGenesisContextV1
+	a mdbx.TreeAuthorityV1
+	raw [][]byte
+	hashes [][32]byte
+	height uint64
+	work0 uint64
+	rows map[Outpoint]UtxoEntry
+	seeded uint64
+}
+
+func stepTreeNewV1(t *testing.T, tip, height uint64, genesis []byte, funding ...testOutput) *stepTreeWorldV1 {
+	t.Helper()
+	if genesis == nil { genesis = initial148BlockGenesis(t) }
+	w := &stepTreeWorldV1{btWorld: btNew(t), height: height, view: &pathView148{headers148: map[[32]byte][148]byte{}}}
+	w.genesis = PublishedGenesisContextV1{Published: bytes.Clone(genesis), GenesisHash: sha3.Sum256(genesis[:148]), ChainID: sha3.Sum256(append([]byte("RUBIN-GENESIS-v1"), genesis...))}
+	w.raw, w.hashes = [][]byte{bytes.Clone(genesis)}, [][32]byte{w.genesis.GenesisHash}
+	w.rows = map[Outpoint]UtxoEntry{}
+	stepTreeCoinbaseRowsV1(t, w.rows, genesis[149:], 0)
+	root := [32]byte(genesis[108:140])
+	for h := uint64(1); h <= tip; h++ {
+		commit := initial148BlockWitnessCommit(t)
+		payouts := []testOutput{}
+		if h == 1 { payouts = append(payouts, funding...) }
+		cb := coinbaseTxWithOutputs(uint32(h), append(payouts, testOutput{covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}))
+		if len(payouts) != 0 { stepTreeCoinbaseRowsV1(t, w.rows, cb, h); root = stepTreeRootV1(w.rows) }
+		raw := initial148BlockFrame(t, [][]byte{cb}, func(header *initial148BlockHead) { header.parent, header.root, header.timestamp = w.hashes[h-1], root, initial148GenesisTimestamp+240*h })
+		w.raw, w.hashes = append(w.raw, raw), append(w.hashes, sha3.Sum256(raw[:148]))
+	}
+	for h, raw := range w.raw { w.view.headers148[w.hashes[h]] = [148]byte(raw[:148]) }
+	work, err := WorkFromTarget([32]byte(genesis[76:108]))
+	logicalMDBXAssert(t, err == nil, "genesis work")
+	w.work0 = work.Uint64()
+	work.Add(work, new(big.Int).SetUint64(tip))
+	w.a = mdbx.TreeAuthorityV1{Authority: mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 3, NextGenerationID: 5, Phase: 3, Lifecycle: 2, Replay: &mdbx.ReplayV1{TargetProfile: 2, TargetGenerationID: 1, Target: mdbx.RecoveryTargetV1{ChainID: w.genesis.ChainID, GenesisHash: w.genesis.GenesisHash, TipHeight: tip, TipHash: w.hashes[tip], CumulativeChainwork: replayEntryWork(work)}, Cursor: mdbx.ReplayCursorV1{Kind: 1}}}, LagGenerationID: 4, TargetLagGenerationID: 2, SourceKind: 1}
+	// Correct empty role identities exist before this dormant replay is admitted.
+	for _, g := range []uint64{1, 2} {
+		binding := mdbx.RootBindingV1{DatabaseID: [32]byte{7}, CommitmentVersion: 1, ChainID: w.genesis.ChainID, GenesisHash: w.genesis.GenesisHash, RootDigest: sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")), Assurance: mdbx.TreeAssuranceV1{Kind: 1}}
+		value, err := binding.Encode()
+		logicalMDBXAssert(t, err == nil, "empty configured role")
+		m := btMutation(0, btMeta(0x11, g), value); m.BeforePresent = true
+		w.pair(t, m)
+	}
+	w.setAuthority(t)
+	w.step = NewReplayStepOwner148V1(ReplayStepContextV1{Genesis: w.genesis}, w.view, 32*(tip+1), [32]byte{7})
+	w.view.owner = w.step.path
+	if height > 0 {
+		stepTreeProgressV1(t, w, 0, w.call(0))
+		if len(funding) != 0 { stepTreeProgressV1(t, w, 1, w.call(1)); w.seeded = 1 }
+		w.seedPrefix(t, height)
+	}
+	return w
+}
+
+func stepTreeCoinbaseRowsV1(t *testing.T, rows map[Outpoint]UtxoEntry, raw []byte, height uint64) {
+	t.Helper()
+	offset := 0
+	tx, id, _, _, err := parseBlockTx(raw, &offset)
+	logicalMDBXAssert(t, err == nil && offset == len(raw), "independent coinbase rows")
+	for i, output := range tx.Outputs {
+		if output.CovenantType == 0x0103 || output.CovenantType == 0x0002 { continue }
+		rows[Outpoint{Txid: id, Vout: uint32(i)}] = UtxoEntry{Value: output.Value, CovenantType: output.CovenantType, CovenantData: bytes.Clone(output.CovenantData), CreationHeight: height, CreatedByCoinbase: true}
+	}
+}
+
+func stepTreeRootV1(rows map[Outpoint]UtxoEntry) [32]byte {
+	leaves := make(map[[36]byte][]byte, len(rows))
+	for op, row := range rows {
+		var key [36]byte; copy(key[:32], op.Txid[:]); binary.BigEndian.PutUint32(key[32:], op.Vout)
+		leaves[key] = btValue(btFrame(row.Value, row.CovenantType, row.CovenantData), row.CreationHeight, row.CreatedByCoinbase)
+	}
+	return icbRootV1(leaves)
+}
+
+func (w *stepTreeWorldV1) setAuthority(t *testing.T) {
+	t.Helper()
+	value, err := w.a.Encode()
+	logicalMDBXAssert(t, err == nil, "STEP complete envelope: %v", err)
+	m := btMutation(0, []byte{2}, value); m.BeforePresent = true
+	w.pair(t, m)
+}
+
+func (w *stepTreeWorldV1) endpoint(h uint64) mdbx.TreeEndpointV1 {
+	work := [40]byte{}
+	binary.BigEndian.PutUint64(work[32:], h+w.work0)
+	return mdbx.TreeEndpointV1{Kind: 1, Height: h, BlockHash: w.hashes[h], CumulativeChainwork: work}
+}
+
+func (w *stepTreeWorldV1) seedPrefix(t *testing.T, height uint64) {
+	t.Helper()
+	var rows []mdbx.Mutation
+	for h := w.seeded+1; h < height; h++ {
+		rows = append(rows, btMutation(3, w.hashes[h][:], w.raw[h][:148]))
+		for _, g := range []uint64{1, 2} {
+			if g == 2 && !replayPairAppliesV1(w.a.Authority.Replay.Target.TipHeight, h) { continue }
+			key, _ := mdbx.HeightKey(g, h); owner, _ := mdbx.CanonicalOwnerKey(g, w.hashes[h])
+			rows = append(rows, btMutation(2, key, mdbx.ChainValue(w.hashes[h], w.hashes[h-1], w.endpoint(h).CumulativeChainwork)), btMutation(7, owner, mdbx.CanonicalOwnerValue(h)))
+		}
+	}
+	for from := 0; from < len(rows); from += 1000 { w.pair(t, rows[from:min(from+1000, len(rows))]...) }
+	for _, g := range []uint64{1, 2} {
+		h := height-1
+		if g == 2 {
+			if w.a.Authority.Replay.Target.TipHeight < 15120 { continue }
+			h = min(h, 720*((w.a.Authority.Replay.Target.TipHeight-15120)/720))
+		}
+		var binding mdbx.RootBindingV1
+		err := w.s.View(func(r *mdbx.Reader) error { var err error; binding, _, err = r.ReadTreeRootBindingV1(g); return err })
+		logicalMDBXAssert(t, err == nil && binding.RootDigest == [32]byte(w.raw[h][108:140]), "independent unchanged prefix root")
+		binding.Endpoint = w.endpoint(h)
+		value, err := binding.Encode(); logicalMDBXAssert(t, err == nil, "prefix endpoint")
+		m := btMutation(0, btMeta(0x11, g), value); m.BeforePresent = true; w.pair(t, m)
+	}
+	w.a.Authority.Replay.Cursor = mdbx.ReplayCursorV1{Kind: 2, Height: height-1, BlockHash: w.hashes[height-1]}
+	w.setAuthority(t)
+}
+
+func (w *stepTreeWorldV1) call(h uint64) ReplayStepOutcomeV1 { return w.step.StepReplayMDBX(w.s, w.owner, w.raw[h]) }
+
+// stepTreeProgressV1 proves raw progress without canonical publication, then
+// observes exact persisted role indexes, reciprocal owners and the sole cursor.
+func stepTreeProgressV1(t *testing.T, w *stepTreeWorldV1, h uint64, out ReplayStepOutcomeV1) {
+	t.Helper()
+	logicalMDBXAssert(t, out.NativeCalled && out.Truth == 2 && out.Stage == 3 && out.Index == -1 && out.Err == nil && out.Cause == nil && out.Result == "" && out.Decision == "" && out.CanonicalTruth == "OLD" && !out.HasObservation && out.Observation == (mdbx.TreeObservationV1{}), "raw progress/public OLD: %+v", out)
+	stepTreeImageV1(t, w, h)
+}
+
+func stepTreeImageV1(t *testing.T, w *stepTreeWorldV1, h uint64) {
+	t.Helper()
+	err := w.s.View(func(r *mdbx.Reader) error {
+		a, present, err := r.ReadTreeAuthorityV1()
+		logicalMDBXAssert(t, err == nil && present && a.Authority.Replay.Cursor == (mdbx.ReplayCursorV1{Kind: 2, Height: h, BlockHash: w.hashes[h]}) && a.SourceKind == 1 && a.LagGenerationID == 4 && a.TargetLagGenerationID == 2, "full envelope/cursor")
+		for _, g := range []uint64{1, 2} {
+			if g == 2 && !replayPairAppliesV1(w.a.Authority.Replay.Target.TipHeight, h) { continue }
+			key, _ := mdbx.HeightKey(g, h); owner, _ := mdbx.CanonicalOwnerKey(g, w.hashes[h])
+			entry, found, err := r.Get(mdbx.TreeSchemaV1DBIs()[2], key)
+			parent := [32]byte{}; if h > 0 { parent = w.hashes[h-1] }
+			logicalMDBXAssert(t, err == nil && found && bytes.Equal(entry, mdbx.ChainValue(w.hashes[h], parent, w.endpoint(h).CumulativeChainwork)), "role%d exact index", g)
+			entry, found, err = r.Get(mdbx.TreeSchemaV1DBIs()[7], owner)
+			logicalMDBXAssert(t, err == nil && found && bytes.Equal(entry, mdbx.CanonicalOwnerValue(h)), "role%d exact reciprocal owner", g)
+		}
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "progress readback: %v", err)
+	logicalMDBXAssert(t, w.step.path.release == nil && !w.step.path.guarded && w.step.path.dst148 == ([148]byte{}), "retained path guard or point destination")
+	btReservationsReleased(t, w.owner)
+}
+
+func TestReplayStepTreeV1(t *testing.T) {
+	t.Run("A1_A2_A3_A9", testStepTreeProgressV1)
+	t.Run("A5", testStepTreeContextV1)
+	t.Run("A6_configuration", testStepTreeConfigurationV1)
+	t.Run("A6_R1_R2_R12_R13_H4", testStepTreeBindingV1)
+	t.Run("R6", testStepTreeCapacityV1)
+	t.Run("A11_R3_R11", testStepTreeGrowthV1)
+	t.Run("format2", testStepTreeFormat2V1)
+}
+
+func testStepTreeProgressV1(t *testing.T) {
+	for _, tip := range []uint64{0, 15119, 15120, 15840} {
+		for _, present := range []bool{false, true} {
+			t.Run(fmt.Sprintf("tip%d/present%v", tip, present), func(t *testing.T) {
+				w := stepTreeNewV1(t, tip, 0, nil)
+				if present {
+					w.pair(t, btMutation(3, w.hashes[0][:], w.raw[0][:148]), btMutation(4, w.hashes[0][:], w.raw[0]), btMutation(5, mdbx.UndoManifestKey(w.hashes[0]), stepManifest(0, 0, 1, 0)))
+					for _, g := range []uint64{1, 2} {
+						if g == 2 && tip < 15120 { continue }
+						key, _ := mdbx.HeightKey(g, 0); owner, _ := mdbx.CanonicalOwnerKey(g, w.hashes[0])
+						w.pair(t, btMutation(2, key, mdbx.ChainValue(w.hashes[0], [32]byte{}, w.endpoint(0).CumulativeChainwork)), btMutation(7, owner, mdbx.CanonicalOwnerValue(0)))
+					}
+				}
+				out := w.call(0)
+				w.btWorld.reopen(t)
+				stepTreeProgressV1(t, w, 0, out)
+				w.read(t, 3, w.hashes[0][:], w.raw[0][:148])
+				w.read(t, 4, w.hashes[0][:], w.raw[0])
+				var undo []byte; if tip < 1440 { undo = stepManifest(0, 0, 1, 0) }
+				w.read(t, 5, mdbx.UndoManifestKey(w.hashes[0]), undo)
+			})
+		}
+	}
+	for _, h := range []uint64{720, 721} {
+		t.Run(fmt.Sprintf("fixed15840_h%d", h), func(t *testing.T) {
+			w := stepTreeNewV1(t, 15840, h, nil)
+			out := w.call(h); w.btWorld.reopen(t); stepTreeProgressV1(t, w, h, out)
+			err := w.s.View(func(r *mdbx.Reader) error {
+				root, present, err := r.ReadTreeRootBindingV1(2)
+				logicalMDBXAssert(t, err == nil && present && root.Endpoint == w.endpoint(720), "fixed b720 companion endpoint at h%d", h)
+				return err
+			})
+			logicalMDBXAssert(t, err == nil, "LAG bound readback")
+		})
+	}
+}
+
+func testStepTreeContextV1(t *testing.T) {
+	for _, h := range []uint64{1, 12, 10080, 10081, 20160} {
+		t.Run(fmt.Sprint(h), func(t *testing.T) {
+			w := stepTreeNewV1(t, h, h, nil)
+			out := w.call(h)
+			w.btWorld.reopen(t)
+			stepTreeProgressV1(t, w, h, out)
+		})
+	}
+}
+
+func testStepTreeConfigurationV1(t *testing.T) {
+	for _, mode := range []string{"identity-only", "cloned-publication", "nondefault-target", "zero-database", "zero-chain", "zero-genesis", "publication-mismatch", "fresh-chain-mismatch", "stored-chain-mismatch"} {
+		t.Run(mode, func(t *testing.T) {
+			var raw []byte
+			if mode == "nondefault-target" {
+				original := initial148BlockGenesis(t)
+				header, _ := ParseInitial148HeaderBytes(original[:148])
+				header.Target[0] = 0x7f
+				raw = append(initial148BlockMine(t, initial148BlockHead{version: header.Version, parent: header.PrevBlockHash, merkle: header.MerkleRoot, target: header.Target, root: header.UtxoRoot, timestamp: header.Timestamp}), original[148:]...)
+			}
+			w := stepTreeNewV1(t, 0, 0, raw)
+			context, database := ReplayStepContextV1{Genesis: w.genesis}, [32]byte{7}
+			switch mode {
+			case "identity-only": context.Genesis.Published = nil
+			case "zero-database": database = [32]byte{}
+			case "zero-chain": context.Genesis.ChainID = [32]byte{}
+			case "zero-genesis": context.Genesis.GenesisHash = [32]byte{}
+			case "publication-mismatch": context.Genesis.Published = bytes.Clone(context.Genesis.Published); context.Genesis.Published[149] ^= 1
+			case "fresh-chain-mismatch", "stored-chain-mismatch":
+				context.Genesis.Published = nil; context.Genesis.ChainID[0] ^= 1
+				w.a.Authority.Replay.Target.ChainID = context.Genesis.ChainID; w.setAuthority(t)
+				if mode == "stored-chain-mismatch" { w.pair(t, btMutation(4, w.hashes[0][:], w.raw[0])) }
+			}
+			w.step = NewReplayStepOwner148V1(context, w.view, 32, database)
+			if mode == "cloned-publication" { context.Genesis.Published[149] ^= 1 }
+			out := w.call(0)
+			switch mode {
+			case "zero-database", "zero-chain", "zero-genesis", "publication-mismatch":
+				logicalMDBXAssert(t, !out.NativeCalled && out.Index == -1 && out.Truth == 1 && out.Stage == 1 && out.Result == selectedSideInvariant && out.Cause != nil && out.Err == nil && out.Role == "" && out.Block == ([32]byte{}) && !out.HasObservation, "preflight native defaults: %+v", out)
+			case "fresh-chain-mismatch", "stored-chain-mismatch":
+				want := replayEntryRecovery; if mode == "stored-chain-mismatch" { want = selectedSideIntegrity }
+				logicalMDBXAssert(t, out.NativeCalled && out.Result == want && out.Decision == "" && out.Truth == 1 && out.Stage == 1 && out.Cause != nil && out.Err != nil, "reached publication source: %+v", out)
+			default:
+				stepTreeProgressV1(t, w, 0, out)
+				if mode == "nondefault-target" { logicalMDBXAssert(t, w.work0 == 2 && w.raw[0][76] == 0x7f, "nondefault genesis target/work witness") }
+			}
+			btReservationsReleased(t, w.owner)
+		})
+	}
+}
+
+func testStepTreeFormat2V1(t *testing.T) {
+	w := newStepWorld(t, 0, false)
+	before := w.image()
+	genesis := initial148BlockGenesis(t)
+	context := ReplayStepContextV1{Genesis: PublishedGenesisContextV1{Published: genesis, GenesisHash: sha3.Sum256(genesis[:148]), ChainID: sha3.Sum256(append([]byte("RUBIN-GENESIS-v1"), genesis...))}}
+	owner := NewReplayStepOwner148V1(context, nil, 32, [32]byte{7})
+	out := owner.StepReplayMDBX(w.store, w.owner, genesis)
+	engine, ok := out.Err.(*mdbx.EngineError)
+	logicalMDBXAssert(t, ok && out.NativeCalled && out.Cause == out.Err && out.Result == selectedSideInvariant && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "" && !out.HasObservation && engine.Operation == "update" && engine.Class == "StateMismatch" && engine.Code == -30779 && engine.Diagnostic == "typed tree operation requires tree store" && engine.Cause == nil && !engine.ReopenRequired && engine.TreeObservation == nil && owner.path.slot == nil, "explicit148 format2 refusal without fallback: %+v", out)
+	replaySameImage(t, before, w.image(), "typed tree refusal must not run legacy STEP")
+	stepProgress(t, w, 0, w.authority(), w.call(0))
+}
+
+func (w *stepTreeWorldV1) replace(t *testing.T, h uint64, raw []byte) {
+	t.Helper()
+	delete(w.view.headers148, w.hashes[h])
+	w.raw[h], w.hashes[h] = raw, sha3.Sum256(raw[:148])
+	w.view.headers148[w.hashes[h]] = [148]byte(raw[:148])
+	for k := h+1; k < uint64(len(w.raw)); k++ {
+		delete(w.view.headers148, w.hashes[k])
+		commit := initial148BlockWitnessCommit(t)
+		cb := coinbaseTxWithOutputs(uint32(k), []testOutput{{covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}})
+		w.raw[k] = initial148BlockFrame(t, [][]byte{cb}, func(header *initial148BlockHead) { header.parent, header.root, header.timestamp = w.hashes[k-1], [32]byte(raw[108:140]), initial148GenesisTimestamp+240*k })
+		w.hashes[k] = sha3.Sum256(w.raw[k][:148])
+		w.view.headers148[w.hashes[k]] = [148]byte(w.raw[k][:148])
+	}
+	w.a.Authority.Replay.Target.TipHash = w.hashes[len(w.hashes)-1]
+	w.step.DiscardV1()
+	w.setAuthority(t)
+}
+
+func (w *stepTreeWorldV1) body(t *testing.T, txs ...[]byte) []byte {
+	t.Helper()
+	h := w.height
+	return initial148BlockFrame(t, txs, func(header *initial148BlockHead) { header.parent, header.root, header.timestamp = w.hashes[h-1], [32]byte(w.raw[0][108:140]), initial148GenesisTimestamp+240*h })
+}
+
+func testStepTreeBindingV1(t *testing.T) {
+	for _, mode := range []string{"short", "legacy116", "root-only", "count-zero", "parse", "merkle", "zero-anchor", "distinct-anchors", "equal-anchors", "wrong-anchor", "witness", "DA", "A10-nonce", "R2-merkle-weight", "R3-weight-anchor-DA"} {
+		t.Run(mode, func(t *testing.T) {
+			w := stepTreeNewV1(t, 1, 1, nil)
+			raw := bytes.Clone(w.raw[1])
+			p, err := ParseInitial148BlockBytes(raw); logicalMDBXAssert(t, err == nil, "binding fixture")
+			tx := p.Txs[0]
+			switch mode {
+			case "short": raw = raw[:147]
+			case "legacy116": raw = append(bytes.Clone(raw[:108]), raw[140:]...)
+			case "root-only": raw[108] ^= 1
+			case "count-zero": raw = raw[:149]; raw[148] = 0
+			case "parse": raw = append(raw, 1)
+			case "merkle": raw[len(raw)-1] ^= 1
+			case "R2-merkle-weight", "R3-weight-anchor-DA":
+				raw = stepTreeMixedOrderV1(t, w, mode == "R2-merkle-weight")
+				w.replace(t, 1, raw)
+			default:
+				switch mode {
+				case "zero-anchor": tx.Outputs = []TxOutput{{CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}}
+				case "distinct-anchors": tx.Outputs = append(tx.Outputs, TxOutput{CovenantType: COV_TYPE_ANCHOR, CovenantData: bytes.Repeat([]byte{0x42}, 32)})
+				case "equal-anchors": tx.Outputs = append(tx.Outputs, tx.Outputs[0])
+				case "wrong-anchor": tx.Outputs[0].CovenantData = bytes.Repeat([]byte{0x42}, 32)
+				case "witness": tx.Witness = []WitnessItem{{SuiteID: 1, Pubkey: []byte{1}, Signature: []byte{1}}}
+				case "DA": tx.DaPayload = []byte{1}
+				case "A10-nonce": tx.TxNonce = 1
+				}
+				encoded, err := MarshalTx(tx); logicalMDBXAssert(t, err == nil, "binding tx shape: %v", err)
+				raw = w.body(t, encoded); w.replace(t, 1, raw)
+			}
+			before := bytes.Clone(raw)
+			i := replayStepRun(w.step, w.s, w.owner, raw)
+			out := i.out
+			logicalMDBXAssert(t, out.NativeCalled && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT" && out.Err != nil && out.Cause != nil && bytes.Equal(raw, before), "binding raw product/source immutability: %+v", out)
+			if mode == "A10-nonce" || mode == "R3-weight-anchor-DA" {
+				txErr, ok := out.Cause.(*TxError)
+				code := BLOCK_ERR_COINBASE_INVALID; if mode == "R3-weight-anchor-DA" { code = BLOCK_ERR_WEIGHT_EXCEEDED }
+				logicalMDBXAssert(t, ok && txErr.Code == code && out.Cause == i.observation.incoming && out.Decision == "consensus invalid" && out.Result == "" && out.Height == 1 && out.Block == w.hashes[1] && errors.Is(out.Err, i.observation.incoming) == false, "bound original invalidity and distinct raw sentinel: %+v", out)
+			} else {
+				_, invalidity := out.Cause.(*TxError)
+				logicalMDBXAssert(t, !invalidity && out.Result == replayEntryRecovery && out.Decision == "" && out.Needed != nil && *out.Needed == (ReplayStepNeedV1{Kind: 2, Height: 1, Hash: w.hashes[1]}), "fresh unbound must precede invalidity: %+v", out)
+			}
+			w.read(t, 2, stepKey(1, 1), nil)
+			w.read(t, 4, w.hashes[1][:], nil)
+			w.read(t, 5, mdbx.UndoManifestKey(w.hashes[1]), nil)
+			btReservationsReleased(t, w.owner)
+		})
+	}
+}
+
+func stepTreeMixedOrderV1(t *testing.T, w *stepTreeWorldV1, unbound bool) []byte {
+	t.Helper()
+	others := blockStepsWeighted(t, 68000004)
+	for i, raw := range others {
+		offset := 0; tx, _, _, _, err := parseBlockTx(raw, &offset)
+		logicalMDBXAssert(t, err == nil && len(tx.Outputs) != 0, "mixed resource framing")
+		tx.Outputs[0].CovenantType = COV_TYPE_ANCHOR
+		others[i], err = MarshalTx(tx); logicalMDBXAssert(t, err == nil, "mixed anchor bytes")
+	}
+	others = append(others, blockStepsChunk(blockStepsIDs[0], 0, []byte{0x42}, [32]byte{}))
+	commit := initial148BlockWitnessCommit(t, others...)
+	cb := coinbaseTxWithOutputs(1, []testOutput{{covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}})
+	raw := w.body(t, append([][]byte{cb}, others...)...)
+	if unbound {
+		header, _ := ParseInitial148HeaderBytes(raw[:148]); header.MerkleRoot[0] ^= 1
+		copy(raw[:148], initial148BlockMine(t, initial148BlockHead{version: header.Version, parent: header.PrevBlockHash, merkle: header.MerkleRoot, target: header.Target, root: header.UtxoRoot, timestamp: header.Timestamp}))
+	}
+	return raw
+}
+
+func testStepTreeCapacityV1(t *testing.T) {
+	for _, free := range []uint64{399999999, 400000000} {
+		t.Run(fmt.Sprint(free), func(t *testing.T) {
+			w := stepTreeNewV1(t, 0, 0, nil)
+			original := w.owner
+			w.owner, _ = reservationRemaining(t, free)
+			out := w.call(0)
+			filled := w.owner; w.owner = original
+			logicalMDBXAssert(t, filled.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error { return a.PrecheckV1(free) }) == nil, "next exact gross after STEP")
+			if free == 400000000 { stepTreeProgressV1(t, w, 0, out); return }
+			logicalMDBXAssert(t, out.NativeCalled && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && mdbx.IsOperationReservationCapacity(out.Cause) && out.Err == out.Cause && out.Result == selectedSideCapacity && w.view.headerCalls == 0 && w.step.path.slot == nil, "single precheck T-1 before data: %+v", out)
+			w.read(t, 2, stepKey(1, 0), nil)
+		})
+	}
+}
+
+// testStepTreeGrowthV1 uses actual matured funding, real signatures, independent
+// final leaves and the real complete/native path at both literal growth edges.
+func stepTreeGrowthWorldV1(t *testing.T, mode string, tip uint64) (*stepTreeWorldV1, map[Outpoint]UtxoEntry) {
+	t.Helper()
+	kp := mustMLDSA87Keypair(t)
+	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	payouts := slices.Repeat([]testOutput{{value: 2000, covenantType: COV_TYPE_P2PK, covenantData: cov}}, 9)
+	w := stepTreeNewV1(t, tip, 200, nil, payouts...)
+	p, err := ParseInitial148BlockBytes(w.raw[1]); logicalMDBXAssert(t, err == nil, "funding source")
+	census := logicalGrowthEqual; if mode == "over" { census = logicalGrowthOver }
+	txs := logicalGrowthTxs(t, kp, w.genesis.ChainID, census)
+	final := maps.Clone(w.rows)
+	for i, tx := range txs {
+		op := Outpoint{Txid: p.Txids[0], Vout: uint32(i)}
+		tx.Inputs[0].PrevTxid, tx.Inputs[0].PrevVout = op.Txid, op.Vout
+		tx.Witness[0] = signP2PKInputWitness(t, tx, 0, 2000, w.genesis.ChainID, kp)
+		delete(final, op)
+		encoded := logicalGrowthMarshal(t, []*Tx{tx})[0]
+		id := testTxID(t, encoded)
+		for v, output := range tx.Outputs { final[Outpoint{Txid: id, Vout: uint32(v)}] = UtxoEntry{Value: output.Value, CovenantType: output.CovenantType, CovenantData: output.CovenantData, CreationHeight: 200} }
+	}
+	raws := logicalGrowthMarshal(t, txs)
+	commit := initial148BlockWitnessCommit(t, raws...)
+	value := uint64(1); if mode == "subsidy" { value = 4900000000000000 }
+	cb := coinbaseTxWithOutputs(200, []testOutput{{value: value, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}, {covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}})
+	stepTreeCoinbaseRowsV1(t, final, cb, 200)
+	root := stepTreeRootV1(final)
+	delta := logicalGrowthCensusBytes(final)-logicalGrowthCensusBytes(w.rows)
+	want := uint64(773120); if mode == "over" { want = 773121 }
+	logicalMDBXAssert(t, delta == want, "independent growth literal %d/%d", delta, want)
+	if mode != "equal" { root[0] ^= 1 }
+	raw := initial148BlockFrame(t, append([][]byte{cb}, raws...), func(header *initial148BlockHead) { header.parent, header.root, header.timestamp = w.hashes[199], root, initial148GenesisTimestamp+240*200 })
+	w.replace(t, 200, raw)
+	return w, final
+}
+
+func testStepTreeGrowthV1(t *testing.T) {
+	for _, mode := range []string{"equal", "over", "subsidy"} {
+		t.Run(mode, func(t *testing.T) {
+			w, final := stepTreeGrowthWorldV1(t, mode, 200)
+			i := replayStepRun(w.step, w.s, w.owner, w.raw[200])
+			if mode == "equal" {
+				w.btWorld.reopen(t); stepTreeProgressV1(t, w, 200, i.out)
+				btState(t, w.btWorld, 1, w.endpoint(200), final)
+				return
+			}
+			code := BLOCK_ERR_STATE_GROWTH_EXCEEDED; if mode == "subsidy" { code = BLOCK_ERR_SUBSIDY_EXCEEDED }
+			e, ok := i.out.Cause.(*TxError)
+			logicalMDBXAssert(t, ok && e.Code == code && i.out.Cause == i.observation.incoming && i.out.Decision == "consensus invalid" && i.out.Err != nil && i.out.Truth == 1 && i.out.Stage == 1 && i.out.Role == "CURRENT" && i.out.Height == 200 && i.out.Block == w.hashes[200], "growth/subsidy before unequal root: %+v", i.out)
+			w.read(t, 2, stepKey(1, 200), nil)
+			btState(t, w.btWorld, 1, w.endpoint(199), w.rows)
+			btReservationsReleased(t, w.owner)
+		})
+	}
+}
 
 // stepWorld uses real bootstrap and replay entry. Higher context prefixes use the existing literal seeding boundary.
 type stepWorld struct {
@@ -117,6 +552,7 @@ func (w *stepWorld) image() []mdbx.PrefixRow {
 func stepTuple(t *testing.T, out ReplayStepOutcomeV1, result, decision, canonical string, truth, stage uint8, clean bool) {
 	t.Helper()
 	logicalMDBXAssert(t, out.Result == result && out.Decision == decision && out.CanonicalTruth == canonical && uint8(out.Truth) == truth && uint8(out.Stage) == stage && (out.Err == nil) == clean, "STEP tuple: %+v want %s/%s/%s/%d/%d/clean%v", out, result, decision, canonical, truth, stage, clean)
+	logicalMDBXAssert(t, !out.NativeCalled && out.Index == -1 && out.Role == "" && out.Height == 0 && out.Block == ([32]byte{}) && out.Cause == nil && !out.HasObservation && out.Observation == (mdbx.TreeObservationV1{}), "legacy new-field defaults: %+v", out)
 }
 
 func stepRefusal(t *testing.T, out ReplayStepOutcomeV1, result, cause string) {
