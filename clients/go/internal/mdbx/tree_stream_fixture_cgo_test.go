@@ -6802,7 +6802,146 @@ func psfWindow(t *testing.T, s *Store) uint64 {
 	return 4 * (maxKey + 1)
 }
 
+// psfDelete deletes generation g's nodes and root under their witnesses with the given mutations and selectors.
+func psfDelete(t *testing.T, g uint64, mutations []Mutation, selectors []LargeImageSelectorV1) func(*Reader) TreeOperationV1 {
+	return func(r *Reader) TreeOperationV1 {
+		nodes, err := r.ObsoleteGenerationPageV1(g, ObsoleteNodeV1, nil, 1440)
+		mustEnvironment(t, err)
+		root, err := r.ObsoleteGenerationPageV1(g, ObsoleteRootV1, nil, 1)
+		mustEnvironment(t, err)
+		return TreeOperationV1{Pair: TreePairV1{
+			Mutations:         mutations,
+			ObsoleteDeletes:   append(append([]ObsoleteRowV1(nil), root.Rows...), nodes.Rows...),
+			ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness, root.Witness},
+			LargeConsulted:    selectors,
+		}}
+	}
+}
+
+// psfUndo seeds generation 9's proven format-3 own index projection (148-byte header) and a three-member undo family under its hash.
+func psfUndo(t *testing.T, s *Store) ([32]byte, [][]byte) {
+	header := make([]byte, obsoleteHeaderWidth(3))
+	header[0], header[len(header)-1] = 3, 7
+	hash := sha3.Sum256(header)
+	entry := append(append(bytes.Clone(hash[:]), make([]byte, 32)...), make([]byte, 40)...)
+	entry[103] = 1
+	treeNativeSeed(t, s, 2, binary.BigEndian.AppendUint64(obsoleteGenerationLiteral(9), 1), entry)
+	treeNativeSeed(t, s, 3, hash[:], header)
+	undo := [][]byte{bytes.Clone(hash[:]), append(bytes.Clone(hash[:]), 0), append(bytes.Clone(hash[:]), 2, 0xff)}
+	for i, k := range undo {
+		treeNativeSeed(t, s, 5, k, []byte{byte(i)})
+	}
+	return hash, undo
+}
+
+// N2: present and empty undo families plus an absent body are valid physical domains.
+func psfLargeDomains(t *testing.T) {
+	sc := psfNew(t)
+	hash, undo := psfUndo(t, sc.s)
+	empty := hash
+	empty[31] ^= 1
+	families := []LargeImageSelectorV1{{Kind: LargeImageUndoFamilyV1, Hash: hash}, {Kind: LargeImageUndoFamilyV1, Hash: empty}}
+	if bytes.Compare(empty[:], hash[:]) < 0 {
+		families[0], families[1] = families[1], families[0]
+	}
+	selectors := append([]LargeImageSelectorV1{
+		{Kind: LargeImageBlockBodyV1, Hash: sc.body},
+		{Kind: LargeImageBlockBodyV1, Hash: [32]byte{0xb0, 2}},
+	}, families...)
+	r := psRun(t, sc.s, sc.o, LaneOperation, psfDelete(t, 9, nil, selectors))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	reopened := tsReopen(t, sc.s, sc.path)
+	sc.image(t, reopened, true)
+	for i, k := range undo {
+		psfRaw(t, reopened, 5, k, []byte{byte(i)})
+	}
+	psfRaw(t, reopened, 4, []byte{0xb0, 2}, nil)
+	psfRaw(t, reopened, 5, empty[:], nil)
+}
+
+// N2: a raw undo target inside the selected family disappears once; every nontarget member stays equal.
+func psfTargetInFamily(t *testing.T) {
+	sc := psfNew(t)
+	hash, undo := psfUndo(t, sc.s)
+	r := psRun(t, sc.s, sc.o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		index, err := reader.ObsoleteGenerationPageV1(9, 2, nil, 1440)
+		mustEnvironment(t, err)
+		page, err := reader.ObsoleteUndoPageV1(index.Rows[0], nil, 1)
+		mustEnvironment(t, err)
+		if len(page.Rows) != 1 {
+			t.Fatalf("scene undo page rows %d projection %d stop %d", len(page.Rows), page.Projection, page.Stop)
+		}
+		return TreeOperationV1{Pair: TreePairV1{
+			ObsoleteDeletes:   page.Rows,
+			ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness},
+			LargeConsulted:    []LargeImageSelectorV1{{Kind: LargeImageUndoFamilyV1, Hash: hash}},
+		}}
+	})
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	reopened := tsReopen(t, sc.s, sc.path)
+	psfRaw(t, reopened, 5, undo[0], nil)
+	psfRaw(t, reopened, 5, undo[1], []byte{1})
+	psfRaw(t, reopened, 5, undo[2], []byte{2})
+	sc.image(t, reopened, false)
+}
+
+// N7: an identical ordinary put under a witnessed scope satisfies both predicates after a possibly
+// crossed commit; OLD is selected first.
+func psfBothIdentical(t *testing.T) {
+	sc := psfNew(t)
+	r := sc.run(t, sc.o)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	same := func(reader *Reader) TreeOperationV1 {
+		nodes, err := reader.ObsoleteGenerationPageV1(8, ObsoleteNodeV1, nil, 1440)
+		mustEnvironment(t, err)
+		return TreeOperationV1{Pair: TreePairV1{
+			Mutations:         []Mutation{psfAuthority(t)},
+			ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness},
+			LargeConsulted:    []LargeImageSelectorV1{{Kind: LargeImageBlockBodyV1, Hash: sc.body}},
+		}}
+	}
+	evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = psRun(t, sc.s, sc.o, LaneOperation, same) })
+	if evidence.commits != 1 || evidence.drift != 0 || r.truth != 1 || r.stage != 3 {
+		t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
+	}
+	r.tuple(t, 1, 3, -1)
+	tsConsumed(t, sc.s, sc.o, 1, r.err)
+	reopened := tsReopen(t, sc.s, sc.path)
+	sc.image(t, reopened, true)
+	tsRead(t, reopened, TreeSchemaV1DBIs()[0], []byte{2}, psfAuthority(t).Literal)
+}
+
+// N9: raw authority does not consult generation roles: the committed active generation's physical rows
+// are deleted exactly as tokens name them; eligibility stays the caller's responsibility.
+func psfDormant(t *testing.T) {
+	sc := psfNew(t)
+	for _, row := range obsoleteTreeFamily(1) {
+		treeNativeSeed(t, sc.s, 8, row.key, row.value)
+	}
+	treeNativeSeed(t, sc.s, 0, tsRootKey(1), []byte{0xee, 1})
+	r := sc.run(t, sc.o)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	r = psRun(t, sc.s, sc.o, LaneOperation, psfDelete(t, 1, nil, nil))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	reopened := tsReopen(t, sc.s, sc.path)
+	for _, row := range obsoleteTreeFamily(1) {
+		psfRaw(t, reopened, 8, row.key, nil)
+	}
+	psfRaw(t, reopened, 0, tsRootKey(1), nil)
+	sc.image(t, reopened, true)
+	tsRead(t, reopened, TreeSchemaV1DBIs()[0], []byte{2}, psfAuthority(t).Literal)
+}
+
 func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
+	t.Run("N2-large-domains", psfLargeDomains)
+	t.Run("N2-target-in-family", psfTargetInFamily)
+	t.Run("N7-both-identical-OLD-first", psfBothIdentical)
+	t.Run("N9-dormant", psfDormant)
 	t.Run("N1-commit", func(t *testing.T) {
 		sc := psfNew(t)
 		r := sc.run(t, sc.o)
