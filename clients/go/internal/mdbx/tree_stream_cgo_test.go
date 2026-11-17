@@ -4559,6 +4559,7 @@ func TestTreeStreamPhysicalScopeV1(t *testing.T) {
 	t.Run("overlap", psOverlap)
 	t.Run("counts", psCounts)
 	t.Run("metadata", psMetadata)
+	t.Run("combined-cap", psCombinedCap)
 	t.Run("legacy", psLegacy)
 	t.Run("callback", psCallback)
 }
@@ -4968,6 +4969,47 @@ func psMetadata(t *testing.T) {
 	mustEnvironment(t, r.err)
 	tsRead(t, s2, TreeSchemaV1DBIs()[0], tsCounterKey(9), nil)
 	tsFollowing(t, s2, o2)
+}
+
+// R4: ordinary counter targets and one raw counter delete share the aux cap 16384: 16384 ordinary rows
+// plus the raw row exceed it, 16383 plus the raw row commit, and 16384 ordinary rows with the witness but
+// no raw row commit (the raw row is what crosses the combined cap).
+func psCombinedCap(t *testing.T) {
+	for _, n := range []uint64{16384, 16383, 0} {
+		witnessOnly := n == 0
+		if witnessOnly {
+			n = 16384
+		}
+		s, _, o := psStore(t)
+		mutations := func() []Mutation {
+			out := make([]Mutation, n)
+			for i := range out {
+				g := 1000 + uint64(i)
+				out[i] = Mutation{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(g), AfterKind: 2, Literal: tsCounterLiteral(g, 1)}
+			}
+			return out
+		}
+		grant := psPageGrant + n*(uint64(unsafe.Sizeof(Mutation{}))+uint64(len(tsCounterKey(1000))+len(tsCounterLiteral(1000, 1))))
+		r := psRunG(t, s, o, LaneOperation, grant, func(reader *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(reader)
+			op.Pair.Mutations = mutations()
+			if witnessOnly {
+				op.Pair.ObsoleteDeletes = nil
+			}
+			return op
+		})
+		if n == 16384 && !witnessOnly {
+			psRefused(t, s, r, true, "combined aux cap")
+			continue
+		}
+		r.tuple(t, 2, 3, -1)
+		mustEnvironment(t, r.err)
+		if witnessOnly {
+			tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), tsCounterLiteral(9, 1))
+			continue
+		}
+		psGone(t, s, tsCounterKey(9))
+	}
 }
 
 // N6: legacy format-3 Store.Update still refuses before callback; direct Pair rank 8 stays invalid.
