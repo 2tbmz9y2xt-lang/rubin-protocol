@@ -848,3 +848,26 @@ func requireAbsentBindingDecreasesNothing(t *testing.T, sink *testHarness) {
 	}
 	require(t, sink.chainState.Height+1 == start, "tip height=%d after the disconnects, want %d", sink.chainState.Height, start-1)
 }
+
+// TestDATTLCallbackEndToEndSnapshotBeforePublication drives SyncEngine.ApplyBlock through the
+// production selection while a publication of S2 lands after the selection snapshotted S1 and
+// before its registration: the registration goes to S1 exactly once, S2 records no attempt, and
+// the decrease is admitted; the next two publications select S2 and expire the record.
+func TestDATTLCallbackEndToEndSnapshotBeforePublication(t *testing.T) {
+	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	probe := newSelectionProbe(t, h, source, 0xea)
+	s2 := &wrappedTTLEntry{inner: newBoundService(t, h.service.cfg)}
+	var once sync.Once
+	s1 := &wrappedTTLEntry{inner: h.service}
+	s1.before = func() { once.Do(func() { h.syncEngine.PublishDATTLBinding(s2) }) }
+	h.syncEngine.PublishDATTLBinding(s1)
+	probe.apply()
+	require(t, s1.attempts.Load() == 1 && s2.attempts.Load() == 0, "attempts S1=%d S2=%d, want 1 and 0", s1.attempts.Load(), s2.attempts.Load())
+	require(t, h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "binding after the publication, want S2")
+	probe.apply()
+	probe.f.requireRetained(probe.commit, "count 1: S1's snapshotted registration and S2's decreased once each")
+	probe.apply()
+	require(t, s1.attempts.Load() == 1 && s2.attempts.Load() == 2, "attempts S1=%d S2=%d, want 1 and 2", s1.attempts.Load(), s2.attempts.Load())
+	probe.f.requireAbsent(probe.commit, "the third admitted decrease expired the record")
+}
