@@ -573,7 +573,7 @@ func testStepTreeNativeV1(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			w := stepTreeNewV1(t, 15840, 5, nil)
-			logicalMDBXAssert(t, w.a.Authority.Replay.TargetProfile == 2, "native fixture keeps ARCHIVE body and undo")
+			logicalMDBXAssert(t, w.a.Authority.Replay.TargetProfile == 2, "native fixture keeps ARCHIVE body history")
 			key := []byte{2}
 			if row.generation != 0 {
 				key = btMeta(0x11, row.generation)
@@ -616,15 +616,14 @@ func testStepTreeNativeV1(t *testing.T) {
 			for _, g := range []uint64{1, 2} {
 				btState(t, w.btWorld, g, w.endpoint(h), w.rows)
 			}
-			var header, body, undo []byte
+			var header, body []byte
 			if h == 5 {
 				header = w.raw[5][:148]
 				body = w.raw[5]
-				undo = stepTreeManifestV1(5, 1, 0)
 			}
 			w.read(t, 3, w.hashes[5][:], header)
 			w.read(t, 4, w.hashes[5][:], body)
-			w.read(t, 5, mdbx.UndoManifestKey(w.hashes[5]), undo)
+			w.read(t, 5, mdbx.UndoManifestKey(w.hashes[5]), nil) // h5 < U_target14401 in both profiles.
 			btReservationsReleased(t, w.owner)
 		})
 	}
