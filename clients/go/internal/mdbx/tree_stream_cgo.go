@@ -40,11 +40,11 @@ type TreePairV1 struct {
 	// on the caller's own charges. The engine copies the descriptor at step 5 and never reads the caller's value
 	// after; the caller must keep *ContextConsulted unchanged from the callback's return until that copy.
 	ContextConsulted *CanonicalContextWindowV1
-	// ObsoleteDeletes, ObsoleteConsulted and LargeConsulted carry only same-operation ORIGINAL OLD
-	// physical evidence (nil and empty are equivalent) and are read only after the callback. Any
-	// nonempty field selects the pair-only physical scope: a LaneOperation account, no primitives,
-	// Proof, HeaderSlot, EntryInventory or ContextConsulted, zero PrepaidReadBytes and at least one
-	// Mutation or ObsoleteDeletes row. After the ordinary Pair checks, which keep their own refusals,
+	// ObsoleteDeletes, ObsoleteConsulted and LargeConsulted hold tokens and selectors read from this
+	// operation's ORIGINAL OLD Reader only (nil and empty are equivalent) and are read only after the
+	// callback. Any nonempty field makes the operation a physical-scope Pair, which needs a
+	// LaneOperation account, no primitives, Proof, HeaderSlot, EntryInventory or ContextConsulted,
+	// zero PrepaidReadBytes and at least one Mutation or ObsoleteDeletes row. After the ordinary Pair checks, which keep their own refusals,
 	// the refusals are, in order: any other shape is "invalid Update Batch"; more than 2391106
 	// deletes plus witnesses, more than 2880 selectors or more than 1440 of one kind is "Update Batch
 	// exceeds bound"; a token not from this operation's Reader is "invalid Update Batch"; after the
@@ -445,7 +445,7 @@ func treeScopeBytesV1(pair *TreePairV1) uint64 {
 	return n
 }
 
-// treeWitnessKeyBytesV1 is one witness's prefix/after/last and point key bytes.
+// treeWitnessKeyBytesV1 is the byte length of one witness's domain bounds and point keys.
 func treeWitnessKeyBytesV1(witness *obsoleteWitness) uint64 {
 	n := uint64(len(witness.domain.prefix) + len(witness.domain.after) + len(witness.domain.last))
 	for _, point := range witness.points {
