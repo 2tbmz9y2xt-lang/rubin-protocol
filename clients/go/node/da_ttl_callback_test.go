@@ -105,6 +105,30 @@ func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
 	}
 }
 
+// TestDATTLCallbackBodySurvivorRevisions is the body-level C10 revision row: each body call
+// gives every surviving record its own fresh revision, minted one by one above the stored
+// high-water in ascending da_id order. The third record is admitted last with the smallest
+// da_id, so admission order is not da_id order whichever end the State A/B bucket links at.
+func TestDATTLCallbackBodySurvivorRevisions(t *testing.T) {
+	f, r := newDATTLCallbackRecords(t)
+	late := [32]byte{0x17}
+	f.ownerReadyChunk(late, 0, "ttl-late", daNonReplayPeer("ttl-peer"))
+	f.setOwnerReadyTTL(late, 3)
+	ascending := [][32]byte{late, r.stateAID, r.stateBID}
+	for call := range 2 {
+		high := daRelayStateSnapshot(f.relay).records
+		if err := runDATTLBodyInGuard(t, f); err != nil {
+			t.Fatalf("body call %d: %v", call+1, err)
+		}
+		view := daRelayStateSnapshot(f.relay)
+		for rank, daID := range ascending {
+			if got, want := view.sets[daID].revision, high+uint64(rank)+1; got != want {
+				t.Fatalf("body call %d: record %x revision=%d, want %d", call+1, daID[:1], got, want)
+			}
+		}
+	}
+}
+
 // TestDATTLCallbackBodyRefusalChangesNothing is the body-level C11 row: a refused check on one
 // selected record, or a selected member whose exact owner token is not bound, returns the
 // body's own error and leaves the whole DA image and owner unchanged.
@@ -390,9 +414,11 @@ func requireDATTLIndexStep(t *testing.T, f *daNonReplayFixture, step string) {
 	requireDATTLIndexExact(t, f.relay)
 }
 
-// TestDATTLCallbackIndexProductionPaths is the F2 index row on every production path that
-// publishes a record row: orphan-chunk staging (State A created and grown), commit staging
+// TestDATTLCallbackIndexProductionPaths is the F2 index row on these production paths that
+// publish a record row: orphan-chunk staging (State A created and grown), commit staging
 // (State A to State B), DA completion (State B to State C) and the PEER quota cleanup removal.
+// It does not run the D1 projection's putRecord and removeRecord on its clone (sync_da_relay.go)
+// or the capacity-victim removal of a DA complete commit (da_complete_commit.go).
 func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
 	f := newDANonReplayFixture(t, 8)
 	grown, staged, completed, released := [32]byte{0xd1}, [32]byte{0xd2}, [32]byte{0xd3}, [32]byte{0xd4}

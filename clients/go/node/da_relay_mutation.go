@@ -1068,9 +1068,10 @@ type ownerReadyTTLPlan struct {
 }
 
 // advanceOwnerReadyTTLInGuard is the DA TTL decrease body of the canonical transition
-// (RUBIN_COMPACT_BLOCKS.md Section 5, DA TTL mutation callback). PRECONDITION: the caller holds
-// ChainState admissionMu EXCLUSIVELY, after the D1 publication; this body never acquires that
-// guard (no lockAdmissionFence, no RLockUnlessTerminal), because sync.RWMutex is not reentrant.
+// (RUBIN_COMPACT_BLOCKS.md Section 5, DA TTL mutation callback); the canonical transition is its
+// only permitted caller. PRECONDITION: the caller holds ChainState admissionMu EXCLUSIVELY, after
+// the D1 publication; this body never acquires that guard (no lockAdmissionFence, no
+// RLockUnlessTerminal), because sync.RWMutex is not reentrant.
 //
 // It plans over exactly the State A and State B records of the published image, walking the
 // relations' State A/B bucket, so no State C record is visited, the relay state is not cloned

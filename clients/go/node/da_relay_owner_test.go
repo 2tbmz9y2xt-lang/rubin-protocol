@@ -360,7 +360,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 	for path, want := range map[string]string{
 		"da_relay_state.go":          "8e24e3e1caa2bff23e52438985faba888936ed424774eca2709ac94a3f75800b",
 		"da_relay_record.go":         "2706ab0b65ee400056f6d29e6807d509e937d8d778de5aae5ee36d2a05c8eb11",
-		"da_relay_mutation.go":       "b005db3aea3777cea0cadeb1ea5bd23d0536cdc36acb2badc112218edccad57d",
+		"da_relay_mutation.go":       "9cd3f08e968848e01e54a2c0f904f6b4405d0e64f76d58ccf67c8bfc552e4636",
 		"da_complete_commit.go":      "3fb456f5668dff7bc089b0472ccc61c2c263d5c7d3917cd512a20182e45709f5",
 		"da_complete_snapshot.go":    "e1592f7f08d04c2423184a54ed404a86fdaab1057a725fa8acffc7a37f1eb1cc",
 		"sync_da_relay.go":           "54d3cbb55e38cf420724a0da2e353ee240acad3e5a60e191491eb862d04bca8a",
