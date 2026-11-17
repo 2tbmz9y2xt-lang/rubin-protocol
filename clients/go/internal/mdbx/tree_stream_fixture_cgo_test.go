@@ -6817,11 +6817,12 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 14, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		// The drifted body is a nontarget residual: only preflight (stage 1) may refuse it.
+		if evidence.drift != 1 || evidence.commits != 0 || r.stage != 1 {
+			t.Fatalf("scope preflight mismatch committed: %+v stage%d %v", evidence, r.stage, r.err)
+		}
 		r.tuple(t, 1, 1, -1)
 		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
-		if evidence.drift != 1 || evidence.commits != 0 {
-			t.Fatalf("scope preflight mismatch committed: %+v", evidence)
-		}
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		// The fixture's drift of the body is itself durable; the raw targets must survive.
 		reopened := tsReopen(t, sc.s, sc.path)
