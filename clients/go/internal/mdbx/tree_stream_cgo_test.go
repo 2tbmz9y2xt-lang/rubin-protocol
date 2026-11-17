@@ -4733,7 +4733,10 @@ func psCounts(t *testing.T) {
 		})
 	}
 	run("order", false, func(op *TreeOperationV1) { op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 2}, {Kind: 1}} })
-	run("duplicate", false, func(op *TreeOperationV1) { op.Pair.LargeConsulted = selectors(1, 1)[:1:1]; op.Pair.LargeConsulted = append(op.Pair.LargeConsulted, op.Pair.LargeConsulted[0]) })
+	run("duplicate", false, func(op *TreeOperationV1) {
+		op.Pair.LargeConsulted = selectors(1, 1)[:1:1]
+		op.Pair.LargeConsulted = append(op.Pair.LargeConsulted, op.Pair.LargeConsulted[0])
+	})
 	run("D+W", true, func(op *TreeOperationV1) {
 		op.Pair.ObsoleteDeletes = make([]ObsoleteRowV1, maxUpdateMutations)
 	})
