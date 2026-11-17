@@ -47,15 +47,17 @@ type treePlanV1 struct {
 	scope            *largeImageScope // owned pair-only physical scope; nil otherwise, exclusive with context
 }
 
-// residualV1 is the plan's one residual scope: the physical scope or the context window.
-func (p *treePlanV1) residualV1() (largeImageScope, bool) {
+// residualPresentV1 reports whether the plan has one residual scope: the physical scope or the context window.
+func (p *treePlanV1) residualPresentV1() bool {
+	return p.scope != nil || p.context.Count != 0
+}
+
+// residualScopeV1 is the plan's residual scope value, built where a comparison copies it.
+func (p *treePlanV1) residualScopeV1() largeImageScope {
 	if p.scope != nil {
-		return *p.scope, true
+		return *p.scope
 	}
-	if p.context.Count != 0 {
-		return contextTreeScopeV1(p.context), true
-	}
-	return largeImageScope{}, false
+	return contextTreeScopeV1(p.context)
 }
 
 // treeScopeV1 is one position's slots (op or the truth evaluator, D30, D35): the Reader slot, the recorder slot and
@@ -517,8 +519,8 @@ func (c *treeComposeV1) runV1() {
 	t.covered = treeCoveredV1(w.plan.primitives)
 	t.pairOnly, t.pairReadLimit = len(w.plan.primitives) == 0, w.plan.prepaidReadBytes
 	var err error
-	if scope, ok := w.plan.residualV1(); ok {
-		err = t.pairPreflightScopedV1(w.plan.pair, w.plan.consulted, scope)
+	if w.plan.residualPresentV1() {
+		err = t.pairPreflightScopedV1(w.plan.pair, w.plan.consulted, w.plan)
 	} else {
 		err = t.pairPreflightV1(w.plan.pair, w.plan.consulted)
 	}
@@ -564,8 +566,8 @@ func (c *treeComposeV1) holdV1() error {
 	if err != nil {
 		return err
 	}
-	if scope, ok := w.plan.residualV1(); ok {
-		err = w.t.finalScopedV1(w.plan.pair, w.plan.consulted, scope)
+	if w.plan.residualPresentV1() {
+		err = w.t.finalScopedV1(w.plan.pair, w.plan.consulted, w.plan)
 	} else {
 		err = w.t.finalV1(w.plan.pair, w.plan.consulted)
 	}
@@ -608,8 +610,8 @@ func (c *treeComposeV1) boundedHoldV1() error {
 		w.retireFrozenV1(j)
 	}
 	w.storedBody = treeBodyV1{}
-	if scope, ok := w.plan.residualV1(); ok {
-		return w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted, scope)
+	if w.plan.residualPresentV1() {
+		return w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted, w.plan.residualScopeV1())
 	}
 	return w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted)
 }
@@ -674,8 +676,8 @@ func (c *treeComposeV1) coveredHoldV1() error {
 	if err != nil {
 		return err
 	}
-	if scope, ok := w.plan.residualV1(); ok {
-		return w.t.finalScopedV1(w.plan.pair, w.plan.consulted, scope)
+	if w.plan.residualPresentV1() {
+		return w.t.finalScopedV1(w.plan.pair, w.plan.consulted, w.plan)
 	}
 	return w.t.finalV1(w.plan.pair, w.plan.consulted)
 }
@@ -738,8 +740,8 @@ func (c *treeComposeV1) commitV1() {
 		truth = c.pairTruthV1
 	}
 	c.committed = true
-	if scope, ok := w.plan.residualV1(); ok {
-		c.outcome = w.t.commitScopedV1(w.plan.pair, w.plan.consulted, truth, scope)
+	if w.plan.residualPresentV1() {
+		c.outcome = w.t.commitScopedV1(w.plan.pair, w.plan.consulted, truth, w.plan)
 	} else {
 		c.outcome = w.t.commitV1(w.plan.pair, w.plan.consulted, truth)
 	}
@@ -773,9 +775,10 @@ func (c *treeComposeV1) pairTruthV1(read *C.MDBX_txn, _ error) (CommitTruth, err
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
-	if scope, ok := w.plan.residualV1(); ok {
-		scope.pairLimit = w.t.pairReadLimit
-		old, next, err = updateNativeReadbackScoped(w.old, read, w.s.dbis, w.plan.pair, nil, old, next, scope)
+	if w.plan.residualPresentV1() {
+		sealed := [1]largeImageScope{w.plan.residualScopeV1()}
+		sealed[0].pairLimit = w.t.pairReadLimit
+		old, next, err = updateNativeReadbackScoped(w.old, read, w.s.dbis, w.plan.pair, nil, old, next, sealed[:]...)
 		if err != nil {
 			return CommitTruthUnknown, err
 		}
@@ -818,8 +821,8 @@ func (c *treeComposeV1) readbackV1(e *treeScopeV1, read *C.MDBX_txn) (CommitTrut
 		c.unwind = e.unwind
 		return CommitTruthUnknown, err
 	}
-	if scope, ok := e.plan.residualV1(); ok {
-		return rb.verdictV1(e.plan.pair, e.plan.consulted, scope)
+	if e.plan.residualPresentV1() {
+		return rb.verdictV1(e.plan.pair, e.plan.consulted, e.plan.residualScopeV1())
 	}
 	return rb.verdictV1(e.plan.pair, e.plan.consulted)
 }

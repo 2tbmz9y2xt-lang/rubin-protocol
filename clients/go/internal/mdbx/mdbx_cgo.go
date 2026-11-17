@@ -2054,7 +2054,7 @@ func updateNativeLargeEqual(old, candidate *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan
 	after.active.Store(true)
 	defer before.expire()
 	defer after.expire()
-	return largeResidualEqual(before, after, &scopes[0], plan)
+	return largeResidualEqual(before, after, scopes[0], plan)
 }
 
 func updateNativeLargeMatch(old, candidate *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan []ownedMutation, diagnostic string, scopes ...largeImageScope) error {

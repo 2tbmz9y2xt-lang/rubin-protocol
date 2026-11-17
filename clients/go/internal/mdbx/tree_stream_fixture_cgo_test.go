@@ -7445,7 +7445,7 @@ func psfSealedTraversal(t *testing.T, limit uint64, reached bool) {
 			mustEnvironment(t, sc.s.View(func(r *Reader) error {
 				scope := largeImageScope{selectors: []LargeImageSelectorV1{{Kind: 1, Hash: sc.body}}, maxKey: r.maxKey, pairLimit: limit, databaseID: r.databaseID, config: r.treeConfig}
 				before := fixtureLargeNativeCalls()
-				equal, compareErr = largeResidualEqual(r, r, &scope, nil)
+				equal, compareErr = largeResidualEqual(r, r, scope, nil)
 				calls = fixtureLargeNativeCalls() - before
 				return nil
 			}))

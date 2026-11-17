@@ -4788,16 +4788,18 @@ func psOrdinaryFirst(t *testing.T) {
 		{"rank8", []Mutation{rank8}},
 		{"authority", []Mutation{authority}},
 	} {
-		r := psRunG(t, s, o, LaneOperation, psPageGrant+33*2882, func(reader *Reader) TreeOperationV1 {
-			op := psRawDelete(t, 9)(reader)
-			op.Pair.Mutations = row.mutations
-			op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881)
-			return op
+		t.Run(row.name, func(t *testing.T) {
+			r := psRunG(t, s, o, LaneOperation, psPageGrant+33*2882, func(reader *Reader) TreeOperationV1 {
+				op := psRawDelete(t, 9)(reader)
+				op.Pair.Mutations = row.mutations
+				op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881)
+				return op
+			})
+			if !treeNativeIsInvalid(r.err) {
+				t.Fatalf("scope shape admitted: ordinary %s %v", row.name, r.err)
+			}
+			psRefused(t, s, r, false, row.name)
 		})
-		if !treeNativeIsInvalid(r.err) {
-			t.Fatalf("scope shape admitted: ordinary %s %v", row.name, r.err)
-		}
-		psRefused(t, s, r, false, row.name)
 	}
 	forward := canonicalForwardLiteral(1, 5, [32]byte{0x41}, [40]byte{39: 1})
 	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
