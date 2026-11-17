@@ -6818,19 +6818,21 @@ func psfDelete(t *testing.T, g uint64, mutations []Mutation, selectors []LargeIm
 	}
 }
 
-// N1: classes 1 (UTXO, malformed disposable value), 2 (index) and 4 (derived owner) are deleted by the
-// typed raw path from their own literal rows next to the untouched tree scene; no value is decoded.
+// N1: classes 1 (UTXO), 2 (index forward), 3 (counter) and 4 (derived owner), each holding the malformed
+// disposable value 0xde, are deleted by the typed raw path next to the untouched tree scene; no value is
+// decoded. Classes 5 and 6 are the scene's node/root rows deleted by the other N1 rows.
 func psfClassDeletes(t *testing.T) {
 	sc := psfNew(t)
 	utxo := append(obsoleteGenerationLiteral(9), 0x44)
 	treeNativeSeed(t, sc.s, 1, utxo, []byte{0xde})
 	hash := [32]byte{0x41}
 	forward, derived := canonicalForwardKeyLiteral(9, 1), canonicalOwnerKeyLiteral(9, hash)
-	treeNativeSeed(t, sc.s, 2, forward, canonicalForwardValueLiteral(hash, [40]byte{}))
-	treeNativeSeed(t, sc.s, 7, derived, binary.BigEndian.AppendUint64(nil, 1))
+	treeNativeSeed(t, sc.s, 2, forward, []byte{0xde})
+	treeNativeSeed(t, sc.s, 7, derived, []byte{0xde})
+	treeNativeSeed(t, sc.s, 0, tsCounterKey(9), []byte{0xde})
 	r := psRun(t, sc.s, sc.o, LaneOperation, func(reader *Reader) TreeOperationV1 {
 		var op TreeOperationV1
-		for _, class := range []ObsoleteClassV1{ObsoleteUTXOV1, ObsoleteIndexV1, ObsoleteDerivedV1} {
+		for _, class := range []ObsoleteClassV1{ObsoleteUTXOV1, ObsoleteIndexV1, ObsoleteCounterV1, ObsoleteDerivedV1} {
 			page, err := reader.ObsoleteGenerationPageV1(9, class, nil, 1)
 			mustEnvironment(t, err)
 			if len(page.Rows) != 1 {
@@ -6843,12 +6845,13 @@ func psfClassDeletes(t *testing.T) {
 	})
 	r.tuple(t, 2, 3, -1)
 	if r.err != nil {
-		t.Fatalf("scope persisted image differs: classes 1, 2, 4 %v", r.err)
+		t.Fatalf("scope persisted image differs: classes 1-4 %v", r.err)
 	}
 	reopened := tsReopen(t, sc.s, sc.path)
 	psfRaw(t, reopened, 1, utxo, nil)
 	psfRaw(t, reopened, 2, forward, nil)
 	psfRaw(t, reopened, 7, derived, nil)
+	psfRaw(t, reopened, 0, tsCounterKey(9), nil)
 	sc.image(t, reopened, false)
 }
 
@@ -7009,7 +7012,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("N2-target-in-family", psfTargetInFamily)
 	t.Run("N7-both-identical-OLD-first", psfBothIdentical)
 	t.Run("N9-dormant", psfDormant)
-	t.Run("N1-classes-1-2-4", psfClassDeletes)
+	t.Run("N1-classes-1-4", psfClassDeletes)
 	t.Run("N3-page-bounds", psfPageBounds)
 	t.Run("N1-commit", func(t *testing.T) {
 		sc := psfNew(t)
