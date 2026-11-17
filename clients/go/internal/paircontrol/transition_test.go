@@ -367,35 +367,91 @@ func TestIndependentStaticPayloadPriority(t *testing.T) {
 }
 
 func TestCompleteOriginalPairCAS(t *testing.T) {
-	for _, field := range []string{"form", "location", "database_id", "current", "lag", "authority"} {
-		t.Run(field, func(t *testing.T) {
-			s, dir := existing(t, selected())
-			i := replacement()
-			switch field {
-			case "form":
-				i.Old.Database.Form, i.Old.Database.Location = 2, "old"
-			case "location":
-				i.Old.Database.Location = "/other-old"
-			case "database_id":
-				i.Old.Database.DatabaseID[1] = 1
-			case "current":
-				i.Old.CurrentGeneration++
-			case "lag":
-				i.Old.LagGeneration++
-			case "authority":
-				i.Old.AuthoritySequence++
+	for _, operation := range []string{"persist_intent", "damage"} {
+		for _, field := range []string{"form", "location", "database_id", "current", "lag", "authority"} {
+			t.Run(operation+"/"+field, func(t *testing.T) {
+				s, dir := existing(t, selected())
+				i := replacement()
+				switch field {
+				case "form":
+					i.Old.Database.Form, i.Old.Database.Location = 2, "old"
+				case "location":
+					i.Old.Database.Location = "/other-old"
+				case "database_id":
+					i.Old.Database.DatabaseID[1] = 1
+				case "current":
+					i.Old.CurrentGeneration++
+				case "lag":
+					i.Old.LagGeneration++
+				case "authority":
+					i.Old.AuthoritySequence++
+				}
+				before := diskBytes(t, dir)
+				o := installFaults(t, s)
+				call := func(candidate IntentV1) (ResultV1, error) {
+					if operation == "damage" {
+						return s.RecordDamageV1(context.Background(), 17, *candidate.Old, reference())
+					}
+					return s.PersistIntentV1(context.Background(), 17, candidate, nil)
+				}
+				r, err := call(i)
+				wantLocal(t, r, err, operation, "stale", ResultV1{1, 17, false})
+				if len(o.events) != 0 || !bytes.Equal(before, diskBytes(t, dir)) {
+					t.Fatal("complete OLD mismatch changed aggregate")
+				}
+				r, err = call(replacement())
+				require(t, err)
+				if r != (ResultV1{2, 18, false}) {
+					t.Fatal("requalified exact OLD was refused")
+				}
+			})
+		}
+	}
+}
+
+func TestStoredOwnerPreparationRefusals(t *testing.T) {
+	for _, kind := range []string{"economy_extra_p", "h1_missing_p", "retire_no_intent", "retire_wrong_id", "end_no_intent", "end_operator_intent"} {
+		t.Run(kind, func(t *testing.T) {
+			p, h1 := h1Policy(t)
+			v, i := selected(), replacement()
+			s, dir := existing(t, v)
+			if kind != "retire_no_intent" && kind != "end_no_intent" {
+				var err error
+				if kind == "h1_missing_p" {
+					i = h1
+					_, err = s.PersistIntentV1(context.Background(), 17, i, p)
+				} else {
+					_, err = s.PersistIntentV1(context.Background(), 17, i, nil)
+				}
+				require(t, err)
+				v.Sequence, v.Intent = 18, &i
 			}
-			before := diskBytes(t, dir)
-			r, err := s.PersistIntentV1(context.Background(), 17, i, nil)
-			wantLocal(t, r, err, "persist_intent", "stale", ResultV1{1, 17, false})
-			if !bytes.Equal(before, diskBytes(t, dir)) {
-				t.Fatal("complete OLD mismatch changed aggregate")
+			o, before := installFaults(t, s), diskBytes(t, dir)
+			operation, code := "retire", "stale"
+			var r ResultV1
+			var err error
+			switch kind {
+			case "economy_extra_p":
+				code = "refused"
+				r, err = s.RetireV1(context.Background(), v.Sequence, i.ID, reference(), p)
+			case "h1_missing_p":
+				code = "refused"
+				r, err = s.RetireV1(context.Background(), v.Sequence, i.ID, reference(), nil)
+			case "retire_no_intent":
+				r, err = s.RetireV1(context.Background(), v.Sequence, i.ID, reference(), nil)
+			case "retire_wrong_id":
+				id := i.ID
+				id[1] = 1
+				r, err = s.RetireV1(context.Background(), v.Sequence, id, reference(), nil)
+			default:
+				operation = "end_h1"
+				r, err = s.EndH1V1(context.Background(), v.Sequence, i.ID, p)
 			}
-			r, err = s.PersistIntentV1(context.Background(), 17, replacement(), nil)
-			require(t, err)
-			if r != (ResultV1{2, 18, false}) {
-				t.Fatal("requalified exact OLD was refused")
+			wantLocal(t, r, err, operation, code, ResultV1{1, v.Sequence, false})
+			if len(o.events) != 0 || !bytes.Equal(before, diskBytes(t, dir)) {
+				t.Fatal("stored-owner refusal reached effects or changed full image")
 			}
+			wantRecord(t, s, v)
 		})
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -210,7 +211,7 @@ func terminalPolicy(t *testing.T, p *policycontrol.Store, i IntentV1, kind strin
 			return err
 		})
 	}
-	if kind != "manual_later" && kind != "manual_blocked" {
+	if !strings.HasPrefix(kind, "manual_") {
 		return
 	}
 	a := h1Value().H1Binding.Admission
@@ -218,7 +219,25 @@ func terminalPolicy(t *testing.T, p *policycontrol.Store, i IntentV1, kind strin
 	d.DatabaseID[1], d.Location = 1, "D18"
 	a.Destination = leafBytes(d)
 	newID := [32]byte{0x45}
+	if kind == "manual_same_id" {
+		newID = i.ID
+	}
 	a.Ownership = append([]byte{0, 0, 0, 0, 0, 0, 0, 4}, newID[:]...)
+	switch kind {
+	case "manual_same_epoch":
+		a.Ownership[7] = 2
+	case "manual_short_owner":
+		a.Ownership = a.Ownership[:39]
+	case "manual_future_epoch":
+		a.Ownership[7] = 5
+	case "manual_bad_old":
+		a.Old = []byte{1}
+	case "manual_bad_destination":
+		a.Destination = []byte{2}
+	case "manual_absolute_destination":
+		d.Form, d.Location = 1, "/db/D18"
+		a.Destination = leafBytes(d)
+	}
 	tx, err := p.Begin()
 	require(t, err)
 	tx.AdmitOwner(policycontrol.OwnerH1, newID[:])
@@ -229,6 +248,39 @@ func terminalPolicy(t *testing.T, p *policycontrol.Store, i IntentV1, kind strin
 	if pr.Truth != 2 {
 		t.Fatal("new manual owner was not admitted")
 	}
+	view, err := p.View()
+	require(t, err)
+	if view.Sequence != 4 || view.Receipt.Owner.Kind != policycontrol.OwnerH1 || view.Receipt.Owner.Epoch != 4 || !bytes.Equal(view.Receipt.Owner.Intent, newID[:]) {
+		t.Fatal("actual new owner/epoch differs from the independently supplied manual witness")
+	}
+	if kind == "manual_same_d" {
+		owner := policycontrol.Owner{Kind: policycontrol.OwnerH1, Epoch: 4, Intent: newID[:]}
+		policyChange(t, p, owner, func(tx *policycontrol.Tx) error { return tx.RemoveOnSuccess() })
+		diagnosis := i.H1Binding.Diagnosis
+		diagnosis.Hash[1] = 2
+		policyChange(t, p, policycontrol.Owner{}, func(tx *policycontrol.Tx) error {
+			_, err := tx.ObserveIncident(diagnosis)
+			return err
+		})
+		tx, err := p.Begin()
+		require(t, err)
+		newID = [32]byte{0x46}
+		a = h1Value().H1Binding.Admission
+		a.Ownership = append([]byte{0, 0, 0, 0, 0, 0, 0, 7}, newID[:]...)
+		tx.AdmitOwner(policycontrol.OwnerH1, newID[:])
+		tx.Operation(policycontrol.ClassControl, 1)
+		require(t, tx.ConsumeIntent(a))
+		pr, err := tx.Commit()
+		require(t, err)
+		if seq, known := pr.Sequence(); pr.Truth != 2 || !known || seq != 7 {
+			t.Fatal("new incident did not lawfully admit original D under fresh owner7")
+		}
+		view, err := p.View()
+		require(t, err)
+		if view.Receipt.Owner.Kind != policycontrol.OwnerH1 || view.Receipt.Owner.Epoch != 7 || !bytes.Equal(view.Receipt.Owner.Intent, newID[:]) {
+			t.Fatal("new incident owner is not the actual independently supplied owner7")
+		}
+	}
 	if kind == "manual_blocked" {
 		owner := policycontrol.Owner{Kind: policycontrol.OwnerH1, Epoch: 4, Intent: newID[:]}
 		policyChange(t, p, owner, func(tx *policycontrol.Tx) error { return tx.AutoBlock() })
@@ -236,7 +288,7 @@ func terminalPolicy(t *testing.T, p *policycontrol.Store, i IntentV1, kind strin
 }
 
 func TestTerminalH1Bookkeeping(t *testing.T) {
-	for _, kind := range []string{"live", "live_advanced", "blocked", "success", "observed_later", "manual_later", "manual_blocked", "blocked_changed_diagnosis", "rollback", "nil_not_later", "stale_outer", "precommit", "unknown"} {
+	for _, kind := range []string{"live", "live_advanced", "blocked", "success", "observed_later", "manual_later", "manual_blocked", "manual_same_epoch", "manual_same_id", "manual_same_d", "manual_short_owner", "manual_future_epoch", "manual_bad_old", "manual_bad_destination", "manual_absolute_destination", "blocked_changed_diagnosis", "rollback", "nil_not_later", "stale_outer", "precommit", "unknown"} {
 		t.Run(kind, func(t *testing.T) {
 			p, i := h1Policy(t)
 			v := selected()
@@ -268,6 +320,7 @@ func TestTerminalH1Bookkeeping(t *testing.T) {
 			beforeP, err := p.View()
 			require(t, err)
 			before := diskBytes(t, dir)
+			o := installFaults(t, s)
 			expected := uint64(19)
 			if kind == "stale_outer" {
 				expected = 18
@@ -282,8 +335,11 @@ func TestTerminalH1Bookkeeping(t *testing.T) {
 			switch kind {
 			case "live", "live_advanced":
 				wantLocal(t, r, err, "end_h1", "refused", ResultV1{1, 19, false})
-			case "rollback", "nil_not_later", "blocked_changed_diagnosis":
+			case "rollback", "nil_not_later", "blocked_changed_diagnosis", "manual_same_epoch", "manual_same_id", "manual_same_d", "manual_short_owner", "manual_future_epoch", "manual_bad_old", "manual_bad_destination", "manual_absolute_destination":
 				wantLocal(t, r, err, "end_h1", "integrity", ResultV1{1, 19, false})
+				if len(o.events) != 0 {
+					t.Fatal("terminal qualification rejection acquired outer OS effects")
+				}
 			case "stale_outer":
 				wantLocal(t, r, err, "end_h1", "stale", ResultV1{1, 19, false})
 			case "precommit":
