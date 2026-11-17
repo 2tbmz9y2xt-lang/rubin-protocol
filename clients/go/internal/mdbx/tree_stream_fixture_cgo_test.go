@@ -7144,7 +7144,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		sc := psfNew(t)
 		f, window := psfF(t), psfWindow(t, sc.s)
 		var r tsResult
-		evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = sc.run(t, reservationFilled(t, f-1)) })
+		evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = sc.run(t, reservationFilled(t, psPageGrant+f-1)) })
 		if any(r.err) != any(errOperationReservationCapacity) || sc.s.state != storeOPEN {
 			t.Fatalf("scope metadata high-water differs: %v %s", r.err, sc.s.state)
 		}
@@ -7153,15 +7153,15 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 			t.Fatalf("scope next operation differs: OLD abort %+v", evidence)
 		}
 		sc.image(t, sc.s, false)
-		// F plus S and one body operand is one operand short of the funded two-span comparison.
-		r = sc.run(t, reservationFilled(t, f+window+uint64(len(psfBodyValue))+64))
+		// One byte less than F plus S and both body operands refuses the funded two-span comparison.
+		r = sc.run(t, reservationFilled(t, psPageGrant+f+window+2*uint64(len(psfBodyValue))-1))
 		if any(r.err) != any(errOperationReservationCapacity) {
 			t.Fatalf("scope operand window not funded: %v", r.err)
 		}
 		r.tuple(t, 1, 1, -1)
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc2 := psfNew(t)
-		r = sc2.run(t, reservationFilled(t, f+window+2*uint64(len(psfBodyValue))+4096))
+		r = sc2.run(t, reservationFilled(t, psPageGrant+f+window+2*uint64(len(psfBodyValue))))
 		r.tuple(t, 2, 3, -1)
 		mustEnvironment(t, r.err)
 		sc2.image(t, sc2.s, true)
@@ -7239,7 +7239,7 @@ func psfPointMismatchThenCapacity(t *testing.T) {
 	run := func(mode uint32, remaining func(f, window uint64) uint64) (*psfScene, tsResult, fixtureLargeEvidence) {
 		sc := psfNew(t)
 		psfUndo(t, sc.s)
-		o := reservationFilled(t, remaining(psfUndoScopeF(t), psfWindow(t, sc.s)))
+		o := reservationFilled(t, psPageGrant+remaining(psfUndoScopeF(t), psfWindow(t, sc.s)))
 		sc.o = o
 		if mode == 0 {
 			return sc, psRun(t, sc.s, o, LaneOperation, psfUndoScopeOp(t)), fixtureLargeEvidence{}

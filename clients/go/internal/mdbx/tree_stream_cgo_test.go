@@ -4483,15 +4483,34 @@ func psScope(t *testing.T, r *Reader, g uint64) ObsoletePageV1 {
 	return page
 }
 
+// psPageGrant is a test-side covering bound, not a production or contract value, of the caller-held input
+// of a case that reads at most two one-row counter pages or one scene's node/root pages (page, row and
+// witness records, tokens, continuation and key copies), and adds at most one ordinary row with its literal
+// and a few selectors. Cases with larger inputs pass their own bound to psRunG.
+const psPageGrant = 4096
+
 // psRun invokes UpdateTreeV1 once with a Reader-dependent plan on a fresh account of kind.
 func psRun(t *testing.T, s *Store, o *OperationReservationOwner, kind OperationKind, build func(*Reader) TreeOperationV1) tsResult {
+	t.Helper()
+	return psRunG(t, s, o, kind, psPageGrant, build)
+}
+
+// psRunG is psRun whose caller holds one real grant g on the invocation's own account from before the
+// callback creates or reads its input through UpdateTreeV1's return; g never enters F, S or operand terms.
+func psRunG(t *testing.T, s *Store, o *OperationReservationOwner, kind OperationKind, g uint64, build func(*Reader) TreeOperationV1) tsResult {
 	t.Helper()
 	var r tsResult
 	calls := 0
 	before := reservationLive(o)
 	mustEnvironment(t, o.WithOperation(kind, func(a *OperationAccount) error {
-		r = tsInvoke(s, a, func(reader *Reader) (TreeOperationV1, error) { calls++; return build(reader), nil })
-		return nil
+		return a.WithReservation(g, func() error {
+			held := reservationLive(o)
+			r = tsInvoke(s, a, func(reader *Reader) (TreeOperationV1, error) { calls++; return build(reader), nil })
+			if reservationLive(o) != held {
+				t.Fatalf("scope grant leaked: engine hold live%d want%d", reservationLive(o), held)
+			}
+			return nil
+		})
 	}))
 	if calls != 1 || reservationLive(o) != before {
 		t.Fatalf("scope grant leaked: calls%d live%d want%d", calls, reservationLive(o), before)
@@ -4561,17 +4580,22 @@ func psCallback(t *testing.T) {
 		}))
 	}
 	marker := errors.New("scope callback marker")
-	garbage := TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: make([]ObsoleteRowV1, 3), LargeConsulted: []LargeImageSelectorV1{{Kind: 9}}}}
+	// The carrier is created inside each invocation's caller grant frame (psPageGrant covers it).
+	garbage := func() TreeOperationV1 {
+		return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: make([]ObsoleteRowV1, 3), LargeConsulted: []LargeImageSelectorV1{{Kind: 9}}}}
+	}
 	before := reservationLive(o)
 	mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
-		r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
-			return garbage, a.WithPhaseReservationV1(64, 0, func(func() error) error { return marker })
+		return a.WithReservation(psPageGrant, func() error {
+			r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
+				return garbage(), a.WithPhaseReservationV1(64, 0, func(func() error) error { return marker })
+			})
+			r.tuple(t, 1, 1, -1)
+			if !errors.Is(r.err, marker) {
+				t.Fatalf("scope callback error identity lost: %v", r.err)
+			}
+			return nil
 		})
-		r.tuple(t, 1, 1, -1)
-		if !errors.Is(r.err, marker) {
-			t.Fatalf("scope callback error identity lost: %v", r.err)
-		}
-		return nil
 	}))
 	if reservationLive(o) != before || s.state != storeOPEN {
 		t.Errorf("scope grant leaked: error live%d want%d state%s", reservationLive(o), before, s.state)
@@ -4580,10 +4604,12 @@ func psCallback(t *testing.T) {
 	func() {
 		defer func() { recovered = recover() }()
 		_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
-			tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
-				return garbage, a.WithPhaseReservationV1(64, 0, func(func() error) error { panic(marker) })
+			return a.WithReservation(psPageGrant, func() error {
+				tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
+					return garbage(), a.WithPhaseReservationV1(64, 0, func(func() error) error { panic(marker) })
+				})
+				return nil
 			})
-			return nil
 		})
 	}()
 	if recovered != any(marker) || reservationLive(o) != before || s.state != storeOPEN {
@@ -4601,17 +4627,19 @@ func psCallback(t *testing.T) {
 }
 
 // psGoexit runs one Lane operation whose callback calls runtime.Goexit on its own goroutine.
-func psGoexit(t *testing.T, s *Store, o *OperationReservationOwner, garbage TreeOperationV1) {
+func psGoexit(t *testing.T, s *Store, o *OperationReservationOwner, garbage func() TreeOperationV1) {
 	t.Helper()
 	done := make(chan bool)
 	go func() {
 		returned := false
 		defer func() { done <- returned }()
 		_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
-			tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
-				return garbage, a.WithPhaseReservationV1(64, 0, func(func() error) error { runtime.Goexit(); return nil })
+			return a.WithReservation(psPageGrant, func() error {
+				tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
+					return garbage(), a.WithPhaseReservationV1(64, 0, func(func() error) error { runtime.Goexit(); return nil })
+				})
+				return nil
 			})
-			return nil
 		})
 		returned = true
 	}()
@@ -4695,7 +4723,8 @@ func psShape(t *testing.T) {
 	})
 	psRefused(t, s, r, false, "consulted-only")
 	// Malformed ordinary Pair keeps its own capacity row ahead of the scope shape row.
-	r = psRun(t, s, o, TreeOperation, func(reader *Reader) TreeOperationV1 {
+	consultedGrant := (maxUpdateConsulted + 1) * (uint64(unsafe.Sizeof(ConsultedRow{})) + 16)
+	r = psRunG(t, s, o, TreeOperation, psPageGrant+consultedGrant, func(reader *Reader) TreeOperationV1 {
 		op := psRawDelete(t, 9)(reader)
 		op.Pair.Consulted = tsConsulted(int(maxUpdateConsulted) + 1)
 		return op
@@ -4736,7 +4765,7 @@ func psProvenance(t *testing.T) {
 	for i, build := range foreign {
 		// One byte below F still yields the charge-free provenance refusal.
 		f := psF(0, 0, 1, 1, 0, 0, 9, 9)
-		r = psRun(t, s, reservationFilled(t, f-1), LaneOperation, build)
+		r = psRun(t, s, reservationFilled(t, psPageGrant+f-1), LaneOperation, build)
 		if r.err != nil && s.state == storeOPEN && treeNativeIsInvalid(r.err) {
 			psRefused(t, s, r, false, fmt.Sprint("foreign", i))
 			continue
@@ -4805,8 +4834,8 @@ func psOverlap(t *testing.T) {
 // R2: count capacity precedes unknown-kind/order and token content; zero hash is legal.
 func psCounts(t *testing.T) {
 	s, _, o := psStore(t)
-	run := func(label string, capacity bool, edit func(*TreeOperationV1)) {
-		r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+	run := func(label string, capacity bool, extra uint64, edit func(*TreeOperationV1)) {
+		r := psRunG(t, s, o, LaneOperation, psPageGrant+extra, func(reader *Reader) TreeOperationV1 {
 			op := psRawDelete(t, 9)(reader)
 			edit(&op)
 			return op
@@ -4821,30 +4850,30 @@ func psCounts(t *testing.T) {
 		}
 		return out
 	}
-	run("2881", true, func(op *TreeOperationV1) {
+	run("2881", true, 33*2881, func(op *TreeOperationV1) {
 		op.Pair.LargeConsulted = append([]LargeImageSelectorV1{{Kind: 0}}, selectors(1, 2880)...)
 	})
-	run("1441 bodies", true, func(op *TreeOperationV1) {
+	run("1441 bodies", true, 33*1442, func(op *TreeOperationV1) {
 		op.Pair.LargeConsulted = append([]LargeImageSelectorV1{{Kind: 255}}, selectors(1, 1441)...)
 	})
-	run("1441 families", true, func(op *TreeOperationV1) { op.Pair.LargeConsulted = selectors(2, 1441) })
+	run("1441 families", true, 33*1441, func(op *TreeOperationV1) { op.Pair.LargeConsulted = selectors(2, 1441) })
 	for _, kind := range []LargeImageKindV1{0, 3, 255} {
-		run(fmt.Sprint("kind", kind), false, func(op *TreeOperationV1) {
+		run(fmt.Sprint("kind", kind), false, 0, func(op *TreeOperationV1) {
 			op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: kind}}
 		})
 	}
-	run("order", false, func(op *TreeOperationV1) { op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 2}, {Kind: 1}} })
-	run("duplicate", false, func(op *TreeOperationV1) {
+	run("order", false, 0, func(op *TreeOperationV1) { op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 2}, {Kind: 1}} })
+	run("duplicate", false, 0, func(op *TreeOperationV1) {
 		op.Pair.LargeConsulted = selectors(1, 1)[:1:1]
 		op.Pair.LargeConsulted = append(op.Pair.LargeConsulted, op.Pair.LargeConsulted[0])
 	})
-	run("D+W", true, func(op *TreeOperationV1) {
+	run("D+W", true, 8*maxUpdateMutations, func(op *TreeOperationV1) {
 		op.Pair.ObsoleteDeletes = make([]ObsoleteRowV1, maxUpdateMutations)
 	})
 	// Boundaries 1 and 1440 of a known kind with zero hashes are legal physical domains.
 	for _, n := range []int{1, 1440} {
 		s2, _, o2 := psStore(t)
-		r := psRun(t, s2, o2, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		r := psRunG(t, s2, o2, LaneOperation, psPageGrant+33*uint64(n), func(reader *Reader) TreeOperationV1 {
 			op := psRawDelete(t, 9)(reader)
 			op.Pair.LargeConsulted = selectors(1, n)
 			return op
@@ -4863,7 +4892,7 @@ func psMetadata(t *testing.T) {
 	if got := treeScopeBytesV1(&TreePairV1{}); got != psF(0, 0, 0, 0, 0, 0, 0, 0) {
 		t.Fatalf("scope metadata high-water differs: empty %d", got)
 	}
-	r := psRun(t, s, reservationFilled(t, f-1), LaneOperation, psRawDelete(t, 9))
+	r := psRun(t, s, reservationFilled(t, psPageGrant+f-1), LaneOperation, psRawDelete(t, 9))
 	// A smaller production F passes this charge and is refused only later by the window, after the section begins.
 	if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
 		t.Fatalf("scope metadata high-water differs: F-1 = %v %s", r.err, s.state)
@@ -4877,14 +4906,15 @@ func psMetadata(t *testing.T) {
 	mustEnvironment(t, s.View(func(reader *Reader) error { maxKey = reader.maxKey; return nil }))
 	window := 4 * (maxKey + 1)
 	// F alone admits; the scoped preflight window then refuses after beginTreeSectionV1 (CLOSED).
-	r = psRun(t, s, reservationFilled(t, f+window-1), LaneOperation, psRawDelete(t, 9))
+	r = psRun(t, s, reservationFilled(t, psPageGrant+f+window-1), LaneOperation, psRawDelete(t, 9))
 	if any(r.err) != any(errOperationReservationCapacity) {
 		t.Fatalf("scope operand window not funded: %v", r.err)
 	}
 	r.tuple(t, 1, 1, -1)
 	tsConsumed(t, s, o, 1, errOperationReservationCapacity)
 	s2, _, o2 := psStore(t)
-	r = psRun(t, s2, reservationFilled(t, f+window+64), LaneOperation, psRawDelete(t, 9))
+	// Bound equality: exactly G+F+S remaining admits the raw-only plan.
+	r = psRun(t, s2, reservationFilled(t, psPageGrant+f+window), LaneOperation, psRawDelete(t, 9))
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
 	tsRead(t, s2, TreeSchemaV1DBIs()[0], tsCounterKey(9), nil)
