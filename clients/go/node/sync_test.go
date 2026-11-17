@@ -1102,7 +1102,7 @@ func TestRestoreChainState_NilDestination(t *testing.T) {
 }
 
 func mustBuildSignedTransferTxForSyncTest(
-	t *testing.T,
+	t testing.TB,
 	utxos map[consensus.Outpoint]consensus.UtxoEntry,
 	inputs []consensus.Outpoint,
 	amount uint64,
@@ -1487,7 +1487,7 @@ func TestMain(m *testing.M) {
 
 // buildPendingOutpointTemplate runs under the template lock. A build that ends
 // early removes its directory and keys and leaves the template unbuilt.
-func buildPendingOutpointTemplate(t *testing.T) {
+func buildPendingOutpointTemplate(t testing.TB) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "rubin-pending-outpoint-template-")
 	if err != nil {
@@ -1535,7 +1535,7 @@ func buildPendingOutpointTemplate(t *testing.T) {
 	for height := uint64(1); height <= 100; height++ {
 		subsidy := consensus.BlockSubsidy(height, f.alreadyGenerated)
 		coinbase := reorgTestCoinbaseForAddress(t, height, subsidy, f.sourceAddress)
-		summary, err := engine.ApplyBlock(buildSingleTxBlock(t, f.tipHash, target, height+1, coinbase), nil)
+		summary, err := engine.ApplyBlock(buildSingleTxBlockTB(t, f.tipHash, target, height+1, coinbase), nil)
 		if err != nil {
 			t.Fatalf("ApplyBlock(height=%d): %v", height, err)
 		}
@@ -1551,9 +1551,38 @@ func buildPendingOutpointTemplate(t *testing.T) {
 	pendingOutpointTemplate.dir, pendingOutpointTemplate.destKP, pendingOutpointTemplate.f = dir, keys[1], f
 }
 
+// buildSingleTxBlockTB is buildSingleTxBlock for a test or a benchmark.
+func buildSingleTxBlockTB(t testing.TB, prevHash [32]byte, target [32]byte, timestamp uint64, tx []byte) []byte {
+	t.Helper()
+	_, txid, _, _, err := consensus.ParseTx(tx)
+	if err != nil {
+		t.Fatalf("parse tx: %v", err)
+	}
+	root, err := consensus.MerkleRootTxids([][32]byte{txid})
+	if err != nil {
+		t.Fatalf("merkle root: %v", err)
+	}
+	header := make([]byte, 0, consensus.BLOCK_HEADER_BYTES+len(tx)+1)
+	header = consensus.AppendU32le(header, 1)
+	header = append(header, prevHash[:]...)
+	header = append(header, root[:]...)
+	header = consensus.AppendU64le(header, timestamp)
+	header = append(header, target[:]...)
+	header = consensus.AppendU64le(header, 7)
+	header = consensus.AppendCompactSize(header, 1)
+	return append(header, tx...)
+}
+
 // newPendingOutpointSyncFixture gives the caller its own byte copy of the
 // template chain, opened as a fresh engine with its own mempool and owner.
-func newPendingOutpointSyncFixture(t *testing.T) *pendingOutpointSyncFixture {
+func newPendingOutpointSyncFixture(t testing.TB) *pendingOutpointSyncFixture {
+	t.Helper()
+	return newPendingOutpointSyncFixtureWithMempool(t, DefaultMempoolConfig())
+}
+
+// newPendingOutpointSyncFixtureWithMempool is newPendingOutpointSyncFixture with the
+// engine's mempool built by NewMempoolWithConfig from cfg.
+func newPendingOutpointSyncFixtureWithMempool(t testing.TB, cfg MempoolConfig) *pendingOutpointSyncFixture {
 	t.Helper()
 	tmpl := &pendingOutpointTemplate
 	tmpl.Lock()
@@ -1575,15 +1604,15 @@ func newPendingOutpointSyncFixture(t *testing.T) *pendingOutpointSyncFixture {
 		t.Fatalf("LoadChainState: %v", err)
 	}
 	target := consensus.POW_LIMIT
-	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir))
-	if _, err := ReconcileChainStateWithBlockStore(state, store, cfg); err != nil {
+	syncCfg := DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir))
+	if _, err := ReconcileChainStateWithBlockStore(state, store, syncCfg); err != nil {
 		t.Fatalf("ReconcileChainStateWithBlockStore: %v", err)
 	}
-	engine, err := NewSyncEngine(state, store, cfg)
+	engine, err := NewSyncEngine(state, store, syncCfg)
 	if err != nil {
 		t.Fatalf("NewSyncEngine: %v", err)
 	}
-	mempool, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
+	mempool, err := NewMempoolWithConfig(engine.chainState, store, devnetGenesisChainID, cfg)
 	if err != nil {
 		t.Fatalf("NewMempool: %v", err)
 	}

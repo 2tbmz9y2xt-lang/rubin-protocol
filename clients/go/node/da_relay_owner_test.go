@@ -1411,7 +1411,7 @@ func TestDAAdmissionCandidateErrorOrder(t *testing.T) {
 }
 
 type daNonReplayFixture struct {
-	t         *testing.T
+	t         testing.TB
 	signer    *consensus.MLDSA87Keypair
 	address   []byte
 	state     *ChainState
@@ -1510,7 +1510,7 @@ func (f *daNonReplayFixture) signed(spec daNonReplayTxSpec) daNonReplayTx {
 	if err := consensus.SignTransaction(tx, f.state.Utxos, devnetGenesisChainID, f.signer); err != nil {
 		f.t.Fatalf("SignTransaction: %v", err)
 	}
-	raw := mustMarshalTxForNodeTest(f.t, tx)
+	raw := f.marshal(tx)
 	parsed, txid, wtxid, consumed, err := consensus.ParseTx(raw)
 	if err != nil || consumed != len(raw) {
 		f.t.Fatalf("ParseTx=(%d,%v), want %d,nil", consumed, err, len(raw))
@@ -1522,7 +1522,19 @@ func (f *daNonReplayFixture) signed(spec daNonReplayTxSpec) daNonReplayTx {
 }
 
 func (f *daNonReplayFixture) begin(tx daNonReplayTx) *DAAdmission {
-	return mustDAAdmission(f.t, f.mp, tx.raw)
+	admission, err := f.mp.BeginDAAdmission(tx.raw)
+	if err != nil {
+		f.t.Fatalf("BeginDAAdmission: %v", err)
+	}
+	return admission
+}
+
+func (f *daNonReplayFixture) marshal(tx *consensus.Tx) []byte {
+	raw, err := consensus.MarshalTx(tx)
+	if err != nil {
+		f.t.Fatalf("MarshalTx: %v", err)
+	}
+	return raw
 }
 
 func (f *daNonReplayFixture) admit(tx daNonReplayTx, provenance daProvenance) daRelayAdmissionOutcome {
@@ -1545,7 +1557,12 @@ func (f *daNonReplayFixture) completeReplay(daID [32]byte, kind uint8, payload .
 	chunk := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, payload: payload})
 	f.admit(chunk, daNonReplayPeer("chunk"))
 	commit := f.signed(daNonReplayTxSpec{kind: 0x01, daID: daID, chunkCount: 1, commitment: sha3.Sum256(chunk.spec.payload), commitmentOutputs: 1})
-	_, token := mustFinalizeDAAdmission(f.t, f.mp, commit.raw)
+	admission := f.begin(commit)
+	_ = admission.Snapshot()
+	staged, _ := admission.BeginCommit(nil)
+	token := staged.CandidateToken()
+	staged.Commit()
+	admission.Close()
 	f.mutateRelay(func(s *DARelayState) {
 		record := s.relations.recordValue(daID)
 		record.commit = daRelayCommit{daID: daID, payloadCommitment: commit.spec.commitment, member: &daRelayMemberIdentity{txid: commit.txid, wtxid: commit.wtxid, fee: commit.spec.fee, inputs: append([]consensus.Outpoint(nil), commit.inputs...), token: token, provenance: daNonReplayPeer("commit")}, chunkCount: 1, txBytes: append([]byte(nil), commit.raw...)}
@@ -7638,7 +7655,7 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 				f.t.Fatal(err)
 			}
 			parsed.TxKind, parsed.DaChunkCore, parsed.DaPayload = 0x00, nil, nil
-			raw := mustMarshalTxForNodeTest(f.t, parsed)
+			raw := f.marshal(parsed)
 			_, txid, wtxid, _, err := consensus.ParseTx(raw)
 			if err != nil {
 				f.t.Fatal(err)
