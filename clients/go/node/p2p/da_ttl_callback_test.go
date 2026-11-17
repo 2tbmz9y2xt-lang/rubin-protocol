@@ -185,7 +185,7 @@ func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
 	require(t, len(services) == 2 && services[h.syncEngine.DATTLBindingService()], "final binding outside the racing constructions")
 }
 
-// TestDATTLCallbackServiceCloseRace is the H2 API form: Close(S1) races the registration of a
+// TestDATTLCallbackServiceCloseRace pins Close(S1) racing the registration of a
 // selection that snapshotted S1 while S2 binds. The outcome is either admitted before DRAINING
 // with Close waiting for the decrease, or refused with zero effects; never S2.
 func TestDATTLCallbackServiceCloseRace(t *testing.T) {
@@ -412,7 +412,7 @@ func TestDATTLCallbackEndToEndReorgRequeueNotDecreased(t *testing.T) {
 	requireCommitRetained(t, sink, fixture, false, "expired at the third counted publication following the requeue")
 }
 
-// TestDATTLCallbackLaterConstructionKeepsFirstHook pins C8 and F1 end to end through a real
+// TestDATTLCallbackLaterConstructionKeepsFirstHook pins the later-construction claim end to end through a real
 // reorganization: S2 over the same SyncEngine succeeds with the same relay and becomes the
 // binding, while the detached-reorg hook stays with the first claimant S1. With S1 CLOSED and
 // S2 OPEN the disconnected commit is refused (S1's closed path) and not retained; the control
@@ -457,7 +457,7 @@ func observeDARelayPublicImage(t *testing.T, h *testHarness) daRelayPublicImage 
 	return image
 }
 
-// TestDATTLCallbackLaterConstructionChangesNoDAState is the C8 NOCHG row at the Service level:
+// TestDATTLCallbackLaterConstructionChangesNoDAState pins that a later construction changes nothing:
 // over a relay populated with a State A chunk and a State B commit, a later NewService S2 (and so
 // its ClaimDARelayState and binding publication) leaves the exported relay image unchanged. Counts
 // and owner tokens are not exported; the node row TestDATTLCallbackBindingChangesNoDAState
@@ -476,10 +476,10 @@ func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
 
 // TestDATTLCallbackEndToEndSelection drives the no-lease selection through real ACCEPTED/NEW
 // applies (SyncEngine.ApplyBlock, the RPC miner's apply) over the real DA owner and Services: the
-// bound OPEN Service admits one decrease per publication (C3, C10), AnnounceBlock decreases
-// nothing (C3, C12), a CLOSED current binding refuses with zero DA effects and no fallback while
-// the apply still returns ACCEPTED/NEW (R3, RES), the closed Service's retained
-// AnnounceBlock returns "service already closed" (C12), and a fresh Service binds and decreases.
+// bound OPEN Service admits one decrease per publication, AnnounceBlock decreases
+// nothing, a CLOSED current binding refuses with zero DA effects and no fallback while
+// the apply still returns ACCEPTED/NEW, the closed Service's retained
+// AnnounceBlock returns "service already closed", and a fresh Service binds and decreases.
 func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -507,7 +507,7 @@ func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 	f.requireAbsent(commit, "the record S2's admitted decrease expired at count 1")
 }
 
-// TestDATTLCallbackEndToEndLeasePath pins the C1 lease-path row end to end: the peer path runs
+// TestDATTLCallbackEndToEndLeasePath pins the lease path end to end: the peer path runs
 // the lease-owning Service's own nested entry and never reads the binding, so with the binding
 // naming a later, CLOSED Service S2 (whose selection would refuse) the peer applies still count
 // 3 -> 2 -> 1 -> removed.
@@ -530,7 +530,7 @@ func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
 	f.requireAbsent(commit, "the lease path decreased although the binding names a CLOSED Service")
 }
 
-// TestDATTLCallbackEndToEndPanicReleasesLease pins H3 at the entry: a panic inside the decrease
+// TestDATTLCallbackEndToEndPanicReleasesLease pins the entry under a panic: a panic inside the decrease
 // passed to the bound Service's registered entry propagates unrecovered, the lease is released
 // exactly once before propagation, and Close then returns.
 func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
@@ -561,9 +561,9 @@ func mineSideBlock(t *testing.T) []byte {
 	return block
 }
 
-// TestDATTLCallbackEndToEndNonAcceptedResults pins R1 and the R2 rows end to end over the real
+// TestDATTLCallbackEndToEndNonAcceptedResults pins the non-accepted results end to end over the real
 // SyncEngine, DA owner and Service, counting through the retained image: a valid side-branch block
-// stored non-canonical (D1), a KNOWN_BLOCK_NOOP replay and a DisconnectTip decrease nothing, so the
+// stored non-canonical, a KNOWN_BLOCK_NOOP replay and a DisconnectTip decrease nothing, so the
 // record retained at count 3 survives the next two counted publications and expires only at the
 // third. The side block enters through SyncEngine.ApplyBlockWithReorg (no Service lease).
 func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {

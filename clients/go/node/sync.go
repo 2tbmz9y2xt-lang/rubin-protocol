@@ -696,9 +696,9 @@ func (s *SyncEngine) ClaimDARelayState(expectedRelay *DARelayState, admitDetache
 
 // DATTLMutationService is a Service together with its own DA TTL mutation entry
 // (RUBIN_COMPACT_BLOCKS.md Section 5; RUBIN_L1_P2P_AUX.md Section 5, Table A).
-// EnterDATTLMutation, called for a transition under no Service lease, MUST
-// register exactly one call lease with that Service, admitted only while it is
-// OPEN; when DRAINING or CLOSED it MUST return the Service's stable closed error
+// EnterDATTLMutation, called for a transition under no Service lease,
+// registers exactly one call lease with that Service, admitted only while it is
+// OPEN; when DRAINING or CLOSED it returns the Service's stable closed error
 // without calling decrease. Once admitted it calls decrease exactly once, returns
 // its result unchanged, and releases the lease exactly once on every exit,
 // unwind included. It never consults the binding, retries or falls back.

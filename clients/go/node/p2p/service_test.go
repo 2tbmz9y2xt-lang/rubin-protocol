@@ -496,7 +496,7 @@ func TestProcessRelayedBlockDropsRetainedDAOrphanNotValidAgainstC1(t *testing.T)
 	f.requireAbsent(commit, "the record the canonical transition could not validate against C1")
 }
 
-// TestAnnounceBlockMakesNoDARelayTTLDecrease pins the TTL cadence after RUB-1847: each accepted
+// TestAnnounceBlockMakesNoDARelayTTLDecrease pins the TTL cadence: each accepted
 // remote block decreases the retained record once inside its canonical transition (3 -> 2 -> 1,
 // removed at the third), and neither the post-return accepted-block effects nor a local
 // AnnounceBlock decreases it, observed through the retained image.

@@ -5625,7 +5625,7 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 					t.Fatalf("%s canonical err=%v, want canonical terminal", row.name, err)
 				}
 			}
-			if selector.name == ownerReadyTTLSelector { // F2: a State C record is never visited
+			if selector.name == ownerReadyTTLSelector { // the TTL body never visits a State C record
 				requireDATTLSkipsStateC(t, f, selector.run, row.name)
 				continue
 			}
@@ -5687,7 +5687,7 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 			f.completeReplayPinned(id)
 			record := daRelayStateSnapshot(f.relay).sets[id]
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { row.corrupt(claimCorruptionTarget{o, record}) })
-			if selector.name == ownerReadyTTLSelector { // F2: State C claims are never visited
+			if selector.name == ownerReadyTTLSelector { // the TTL body never visits State C claims
 				requireDATTLSkipsStateC(t, f, selector.run, "State C claims")
 				continue
 			}
@@ -5747,7 +5747,7 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 		for _, selector := range ownerReadyRemovalSelectors {
 			f := buildDuplicateInputs(t, role)
 			f.mutateRelay(func(s *DARelayState) { s.mempool = nil })
-			if selector.name == ownerReadyTTLSelector { // F2: State C claims are never visited
+			if selector.name == ownerReadyTTLSelector { // the TTL body never visits State C claims
 				requireDATTLSkipsStateC(t, f, selector.run, "State C claims")
 				continue
 			}
@@ -5785,7 +5785,7 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 			}
 		})
 		// Every alias row runs on the PEER release: the in-guard TTL body never scans the State C
-		// owner domain (F2), and its own State A/B token refusals are pinned by
+		// owner domain, and its own State A/B token refusals are pinned by
 		// TestDATTLCallbackBodyRefusalArms.
 		requireOwnerReadySentinel(t, f, ownerReadyRemovalSelectors[1].run, errDARelayImageIncompatible, name)
 	}
@@ -6705,7 +6705,7 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	// OWNED CALLERS: each owner-aware entrypoint is named once, in its wrapper; the legacy roots never.
 	refs := productionReferenceCensus(t, "releaseOwnerReadyPeerQuota", "releasePeerQuotaKey", "advanceOrphanTTL", "prepareCanonicalDAImage", "advanceOwnerReadyTTLInGuard")
 	require(t, reflect.DeepEqual(refs, map[string][]string{"releaseOwnerReadyPeerQuota": {"ReleasePeerQuotaKey"}, "releasePeerQuotaKey": nil, "advanceOrphanTTL": nil, "prepareCanonicalDAImage": nil, "advanceOwnerReadyTTLInGuard": {"enterDATTL"}}), "production references=%v", refs)
-	// R4: the fenced TTL paths are deleted, so no production declaration of them remains.
+	// The fenced TTL paths are deleted, so no production declaration of them remains.
 	for _, gone := range []string{"AdvanceOrphanTTL", "advanceOwnerReadyTTL", "advanceDAOrphanTTL", "ownerReadyTTLTickVictims", "tickOwnerReadyTTLRecordLocked"} {
 		require(t, len(productionDeclarations(t, gone)) == 0, "deleted fenced TTL function %s is declared again", gone)
 	}
@@ -6780,7 +6780,7 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	// RECORD-LOCAL WORK: the removal arms and their shared retirement helper never call the global locator traversal, the record deep clone
 	// or the Live projector, nor range locators.
 	// The pure-TTL sink arm this scan once carried went with the deleted fenced tick
-	// (RUB-1847): the in-guard TTL body's record and locator effects are pinned by the
+	// the in-guard TTL body's record and locator effects are pinned by the
 	// TestDATTLCallbackBody rows.
 	// A bounded shape check, not a proof over arbitrary Go: which rows the retirement arms retire or keep is pinned by the runtime rows (TestAdmitDANonReplayPrunesOutOfRangeClaims, TestOwnerReadyRemovalPeerAndTTLSelectors, the OWNER-READY IN-GUARD BODY row below).
 	isLocators := func(expr ast.Expr) bool { sel, ok := expr.(*ast.SelectorExpr); return ok && sel.Sel.Name == "locators" }

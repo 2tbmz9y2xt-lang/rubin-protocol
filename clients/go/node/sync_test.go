@@ -187,7 +187,7 @@ func TestSyncEffectiveDAMempoolSize(t *testing.T) {
 	if got, err := engine.EffectiveDAMempoolSize(); err != nil || got != 536870912 {
 		t.Fatalf("production binding observation=%d err=%v, want 536870912", got, err)
 	}
-	// Under F1 a later claim succeeds either way, so the observation is pinned by the hook: the
+	// A later claim succeeds either way, so the observation is pinned by the hook: the
 	// first claim after it must install its own detached-reorg hook.
 	if engine.daRelayClaimed || engine.reorgDAAdmission != nil {
 		t.Fatalf("observation recorded a Service claim: claimed=%v hook=%v", engine.daRelayClaimed, engine.reorgDAAdmission != nil)

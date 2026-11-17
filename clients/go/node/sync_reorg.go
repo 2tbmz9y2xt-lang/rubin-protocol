@@ -103,7 +103,7 @@ func (s *SyncEngine) ApplyBlockWithReorgDeferred(blockBytes []byte, prevTimestam
 }
 
 // ApplyBlockWithReorgDeferredUnderLease is ApplyBlockWithReorgDeferred for a
-// caller that holds a Service call lease. lease MUST be that lease-owning
+// caller that holds a Service call lease. lease is that lease-owning
 // Service's own nested DA TTL entry: an ACCEPTED/NEW publication of this apply
 // invokes it once as a nested callee that registers and releases nothing and
 // never reads the binding (RUBIN_L1_P2P_AUX.md Section 5, Table A). A nil lease

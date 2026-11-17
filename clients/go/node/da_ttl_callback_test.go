@@ -23,7 +23,7 @@ import (
 
 // runDATTLBodyInGuard runs the in-guard TTL body while the test holds the ChainState admission
 // guard EXCLUSIVELY, as the canonical transition does. A body that reacquired the guard would
-// block on its own caller, so completion within the timeout is the H4 observation.
+// block on its own caller, so completion within the timeout shows the body never reacquires it.
 func runDATTLBodyInGuard(t *testing.T, f *daNonReplayFixture) error {
 	t.Helper()
 	f.state.admissionMu.Lock()
@@ -53,7 +53,7 @@ func advanceDATTLInGuard(s *DARelayState) error {
 // tables; rows whose premise is the clone path's whole-image check branch on it.
 const ownerReadyTTLSelector = "ttl tick"
 
-// requireDATTLSkipsStateC pins F2 on a State-C-only image: the in-guard TTL body walks only State
+// requireDATTLSkipsStateC pins the State A and B walk on a State-C-only image: the in-guard TTL body walks only State
 // A and State B, so a State C defect it never visits is neither refused nor changed.
 func requireDATTLSkipsStateC(t *testing.T, f *daNonReplayFixture, run func(*DARelayState) error, label string) {
 	t.Helper()
@@ -177,7 +177,7 @@ func requireDATTLCount(t *testing.T, view daRelayStateView, daID [32]byte, want 
 	}
 }
 
-// TestDATTLCallbackBodyThreeCountedPublications is the body-level C10 row: one State A and one
+// TestDATTLCallbackBodyThreeCountedPublications decreases over repeated body calls: one State A and one
 // State B record created at 3 decrease to 2, then 1, and are removed with the owner-ready expiry
 // effect at the third body call; State C is untouched; every counter returns to the base image.
 func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
@@ -223,7 +223,7 @@ func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
 	}
 }
 
-// TestDATTLCallbackBodySurvivorRevisions is the body-level C10 revision row: each body call
+// TestDATTLCallbackBodySurvivorRevisions pins revisions over repeated body calls: each body call
 // gives every surviving record its own fresh revision, minted one by one above the stored
 // high-water in ascending da_id order. The third record is admitted last with the smallest
 // da_id, so admission order is not da_id order whichever end the State A/B bucket links at.
@@ -247,7 +247,7 @@ func TestDATTLCallbackBodySurvivorRevisions(t *testing.T) {
 	}
 }
 
-// TestDATTLCallbackBodyRefusalChangesNothing is the body-level C11 row: a refused check on one
+// TestDATTLCallbackBodyRefusalChangesNothing pins that a refused check on one
 // selected record, or a selected member whose exact owner token is not bound, returns the
 // body's own error and leaves the whole DA image and owner unchanged.
 func TestDATTLCallbackBodyRefusalChangesNothing(t *testing.T) {
@@ -330,7 +330,7 @@ func daTTLIndexMismatch(relay *DARelayState) string {
 	return ""
 }
 
-// TestDATTLCallbackBodyRefusalArms is the body-level C11 row per refusal arm: each row corrupts
+// TestDATTLCallbackBodyRefusalArms pins one refusal per check arm: each case corrupts
 // one stored value, asserts the body's returned error, and asserts that the DA image, the owner
 // and the State A/B index are unchanged after the refusal (the index also exact whenever the
 // row's corruption left it exact before the body).
@@ -458,7 +458,7 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			var terminal *canonicalDATerminalError
 			return errors.As(err, &terminal) && strings.Contains(err.Error(), "contradicts its parsed identity")
 		}},
-		// A count of zero is an inconsistent stored value (ATOM: underflow invalidates the plan
+		// A count of zero is an inconsistent stored value (underflow invalidates the plan
 		// before mutation); the rows assert the bare errDARelayImageIncompatible.
 		{"State A count zero", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			f.setOwnerReadyTTL(r.stateAID, 0)
@@ -510,7 +510,7 @@ func TestDATTLCallbackBodyUnboundRelay(t *testing.T) {
 	}
 }
 
-// TestDATTLCallbackBodyWalksOnlyStateAB is the F2 row: a State C record that would fail every
+// TestDATTLCallbackBodyWalksOnlyStateAB pins the walk bound: a State C record that would fail every
 // owner-ready check is never visited, and the State A/B index stays exact across admission,
 // decrease, expiry and the whole-clone ReleasePeerQuotaKey swap.
 func TestDATTLCallbackBodyWalksOnlyStateAB(t *testing.T) {
@@ -599,7 +599,7 @@ func requireDATTLIndexStep(t *testing.T, f *daNonReplayFixture, step string) {
 	requireDATTLIndexExact(t, f.relay)
 }
 
-// TestDATTLCallbackIndexProductionPaths is the F2 index row on these production paths that
+// TestDATTLCallbackIndexProductionPaths pins the index on these production paths that
 // publish a record row: orphan-chunk staging (State A created and grown), commit staging
 // (State A to State B), DA completion (State B to State C), the PEER quota cleanup removal and
 // the D1 projection publication (TestDATTLCallbackIndexD1Projection). It does not run the
@@ -632,7 +632,7 @@ func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
 	requireDATTLIndexStep(t, f, "PEER cleanup removal")
 }
 
-// TestDATTLCallbackIndexD1Projection is the F2 index row on the D1 projection: one
+// TestDATTLCallbackIndexD1Projection pins the index on the D1 projection: one
 // buildCanonicalDAOwnerCandidates pass over a snapshot taken as capture() takes it re-puts the
 // State A survivor, removes the included State C record and removes the State B record whose
 // input the final chain spent, and D1 publishes that clone. The O1 half is not published, so the
@@ -714,10 +714,10 @@ func (r *daTTLRecordingService) EnterDATTLMutation(decrease func() error) error 
 	return decrease()
 }
 
-// TestDATTLCallbackBindingSelection pins the API-level binding rows: absent invokes nothing (C4
-// API form), the latest publication wins (C5), a snapshot taken before a later publication keeps
-// its Service (C5 A10), the identity read follows publications (C13), a refusal is returned
-// unchanged with no fallback (R3), and a nil publication leaves the binding unchanged (R5).
+// TestDATTLCallbackBindingSelection pins the binding API: absent invokes nothing,
+// the latest publication wins, a snapshot taken before a later publication keeps its Service,
+// the identity read follows publications, a refusal is returned unchanged with no fallback,
+// and a nil publication leaves the binding unchanged.
 func TestDATTLCallbackBindingSelection(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	var attempts []string
@@ -737,7 +737,7 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	require(t, f.engine.DATTLBindingService() == DATTLMutationService(s2), "identity read after S2 publication")
 	require(t, f.engine.enterSelectedDATTL(decrease) == nil && slices.Equal(attempts, []string{"S2"}) && decreases == 1, "latest binding: attempts=%v decreases=%d", attempts, decreases)
 
-	// A10: S2 binds after the selection snapshot and before the registration attempt.
+	// S2 binds after the selection snapshot and before the registration attempt.
 	attempts, decreases = nil, 0
 	snapshotThenBind := &daTTLRecordingService{name: "S1", attempts: &attempts}
 	snapshotThenBind.beforeAttempt = func() {
@@ -748,7 +748,7 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	err := f.engine.enterSelectedDATTL(decrease)
 	require(t, err == nil && slices.Equal(attempts, []string{"S1"}) && decreases == 1 && f.engine.DATTLBindingService() == DATTLMutationService(s2), "snapshot retarget: attempts=%v decreases=%d", attempts, decreases)
 
-	// R3: a refused registration is returned unchanged, runs no decrease, and falls back nowhere.
+	// A refused registration is returned unchanged, runs no decrease, and falls back nowhere.
 	attempts, decreases = nil, 0
 	closed := errors.New("service already closed")
 	refusing := &daTTLRecordingService{name: "closed", attempts: &attempts, refuse: closed}
@@ -761,7 +761,7 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	require(t, nilEngine.DATTLBindingService() == nil && nilEngine.enterSelectedDATTL(decrease) == nil && decreases == 0, "nil engine binding")
 }
 
-// TestDATTLCallbackBindingChangesNoDAState pins NOCHG at the API level over a populated relay
+// TestDATTLCallbackBindingChangesNoDAState pins that binding and selection change nothing over a populated relay
 // (State A and B at nonzero counts with owner tokens and a prefetch reservation, State C): the
 // first and a later ClaimDARelayState, publication, the identity read and an absent, refused or
 // admitted selection whose decrease does nothing change no DA record, count, locator, accounting
@@ -798,7 +798,7 @@ func TestDATTLCallbackBindingChangesNoDAState(t *testing.T) {
 	f.relay.mu.Unlock()
 }
 
-// TestDATTLCallbackBindingConcurrentPublications is the H1 API form under -race: one publisher
+// TestDATTLCallbackBindingConcurrentPublications runs under -race: one publisher
 // stores S_i in increasing i and then records i, while selections run concurrently. A selection
 // reads the recorded index before and after it and must select an S_j with before <= j <=
 // after+1 (S_after+1 may be published and not yet recorded), so a cached or stale binding fails.
@@ -843,7 +843,7 @@ func (c *daTTLOrderedService) EnterDATTLMutation(decrease func() error) error {
 }
 
 // TestDATTLCallbackRunsInsideTheTransitionHold replaces the retired fenced-writer row of
-// TestCanonicalDAWritersCannotInterleaveWithTheTransition on the new path (C2, H4): with the
+// TestCanonicalDAWritersCannotInterleaveWithTheTransition on the new path: with the
 // admission guard held exclusively, a ReleasePeerQuotaKey started first parks on the guard, the
 // in-guard TTL body completes under that same hold, the writer does not run before the release,
 // and after it the writer runs against the decreased image without losing it.
