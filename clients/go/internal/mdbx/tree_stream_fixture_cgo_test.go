@@ -6946,7 +6946,14 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		sc := psfNew(t)
 		r := sc.run(t, sc.o)
 		r.tuple(t, 2, 3, -1)
-		mustEnvironment(t, r.err)
+		if r.err != nil {
+			t.Fatalf("rank8 typed page did not commit: %v", r.err)
+		}
+		for _, row := range obsoleteTreeFamily(9) {
+			if gone, err := FixtureRawRowEqual(sc.s, 8, row.key, nil); err != nil || !gone {
+				t.Fatalf("rank8 typed page did not commit: %x %v", row.key, err)
+			}
+		}
 		sc.image(t, sc.s, true)
 		tsRead(t, sc.s, TreeSchemaV1DBIs()[0], []byte{2}, psfAuthority(t).Literal)
 		tsFollowing(t, sc.s, sc.o)

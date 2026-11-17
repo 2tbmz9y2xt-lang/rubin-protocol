@@ -4559,7 +4559,9 @@ func psCallback(t *testing.T) {
 	}
 	r := psRun(t, s, o, LaneOperation, psRawDelete(t, 9))
 	r.tuple(t, 2, 3, -1)
-	mustEnvironment(t, r.err)
+	if r.err != nil || s.state != storeOPEN {
+		t.Fatalf("scope next operation differs: %v %s", r.err, s.state)
+	}
 }
 
 // N2: a raw-only delete commits NEW, removes exactly its target and leaves the next operation healthy.
@@ -4568,7 +4570,7 @@ func psAccepted(t *testing.T) {
 	r := psRun(t, s, o, LaneOperation, psRawDelete(t, 9))
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
-	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), nil)
+	psGone(t, s, tsCounterKey(9))
 	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(10), tsCounterLiteral(10, 1))
 	tsFollowing(t, s, o)
 	s = tsReopen(t, s, path)
@@ -4584,6 +4586,18 @@ func psAccepted(t *testing.T) {
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
 	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(10), tsCounterLiteral(10, 1))
+}
+
+// psGone requires the raw counter target to be absent after the owned plan committed.
+func psGone(t *testing.T, s *Store, key []byte) {
+	t.Helper()
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		_, present, err := r.Get(TreeSchemaV1DBIs()[0], key)
+		if err != nil || present {
+			t.Fatalf("owned raw target survived: %x present%v %v", key, present, err)
+		}
+		return nil
+	}))
 }
 
 // R2/M1: every forbidden companion of a nonempty new field refuses under the closed shape.
