@@ -217,6 +217,24 @@ func TestDACompletionBudget(t *testing.T) {
 				t.Fatalf("source exhaustion leaked to another quota_identity: %v", err)
 			}
 		}},
+		{"supplied_quota_key", func(t *testing.T) {
+			// The budget consumes the supplied key byte-for-byte: each key below
+			// differs from an exhausted one only by case, surrounding whitespace,
+			// an IPv4-mapped prefix or a port, and still reserves its own share.
+			exhausted := map[string]daCompletionUse{"q": {used: perSource}, "192.0.2.1": {used: perSource}}
+			b := seededDABudgetFrom(1, 1, 0, exhausted)
+			want := maps.Clone(exhausted)
+			for _, quota := range []string{"Q", " q", "q\n", "::ffff:192.0.2.1", "192.0.2.1:8333"} {
+				reservation, err := b.reserve(daBudgetContext(1, 1, 0), daBudgetPeer(t, quota), daCompletionCharge{bytes: 1})
+				if err != nil || reservation != (daCompletionReservation{quota: quota, charge: 1}) {
+					t.Fatalf("quota %q reservation=%+v err=%v", quota, reservation, err)
+				}
+				want[quota] = daCompletionUse{reserved: 1}
+			}
+			if got := imageDACompletionBudget(b); !reflect.DeepEqual(got.sources, want) {
+				t.Fatalf("sources=%+v want %+v", got.sources, want)
+			}
+		}},
 		{"settle_accepted_returns", func(t *testing.T) {
 			// "other" holds a reservation, so returning q's charges must subtract
 			// only them; the second return deletes the zero q entry.
@@ -503,7 +521,12 @@ func daBudgetWaitFrame(t *testing.T, frame string) {
 	t.Helper()
 	buf := make([]byte, 1<<20)
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); runtime.Gosched() {
-		if strings.Contains(string(buf[:runtime.Stack(buf, true)]), frame) {
+		n := runtime.Stack(buf, true)
+		if n == len(buf) {
+			buf = make([]byte, 2*len(buf))
+			continue
+		}
+		if strings.Contains(string(buf[:n]), frame) {
 			return
 		}
 	}
@@ -768,8 +791,9 @@ func daBudgetAdmissionCases() []daBudgetCase {
 				switch {
 				case row.full:
 					if !isDABudgetDecline(err) {
-						t.Fatalf("%+v err=%v (%T) disposition=%v want budget decline", row, err, err, relayDispositionOf(err))
+						t.Logf("row %+v", row)
 					}
+					requireDABudgetDecline(t, err)
 				case row.mismatch:
 					if !errors.Is(err, ErrDARelayPayloadCommitmentMismatch) {
 						t.Fatalf("%+v control step-3 commitment err=%v", row, err)
