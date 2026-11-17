@@ -243,70 +243,104 @@ func checkBlockedNext(t *testing.T, s *Store, o *observedFS, original *ErrorV1, 
 	}
 }
 
+// checkAtomicFileFailure shares the physical assertions of only Create and PersistIntent.
+func checkAtomicFileFailure(t *testing.T, row faultRow, creating, failRelease bool) {
+	t.Helper()
+	old, next := selected(), selected()
+	i := replacement()
+	next.Sequence, next.Intent = 18, &i
+	var s *Store
+	var dir string
+	if creating {
+		dir = directory(t)
+		s = &Store{dir: dir}
+		next = RecordV1{Identity: identity(), Selector: 1}
+	} else {
+		s, dir = existing(t, old)
+	}
+	event := row.event
+	if event == "publish" {
+		event = "rename"
+		if creating {
+			event = "link"
+		}
+	}
+	primary, release := errors.New(row.name), errors.New("release")
+	faults := []faultAt{{event, row.nth, primary, false}}
+	if failRelease {
+		faults = append(faults, faultAt{"release", 1, release, false})
+	}
+	o := installFaults(t, s, faults...)
+	var failure *ErrorV1
+	var want ResultV1
+	if creating {
+		failed, err := startV1(dir, identity(), &NewInstallationProofV1{identity()}, s.ops)
+		failure = wantNilStore(t, failed, err, "create", row.code)
+	} else {
+		result, err := s.PersistIntentV1(context.Background(), 17, i, nil)
+		want = ResultV1{row.truth, map[TruthV1]uint64{1: 17, 2: 18, 3: 0}[row.truth], row.latch}
+		failure = wantLocal(t, result, err, "persist_intent", row.code, want)
+	}
+	causes := []error{primary}
+	if failRelease {
+		causes = append(causes, release)
+	}
+	wantCauses(t, failure, causes...)
+	wantConsumed(t, o)
+	if !creating && row.truth == 1 && !bytes.Equal(diskBytes(t, dir), fixtureBytes(old)) {
+		t.Fatal("OLD preimage changed")
+	}
+	if row.truth == 2 && !bytes.Equal(diskBytes(t, dir), fixtureBytes(next)) {
+		t.Fatal("known NEW demoted or lost")
+	}
+	_, pendingErr := os.Lstat(filepath.Join(dir, "outer-control.pending"))
+	if (pendingErr == nil) != row.pending {
+		t.Fatal("pending disposition differs")
+	}
+	if !creating {
+		if row.latch {
+			checkBlockedNext(t, s, o, failure, want, old, next)
+		} else {
+			wantRecord(t, s, old)
+			result, err := s.RecoverV1()
+			require(t, err)
+			if result != (ResultV1{}) {
+				t.Fatal("clean OLD retained an attempt")
+			}
+			o.faults = nil
+			result, err = s.PersistIntentV1(context.Background(), 17, i, nil)
+			require(t, err)
+			if result != (ResultV1{2, 18, false}) {
+				t.Fatal("clean OLD disallowed legal next write")
+			}
+		}
+		require(t, s.CloseV1())
+	}
+	if o.releases != 1 {
+		t.Fatal("operation did not consume acquired flock exactly once")
+	}
+	fresh, err := OpenV1(dir, identity())
+	if row.pending {
+		wantNilStore(t, fresh, err, "open", "unresolved")
+	} else if creating && row.truth == 1 {
+		wantNilStore(t, fresh, err, "open", "missing")
+	} else {
+		require(t, err)
+		require(t, fresh.CloseV1())
+	}
+	fresh, err = CreateV1(dir, identity(), NewInstallationProofV1{identity()})
+	if creating && row.truth == 1 && !row.pending {
+		require(t, err)
+		require(t, fresh.CloseV1())
+	} else {
+		wantNilStore(t, fresh, err, "create", "refused")
+	}
+}
+
 func TestActualFileFailureMatrix(t *testing.T) {
 	for _, row := range faultRows() {
 		t.Run(row.name, func(t *testing.T) {
-			old, next := selected(), selected()
-			i := replacement()
-			next.Sequence, next.Intent = 18, &i
-			s, dir := existing(t, old)
-			primary := errors.New(row.name)
-			event := row.event
-			if event == "publish" {
-				event = "rename"
-			}
-			o := installFaults(t, s, faultAt{event, row.nth, primary, false})
-			r, err := s.PersistIntentV1(context.Background(), 17, i, nil)
-			seq := uint64(17)
-			if row.truth == 2 {
-				seq = 18
-			}
-			if row.truth == 3 {
-				seq = 0
-			}
-			want := ResultV1{row.truth, seq, row.latch}
-			e := wantLocal(t, r, err, "persist_intent", row.code, want)
-			wantCauses(t, e, primary)
-			wantConsumed(t, o)
-			if row.truth == 1 && !bytes.Equal(diskBytes(t, dir), fixtureBytes(old)) {
-				t.Fatal("OLD preimage changed")
-			}
-			if row.truth == 2 && !bytes.Equal(diskBytes(t, dir), fixtureBytes(next)) {
-				t.Fatal("known NEW demoted or lost")
-			}
-			_, pendingErr := os.Lstat(filepath.Join(dir, "outer-control.pending"))
-			if (pendingErr == nil) != row.pending {
-				t.Fatal("pending disposition differs")
-			}
-			if row.latch {
-				checkBlockedNext(t, s, o, e, want, old, next)
-			} else {
-				wantRecord(t, s, old)
-				r, err := s.RecoverV1()
-				require(t, err)
-				if r != (ResultV1{}) {
-					t.Fatal("clean OLD retained an attempt")
-				}
-				o.faults = nil
-				r, err = s.PersistIntentV1(context.Background(), 17, i, nil)
-				require(t, err)
-				if r != (ResultV1{2, 18, false}) {
-					t.Fatal("clean OLD disallowed legal next write")
-				}
-			}
-			require(t, s.CloseV1())
-			if o.releases != 1 {
-				t.Fatal("flock not consumed exactly once")
-			}
-			fresh, err := OpenV1(dir, identity())
-			if row.pending {
-				wantNilStore(t, fresh, err, "open", "unresolved")
-			} else {
-				require(t, err)
-				require(t, fresh.CloseV1())
-			}
-			fresh, err = CreateV1(dir, identity(), NewInstallationProofV1{identity()})
-			wantNilStore(t, fresh, err, "create", "refused")
+			checkAtomicFileFailure(t, row, false, false)
 		})
 	}
 }
@@ -448,69 +482,21 @@ func TestCreateFaultMatrix(t *testing.T) {
 		faultRow{"readback_close", "close:outer-control", 1, 2, "postcommit_new", true, true},
 		faultRow{"scratch_unlink", "remove:outer-control.scratch", 1, 2, "postcommit_new", true, true})
 	for _, row := range rows {
+		switch row.name {
+		case "arming_dirclose":
+			row.nth = 2
+		case "publication_dirclose":
+			row.nth = 3
+		case "readback_dirclose":
+			row.nth = 4
+		case "cleanup_dirclose":
+			row.nth = 5
+		case "cleanup_dirsync":
+			row.nth = 4
+		}
 		for _, failRelease := range []bool{false, true} {
 			t.Run(row.name+map[bool]string{false: "", true: "_release"}[failRelease], func(t *testing.T) {
-				dir := directory(t)
-				holder := &Store{dir: dir}
-				event, nth := row.event, row.nth
-				if event == "publish" {
-					event = "link"
-				}
-				if row.name == "arming_dirclose" {
-					nth = 2
-				}
-				if row.name == "publication_dirclose" {
-					nth = 3
-				}
-				if row.name == "readback_dirclose" {
-					nth = 4
-				}
-				if row.name == "cleanup_dirclose" {
-					nth = 5
-				}
-				if row.name == "cleanup_dirsync" {
-					nth = 4
-				}
-				mainErr, releaseErr := errors.New("main"), errors.New("release")
-				faults := []faultAt{{event, nth, mainErr, false}}
-				if failRelease {
-					faults = append(faults, faultAt{"release", 1, releaseErr, false})
-				}
-				o := installFaults(t, holder, faults...)
-				s, err := startV1(dir, identity(), &NewInstallationProofV1{identity()}, holder.ops)
-				e := wantNilStore(t, s, err, "create", row.code)
-				if failRelease {
-					wantCauses(t, e, mainErr, releaseErr)
-				} else {
-					wantCauses(t, e, mainErr)
-				}
-				wantConsumed(t, o)
-				if o.releases != 1 {
-					t.Fatal("failed Create did not consume acquired flock once")
-				}
-				_, pendingErr := os.Lstat(filepath.Join(dir, "outer-control.pending"))
-				if (pendingErr == nil) != row.pending {
-					t.Fatal("Create pending state differs")
-				}
-				if row.truth == 2 && !bytes.Equal(diskBytes(t, dir), fixtureBytes(RecordV1{Identity: identity(), Selector: 1})) {
-					t.Fatal("failed post-NEW Create erased/demoted control")
-				}
-				fresh, err := OpenV1(dir, identity())
-				if row.pending {
-					wantNilStore(t, fresh, err, "open", "unresolved")
-				} else if row.truth == 1 {
-					wantNilStore(t, fresh, err, "open", "missing")
-				} else {
-					require(t, err)
-					require(t, fresh.CloseV1())
-				}
-				fresh, err = CreateV1(dir, identity(), NewInstallationProofV1{identity()})
-				if row.truth == 1 && !row.pending {
-					require(t, err)
-					require(t, fresh.CloseV1())
-				} else {
-					wantNilStore(t, fresh, err, "create", "refused")
-				}
+				checkAtomicFileFailure(t, row, true, failRelease)
 			})
 		}
 	}
