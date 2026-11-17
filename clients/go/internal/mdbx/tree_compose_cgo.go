@@ -44,6 +44,8 @@ type treePlanV1 struct {
 	inventory        *entryInventoryStateV1
 	context          CanonicalContextWindowV1 // owned Pair.ContextConsulted; Count 0 encodes no window
 	prepaidReadBytes uint64
+	tip              *canonicalTipCell
+	preserveReplay   bool
 }
 
 // treeScopeV1 is one position's slots (op or the truth evaluator, D30, D35): the Reader slot, the recorder slot and
@@ -458,6 +460,8 @@ func (c *treeComposeV1) opV1(out *transactionOutcome) treeUnwindV1 {
 // txn with R_j, and writes *out field by field from the captured outcome.
 func (c *treeComposeV1) cleanupV1(out *transactionOutcome) {
 	unwound := !c.done && !c.committed && c.writer.t != nil
+	c.writer.plan.tip.retire()
+	c.writer.plan.tip = nil
 	c.releaseV1()
 	if unwound {
 		c.outcome, c.index = c.writer.t.abortV1(c.writer.recorded), c.unwoundIndexV1()
@@ -572,10 +576,7 @@ func (c *treeComposeV1) holdV1() error {
 func (c *treeComposeV1) boundedHoldV1() error {
 	w := c.writer
 	w.enclosing = true
-	if w.dirtyConsultedV1() {
-		return updateInvalidBatch()
-	}
-	err := w.boundedCheckV1()
+	err := w.boundedPreflightV1()
 	if err != nil {
 		return err
 	}
@@ -595,11 +596,38 @@ func (c *treeComposeV1) boundedHoldV1() error {
 		}
 		w.retireFrozenV1(j)
 	}
-	w.storedBody = treeBodyV1{}
-	if w.plan.context.Count != 0 {
-		return w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted, contextTreeScopeV1(w.plan.context))
+	return w.boundedFinalV1()
+}
+
+// boundedPreflightV1 preserves primitive-checker priority before replay observations.
+func (w *treeScopeV1) boundedPreflightV1() error {
+	if w.dirtyConsultedV1() {
+		return updateInvalidBatch()
 	}
-	return w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted)
+	err := w.boundedCheckV1()
+	if err != nil {
+		return err
+	}
+	err = w.plan.replayOriginalV1(w.old, w.s.dbis)
+	if err != nil {
+		return err
+	}
+	return w.plan.replayMatchV1(w.t.write, w.s.dbis, "OLD/write snapshot mismatch")
+}
+
+// boundedFinalV1 completes existing auxiliary equality before replay observations.
+func (w *treeScopeV1) boundedFinalV1() error {
+	w.storedBody = treeBodyV1{}
+	var err error
+	if w.plan.context.Count != 0 {
+		err = w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted, contextTreeScopeV1(w.plan.context))
+	} else {
+		err = w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted)
+	}
+	if err != nil {
+		return err
+	}
+	return w.plan.replayMatchV1(w.t.write, w.s.dbis, "final update image mismatch")
 }
 
 // dirtyConsultedV1 consumes no payload and builds no target list.
@@ -800,6 +828,7 @@ func (c *treeComposeV1) readbackV1(e *treeScopeV1, read *C.MDBX_txn) (CommitTrut
 		return CommitTruthUnknown, err
 	}
 	e.rb, e.ledger = rb, budget.ledgerV1()
+	rb.replay = e.plan
 	rb.bounded, rb.oldImage, rb.newImage = e.bounded, true, true
 	if stopped, err := e.loopV1(); stopped {
 		c.unwind = e.unwind
