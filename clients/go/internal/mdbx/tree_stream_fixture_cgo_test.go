@@ -6818,9 +6818,9 @@ func psfDelete(t *testing.T, g uint64, mutations []Mutation, selectors []LargeIm
 	}
 }
 
-// Classes 1 (UTXO), 2 (index forward), 3 (counter) and 4 (derived owner), each holding the malformed
-// disposable value 0xde, are deleted by the typed raw path next to the untouched tree scene; no value is
-// decoded. Classes 5 and 6 are the scene's node/root rows deleted by the commit rows.
+// UTXO, index-forward, counter and derived-owner rows, each holding the malformed disposable value
+// 0xde, are deleted by the typed raw path next to the untouched tree scene; no value is decoded. The
+// node and root rows are the scene's own rows deleted by the commit rows.
 func psfClassDeletes(t *testing.T) {
 	sc := psfNew(t)
 	utxo := append(obsoleteGenerationLiteral(9), 0x44)
