@@ -8,7 +8,6 @@ import (
 	"math"
 	"reflect"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -480,20 +479,6 @@ func (a daBudgetAdmission) requireUsed(t *testing.T, tip daCompletionTip) {
 	}
 }
 
-type daBudgetRejectImage struct {
-	context PendingOutpointAdmissionContext
-	adopted bool
-	entries map[[32]byte]struct{}
-	fifo    [][32]byte
-	next    int
-}
-
-func daBudgetRejectCache(c *daRejectCache) daBudgetRejectImage {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return daBudgetRejectImage{context: c.context, adopted: c.adopted, entries: maps.Clone(c.entries), fifo: slices.Clone(c.fifo), next: c.next}
-}
-
 // daBudgetPanicAdmission recovers the panic of one AdmitDA call.
 func daBudgetPanicAdmission(a daBudgetAdmission, provenance DAProvenance) (recovered any) {
 	recovered, _ = daBudgetAttempt(a, provenance)
@@ -814,7 +799,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			a := newDABudgetAdmission(t, false, true)
 			a.seed(a.tip(t), 7, map[string]daCompletionUse{"q": {used: perSource - a.charge + 1}})
 			relay, owner, budget := daRelayStateSnapshot(a.f.relay), cloneDAAdmissionOwner(a.f.mp.pendingOutpoints), a.budget()
-			cache := daBudgetRejectCache(&a.f.relay.rejectCache)
+			cache := snapshotDARejectCache(&a.f.relay.rejectCache)
 			result, err := a.f.relay.AdmitDA(a.last.raw, daNonReplayPeer("q"))
 			if result != (DAAdmissionResult{}) {
 				t.Fatalf("decline result=%+v", result)
@@ -826,7 +811,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			}
 			// Earlier miss reconciliation may adopt the context; no reject row is added.
 			cache.context, cache.adopted = a.f.mp.pendingOutpoints.stableContextForBudgetTest(t), true
-			if got := daBudgetRejectCache(&a.f.relay.rejectCache); !reflect.DeepEqual(got, cache) {
+			if got := snapshotDARejectCache(&a.f.relay.rejectCache); !reflect.DeepEqual(got, cache) {
 				t.Fatalf("decline changed the reject cache: %+v want %+v", got, cache)
 			}
 		}},
