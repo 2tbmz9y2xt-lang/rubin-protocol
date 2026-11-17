@@ -621,3 +621,49 @@ func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 	relay(5)
 	f.requireAbsent(commit, "the record the third counted publication expired")
 }
+
+// TestDATTLCallbackEndToEndDrainingBindingRefused drives the production no-lease selection
+// through SyncEngine.ApplyBlock while the current binding's Service S2 is DRAINING and the
+// earlier S1 is OPEN: the publication still returns ACCEPTED/NEW, the registration is refused
+// with zero DA effects and nothing falls back to S1, Close(S2) returns only after the held lease
+// is released, and a fresh Service then binds and decreases.
+func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
+	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h)
+	commit := f.commit(daRelayTestID(0xd5), 2)
+	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
+	apply := func(height uint64) {
+		t.Helper()
+		summary, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, height), nil)
+		require(t, err == nil && summary != nil && summary.BlockHeight == height, "ApplyBlock(%d)=(%+v,%v), want ACCEPTED/NEW", height, summary, err)
+	}
+	apply(1)
+	apply(2)
+	s2 := newBoundService(t, h.service.cfg)
+	require(t, s2.acquireWork(), "lease on S2")
+	closeDone := make(chan struct{})
+	go func() { _ = s2.Close(); close(closeDone) }()
+	deadline := time.Now().Add(lifecycleWatchdog)
+	for s2.workAuthorized() {
+		require(t, time.Now().Before(deadline), "S2 did not become DRAINING within %s", lifecycleWatchdog)
+		runtime.Gosched()
+	}
+	apply(3)
+	f.requireRetained(commit, "the DRAINING binding refused the decrease and nothing fell back to the OPEN S1")
+	select {
+	case <-closeDone:
+		t.Fatal("Close(S2) returned while its lease was held")
+	default:
+	}
+	s2.releaseWork()
+	select {
+	case <-closeDone:
+	case <-time.After(lifecycleWatchdog):
+		t.Fatalf("Close(S2) did not return within %s after the release", lifecycleWatchdog)
+	}
+	require(t, h.service.workAuthorized() && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S1 left OPEN and the binding kept naming S2")
+	newBoundService(t, h.service.cfg)
+	apply(4)
+	f.requireAbsent(commit, "the fresh binding's admitted decrease expired the record at count 1")
+}
