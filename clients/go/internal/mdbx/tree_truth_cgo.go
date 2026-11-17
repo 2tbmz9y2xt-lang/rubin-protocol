@@ -833,7 +833,9 @@ func (r *treeReadbackStateV1) verdictV1(pair []ownedMutation, consulted []ownedC
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
-	oldImage, newImage = oldImage && equal, newImage && equal
+	if !equal {
+		oldImage, newImage = false, false
+	}
 	if oldImage {
 		return CommitTruthOld, nil
 	}

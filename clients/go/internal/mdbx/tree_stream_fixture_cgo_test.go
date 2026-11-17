@@ -4041,7 +4041,7 @@ func tpCallbackCleanupV1(t *testing.T, failed bool, mode string, cleanup uint32)
 	}()
 	eiAwait(t, done)
 	unwound := mode == "panic" || mode == "goexit"
-	if returned == unwound || mode == "panic" && recovered != marker || mode != "panic" && recovered != nil {
+	if returned == unwound || mode == "panic" && recovered != any(marker) || mode != "panic" && recovered != nil {
 		t.Fatal("callback return or unwind delivery changed", returned, recovered)
 	}
 	tipRetired(t, reader, cell)

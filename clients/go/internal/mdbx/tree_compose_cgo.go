@@ -604,10 +604,12 @@ func (w *treeScopeV1) boundedPreflightV1() error {
 	if w.dirtyConsultedV1() {
 		return updateInvalidBatch()
 	}
-	if err := w.boundedCheckV1(); err != nil {
+	err := w.boundedCheckV1()
+	if err != nil {
 		return err
 	}
-	if err := w.plan.replayOriginalV1(w.old, w.s.dbis); err != nil {
+	err = w.plan.replayOriginalV1(w.old, w.s.dbis)
+	if err != nil {
 		return err
 	}
 	return w.plan.replayMatchV1(w.t.write, w.s.dbis, "OLD/write snapshot mismatch")

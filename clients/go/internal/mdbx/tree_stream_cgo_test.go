@@ -4084,7 +4084,7 @@ func tpCallbackV1(t *testing.T) {
 			}
 			switch mode {
 			case "panic":
-				if recovered != marker || returned || s.state != storeOPEN {
+				if recovered != any(marker) || returned || s.state != storeOPEN {
 					t.Fatal("callback panic changed delivery or cleanup")
 				}
 			case "goexit":

@@ -399,10 +399,12 @@ func (e *treePublicEntryV1) replayAdmitV1(plan *treePlanV1) error {
 	if e.tip == nil && treeReplayDeletesV1(plan) {
 		return updateInvalidBatch()
 	}
-	if err := canonicalTipAdmit(plan.pair, e.tip); err != nil {
+	err := canonicalTipAdmit(plan.pair, e.tip)
+	if err != nil {
 		return err
 	}
-	if err := e.hold.grow(512); err != nil {
+	err = e.hold.grow(512)
+	if err != nil {
 		return err
 	}
 	plan.tip, e.tip = e.tip, nil
