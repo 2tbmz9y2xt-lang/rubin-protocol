@@ -16,7 +16,7 @@ func TestDACleanupIntrinsicMetadata(t *testing.T) {
 		name string
 		run  func(*DARelayState) error
 	}{
-		{"ttl tick", (*DARelayState).AdvanceOrphanTTL},
+		{ownerReadyTTLSelector, advanceDATTLInGuard},
 		{"peer commit", func(s *DARelayState) error { return s.ReleasePeerQuotaKey("commit") }},
 		{"peer chunk", func(s *DARelayState) error { return s.ReleasePeerQuotaKey("chunk") }},
 		{"peer release", func(s *DARelayState) error { return s.ReleasePeerQuotaKey("unrelated") }},
@@ -53,6 +53,10 @@ func TestDACleanupIntrinsicMetadata(t *testing.T) {
 					s.relations.putRecord(id, record)
 					s.pinnedPayloadBytes = record.payloadBytes
 				})
+				if selector.name == ownerReadyTTLSelector {
+					requireDATTLSkipsStateC(t, f, selector.run, row.name)
+					return
+				}
 				before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 				if err := selector.run(f.relay); !errors.Is(err, errDARelayImageIncompatible) {
 					t.Fatalf("cleanup accepted inconsistent C metadata: err=%v, want %v", err, errDARelayImageIncompatible)
@@ -113,6 +117,10 @@ func TestDACleanupIntrinsicMetadata(t *testing.T) {
 				s.pinnedPayloadBytes += uint64(len(extra.spec.payload))
 				s.relations.putLocator(extra.txid, daRelayLocator{daID: id, kind: daRelayLocatorChunk, chunkIndex: index})
 			})
+			if selector.name == ownerReadyTTLSelector {
+				requireDATTLSkipsStateC(t, f, selector.run, "excessive chunk count")
+				return
+			}
 			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			require(t, errors.Is(selector.run(f.relay), errDARelayImageIncompatible), "cleanup accepted excessive C chunk count")
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)

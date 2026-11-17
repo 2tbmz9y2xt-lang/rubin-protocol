@@ -4,7 +4,12 @@ import (
 	"crypto/sha3"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -29,6 +34,56 @@ func runDATTLBodyInGuard(t *testing.T, f *daNonReplayFixture) error {
 		t.Fatal("TTL body blocked under the held exclusive admission guard")
 	}
 	return nil
+}
+
+// advanceDATTLInGuard runs the in-guard TTL body as the canonical transition does: with the bound
+// ChainState admission guard held exclusively, or bare on an unbound relay, which has no guard.
+func advanceDATTLInGuard(s *DARelayState) error {
+	if s.mempool != nil && s.mempool.chainState != nil {
+		s.mempool.chainState.admissionMu.Lock()
+		defer s.mempool.chainState.admissionMu.Unlock()
+	}
+	return s.advanceOwnerReadyTTLInGuard()
+}
+
+// ownerReadyTTLSelector names the in-guard TTL body's arm in the shared owner-ready selector
+// tables; rows whose premise is the clone path's whole-image check branch on it.
+const ownerReadyTTLSelector = "ttl tick"
+
+// requireDATTLSkipsStateC pins F2 on a State-C-only image: the in-guard TTL body walks only State
+// A and State B, so a State C defect it never visits is neither refused nor changed.
+func requireDATTLSkipsStateC(t *testing.T, f *daNonReplayFixture, run func(*DARelayState) error, label string) {
+	t.Helper()
+	before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+	require(t, run(f.relay) == nil, "%s: the in-guard TTL body refused a State C defect it must not visit", label)
+	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
+}
+
+// productionDeclarations lists every non-test Go file under clients/go that declares or names
+// name as an identifier, so a deleted function stays absent from production, method values included.
+func productionDeclarations(t *testing.T, name string) []string {
+	t.Helper()
+	var hits []string
+	err := filepath.Walk("..", func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		file, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		if parseErr != nil {
+			return parseErr
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			if ident, ok := node.(*ast.Ident); ok && ident.Name == name {
+				hits = append(hits, path)
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("declaration census: %v", err)
+	}
+	return hits
 }
 
 type daTTLCallbackRecords struct {

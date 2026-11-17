@@ -374,3 +374,73 @@ func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
 	require(t, s2.daRelay == h.service.daRelay && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S2 construction")
 	require(t, reflect.DeepEqual(before, observeDARelayPublicImage(t, h)), "later construction changed the DA relay image")
 }
+
+// TestDATTLCallbackEndToEndSelection drives the no-lease selection through real ACCEPTED/NEW
+// applies (SyncEngine.ApplyBlock, the RPC miner's apply) over the real DA owner and Services: the
+// bound OPEN Service admits one decrease per publication (C3, C10), AnnounceBlock decreases
+// nothing (C3, C12), a CLOSED current binding refuses with zero DA effects and no fallback while
+// the apply still returns ACCEPTED/NEW (R3, RES), the closed Service's retained
+// AnnounceBlock returns "service already closed" (C12), and a fresh Service binds and decreases.
+func TestDATTLCallbackEndToEndSelection(t *testing.T) {
+	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h)
+	commit := f.commit(daRelayTestID(0xd1), 2)
+	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
+	apply := func(height uint64) {
+		t.Helper()
+		summary, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, height), nil)
+		require(t, err == nil && summary != nil && summary.BlockHeight == height, "ApplyBlock(%d)=(%+v,%v), want ACCEPTED/NEW", height, summary, err)
+	}
+	apply(1)
+	apply(2)
+	f.requireRetained(commit, "count 1 after two selected decreases")
+	must(t, h.service.AnnounceBlock(blockAtHeight(t, source, 2)), "AnnounceBlock(2)")
+	must(t, h.service.AnnounceBlock(blockAtHeight(t, source, 3)), "AnnounceBlock(3)")
+	f.requireRetained(commit, "AnnounceBlock decreased nothing")
+	must(t, h.service.Close(), "Close(S1)")
+	apply(3)
+	f.requireRetained(commit, "the CLOSED binding refused the decrease")
+	requireClosedRejection(t, h.service.AnnounceBlock(blockAtHeight(t, source, 4)), "the closed Service's retained AnnounceBlock")
+	s2 := newBoundService(t, h.service.cfg)
+	require(t, h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S2 binding")
+	apply(4)
+	f.requireAbsent(commit, "the record S2's admitted decrease expired at count 1")
+}
+
+// TestDATTLCallbackEndToEndLeasePath pins the C1 lease-path row end to end: the peer path runs
+// the lease-owning Service's own nested entry and never reads the binding, so with the binding
+// naming a later, CLOSED Service S2 (whose selection would refuse) the peer applies still count
+// 3 -> 2 -> 1 -> removed.
+func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
+	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h)
+	commit := f.commit(daRelayTestID(0xd2), 2)
+	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
+	s2 := newBoundService(t, h.service.cfg)
+	must(t, s2.Close(), "Close(S2): the bound Service is CLOSED, so a selection would refuse")
+	p := testPeerForService(h.service, "remote", 3)
+	for height := uint64(1); height <= 2; height++ {
+		_, err := p.processRelayedBlock(blockAtHeight(t, source, height))
+		must(t, err, "processRelayedBlock")
+	}
+	f.requireRetained(commit, "count 1 after two lease-path decreases")
+	_, err := p.processRelayedBlock(blockAtHeight(t, source, 3))
+	must(t, err, "processRelayedBlock(3)")
+	f.requireAbsent(commit, "the lease path decreased although the binding names a CLOSED Service")
+}
+
+// TestDATTLCallbackEndToEndPanicReleasesLease pins H3 at the entry: a panic inside the decrease
+// passed to the bound Service's registered entry propagates unrecovered, the lease is released
+// exactly once before propagation, and Close then returns.
+func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	recovered := func() (value any) {
+		defer func() { value = recover() }()
+		_ = h.service.EnterDATTLMutation(func() error { panic("ttl body panic") })
+		return nil
+	}()
+	require(t, recovered == "ttl body panic", "panic value=%v, want the original propagated unrecovered", recovered)
+	require(t, h.service.closeReturnsWithin(lifecycleWatchdog), "Close stranded after the panicking entry")
+}

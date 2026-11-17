@@ -99,6 +99,16 @@ func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uin
 // including on returned error. finish is serial and idempotent.
 // A panic before handoff cancels pending leases, including diagnostic panics.
 func (s *SyncEngine) ApplyBlockWithReorgDeferred(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, func(), error) {
+	return s.ApplyBlockWithReorgDeferredUnderLease(blockBytes, prevTimestamps, nil)
+}
+
+// ApplyBlockWithReorgDeferredUnderLease is ApplyBlockWithReorgDeferred for a
+// caller that holds a Service call lease. lease MUST be that lease-owning
+// Service's own nested DA TTL entry: an ACCEPTED/NEW publication of this apply
+// invokes it once as a nested callee that registers and releases nothing and
+// never reads the binding (RUBIN_L1_P2P_AUX.md Section 5, Table A). A nil lease
+// is ApplyBlockWithReorgDeferred, which selects from the current binding.
+func (s *SyncEngine) ApplyBlockWithReorgDeferredUnderLease(blockBytes []byte, prevTimestamps []uint64, lease func(decrease func() error) error) (*ChainStateConnectSummary, func(), error) {
 	completions := &reorgDACompletions{}
 	transferred := false
 	defer func() {
@@ -114,6 +124,8 @@ func (s *SyncEngine) ApplyBlockWithReorgDeferred(blockBytes []byte, prevTimestam
 		defer s.flushDiagnostics(diag)
 		s.mutationMu.Lock()
 		defer s.mutationMu.Unlock()
+		s.daTTLLease = lease
+		defer func() { s.daTTLLease = nil }()
 		if err := s.mutationAllowed(); err != nil {
 			return nil, err
 		}
@@ -346,6 +358,7 @@ func (s *SyncEngine) applyPreferredBranch(
 	if err != nil {
 		return nil, err
 	}
+	plan.daTTLAccepted = true
 	truth, err := s.commitCanonicalTransition(plan, diag)
 	if truth != canonicalTruthNew {
 		return nil, err

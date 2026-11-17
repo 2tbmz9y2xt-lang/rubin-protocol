@@ -2004,7 +2004,7 @@ func TestClaimDARelayStateLaterClaimKeepsFirstHook(t *testing.T) {
 	if got, err := f.engine.ClaimDARelayState(want, later); err != nil || got != want {
 		t.Fatalf("later claim state=%p err=%v, want %p nil", got, err, want)
 	}
-	f.engine.reorgDAAdmission(nil)
+	_, _ = f.engine.reorgDAAdmission(nil)
 	if !f.engine.daRelayClaimed || calls[0] != 1 || calls[1] != 0 {
 		t.Fatalf("later claim replaced the first hook: claimed=%v calls=%v", f.engine.daRelayClaimed, calls)
 	}

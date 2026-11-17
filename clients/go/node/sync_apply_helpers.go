@@ -92,6 +92,11 @@ type canonicalTransitionPlan struct {
 	// staged carries new-suffix payload to the store and is released by staging,
 	// so the plan afterwards retains only charged metadata.
 	staged []canonicalStagedRow
+
+	// daTTLAccepted is set only by the two ACCEPTED apply entries (direct connect
+	// and preferred branch), so a NEW publication of any other initiator, such as
+	// DisconnectTip, invokes no DA TTL entry (RUBIN_COMPACT_BLOCKS.md Section 5).
+	daTTLAccepted bool
 }
 
 // canonicalCommitTruth is the commit-truth class of one canonical transition.
@@ -578,6 +583,10 @@ func (s *SyncEngine) saveNonpersistentFinalState(plan *canonicalTransitionPlan) 
 // no-panic guard, not a live case — a nil batch would DROP the record, the
 // corridor having no fallback — so TestCanonicalBlockRelayTerminalNew pins it.
 //
+// An unlatched truth-NEW publication whose plan an ACCEPTED apply entry marked
+// then runs the DA TTL mutation callback (enterDATTL) still under the exclusive
+// guard; it is not one of the publication assignments above.
+//
 // A latched outcome keeps admission closed until restart: terminal NEW publishes
 // the full image and still latches, terminal OLD and UNKNOWN publish nothing.
 // Every open outcome clears the owner transition and reopens admission.
@@ -601,10 +610,33 @@ func (t *canonicalTransition) publishCanonicalTransition(plan *canonicalTransiti
 		}
 		return
 	}
+	if truth == canonicalTruthNew && plan.daTTLAccepted {
+		t.enterDATTL()
+	}
 	if !ownerClosed {
 		t.owner.endTransitionAborted()
 	}
 	t.chainState.admissionMu.Unlock()
+}
+
+// enterDATTL is the DA TTL mutation callback of one unlatched ACCEPTED/NEW
+// publication (RUBIN_COMPACT_BLOCKS.md Section 5): it runs after D1 and before
+// the exclusive admission guard is released, without reacquiring it. Under a
+// Service lease it invokes that Service's own nested entry and never reads the
+// binding; otherwise it selects once from the current binding. The transition
+// is the sole consumer of the entry result: an error or a closed refusal
+// changes no publication, apply result, summary, relay authority or requeue,
+// and is not mapped, latched, retried or recorded. A panic propagates.
+func (t *canonicalTransition) enterDATTL() {
+	if t.daRelay == nil {
+		return
+	}
+	decrease := t.daRelay.advanceOwnerReadyTTLInGuard
+	if lease := t.engine.daTTLLease; lease != nil {
+		_ = lease(decrease)
+		return
+	}
+	_ = t.engine.enterSelectedDATTL(decrease)
 }
 
 // canonicalLatchReason names the CLASS that latched, from the classifier's own

@@ -493,23 +493,31 @@ func TestProcessRelayedBlockDropsRetainedDAOrphanNotValidAgainstC1(t *testing.T)
 	f.requireAbsent(commit, "the record the canonical transition could not validate against C1")
 }
 
-// TestAnnounceBlockAdvancesDARelayTTL pins the TTL cadence through both Service
-// callers: one owner-aware tick per accepted remote block (whose D1 keeps the record,
-// its input unspent) and per local AnnounceBlock, observed through the retained image.
-func TestAnnounceBlockAdvancesDARelayTTL(t *testing.T) {
-	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
+// TestAnnounceBlockMakesNoDARelayTTLDecrease pins the TTL cadence after RUB-1847: each accepted
+// remote block decreases the retained record once inside its canonical transition (3 -> 2 -> 1,
+// removed at the third), and neither the post-return accepted-block effects nor a local
+// AnnounceBlock decreases it, observed through the retained image.
+func TestAnnounceBlockMakesNoDARelayTTLDecrease(t *testing.T) {
+	source := newTestHarness(t, 5, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
 	commit := f.commit(daRelayTestID(101), 2)
 	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "handleTx")
-	if _, err := testPeerForService(h.service, "remote", 3).processRelayedBlock(blockAtHeight(t, source, 1)); err != nil {
-		t.Fatalf("processRelayedBlock(1): %v", err)
+	remote := testPeerForService(h.service, "remote", 4)
+	for height := uint64(1); height <= 2; height++ {
+		if _, err := remote.processRelayedBlock(blockAtHeight(t, source, height)); err != nil {
+			t.Fatalf("processRelayedBlock(%d): %v", height, err)
+		}
+		f.requireRetained(commit, fmt.Sprintf("after accepted remote block %d", height))
 	}
-	f.requireRetained(commit, "after the accepted remote block's tick")
-	must(t, h.service.AnnounceBlock(blockAtHeight(t, source, 2)), "AnnounceBlock(2)")
-	f.requireRetained(commit, "two ticks in")
+	// Count 1 now: one more decrease from any path expires the record.
 	must(t, h.service.AnnounceBlock(blockAtHeight(t, source, 3)), "AnnounceBlock(3)")
-	f.requireAbsent(commit, "the expired record after the third tick")
+	must(t, h.service.AnnounceBlock(blockAtHeight(t, source, 4)), "AnnounceBlock(4)")
+	f.requireRetained(commit, "after two local AnnounceBlock calls")
+	if _, err := remote.processRelayedBlock(blockAtHeight(t, source, 3)); err != nil {
+		t.Fatalf("processRelayedBlock(3): %v", err)
+	}
+	f.requireAbsent(commit, "the expired record after the third accepted block")
 }
 
 // The four TestUnregisterPeer rows read the retained image through the replay

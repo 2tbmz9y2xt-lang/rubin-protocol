@@ -1056,24 +1056,26 @@ func calleeOf(call *ast.CallExpr) string {
 	return ""
 }
 
-// TestRemoteDACleanupCallerEffects: the accepted-block and AnnounceBlock TTL ticks (a subtest)
-// and, as source, AnnounceBlock's error precedence: broadcast error first, `return ttlErr` last.
+// TestRemoteDACleanupCallerEffects: the accepted-block and AnnounceBlock cadence (a subtest) and,
+// as source, that AnnounceBlock and noteAcceptedBlock reach no TTL function: AnnounceBlock's last
+// statement returns the broadcast result and neither body names a TTL identifier.
 func TestRemoteDACleanupCallerEffects(t *testing.T) {
-	t.Run("ticks", TestAnnounceBlockAdvancesDARelayTTL)
+	t.Run("ticks", TestAnnounceBlockMakesNoDARelayTTLDecrease)
 	announce := p2pFunction(t, "service.go", "AnnounceBlock")
-	var order []string
-	ast.Inspect(announce.Body, func(node ast.Node) bool {
-		if stmt, ok := node.(*ast.IfStmt); ok {
-			if cond, ok := stmt.Cond.(*ast.BinaryExpr); ok {
-				if name, ok := cond.X.(*ast.Ident); ok && (name.Name == "broadcastErr" || name.Name == "ttlErr") {
-					order = append(order, name.Name)
-				}
-			}
-		}
-		return true
-	})
 	final, ok := announce.Body.List[len(announce.Body.List)-1].(*ast.ReturnStmt)
-	require(t, slices.Equal(order, []string{"broadcastErr"}) && ok && len(final.Results) == 1 && types.ExprString(final.Results[0]) == "ttlErr", "AnnounceBlock error checks=%v last statement %T; want the broadcast error checked first and `return ttlErr` last", order, announce.Body.List[len(announce.Body.List)-1])
+	require(t, ok && len(final.Results) == 1 && types.ExprString(final.Results[0]) == "s.broadcastAcceptedBlock(nil, blockHash)", "AnnounceBlock last statement %T; want `return s.broadcastAcceptedBlock(nil, blockHash)`", announce.Body.List[len(announce.Body.List)-1])
+	for _, name := range []string{"AnnounceBlock", "noteAcceptedBlock"} {
+		file := "service.go"
+		if name == "noteAcceptedBlock" {
+			file = "handlers_block.go"
+		}
+		ast.Inspect(p2pFunction(t, file, name).Body, func(node ast.Node) bool {
+			if ident, ok := node.(*ast.Ident); ok {
+				require(t, !strings.Contains(strings.ToLower(ident.Name), "ttl") && ident.Name != "TerminalFaulted", "%s names %s", name, ident.Name)
+			}
+			return true
+		})
+	}
 }
 
 // TestRemoteDAResultDomainClosure: the structural half of UNREACHABLE_RESULT (two guarded effect

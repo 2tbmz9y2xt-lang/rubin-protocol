@@ -294,6 +294,13 @@ func (s *Service) acquireWork() bool {
 	return true
 }
 
+// enterDATTLMutationLeased is this Service's own nested DA TTL entry, passed by
+// its own peer worker into an apply that already runs under the worker's
+// lease: it registers and releases nothing and never reads the binding.
+func (s *Service) enterDATTLMutationLeased(decrease func() error) error {
+	return decrease()
+}
+
 // EnterDATTLMutation is this Service's own DA TTL mutation entry for a
 // transition under no Service lease (Table A): it registers one call lease and
 // returns exactly "service already closed" with zero effects once Close has
@@ -327,16 +334,10 @@ func (s *Service) workAuthorized() bool {
 
 // AnnounceBlock parses a locally accepted block and announces it to the
 // current peers. It takes one Service call lease before parsing, seen-set
-// mutation, broadcast or DA TTL work: once Close has published the non-OPEN
-// state it returns exactly "service already closed" with zero effects, and a
-// call that won the lease first finishes while Close waits for it.
-//
-// The retained-DA TTL advance is additionally gated on the engine's terminal
-// latch so an already-latched node skips the work. If a latch lands after this
-// check, the shared admission fence returns unavailable before retained-state
-// access; an ordinary transition still serializes the advance. TerminalFaulted() is nil-safe by its own
-// documented contract, and no constructed Service reaches this gate with a
-// nil engine: validateServiceConfig rejects a nil SyncEngine.
+// mutation or broadcast: once Close has published the non-OPEN state it
+// returns exactly "service already closed" with zero effects, and a call that
+// won the lease first finishes while Close waits for it. It performs no DA TTL
+// decrease: the canonical transition applied it before the block was returned.
 func (s *Service) AnnounceBlock(blockBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
@@ -356,15 +357,7 @@ func (s *Service) AnnounceBlock(blockBytes []byte) error {
 	if !s.blockSeen.Add(blockHash) {
 		return nil
 	}
-	broadcastErr := s.broadcastAcceptedBlock(nil, blockHash)
-	var ttlErr error
-	if !s.cfg.SyncEngine.TerminalFaulted() {
-		ttlErr = s.advanceDAOrphanTTL()
-	}
-	if broadcastErr != nil {
-		return broadcastErr
-	}
-	return ttlErr
+	return s.broadcastAcceptedBlock(nil, blockHash)
 }
 
 // AnnounceTx admits a locally submitted transaction to the relay pool and

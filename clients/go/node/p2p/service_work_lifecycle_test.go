@@ -1136,28 +1136,36 @@ func TestServiceWorkLifecycleBlockRetry(t *testing.T) {
 	})
 }
 
-// TestTerminalPersistenceNewSkipsTheFencedTTLAdvance pins that a published
-// terminal result still skips the post-return TTL mutation. The shared fence
-// now refuses a truly latched race; this row separately preserves the existing
-// no-TTL-effect branch selected from the returned terminal shape.
-func TestTerminalPersistenceNewSkipsTheFencedTTLAdvance(t *testing.T) {
-	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	p := testPeerForService(h.service, "remote", 2)
-	summary, err := p.processRelayedBlock(blockAtHeight(t, source, 1))
-	must(t, err, "processRelayedBlock")
+// primeDATTLToOne retains one commit at count 3 and applies source blocks 1 and 2 through the
+// peer path, whose in-guard decreases leave it at count 1, so one more decrease from any path
+// expires it.
+func primeDATTLToOne(t *testing.T, source, h *testHarness, p *peer, daID [32]byte) (*daIngressFixture, []byte, *node.ChainStateConnectSummary) {
+	t.Helper()
 	f := newDAIngressFixture(t, h)
-	commit := f.commit(daRelayTestID(109), 2)
+	commit := f.commit(daID, 2)
 	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit")
-	// Primed to ONE tick from expiry, so the tick this row skips is the one that
-	// decides: with the gate reverted the record is released and the replay
-	// below readmits instead of reporting the DUPLICATE.
-	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime the TTL")
-	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime the TTL")
-	terminal := errors.New("storage persistence fault")
-	p.acceptRelayedBlockResult(summary.BlockHash, summary, terminal)
-	f.requireRetained(commit, "the retained record the skipped TTL tick left in place")
-	requireEqual(t, h.service.blockSeen.Has(summary.BlockHash), true, "the seen-set entry the unfenced effects still added")
+	var summary *node.ChainStateConnectSummary
+	for height := uint64(1); height <= 2; height++ {
+		var err error
+		summary, err = p.processRelayedBlock(blockAtHeight(t, source, height))
+		must(t, err, "processRelayedBlock")
+	}
+	f.requireRetained(commit, "the record at count 1")
+	return f, commit, summary
+}
+
+// TestRelayedBlockPostReturnMakesNoTTLDecrease pins that the relayed-block post-return effects
+// decrease no TTL count, for an ordinary and a terminal-shaped result: the record primed to
+// count 1 survives both, and the seen-set effect still lands.
+func TestRelayedBlockPostReturnMakesNoTTLDecrease(t *testing.T) {
+	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	p := testPeerForService(h.service, "remote", 3)
+	f, commit, summary := primeDATTLToOne(t, source, h, p, daRelayTestID(109))
+	_, _ = p.acceptRelayedBlockResult(summary.BlockHash, summary, nil)
+	_, _ = p.acceptRelayedBlockResult(summary.BlockHash, summary, errors.New("storage persistence fault"))
+	f.requireRetained(commit, "the record no post-return effect decreased")
+	requireEqual(t, h.service.blockSeen.Has(summary.BlockHash), true, "the seen-set entry the post-return effects added")
 }
 
 // latchDAHarness GENUINELY latches h's engine, which then RETAINS ChainState.admissionMu
@@ -1223,11 +1231,9 @@ func TestLocalDATerminalWorkDrains(t *testing.T) {
 	requireReturned(t, lifecycleClose(retained.service), "Service.Close after retained terminal prefetch")
 }
 
-// TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance preserves the early
-// already-latched skip. A latch racing this check is refused by the shared
-// fence; this row also proves the unfenced seen-set effect ahead of the check
-// still lands.
-func TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance(t *testing.T) {
+// TestLatchedEngineAnnounceBlockReturns pins that AnnounceBlock on a latched engine returns (it
+// reaches no admission fence or TTL work) and still adds the seen-set entry.
+func TestLatchedEngineAnnounceBlockReturns(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	latchDAHarness(t, h, source)
@@ -1256,31 +1262,17 @@ func TestLatchedEngineSkipsThePeerQuotaRelease(t *testing.T) {
 	requireEqual(t, h.service.PeerLifecycleExits(), exits+1, "the lifecycle exit the completed teardown recorded")
 }
 
-// TestResolvedOrphanTerminalResultSkipsTheFencedTTLAdvance is the RESOLVED-ORPHAN
-// entry's own killer for the same skip. acceptResolvedOrphanResult forwards the
-// apply error into noteAcceptedBlock, so a resolved orphan whose apply returns
-// the terminal shape — a published summary alongside a non-nil error — skips the
-// fenced TTL advance exactly like the relayed-block entry does. Forwarding nil
-// instead would advance the TTL, and the orphan primed one advance from expiry
-// below is what makes that difference observable.
-//
-// This entry reaches noteAcceptedBlock through its OWN call site, which the
-// relayed-block row above never executes; neither row can stand in for the other.
-func TestResolvedOrphanTerminalResultSkipsTheFencedTTLAdvance(t *testing.T) {
-	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+// TestResolvedOrphanPostReturnMakesNoTTLDecrease is the resolved-orphan entry's own row: its
+// call site of noteAcceptedBlock decreases no TTL count for an ordinary or a terminal-shaped
+// result, and a terminal result still stops the walk.
+func TestResolvedOrphanPostReturnMakesNoTTLDecrease(t *testing.T) {
+	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	p := testPeerForService(h.service, "remote", 2)
-	summary, err := p.processRelayedBlock(blockAtHeight(t, source, 1))
-	must(t, err, "processRelayedBlock")
-	f := newDAIngressFixture(t, h)
-	commit := f.commit(daRelayTestID(111), 2)
-	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit")
-	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime the TTL")
-	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime the TTL")
-	terminal := errors.New("storage persistence fault")
-	stop := h.service.acceptResolvedOrphanResult(p, summary.BlockHash, summary.BlockHash, summary, terminal)
-	requireEqual(t, stop, true, "the resolved-orphan walk stop a terminal result forces")
-	f.requireRetained(commit, "the retained record the skipped TTL tick left in place")
+	p := testPeerForService(h.service, "remote", 3)
+	f, commit, summary := primeDATTLToOne(t, source, h, p, daRelayTestID(111))
+	requireEqual(t, h.service.acceptResolvedOrphanResult(p, summary.BlockHash, summary.BlockHash, summary, nil), false, "the ordinary resolved-orphan result")
+	requireEqual(t, h.service.acceptResolvedOrphanResult(p, summary.BlockHash, summary.BlockHash, summary, errors.New("storage persistence fault")), true, "the resolved-orphan walk stop a terminal result forces")
+	f.requireRetained(commit, "the record no post-return effect decreased")
 }
 
 // TestAnnounceTxLocalDAWorkLifecycle: the DA arm runs entirely inside AnnounceTx's original

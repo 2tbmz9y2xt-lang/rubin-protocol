@@ -819,7 +819,7 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 // unfenced behavior rather than inventing one. The nil RECEIVER arm only keeps this
 // function itself from dereferencing s: no fenced body is nil-safe (each takes s.mu
 // next), so nil handling belongs to the exported wrappers — ReleasePeerQuotaKey
-// returns early, AdvanceOrphanTTL promises nothing.
+// returns early.
 //
 // A latched engine returns unavailable before retained state is accessed. The
 // terminal writer remains held, so the closed image cannot be reopened.
@@ -855,15 +855,6 @@ func ValidateDARelayChunk(chunk DARelayChunk) error {
 		return ErrDARelayChunkHashMismatch
 	}
 	return nil
-}
-
-// AdvanceOrphanTTL runs the owner-aware TTL tick once, all-or-nothing: each incomplete owner-ready
-// record with ttl above one decrements once and mints one fresh revision; ttl one expires whole
-// (members, locator rows, accounting, prefetch reservation and, on a bound relay, finalized owner
-// claims) with no revision; valid C is a validated zero-TTL no-op, while zero A/B TTL fails. It returns
-// commitOwnerReadyRemoval's error classes unwrapped; that body owns the fence; a nil receiver is not promised.
-func (s *DARelayState) AdvanceOrphanTTL() error {
-	return s.advanceOwnerReadyTTL()
 }
 
 // ReleasePeerQuotaKey releases the retained members whose finalized PEER provenance carries key

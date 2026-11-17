@@ -1051,10 +1051,6 @@ func (s *DARelayState) releaseOwnerReadyPeerQuota(quotaIdentity string) error {
 	})
 }
 
-func (s *DARelayState) advanceOwnerReadyTTL() error {
-	return s.commitOwnerReadyRemoval(ownerReadyTTLTickVictims)
-}
-
 // ownerReadyTTLPlan is one in-guard TTL decrease planned over the State A and State B records
 // of the published image. records is the ABSOLUTE post-decrease revision high-water; selected
 // totals every selected record's accounting, survivors every surviving record's, and peerBytes
@@ -1772,22 +1768,6 @@ func ownerReadyPeerRemovalVictims(clone *DARelayState, quotaIdentity string) ([]
 	return victims, nil
 }
 
-func ownerReadyTTLTickVictims(clone *DARelayState) ([]DAAdmissionVictim, error) {
-	candidates, err := clone.ownerReadyRemovalCandidatesLocked()
-	if err != nil {
-		return nil, err
-	}
-	var victims []DAAdmissionVictim
-	for _, daID := range candidates {
-		removed, err := clone.tickOwnerReadyTTLRecordLocked(daID)
-		if err != nil {
-			return nil, err
-		}
-		victims = append(victims, removed...)
-	}
-	return victims, nil
-}
-
 // releaseOwnerReadyPeerRecordLocked applies the PEER rule to one record on the clone. The
 // commit arm quantifies over the retained members' PROVENANCE KIND, never over the released
 // quota identity: the kind set is closed at PEER, LOCAL and DETACHED_REORG, and exactly a
@@ -1843,31 +1823,6 @@ func ownerReadyPeerMatches(record daRelaySetRecord, quotaIdentity string) (match
 		}
 	}
 	return matchCommit, matchChunks, memberCount, nonPeerChunk
-}
-
-// tickOwnerReadyTTLRecordLocked expires a ttl-one record whole; otherwise it copies the record
-// VALUE only (same chunks container and backing), decrements once and mints one checked revision.
-func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissionVictim, error) {
-	record := s.relations.recordValue(daID)
-	if record.state == daRelayStateCompleteSet {
-		return nil, nil
-	}
-	if record.ttlBlocksRemaining == 1 {
-		return s.removeOwnerReadyWholeRecordLocked(record)
-	}
-	survivor := record
-	survivor.ttlBlocksRemaining--
-	if err := checkOwnerReadyRemovalBaseline(record, survivor); err != nil {
-		return nil, err
-	}
-	revision, err := checkedAddUint64(s.records, 1)
-	if err != nil {
-		return nil, err
-	}
-	survivor.revision = revision
-	s.relations.scalarRecord(daID, survivor)
-	s.records = revision
-	return nil, nil
 }
 
 // ownerReadyRemovalCaps lifts the staged and four orphan-domain caps to the uint64 maximum.

@@ -115,7 +115,11 @@ type SyncEngine struct {
 	reorgDAAdmission func([]byte) (func(bool), error)
 	// daTTLBinding is the retained DA owner's current Section 5 TTL binding, nil while absent;
 	// its atomic operations are the one order of publications, selections and identity reads.
-	daTTLBinding       atomic.Pointer[daTTLBinding]
+	daTTLBinding atomic.Pointer[daTTLBinding]
+	// daTTLLease is the lease-owning Service's nested DA TTL entry for the one
+	// apply running under mutationMu, nil under no Service lease; it is written
+	// and read only while mutationMu is held.
+	daTTLLease         func(decrease func() error) error
 	cfg                SyncConfig
 	stderr             io.Writer
 	mu                 sync.RWMutex
@@ -1208,6 +1212,7 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	if err != nil {
 		return nil, blockApplyMetricNone, canonicalApplyProjection{}, err
 	}
+	plan.daTTLAccepted = true
 	truth, err := s.commitCanonicalTransition(plan, diag)
 	projection := canonicalApplyProjection{truth: truth, commitStageEntered: true}
 	if truth != canonicalTruthNew {

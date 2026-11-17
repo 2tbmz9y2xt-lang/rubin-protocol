@@ -994,7 +994,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 		{"reconnect_and_passive_tip", func(t *testing.T) {
 			// A10/A7: the disconnect release (ReleasePeerQuotaKey), a reconnect
 			// with the same quota_identity (AdmitDA), a best-tip change and the
-			// block-connect TTL tick (AdvanceOrphanTTL) leave the budget
+			// block-connect TTL tick (the in-guard TTL body) leave the budget
 			// unchanged; the next step 2a (AdmitDA) observes the new tip and
 			// renews. The best-tip change is simulated: the test writes the chain
 			// state tip and sets the owner's stable tip with setRelaySource; no
@@ -1024,7 +1024,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			moved := PendingOutpointTip{HasTip: true, Height: tip.height + 1, Hash: [32]byte{0xab}}
 			a.f.state.HasTip, a.f.state.Height, a.f.state.TipHash = true, moved.Height, moved.Hash
 			setRelaySource(a.f.mp.pendingOutpoints, moved, context.Generation)
-			if err := a.f.relay.AdvanceOrphanTTL(); err != nil {
+			if err := advanceDATTLInGuard(a.f.relay); err != nil {
 				t.Fatal(err)
 			}
 			if got := a.budget(); !reflect.DeepEqual(got, before) {
