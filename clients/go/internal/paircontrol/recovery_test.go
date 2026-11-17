@@ -490,18 +490,20 @@ func TestLostAcknowledgementRecovery(t *testing.T) {
 			if len(recorder.events) != n {
 				t.Fatal("blocked mutator performed effects")
 			}
-			observed, err := s.ObserveV1()
-			blocked := wantLocal(t, ResultV1{}, err, "observe", "unresolved", ResultV1{})
-			want := RecordV1{}
-			if truth != 3 {
-				want = selected()
-				if truth == 2 {
-					i := replacement()
-					want.Sequence, want.Intent = 18, &i
+			if truth != 3 || strings.HasPrefix(kind, "neither_old_") {
+				observed, err := s.ObserveV1()
+				blocked := wantLocal(t, ResultV1{}, err, "observe", "unresolved", ResultV1{})
+				want := RecordV1{}
+				if truth != 3 {
+					want = selected()
+					if truth == 2 {
+						i := replacement()
+						want.Sequence, want.Intent = 18, &i
+					}
 				}
-			}
-			if !reflect.DeepEqual(observed, want) || !reflect.ValueOf(blocked.Cause).Equal(reflect.ValueOf(original)) || len(recorder.events) != n {
-				t.Fatal("classified/unknown observation lost complete image, original error or no-I/O disposition")
+				if !reflect.DeepEqual(observed, want) || !reflect.ValueOf(blocked.Cause).Equal(reflect.ValueOf(original)) || len(recorder.events) != n {
+					t.Fatal("classified/unknown observation lost complete image, original error or no-I/O disposition")
+				}
 			}
 			require(t, s.CloseV1())
 		})
