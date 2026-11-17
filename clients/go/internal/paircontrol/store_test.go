@@ -212,7 +212,7 @@ func TestConstructorRefusals(t *testing.T) {
 			}
 			e := wantNilStore(t, s, err, map[bool]string{true: "create", false: "open"}[creating], code)
 			if strings.HasPrefix(name, "cwd_") {
-				if !errors.Is(e.Cause, syscall.ENOENT) || absCause != nil && !reflect.DeepEqual(e.Cause, absCause) || absCause == nil && !reflect.DeepEqual(e.Cause, syscall.ENOENT) {
+				if !errors.Is(e.Cause, syscall.ENOENT) || absCause != nil && (reflect.TypeOf(e.Cause) != reflect.TypeOf(absCause) || e.Cause.Error() != absCause.Error()) || absCause == nil && reflect.TypeOf(e.Cause) != reflect.TypeOf(syscall.ENOENT) {
 					t.Fatalf("removed-cwd cause: %T %v; captured Abs cause: %T %v", e.Cause, e.Cause, absCause, absCause)
 				}
 			}
