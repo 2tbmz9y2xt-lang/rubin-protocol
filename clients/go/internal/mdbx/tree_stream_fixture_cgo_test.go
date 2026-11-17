@@ -6892,6 +6892,36 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		}
 		tsConsumed(t, sc.s, sc.o, 3, r.err)
 	})
+	t.Run("N4-selector-alias", func(t *testing.T) {
+		// At write site 3 the caller rewrites its own LargeConsulted value to an absent body; the body then
+		// drifts after the first write. The owned selector copy still compares the drifted body at final.
+		sc := psfNew(t)
+		build := sc.build(t)
+		var selectors []LargeImageSelectorV1
+		op := func(r *Reader) TreeOperationV1 {
+			out := build(r)
+			selectors = out.Pair.LargeConsulted
+			return out
+		}
+		var r tsResult
+		var evidence fixtureLargeEvidence
+		observed, err := FixturePairReadObservation(sc.s, func(site uint32) {
+			if site == 3 && selectors != nil {
+				selectors[0].Hash = [32]byte{0xb0, 2}
+				selectors = nil
+			}
+		}, func() {
+			evidence = ctxTreeFault(t, sc.s, 13, 4, sc.key(), func() { r = psRun(t, sc.s, sc.o, LaneOperation, op) })
+		})
+		mustEnvironment(t, err)
+		if observed.Writes == 0 || evidence.drift != 1 || evidence.commits != 0 || r.stage != 2 {
+			t.Fatalf("owned scope changed with input: %+v %+v stage%d %v", observed, evidence, r.stage, r.err)
+		}
+		r.tuple(t, 1, 2, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "final update image mismatch", nil)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		sc.image(t, tsReopen(t, sc.s, sc.path), false)
+	})
 	t.Run("M15-same-prefix-sibling", func(t *testing.T) {
 		// Only the generation-9 one-leaf is a target; its same-generation-prefix sibling, ordered before it,
 		// drifts at the write snapshot. Generation 8 holds byte-equal values under another prefix.
