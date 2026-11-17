@@ -187,8 +187,20 @@ func TestSyncEffectiveDAMempoolSize(t *testing.T) {
 	if got, err := engine.EffectiveDAMempoolSize(); err != nil || got != 536870912 {
 		t.Fatalf("production binding observation=%d err=%v, want 536870912", got, err)
 	}
-	if claimed, err := engine.ClaimDARelayState(relay, func([]byte) (func(bool), error) { return func(bool) {}, nil }); err != nil || claimed != relay {
-		t.Fatalf("observation consumed the lifetime Service claim: claimed=%p err=%v", claimed, err)
+	// Under F1 a later claim succeeds either way, so the observation is pinned by the hook: the
+	// first claim after it must install its own detached-reorg hook.
+	if engine.daRelayClaimed || engine.reorgDAAdmission != nil {
+		t.Fatalf("observation recorded a Service claim: claimed=%v hook=%v", engine.daRelayClaimed, engine.reorgDAAdmission != nil)
+	}
+	hookCalls := 0
+	if claimed, err := engine.ClaimDARelayState(relay, func([]byte) (func(bool), error) { hookCalls++; return func(bool) {}, nil }); err != nil || claimed != relay {
+		t.Fatalf("claim after observation: claimed=%p err=%v", claimed, err)
+	}
+	if engine.reorgDAAdmission == nil {
+		t.Fatal("observation consumed the lifetime Service claim: the later claimant's hook was not installed")
+	}
+	if _, err := engine.reorgDAAdmission(nil); err != nil || hookCalls != 1 {
+		t.Fatalf("observation consumed the lifetime Service claim: hook err=%v calls=%d, want the later claimant's hook", err, hookCalls)
 	}
 	// The configured 536870912 stays while the bound relay moves: the relay is the only source.
 	engine.daRelay = boundTo(1073741824, 0).daRelay

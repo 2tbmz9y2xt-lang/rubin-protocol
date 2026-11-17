@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -576,14 +577,20 @@ func TestDATTLCallbackEmptiedBucketDropped(t *testing.T) {
 }
 
 // daTTLRecordingService is a node-level DATTLMutationService that records each entry attempt by
-// name and, unless refused, runs decrease once as an admitted registration would.
+// name and, unless refused, runs decrease once as an admitted registration would. beforeAttempt,
+// when set, runs after the selection snapshot and before the attempt is recorded, the point a
+// registration would linearize.
 type daTTLRecordingService struct {
-	name     string
-	attempts *[]string
-	refuse   error
+	name          string
+	attempts      *[]string
+	refuse        error
+	beforeAttempt func()
 }
 
 func (r *daTTLRecordingService) EnterDATTLMutation(decrease func() error) error {
+	if r.beforeAttempt != nil {
+		r.beforeAttempt()
+	}
 	*r.attempts = append(*r.attempts, r.name)
 	if r.refuse != nil {
 		return r.refuse
@@ -594,7 +601,8 @@ func (r *daTTLRecordingService) EnterDATTLMutation(decrease func() error) error 
 // TestDATTLCallbackBindingSelection pins the API-level binding rows: absent invokes nothing (C4
 // API form), the latest publication wins (C5), a snapshot taken before a later publication keeps
 // its Service (C5 A10), the identity read follows publications (C13), a refusal is returned
-// unchanged with no fallback (R3), and a nil publication leaves the binding unchanged (R5).
+// unchanged with no fallback (R3), and a nil publication leaves the binding unchanged (R5) while
+// a typed nil pointer is published as the doc states.
 func TestDATTLCallbackBindingSelection(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	var attempts []string
@@ -614,15 +622,15 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	require(t, f.engine.DATTLBindingService() == DATTLMutationService(s2), "identity read after S2 publication")
 	require(t, f.engine.enterSelectedDATTL(decrease) == nil && slices.Equal(attempts, []string{"S2"}) && decreases == 1, "latest binding: attempts=%v decreases=%d", attempts, decreases)
 
-	// A10: the selection snapshot precedes a publication that lands before registration.
+	// A10: S2 binds after the selection snapshot and before the registration attempt.
 	attempts, decreases = nil, 0
 	snapshotThenBind := &daTTLRecordingService{name: "S1", attempts: &attempts}
-	f.engine.PublishDATTLBinding(snapshotThenBind)
-	err := f.engine.enterSelectedDATTL(func() error {
+	snapshotThenBind.beforeAttempt = func() {
+		require(t, len(attempts) == 0 && decreases == 0, "S2 published after registration: attempts=%v decreases=%d", attempts, decreases)
 		f.engine.PublishDATTLBinding(s2)
-		decreases++
-		return nil
-	})
+	}
+	f.engine.PublishDATTLBinding(snapshotThenBind)
+	err := f.engine.enterSelectedDATTL(decrease)
 	require(t, err == nil && slices.Equal(attempts, []string{"S1"}) && decreases == 1 && f.engine.DATTLBindingService() == DATTLMutationService(s2), "snapshot retarget: attempts=%v decreases=%d", attempts, decreases)
 
 	// R3: a refused registration is returned unchanged, runs no decrease, and falls back nowhere.
@@ -636,63 +644,87 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	var nilEngine *SyncEngine
 	nilEngine.PublishDATTLBinding(s1)
 	require(t, nilEngine.DATTLBindingService() == nil && nilEngine.enterSelectedDATTL(decrease) == nil && decreases == 0, "nil engine binding")
+	var typedNil *daTTLRecordingService
+	f.engine.PublishDATTLBinding(typedNil)
+	bound := f.engine.DATTLBindingService()
+	require(t, bound != nil && bound.(*daTTLRecordingService) == nil, "typed nil publication: bound=%v", bound)
 }
 
-// TestDATTLCallbackBindingChangesNoDAState pins NOCHG at the API level: publication, the identity
-// read and an absent-or-refused selection change no DA record, count, claim or owner token.
+// TestDATTLCallbackBindingChangesNoDAState pins NOCHG at the API level over a populated relay
+// (State A and B at nonzero counts with owner tokens and a prefetch reservation, State C): the
+// first and a later ClaimDARelayState, publication, the identity read and an absent, refused or
+// admitted selection whose decrease does nothing change no DA record, count, locator, accounting
+// value, prefetch reservation or pending-outpoint owner claim, and the later claim keeps the
+// first claimant's hook.
 func TestDATTLCallbackBindingChangesNoDAState(t *testing.T) {
-	f := newPendingOutpointSyncFixture(t)
-	relay := f.engine.DARelayState()
-	before := daRelayStateSnapshot(relay)
+	f, r := newDATTLCallbackRecords(t)
+	engine := &SyncEngine{chainState: f.state, daRelay: f.relay}
+	requireDATTLCount(t, r.setup, r.stateAID, 3)
+	requireDATTLCount(t, r.setup, r.stateBID, 3)
+	beforeRelay, beforeOwner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+	firstCalls := 0
+	first := func([]byte) (func(bool), error) { firstCalls++; return func(bool) {}, nil }
+	later := func([]byte) (func(bool), error) { t.Error("later claimant's hook installed"); return nil, nil }
 	var attempts []string
-	f.engine.PublishDATTLBinding(&daTTLRecordingService{name: "S1", attempts: &attempts, refuse: errors.New("service already closed")})
-	_ = f.engine.DATTLBindingService()
-	err := f.engine.enterSelectedDATTL(func() error { t.Error("refused selection ran decrease"); return nil })
+	require(t, engine.enterSelectedDATTL(func() error { t.Error("absent binding ran decrease"); return nil }) == nil, "absent selection")
+	for _, hook := range []func([]byte) (func(bool), error){first, later} {
+		claimed, err := engine.ClaimDARelayState(f.relay, hook)
+		require(t, err == nil && claimed == f.relay, "claim: claimed=%p err=%v", claimed, err)
+	}
+	engine.PublishDATTLBinding(&daTTLRecordingService{name: "S1", attempts: &attempts, refuse: errors.New("service already closed")})
+	_ = engine.DATTLBindingService()
+	err := engine.enterSelectedDATTL(func() error { t.Error("refused selection ran decrease"); return nil })
 	require(t, err != nil && slices.Equal(attempts, []string{"S1"}), "refused selection err=%v attempts=%v", err, attempts)
-	require(t, reflect.DeepEqual(before, daRelayStateSnapshot(relay)), "binding publication or selection changed the DA relay image")
-	require(t, relay.mu.TryLock(), "DA relay mutex leaked")
-	relay.mu.Unlock()
+	engine.PublishDATTLBinding(&daTTLRecordingService{name: "S2", attempts: &attempts})
+	require(t, engine.enterSelectedDATTL(func() error { return nil }) == nil && slices.Equal(attempts, []string{"S1", "S2"}), "admitted selection attempts=%v", attempts)
+	_, _ = engine.reorgDAAdmission(nil)
+	require(t, firstCalls == 1, "later claim replaced the first claimant's hook: first calls=%d", firstCalls)
+	require(t, reflect.DeepEqual(beforeRelay, daRelayStateSnapshot(f.relay)), "construction, binding or selection changed the DA relay image")
+	require(t, reflect.DeepEqual(beforeOwner, cloneDAAdmissionOwner(f.mp.pendingOutpoints)), "construction, binding or selection changed the pending-outpoint owner")
+	require(t, f.relay.mu.TryLock(), "DA relay mutex leaked")
+	f.relay.mu.Unlock()
 }
 
-// TestDATTLCallbackBindingConcurrentPublications is the H1 API form: concurrent publications race
-// selections; every selection observes one whole published Service, never a torn pair.
+// TestDATTLCallbackBindingConcurrentPublications is the H1 API form under -race: one publisher
+// stores S_i in increasing i and then records i, while selections run concurrently. A selection
+// reads the recorded index before and after it and must select an S_j with before <= j <=
+// after+1 (S_after+1 may be published and not yet recorded), so a cached or stale binding fails.
+// A torn Service/entry pair is structurally impossible: the binding is one interface value
+// behind one atomic pointer, and the entry is that Service's own method, so no row tests it.
 func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
-	services := make([]*daTTLConcurrentService, 3)
+	const publications = 400
+	var recorded, selected atomic.Int64
+	services := make([]*daTTLOrderedService, publications)
 	for i := range services {
-		services[i] = &daTTLConcurrentService{id: i}
-		services[i].self = services[i]
+		services[i] = &daTTLOrderedService{id: int64(i), selected: &selected}
 	}
 	f.engine.PublishDATTLBinding(services[0])
-	start, done := make(chan struct{}), make(chan struct{})
-	for _, service := range services[1:] {
-		go func(service *daTTLConcurrentService) {
-			<-start
-			for range 200 {
-				f.engine.PublishDATTLBinding(service)
-			}
-			done <- struct{}{}
-		}(service)
-	}
-	close(start)
-	for range 400 {
-		err := f.engine.enterSelectedDATTL(func() error { return nil })
-		require(t, err == nil, "selection error %v", err)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 1; i < publications; i++ {
+			f.engine.PublishDATTLBinding(services[i])
+			recorded.Store(int64(i))
+		}
+	}()
+	for range 2 * publications {
+		before := recorded.Load()
+		require(t, f.engine.enterSelectedDATTL(func() error { return nil }) == nil, "selection error")
+		after, got := recorded.Load(), selected.Load()
+		require(t, before <= got && got <= after+1, "selected S_%d outside [S_%d, S_%d]", got, before, after+1)
 	}
 	<-done
-	<-done
-	last := f.engine.DATTLBindingService()
-	require(t, last == DATTLMutationService(services[1]) || last == DATTLMutationService(services[2]), "final binding %v", last)
+	require(t, f.engine.DATTLBindingService() == DATTLMutationService(services[publications-1]), "final binding is not the last publication")
 }
 
-type daTTLConcurrentService struct {
-	id   int
-	self *daTTLConcurrentService
+// daTTLOrderedService stores its index into selected when its entry is entered.
+type daTTLOrderedService struct {
+	id       int64
+	selected *atomic.Int64
 }
 
-func (c *daTTLConcurrentService) EnterDATTLMutation(decrease func() error) error {
-	if c.self != c {
-		return fmt.Errorf("torn binding: entry of %d", c.id)
-	}
+func (c *daTTLOrderedService) EnterDATTLMutation(decrease func() error) error {
+	c.selected.Store(c.id)
 	return decrease()
 }

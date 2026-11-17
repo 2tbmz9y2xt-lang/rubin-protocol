@@ -1,10 +1,15 @@
 package p2p
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha3"
 	"errors"
 	"fmt"
+	"math"
+	"reflect"
+	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,8 +19,10 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
-// selectDATTL is the no-lease selection through the public binding surface: one identity
-// snapshot, then one registration attempt with that Service's own entry.
+// selectDATTL is a test-local mirror of node's unexported enterSelectedDATTL over the public
+// binding surface (one identity snapshot, then one registration attempt with that Service's own
+// entry) that also returns the snapshotted Service. The production selection itself is observed
+// by the node rows in clients/go/node/da_ttl_callback_test.go.
 func selectDATTL(engine *node.SyncEngine, decrease func() error) (node.DATTLMutationService, error) {
 	service := engine.DATTLBindingService()
 	if service == nil {
@@ -82,8 +89,41 @@ func (s *Service) closeReturnsWithin(d time.Duration) bool {
 	}
 }
 
+// TestDATTLCallbackServiceDrainingRefused pins R3 for DRAINING: with S1 OPEN and S2 bound, S2's
+// Close waits on a held lease; a registration while S2 is DRAINING is refused with the closed
+// error and zero decreases, with no fallback to S1, and Close returns only after the release.
+func TestDATTLCallbackServiceDrainingRefused(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	s2 := newBoundService(t, h.service.cfg)
+	require(t, s2.acquireWork(), "lease on S2")
+	closeDone := make(chan struct{})
+	go func() { _ = s2.Close(); close(closeDone) }()
+	deadline := time.Now().Add(lifecycleWatchdog)
+	for s2.workAuthorized() {
+		require(t, time.Now().Before(deadline), "S2 did not become DRAINING within %s", lifecycleWatchdog)
+		runtime.Gosched()
+	}
+	decreases := 0
+	selected, err := selectDATTL(h.syncEngine, func() error { decreases++; return nil })
+	require(t, selected == node.DATTLMutationService(s2) && errors.Is(err, errServiceClosed) && err.Error() == "service already closed" && decreases == 0, "DRAINING binding: selected=%p err=%v decreases=%d", selected, err, decreases)
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned while the lease was held")
+	default:
+	}
+	s2.releaseWork()
+	select {
+	case <-closeDone:
+	case <-time.After(lifecycleWatchdog):
+		t.Fatalf("Close did not return within %s after the release", lifecycleWatchdog)
+	}
+	require(t, h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2) && h.service.workAuthorized(), "binding moved or S1 left OPEN")
+}
+
 // TestDATTLCallbackServiceConstructionFailure pins C7: a construction failing at config
-// validation or at the inbound budget leaves the binding naming S1.
+// validation or at the inbound budget leaves the binding naming S1. On an engine with no claim
+// yet, every such refusal claims nothing, so the next successful construction is the first
+// claimant (F1): its admitDetachedReorgDA is the engine's detached-reorg hook.
 func TestDATTLCallbackServiceConstructionFailure(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	for _, row := range []struct {
@@ -102,6 +142,29 @@ func TestDATTLCallbackServiceConstructionFailure(t *testing.T) {
 	decreases := 0
 	selected, err := selectDATTL(h.syncEngine, func() error { decreases++; return nil })
 	require(t, err == nil && selected == node.DATTLMutationService(h.service) && decreases == 1, "selection after failures: selected=%p err=%v", selected, err)
+
+	for _, row := range []struct {
+		want string
+		bad  func(*ServiceConfig)
+	}{
+		{"bind address is required", func(c *ServiceConfig) { c.BindAddr = "" }},
+		{"nil peer manager", func(c *ServiceConfig) { c.PeerManager = nil }},
+		{"nil sync engine", func(c *ServiceConfig) { c.SyncEngine = nil }},
+		{"nil blockstore", func(c *ServiceConfig) { c.BlockStore = nil }},
+		{"nil tx metadata func", func(c *ServiceConfig) { c.TxMetadataFunc = nil }},
+		{"inbound block budget must be zero or between 1073741824 and 8589934592 bytes", func(c *ServiceConfig) { c.InboundBlockBudgetBytes = 1073741823 }},
+	} {
+		t.Run("first claimant after "+row.want, func(t *testing.T) {
+			sink, valid := unclaimedServiceSink(t)
+			invalid := valid
+			row.bad(&invalid)
+			service, err := NewService(invalid)
+			require(t, service == nil && err != nil && err.Error() == row.want, "construction=(%p,%v), want %q", service, err, row.want)
+			require(t, valid.SyncEngine.DATTLBindingService() == nil, "refused construction published a binding")
+			first := newBoundService(t, valid)
+			requireFirstClaimant(t, sink, valid, first)
+		})
+	}
 }
 
 // TestDATTLCallbackServiceConcurrentConstruction is the H1 API form under -race: concurrent
@@ -269,4 +332,45 @@ func TestDATTLCallbackLaterConstructionKeepsFirstHook(t *testing.T) {
 			require(t, retained == !closeFirst, "detached commit retained=%v with first claimant closed=%v", retained, closeFirst)
 		})
 	}
+}
+
+// daRelayPublicImage is the DA relay image observable through the exported surface: the A/B/C
+// member identities in txid order (the exported order is unspecified), each member's retained
+// bytes and the complete-set candidates.
+type daRelayPublicImage struct {
+	identities []node.CompactCandidateIdentity
+	members    map[[32]byte][]byte
+	complete   []node.CompleteDASetCandidate
+}
+
+func observeDARelayPublicImage(t *testing.T, h *testHarness) daRelayPublicImage {
+	t.Helper()
+	relay := h.syncEngine.DARelayState()
+	identities, ok := relay.CompactDAIdentities(h.mempool)
+	require(t, ok, "CompactDAIdentities refused the engine mempool")
+	slices.SortFunc(identities, func(a, b node.CompactCandidateIdentity) int { return bytes.Compare(a.TxID[:], b.TxID[:]) })
+	image := daRelayPublicImage{identities: identities, members: map[[32]byte][]byte{}, complete: relay.CompleteSetCandidates(math.MaxUint64)}
+	for _, identity := range identities {
+		member, present, err := relay.LookupRetainedTx(identity.TxID)
+		require(t, err == nil && present, "LookupRetainedTx(%x): present=%v err=%v", identity.TxID[:4], present, err)
+		image.members[identity.TxID] = member.TxBytes
+	}
+	return image
+}
+
+// TestDATTLCallbackLaterConstructionChangesNoDAState is the C8 NOCHG row at the Service level:
+// over a relay populated with a State A chunk and a State B commit, a later NewService S2 (and so
+// its ClaimDARelayState and binding publication) leaves the exported relay image unchanged. Counts
+// and owner tokens are not exported; the node row TestDATTLCallbackBindingChangesNoDAState
+// compares them around the same claim and binding steps.
+func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h)
+	f.admit(f.chunk(daRelayTestID(0xa8), 0, []byte("ttl nochg chunk")), "127.0.0.1:19111")
+	f.admit(f.commit(daRelayTestID(0xb8), 2), "127.0.0.1:19112")
+	before := observeDARelayPublicImage(t, h)
+	require(t, len(before.identities) == 2 && len(before.members) == 2, "populated image: %d identities", len(before.identities))
+	s2 := newBoundService(t, h.service.cfg)
+	require(t, s2.daRelay == h.service.daRelay && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S2 construction")
+	require(t, reflect.DeepEqual(before, observeDARelayPublicImage(t, h)), "later construction changed the DA relay image")
 }
