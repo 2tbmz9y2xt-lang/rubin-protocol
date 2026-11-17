@@ -795,3 +795,33 @@ func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 	}
 	probe.f.requireAbsent(probe.commit, "the third nested decrease expired the record")
 }
+
+// TestDATTLCallbackEndToEndAbsentBinding drives SyncEngine.ApplyBlock on an engine with no
+// constructed Service: the binding is absent, so three ACCEPTED/NEW publications invoke nothing
+// and the commit retained at count 3 survives them. A Service constructed afterwards binds, and
+// its three admitted decreases then expire the same record.
+func TestDATTLCallbackEndToEndAbsentBinding(t *testing.T) {
+	source := newTestHarness(t, 7, "127.0.0.1:0", nil)
+	sink, cfg := unclaimedServiceSink(t)
+	require(t, sink.syncEngine.DATTLBindingService() == nil, "binding present with no constructed Service")
+	sink.service = &Service{daRelay: sink.syncEngine.DARelayState()}
+	f := newDAIngressFixture(t, sink)
+	commit := f.commit(daRelayTestID(0xe8), 2)
+	f.admit(commit, "127.0.0.1:19111")
+	apply := func(height uint64) {
+		t.Helper()
+		summary, err := sink.syncEngine.ApplyBlock(blockAtHeight(t, source, height), nil)
+		require(t, err == nil && summary != nil && summary.BlockHeight == height, "ApplyBlock(%d)=(%+v,%v), want ACCEPTED/NEW", height, summary, err)
+	}
+	start := sink.chainState.Height + 1
+	for height := start; height < start+3; height++ {
+		apply(height)
+	}
+	require(t, sink.syncEngine.DATTLBindingService() == nil, "an apply published a binding")
+	f.requireRetained(commit, "three publications under an absent binding decreased nothing")
+	newBoundService(t, cfg)
+	for height := start + 3; height < start+6; height++ {
+		apply(height)
+	}
+	f.requireAbsent(commit, "the bound Service's three admitted decreases expired the record")
+}
