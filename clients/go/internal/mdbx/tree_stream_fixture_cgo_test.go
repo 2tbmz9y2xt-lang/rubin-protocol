@@ -6858,13 +6858,28 @@ func psfClassDeletes(t *testing.T) {
 
 // Node page bounds 1 and 7 (default scene pages use 1440) delete exactly the rows their page returned.
 func psfPageBounds(t *testing.T) {
-	family := obsoleteTreeFamily(9)
-	for _, bound := range []uint32{1, 7} {
+	// Six more generation-9 node rows make a nine-row family, so bound 7 stops at its row limit.
+	var extra []obsoleteTreeRow
+	for k := byte(1); k <= 6; k++ {
+		var upper [36]byte
+		upper[34] = k
+		extra = append(extra, obsoleteTreeRow{obsoleteTreeNodeLiteral(9, upper, 0), []byte{0xa4, k}})
+	}
+	family := append(obsoleteTreeFamily(9), extra...)
+	slices.SortFunc(family, func(a, b obsoleteTreeRow) int { return bytes.Compare(a.key, b.key) })
+	stops := map[uint32]PrefixPageStop{1: PrefixPageRowLimit, 7: PrefixPageRowLimit, 1440: PrefixPageExhausted}
+	for _, bound := range []uint32{1, 7, 1440} {
 		sc := psfNew(t)
+		for _, row := range extra {
+			treeNativeSeed(t, sc.s, 8, row.key, row.value)
+		}
 		var deleted [][]byte
 		r := psRun(t, sc.s, sc.o, LaneOperation, func(reader *Reader) TreeOperationV1 {
 			nodes, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, bound)
 			mustEnvironment(t, err)
+			if nodes.Stop != stops[bound] {
+				t.Fatalf("page bound %d stop %d, want %d", bound, nodes.Stop, stops[bound])
+			}
 			for _, row := range nodes.Rows {
 				deleted = append(deleted, row.Key())
 			}
@@ -7361,15 +7376,46 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		}
 		runtime.KeepAlive(left)
 		runtime.KeepAlive(right)
-		// Typed nil budget with a zero seal refuses before acquisition; legacy zero databaseID does not fund.
-		typed := largeImageScope{databaseID: [32]byte{7}}
-		if err := typed.fundV1(); any(err) != any(errOperationReservationCapacity) {
-			t.Fatalf("scope missing budget admitted: %v", err)
-		}
 		if err := (&largeImageScope{}).fundV1(); err != nil {
 			t.Fatal("legacy scope funded", err)
 		}
+		// Typed nil budget with a zero seal refuses before any native acquisition or comparison; a positive
+		// seal over the same body selector reaches both.
+		psfSealedTraversal(t, 0, false)
+		psfSealedTraversal(t, 1<<20, true)
 	})
+}
+
+// psfSealedTraversal compares a typed body-selector scope with a nil budget and the given seal over one
+// View Reader, and asserts the result and whether native acquisitions and payload comparisons occurred.
+func psfSealedTraversal(t *testing.T, limit uint64, reached bool) {
+	t.Helper()
+	sc := psfNew(t)
+	var calls uint32
+	var equal bool
+	var compareErr error
+	observed, err := FixturePairReadObservation(sc.s, nil, func() {
+		_, faultErr := fixtureLargeFault(sc.s, 1, 4, bytes.Repeat([]byte{0xff}, 32), func() {
+			mustEnvironment(t, sc.s.View(func(r *Reader) error {
+				scope := largeImageScope{selectors: []LargeImageSelectorV1{{Kind: 1, Hash: sc.body}}, maxKey: r.maxKey, pairLimit: limit, databaseID: r.databaseID, config: r.treeConfig}
+				before := fixtureLargeNativeCalls()
+				equal, compareErr = largeResidualEqual(r, r, &scope, nil)
+				calls = fixtureLargeNativeCalls() - before
+				return nil
+			}))
+		})
+		mustEnvironment(t, faultErr)
+	})
+	mustEnvironment(t, err)
+	if !reached {
+		if any(compareErr) != any(errOperationReservationCapacity) || calls != 0 || observed.Gets != 0 || observed.Comparisons != 0 {
+			t.Fatalf("scope missing budget admitted: %v calls%d %+v", compareErr, calls, observed)
+		}
+		return
+	}
+	if compareErr != nil || !equal || calls == 0 || observed.Comparisons == 0 {
+		t.Fatalf("sealed body traversal: %v %v calls%d %+v", equal, compareErr, calls, observed)
+	}
 }
 
 // Mode 29 adds an extra member to the rank-5 undo domain at commit, then fails every later

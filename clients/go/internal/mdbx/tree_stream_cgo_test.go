@@ -4941,6 +4941,19 @@ func psCounts(t *testing.T) {
 	run("deletes plus witnesses", true, 8*maxUpdateMutations, func(op *TreeOperationV1) {
 		op.Pair.ObsoleteDeletes = make([]ObsoleteRowV1, maxUpdateMutations)
 	})
+	// At each bound the count admits and the next refusal is "invalid Update Batch".
+	run("deletes plus witnesses at bound", false, 8*maxUpdateMutations, func(op *TreeOperationV1) {
+		op.Pair.ObsoleteDeletes = make([]ObsoleteRowV1, maxUpdateMutations-1)
+	})
+	run("2880", false, 33*2880, func(op *TreeOperationV1) {
+		op.Pair.LargeConsulted = append(append([]LargeImageSelectorV1{{Kind: 0}}, selectors(1, 1440)...), selectors(2, 1439)...)
+	})
+	run("1440 bodies", false, 33*1441, func(op *TreeOperationV1) {
+		op.Pair.LargeConsulted = append([]LargeImageSelectorV1{{Kind: 255}}, selectors(1, 1440)...)
+	})
+	run("1440 families", false, 33*1441, func(op *TreeOperationV1) {
+		op.Pair.LargeConsulted = append([]LargeImageSelectorV1{{Kind: 3}}, selectors(2, 1440)...)
+	})
 	// Counts 1 and 1440 of one known kind commit; the first selector's hash is zero.
 	for _, n := range []int{1, 1440} {
 		s2, _, o2 := psStore(t)
