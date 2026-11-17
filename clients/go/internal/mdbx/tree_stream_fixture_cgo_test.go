@@ -6818,6 +6818,73 @@ func psfDelete(t *testing.T, g uint64, mutations []Mutation, selectors []LargeIm
 	}
 }
 
+// N1: classes 1 (UTXO, malformed disposable value), 2 (index) and 4 (derived owner) are deleted by the
+// typed raw path from their own literal rows next to the untouched tree scene; no value is decoded.
+func psfClassDeletes(t *testing.T) {
+	sc := psfNew(t)
+	utxo := append(obsoleteGenerationLiteral(9), 0x44)
+	treeNativeSeed(t, sc.s, 1, utxo, []byte{0xde})
+	hash := [32]byte{0x41}
+	forward, derived := canonicalForwardKeyLiteral(9, 1), canonicalOwnerKeyLiteral(9, hash)
+	treeNativeSeed(t, sc.s, 2, forward, canonicalForwardValueLiteral(hash, [40]byte{}))
+	treeNativeSeed(t, sc.s, 7, derived, binary.BigEndian.AppendUint64(nil, 1))
+	r := psRun(t, sc.s, sc.o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		var op TreeOperationV1
+		for _, class := range []ObsoleteClassV1{ObsoleteUTXOV1, ObsoleteIndexV1, ObsoleteDerivedV1} {
+			page, err := reader.ObsoleteGenerationPageV1(9, class, nil, 1)
+			mustEnvironment(t, err)
+			if len(page.Rows) != 1 {
+				t.Fatalf("class %d page rows%d, want1", class, len(page.Rows))
+			}
+			op.Pair.ObsoleteDeletes = append(op.Pair.ObsoleteDeletes, page.Rows...)
+			op.Pair.ObsoleteConsulted = append(op.Pair.ObsoleteConsulted, page.Witness)
+		}
+		return op
+	})
+	r.tuple(t, 2, 3, -1)
+	if r.err != nil {
+		t.Fatalf("scope persisted image differs: classes 1, 2, 4 %v", r.err)
+	}
+	reopened := tsReopen(t, sc.s, sc.path)
+	psfRaw(t, reopened, 1, utxo, nil)
+	psfRaw(t, reopened, 2, forward, nil)
+	psfRaw(t, reopened, 7, derived, nil)
+	sc.image(t, reopened, false)
+}
+
+// N3: node page bounds 1 and 7 (default scene pages use 1440) delete exactly the rows their page returned.
+func psfPageBounds(t *testing.T) {
+	family := obsoleteTreeFamily(9)
+	for _, bound := range []uint32{1, 7} {
+		sc := psfNew(t)
+		var deleted [][]byte
+		r := psRun(t, sc.s, sc.o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+			nodes, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, bound)
+			mustEnvironment(t, err)
+			for _, row := range nodes.Rows {
+				deleted = append(deleted, row.Key())
+			}
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: nodes.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness}}}
+		})
+		r.tuple(t, 2, 3, -1)
+		mustEnvironment(t, r.err)
+		if want := min(int(bound), len(family)); len(deleted) != want {
+			t.Fatalf("page bound %d rows%d, want%d", bound, len(deleted), want)
+		}
+		for i, row := range family {
+			want := row.value
+			if i < len(deleted) {
+				if !bytes.Equal(deleted[i], row.key) {
+					t.Fatalf("page bound %d row%d key %x, want %x", bound, i, deleted[i], row.key)
+				}
+				want = nil
+			}
+			psfRaw(t, sc.s, 8, row.key, want)
+		}
+		psfRaw(t, sc.s, 0, tsRootKey(9), []byte{0xee, 9})
+	}
+}
+
 // psfUndo seeds generation 9's proven format-3 own index projection (148-byte header) and a three-member undo family under its hash.
 func psfUndo(t *testing.T, s *Store) ([32]byte, [][]byte) {
 	header := make([]byte, obsoleteHeaderWidth(3))
@@ -6942,6 +7009,8 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("N2-target-in-family", psfTargetInFamily)
 	t.Run("N7-both-identical-OLD-first", psfBothIdentical)
 	t.Run("N9-dormant", psfDormant)
+	t.Run("N1-classes-1-2-4", psfClassDeletes)
+	t.Run("N3-page-bounds", psfPageBounds)
 	t.Run("N1-commit", func(t *testing.T) {
 		sc := psfNew(t)
 		r := sc.run(t, sc.o)
@@ -7162,6 +7231,11 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc2 := psfNew(t)
 		r = sc2.run(t, reservationFilled(t, psPageGrant+f+window+2*uint64(len(psfBodyValue))))
+		// Omitting the preflight budget forwarding or the final/readback seal while the captured context
+		// stays typed turns this funded commit into the typed nil-budget capacity refusal.
+		if r.err != nil || r.truth != 2 {
+			t.Fatalf("scope missing budget admitted: %v truth%d", r.err, r.truth)
+		}
 		r.tuple(t, 2, 3, -1)
 		mustEnvironment(t, r.err)
 		sc2.image(t, sc2.s, true)

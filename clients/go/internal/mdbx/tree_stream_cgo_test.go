@@ -4585,20 +4585,23 @@ func psCallback(t *testing.T) {
 		return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: make([]ObsoleteRowV1, 3), LargeConsulted: []LargeImageSelectorV1{{Kind: 9}}}}
 	}
 	before := reservationLive(o)
-	mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
-		return a.WithReservation(psPageGrant, func() error {
-			r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
-				return garbage(), a.WithPhaseReservationV1(64, 0, func(func() error) error { return marker })
+	var typedNil *nilPointerError
+	for _, application := range []error{marker, fmt.Errorf("scope wrapper: %w", marker), typedNil} {
+		mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+			return a.WithReservation(psPageGrant, func() error {
+				r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
+					return garbage(), a.WithPhaseReservationV1(64, 0, func(func() error) error { return application })
+				})
+				r.tuple(t, 1, 1, -1)
+				if any(r.err) != any(application) {
+					t.Fatalf("scope callback error identity lost: %v want %v", r.err, application)
+				}
+				return nil
 			})
-			r.tuple(t, 1, 1, -1)
-			if !errors.Is(r.err, marker) {
-				t.Fatalf("scope callback error identity lost: %v", r.err)
-			}
-			return nil
-		})
-	}))
-	if reservationLive(o) != before || s.state != storeOPEN {
-		t.Errorf("scope grant leaked: error live%d want%d state%s", reservationLive(o), before, s.state)
+		}))
+		if reservationLive(o) != before || s.state != storeOPEN {
+			t.Errorf("scope grant leaked: error %v live%d want%d state%s", application, reservationLive(o), before, s.state)
+		}
 	}
 	var recovered any
 	func() {
