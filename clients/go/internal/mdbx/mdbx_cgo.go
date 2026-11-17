@@ -2045,6 +2045,11 @@ func updateNativeLargeEqual(old, candidate *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan
 	}
 	before, after := newReader(old, dbis), newReader(candidate, dbis)
 	before.maxKey, after.maxKey = scopes[0].maxKey, scopes[0].maxKey
+	if scopes[0].typedV1() {
+		// Typed scopes bind the engine-captured format-3 context of their verified Store.
+		before.format, before.databaseID, before.treeConfig = 3, scopes[0].databaseID, scopes[0].config
+		after.format, after.databaseID, after.treeConfig = 3, scopes[0].databaseID, scopes[0].config
+	}
 	before.active.Store(true)
 	after.active.Store(true)
 	defer before.expire()

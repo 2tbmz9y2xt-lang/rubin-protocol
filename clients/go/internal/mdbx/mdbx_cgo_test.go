@@ -2063,7 +2063,7 @@ func TestUpdatePlanSurfaceOwnership(t *testing.T) {
 	rawFile, err := parser.ParseFile(fset, "obsolete_raw_cgo.go", raw, 0)
 	mustEnvironment(t, err)
 	owners := map[string]bool{}
-	for _, name := range []string{"updateOwnedObsolete", "obsoleteWitnesses", "obsoleteAdmitRows", "obsoleteRowCurrent", "obsoleteCovered", "obsoleteCharge", "obsoleteCompileRows", "updateObsoleteScope", "obsoleteDomainOrdered", "obsoleteCoalesce", "obsoleteMergeable", "obsoleteCoalescePoints", "obsoleteRetainControls", "obsoleteControlKeys", "obsoleteControlKey", "obsoleteContains"} {
+	for _, name := range []string{"updateOwnedObsolete", "obsoleteWitnesses", "obsoleteAdmitRows", "obsoleteRowCurrent", "obsoleteCovered", "obsoleteCharge", "obsoleteCompileRows", "updateObsoleteScope", "obsoleteDomainOrdered", "obsoleteCoalesce", "obsoleteMergeable", "obsoleteCoalescePoints", "obsoleteRetainControls", "obsoleteControlKeys", "obsoleteControlKey", "obsoleteContains", "obsoleteUniqueWitnesses", "obsoleteDBI", "obsoleteMutationCmp", "obsoleteRowCmp", "obsoleteDomainCmp", "obsoletePointCmp", "obsoleteScopeArrays", "obsoleteWitnessPoints"} {
 		owners[name] = false
 	}
 	for _, declaration := range rawFile.Decls {

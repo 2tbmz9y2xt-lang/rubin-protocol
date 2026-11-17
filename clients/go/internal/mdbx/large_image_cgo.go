@@ -69,6 +69,42 @@ type largeImageScope struct {
 	domains        []obsoleteDomain
 	points         []obsoletePoint
 	consulted      []ownedConsulted
+	// Typed scopes only: a nonzero engine-captured format-3 databaseID selects funded comparison.
+	// pairBudget/pairLimit are set on synchronous comparison copies and never retained.
+	pairBudget *treePairReadBudgetV1
+	pairLimit  uint64
+	databaseID [32]byte
+	config     ConfigV1
+}
+
+func (scope *largeImageScope) typedV1() bool { return scope.databaseID != [32]byte{} }
+
+// windowV1 is S = 4*(maxKey+1): two residual streams, each one copied key and one seek.
+func (scope *largeImageScope) windowV1() uint64 {
+	if scope.maxKey >= ^uint64(0)/4 {
+		return ^uint64(0)
+	}
+	return 4 * (scope.maxKey + 1)
+}
+
+// fundV1 covers S before any typed acquisition; legacy scopes keep their zero-budget path.
+func (scope *largeImageScope) fundV1() error {
+	if !scope.typedV1() {
+		return nil
+	}
+	return scope.pairBudget.coverV1(scope.windowV1(), scope.pairLimit)
+}
+
+// rowsEqualV1 funds both typed operands plus S before C use; presence or length
+// inequality is decided without payload use.
+func (scope *largeImageScope) rowsEqualV1(a, b largeNativeRow) (bool, error) {
+	if !scope.typedV1() {
+		return largeRowsEqual(a, b), nil
+	}
+	if a.done != b.done || !bytes.Equal(a.key, b.key) {
+		return false, nil
+	}
+	return updatePairImageEqualV1(a.image, b.image, true, scope.windowV1(), scope.pairBudget, scope.pairLimit)
 }
 
 func largeImageInput(diagnostic string) error {
@@ -423,7 +459,7 @@ func largeRowsEqual(a, b largeNativeRow) bool {
 	return true
 }
 
-func largeDomainEqual(old, candidate *Reader, selector LargeImageSelectorV1, plan []ownedMutation) (bool, error) {
+func largeDomainEqual(old, candidate *Reader, selector LargeImageSelectorV1, plan []ownedMutation, fund *largeImageScope) (bool, error) {
 	start := sort.Search(len(plan), func(i int) bool {
 		return !updateKeyOrdered(plan[i].dbi.Rank, plan[i].key, largeImageRank(selector.Kind), selector.Hash[:])
 	})
@@ -442,37 +478,42 @@ func largeDomainEqual(old, candidate *Reader, selector LargeImageSelectorV1, pla
 		if a.done && b.done {
 			return equal, nil
 		}
-		if !largeRowsEqual(a, b) {
-			equal = false
-		}
-	}
-}
-
-func largeResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ownedMutation) (bool, error) {
-	equal, err := contextEqual(old, candidate, scope)
-	if err != nil {
-		return false, err
-	}
-	for _, selector := range scope.selectors {
-		match, err := largeDomainEqual(old, candidate, selector, plan)
+		match, err := fund.rowsEqualV1(a, b)
 		if err != nil {
 			return false, err
 		}
 		equal = equal && match
 	}
-	return obsoleteResidualEqual(old, candidate, scope, plan, equal)
 }
 
-func obsoleteResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ownedMutation, equal bool) (bool, error) {
+func largeResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ownedMutation) (bool, error) {
+	if err := scope.fundV1(); err != nil {
+		return false, err
+	}
+	equal, err := contextEqual(old, candidate, scope)
+	if err != nil {
+		return false, err
+	}
+	for _, selector := range scope.selectors {
+		match, err := largeDomainEqual(old, candidate, selector, plan, &scope)
+		if err != nil {
+			return false, err
+		}
+		equal = equal && match
+	}
+	return obsoleteResidualEqual(old, candidate, &scope, plan, equal)
+}
+
+func obsoleteResidualEqual(old, candidate *Reader, scope *largeImageScope, plan []ownedMutation, equal bool) (bool, error) {
 	for _, domain := range scope.domains {
-		match, err := obsoleteDomainEqual(old, candidate, domain, plan, scope.consulted)
+		match, err := obsoleteDomainEqual(old, candidate, domain, plan, scope)
 		if err != nil {
 			return false, err
 		}
 		equal = equal && match
 	}
 	for _, point := range scope.points {
-		match, err := obsoletePointEqual(old, candidate, point, plan, scope.consulted)
+		match, err := obsoletePointEqual(old, candidate, point, plan, scope)
 		if err != nil {
 			return false, err
 		}

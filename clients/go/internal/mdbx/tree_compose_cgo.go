@@ -44,6 +44,18 @@ type treePlanV1 struct {
 	inventory        *entryInventoryStateV1
 	context          CanonicalContextWindowV1 // owned Pair.ContextConsulted; Count 0 encodes no window
 	prepaidReadBytes uint64
+	scope            *largeImageScope // owned pair-only physical scope; nil otherwise, exclusive with context
+}
+
+// residualV1 is the plan's one residual scope: the physical scope or the context window.
+func (p *treePlanV1) residualV1() (largeImageScope, bool) {
+	if p.scope != nil {
+		return *p.scope, true
+	}
+	if p.context.Count != 0 {
+		return contextTreeScopeV1(p.context), true
+	}
+	return largeImageScope{}, false
 }
 
 // treeScopeV1 is one position's slots (op or the truth evaluator, D30, D35): the Reader slot, the recorder slot and
@@ -505,8 +517,8 @@ func (c *treeComposeV1) runV1() {
 	t.covered = treeCoveredV1(w.plan.primitives)
 	t.pairOnly, t.pairReadLimit = len(w.plan.primitives) == 0, w.plan.prepaidReadBytes
 	var err error
-	if w.plan.context.Count != 0 {
-		err = t.pairPreflightContextV1(w.plan.pair, w.plan.consulted, w.plan.context)
+	if scope, ok := w.plan.residualV1(); ok {
+		err = t.pairPreflightScopedV1(w.plan.pair, w.plan.consulted, scope)
 	} else {
 		err = t.pairPreflightV1(w.plan.pair, w.plan.consulted)
 	}
@@ -552,8 +564,8 @@ func (c *treeComposeV1) holdV1() error {
 	if err != nil {
 		return err
 	}
-	if w.plan.context.Count != 0 {
-		err = w.t.finalContextV1(w.plan.pair, w.plan.consulted, w.plan.context)
+	if scope, ok := w.plan.residualV1(); ok {
+		err = w.t.finalScopedV1(w.plan.pair, w.plan.consulted, scope)
 	} else {
 		err = w.t.finalV1(w.plan.pair, w.plan.consulted)
 	}
@@ -596,8 +608,8 @@ func (c *treeComposeV1) boundedHoldV1() error {
 		w.retireFrozenV1(j)
 	}
 	w.storedBody = treeBodyV1{}
-	if w.plan.context.Count != 0 {
-		return w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted, contextTreeScopeV1(w.plan.context))
+	if scope, ok := w.plan.residualV1(); ok {
+		return w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted, scope)
 	}
 	return w.t.pairReadFinalV1(w.plan.pair, w.plan.consulted)
 }
@@ -662,8 +674,8 @@ func (c *treeComposeV1) coveredHoldV1() error {
 	if err != nil {
 		return err
 	}
-	if w.plan.context.Count != 0 {
-		return w.t.finalContextV1(w.plan.pair, w.plan.consulted, w.plan.context)
+	if scope, ok := w.plan.residualV1(); ok {
+		return w.t.finalScopedV1(w.plan.pair, w.plan.consulted, scope)
 	}
 	return w.t.finalV1(w.plan.pair, w.plan.consulted)
 }
@@ -726,8 +738,8 @@ func (c *treeComposeV1) commitV1() {
 		truth = c.pairTruthV1
 	}
 	c.committed = true
-	if w.plan.context.Count != 0 {
-		c.outcome = w.t.commitContextV1(w.plan.pair, w.plan.consulted, truth, w.plan.context)
+	if scope, ok := w.plan.residualV1(); ok {
+		c.outcome = w.t.commitScopedV1(w.plan.pair, w.plan.consulted, truth, scope)
 	} else {
 		c.outcome = w.t.commitV1(w.plan.pair, w.plan.consulted, truth)
 	}
@@ -761,8 +773,9 @@ func (c *treeComposeV1) pairTruthV1(read *C.MDBX_txn, _ error) (CommitTruth, err
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
-	if w.plan.context.Count != 0 {
-		old, next, err = updateNativeReadbackScoped(w.old, read, w.s.dbis, w.plan.pair, nil, old, next, contextTreeScopeV1(w.plan.context))
+	if scope, ok := w.plan.residualV1(); ok {
+		scope.pairLimit = w.t.pairReadLimit
+		old, next, err = updateNativeReadbackScoped(w.old, read, w.s.dbis, w.plan.pair, nil, old, next, scope)
 		if err != nil {
 			return CommitTruthUnknown, err
 		}
@@ -805,8 +818,8 @@ func (c *treeComposeV1) readbackV1(e *treeScopeV1, read *C.MDBX_txn) (CommitTrut
 		c.unwind = e.unwind
 		return CommitTruthUnknown, err
 	}
-	if e.plan.context.Count != 0 {
-		return rb.verdictV1(e.plan.pair, e.plan.consulted, contextTreeScopeV1(e.plan.context))
+	if scope, ok := e.plan.residualV1(); ok {
+		return rb.verdictV1(e.plan.pair, e.plan.consulted, scope)
 	}
 	return rb.verdictV1(e.plan.pair, e.plan.consulted)
 }

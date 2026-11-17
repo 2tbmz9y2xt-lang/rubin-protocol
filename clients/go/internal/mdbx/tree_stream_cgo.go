@@ -40,6 +40,14 @@ type TreePairV1 struct {
 	// on the caller's own charges. The engine copies the descriptor at step 5 and never reads the caller's value
 	// after; the caller must keep *ContextConsulted unchanged from the callback's return until that copy.
 	ContextConsulted *CanonicalContextWindowV1
+	// ObsoleteDeletes, ObsoleteConsulted and LargeConsulted carry only same-operation ORIGINAL OLD
+	// physical evidence (nil and empty are equivalent). Any nonempty field selects the pair-only
+	// physical scope: a LaneOperation account, no primitives, Proof, HeaderSlot, EntryInventory or
+	// ContextConsulted, zero PrepaidReadBytes and at least one Mutation or ObsoleteDeletes row;
+	// any other shape is "invalid Update Batch". These fields are read only after the callback.
+	ObsoleteDeletes   []ObsoleteRowV1
+	ObsoleteConsulted []ObsoletePageWitnessV1
+	LargeConsulted    []LargeImageSelectorV1
 }
 
 // TreeSourceV1 is an immutable, replayable complete block source. At each position
@@ -362,6 +370,11 @@ func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(
 		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, e.prewriteAbortV1(err)
 	}
 	plan := treeOwnPlanV1(op)
+	err = e.scopeCompileV1(op, &plan)
+	if err != nil {
+		e.retireEntryV1()
+		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, e.prewriteAbortV1(err)
+	}
 	if e.inventory != nil {
 		plan.inventory = e.inventory
 		plan.inventory.ownV1(&plan)
@@ -371,7 +384,7 @@ func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(
 
 // prewriteV1 preserves ordinary/ENTRY/Proof/refusal priority before the owned-plan charge.
 func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperationV1, saved error) error {
-	slotOver, admissionErr := treeAdmitSlotV1(op, account, e.store.databaseID)
+	slotOver, admissionErr := e.admitScopedV1(op, account)
 	if admissionErr != nil {
 		return admissionErr
 	}
@@ -391,7 +404,82 @@ func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperati
 		return err
 	}
 	// A zero-byte grow also preserves the post-callback open check.
-	return e.hold.grow(treeStepFiveBytesV1(op))
+	return e.hold.grow(treePrewriteBytesV1(op))
+}
+
+// treePrewriteBytesV1 is the one post-admission charge: the metadata envelope F for a physical
+// scope, which covers its plan copy, otherwise the step-5 charge.
+func treePrewriteBytesV1(op TreeOperationV1) uint64 {
+	if treeScopePresentV1(&op.Pair) {
+		return treeScopeBytesV1(&op.Pair)
+	}
+	return treeStepFiveBytesV1(op)
+}
+
+// treeScopeBytesV1 is F = 4096 + 128(M+D) + 48C + K + 176W + 8W + 8D + 32P + 32(P+3W) + 33L + U.
+func treeScopeBytesV1(pair *TreePairV1) uint64 {
+	d, w := uint64(len(pair.ObsoleteDeletes)), uint64(len(pair.ObsoleteConsulted))
+	p := uint64(obsoleteWitnessPoints(pair.ObsoleteConsulted))
+	n := treePlanChargeAddV1(treePlanCopyBytesV1(*pair), 1, 4096)
+	n = treePlanChargeAddV1(n, d, 128+8)
+	n = treePlanChargeAddV1(n, w, 176+8+3*32)
+	n = treePlanChargeAddV1(n, p, 32+32)
+	n = treePlanChargeAddV1(n, uint64(len(pair.LargeConsulted)), 33)
+	for _, row := range pair.ObsoleteDeletes {
+		n = treePlanChargeAddV1(n, uint64(len(row.span.key)), 1)
+	}
+	for _, token := range pair.ObsoleteConsulted {
+		n = treePlanChargeAddV1(n, treeWitnessKeyBytesV1(token.scope), 1)
+	}
+	return n
+}
+
+// treeWitnessKeyBytesV1 is one witness's prefix/after/last and point key bytes.
+func treeWitnessKeyBytesV1(witness *obsoleteWitness) uint64 {
+	n := uint64(len(witness.domain.prefix) + len(witness.domain.after) + len(witness.domain.last))
+	for _, point := range witness.points {
+		n += uint64(len(point.key))
+	}
+	return n
+}
+
+// scopeCompileV1 compiles raw targets, then the owned large/raw scope, under the admitted F charge.
+// The scope carries the engine-captured format-3 context of this Store's ORIGINAL OLD Reader.
+func (e *treePublicEntryV1) scopeCompileV1(op TreeOperationV1, plan *treePlanV1) error {
+	if !treeScopePresentV1(&op.Pair) {
+		return nil
+	}
+	batch := Batch{Mutations: op.Pair.Mutations, ObsoleteDeletes: op.Pair.ObsoleteDeletes, ObsoleteConsulted: op.Pair.ObsoleteConsulted, LargeConsulted: op.Pair.LargeConsulted}
+	err := treeScopeRowsV1(batch, e.reader, plan)
+	if err != nil {
+		return err
+	}
+	scope, err := updateOwnedLarge(batch, plan.consulted, e.reader.maxKey)
+	if err != nil {
+		return err
+	}
+	scope.databaseID, scope.config = e.reader.databaseID, e.reader.treeConfig
+	plan.scope = &scope
+	return nil
+}
+
+// treeScopeRowsV1: witness identity, coverage/duplicate/target overlap, Consulted disjointness, then caps.
+func treeScopeRowsV1(batch Batch, reader *Reader, plan *treePlanV1) error {
+	err := obsoleteWitnesses(batch, reader)
+	if err != nil {
+		return err
+	}
+	rows, err := obsoleteAdmitRows(batch, reader, plan.pair)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if obsoleteConsultedContains(plan.consulted, row.span.rank, row.span.key) {
+			return updateInvalidBatch()
+		}
+	}
+	plan.pair, err = obsoleteCompileRows(batch, rows, plan.pair)
+	return err
 }
 
 // prewriteAbortV1 aborts OLD after a prewrite refusal; only a wrapped context qualification error is infrastructure.
@@ -430,15 +518,83 @@ func (l treeAccountLedgerV1) chargeV1(n uint64) error { return l.hold.grow(n) }
 func (l treeAccountLedgerV1) releaseV1(n uint64) { _ = l.hold.shrink(n) }
 
 func treeAdmitV1(op TreeOperationV1, account *OperationAccount, databaseID [32]byte) error {
-	_, err := treeAdmitSlotV1(op, account, databaseID)
+	_, err := treeAdmitSlotV1(op, account, databaseID, false)
 	return err
+}
+
+// admitScopedV1 runs the ordinary admission rows, then the charge-free physical-scope shape,
+// count and provenance rows on the post-callback path only.
+func (e *treePublicEntryV1) admitScopedV1(op TreeOperationV1, account *OperationAccount) (bool, error) {
+	over, err := treeAdmitSlotV1(op, account, e.store.databaseID, len(op.Pair.ObsoleteDeletes) != 0)
+	if err != nil {
+		return false, err
+	}
+	return over, treeScopeAdmitV1(op, account, e.reader)
+}
+
+// treeScopePresentV1 reports whether a physical-scope field selects the pair-only domain.
+func treeScopePresentV1(pair *TreePairV1) bool {
+	return len(pair.ObsoleteDeletes) != 0 || len(pair.ObsoleteConsulted) != 0 || len(pair.LargeConsulted) != 0
+}
+
+// treeScopeShapeV1 is the closed pair-only physical-scope shape.
+func treeScopeShapeV1(op TreeOperationV1, account *OperationAccount) bool {
+	if len(op.Primitives) != 0 || op.Proof != nil || op.HeaderSlot != nil {
+		return false
+	}
+	p := &op.Pair
+	if p.EntryInventory != nil || p.ContextConsulted != nil || p.PrepaidReadBytes != 0 {
+		return false
+	}
+	return account.shared.ceiling == LaneMaxBytes
+}
+
+// treeScopeAdmitV1 checks shape, then counts (Capacity), then raw provenance, without allocating.
+func treeScopeAdmitV1(op TreeOperationV1, account *OperationAccount, reader *Reader) error {
+	pair := &op.Pair
+	if !treeScopePresentV1(pair) {
+		return nil
+	}
+	if !treeScopeShapeV1(op, account) {
+		return updateInvalidBatch()
+	}
+	if uint64(len(pair.ObsoleteDeletes))+uint64(len(pair.ObsoleteConsulted)) > maxUpdateMutations {
+		return updateBoundError()
+	}
+	if err := largeSelectorCounts(pair.LargeConsulted); err != nil {
+		return err
+	}
+	return treeScopeProvenanceV1(pair, reader)
+}
+
+// treeScopeProvenanceV1 requires every token from this operation's ORIGINAL OLD Reader.
+func treeScopeProvenanceV1(pair *TreePairV1, reader *Reader) error {
+	if !reader.updateOld {
+		return updateInvalidBatch()
+	}
+	for _, token := range pair.ObsoleteConsulted {
+		if token.scope == nil || token.scope.reader != reader {
+			return updateInvalidBatch()
+		}
+	}
+	for _, row := range pair.ObsoleteDeletes {
+		if row.span == nil || row.span.reader != reader {
+			return updateInvalidBatch()
+		}
+	}
+	return nil
+}
+
+// treeEmptyOperationV1 is the nonempty-operation row; raw admits a raw-delete-only post-callback plan.
+func treeEmptyOperationV1(op TreeOperationV1, raw bool) bool {
+	return len(op.Primitives) == 0 && len(op.Pair.Mutations) == 0 && !raw
 }
 
 // treeAdmitSlotV1 is treeAdmitV1 that also returns the verdict of its one Pair scan on whether op.HeaderSlot, as
 // one more auxiliary mutation, exceeds a non-reverse Pair mutation cap; the verdict is false without a slot or on
 // error. Only that verdict, never a budget, is held in the frames live during the scan (RUB-1750 resource_boundary).
-func treeAdmitSlotV1(op TreeOperationV1, account *OperationAccount, databaseID [32]byte) (bool, error) {
-	if len(op.Primitives) == 0 && len(op.Pair.Mutations) == 0 {
+func treeAdmitSlotV1(op TreeOperationV1, account *OperationAccount, databaseID [32]byte, raw bool) (bool, error) {
+	if treeEmptyOperationV1(op, raw) {
 		return false, updateInvalidBatch()
 	}
 	if len(op.Primitives) != 0 && account.shared.ceiling != TreeLaneMaxBytes {
@@ -830,7 +986,7 @@ func treePlanCopyBytesV1(pair TreePairV1) uint64 {
 func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
 	extra := treeHeaderSlotRowsV1(op.HeaderSlot)
 	plan := treePlanV1{primitives: op.Primitives, slot: treeOwnHeaderSlotV1(op.HeaderSlot), prepaidReadBytes: op.Pair.PrepaidReadBytes}
-	plan.pair = make([]ownedMutation, len(op.Pair.Mutations), len(op.Pair.Mutations)+extra)
+	plan.pair = make([]ownedMutation, len(op.Pair.Mutations), len(op.Pair.Mutations)+extra+len(op.Pair.ObsoleteDeletes))
 	plan.consulted = make([]ownedConsulted, len(op.Pair.Consulted), len(op.Pair.Consulted)+extra)
 	for j, m := range op.Pair.Mutations {
 		plan.pair[j] = ownedMutation{m.DBI, updateClone(m.Key), m.BeforePresent, m.AfterKind, updateClone(m.Literal), m.RefDBI, updateClone(m.RefKey)}

@@ -420,13 +420,21 @@ func (t *treeSectionV1) pairPreflightV1(pair []ownedMutation, consulted []ownedC
 	return t.pairReadPreflightV1(pair, consulted)
 }
 
-// pairPreflightContextV1 is pairPreflightV1 with the admitted context window as one more consulted domain (D4 site 1).
-func (t *treeSectionV1) pairPreflightContextV1(pair []ownedMutation, consulted []ownedConsulted, window CanonicalContextWindowV1) error {
+// pairPreflightScopedV1 is pairPreflightV1 with the plan's one residual scope (context window or physical
+// scope) as one more consulted domain (D4 site 1).
+func (t *treeSectionV1) pairPreflightScopedV1(pair []ownedMutation, consulted []ownedConsulted, scope largeImageScope) error {
 	_, err := updateNativeImages(t.old, t.handles, pair)
 	if err != nil {
 		return err
 	}
-	return t.pairReadPreflightV1(pair, consulted, contextTreeScopeV1(window))
+	return t.pairReadPreflightV1(pair, consulted, scope)
+}
+
+// treeSealScopesV1 sets each synchronous scope copy's funding: the mutable preflight budget, or nil and the seal.
+func treeSealScopesV1(scopes []largeImageScope, budget *treePairReadBudgetV1, limit uint64) {
+	for i := range scopes {
+		scopes[i].pairBudget, scopes[i].pairLimit = budget, limit
+	}
 }
 
 // pairReadPreflightV1 admits Pair/owner windows for both operation modes. The
@@ -435,6 +443,7 @@ func (t *treeSectionV1) pairPreflightContextV1(pair []ownedMutation, consulted [
 func (t *treeSectionV1) pairReadPreflightV1(pair []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) error {
 	budget := treePairReadBudgetV1{credit: t.pairReadLimit, ledger: t.ledger}
 	defer t.publishReadV1(&budget)
+	treeSealScopesV1(scopes, &budget, 0)
 	var err error
 	for _, side := range canonicalSides {
 		err = canonicalNewPaired(pair, side, &budget)
@@ -503,6 +512,7 @@ func (t *treeSectionV1) pairReadFinalV1(pair []ownedMutation, consulted []ownedC
 	if err != nil {
 		return err
 	}
+	treeSealScopesV1(scopes, nil, t.pairReadLimit)
 	return updateNativeScopedMatch(t.old, t.write, t.handles, pair, nil, "final update image mismatch", scopes...)
 }
 
@@ -675,8 +685,8 @@ func (t *treeSectionV1) finalV1(pair []ownedMutation, consulted []ownedConsulted
 	return nil
 }
 
-// finalContextV1 is finalV1 with the admitted context window compared after the Consulted rows (D4 site 2).
-func (t *treeSectionV1) finalContextV1(pair []ownedMutation, consulted []ownedConsulted, window CanonicalContextWindowV1) error {
+// finalScopedV1 is finalV1 with the plan's residual scope compared after the Consulted rows (D4 site 2).
+func (t *treeSectionV1) finalScopedV1(pair []ownedMutation, consulted []ownedConsulted, scope largeImageScope) error {
 	const diagnostic = "final update image mismatch"
 	for _, entry := range t.pw.entries {
 		err := t.finalEntryV1(entry, diagnostic)
@@ -684,7 +694,7 @@ func (t *treeSectionV1) finalContextV1(pair []ownedMutation, consulted []ownedCo
 			return err
 		}
 	}
-	err := t.pairReadFinalV1(pair, consulted, contextTreeScopeV1(window))
+	err := t.pairReadFinalV1(pair, consulted, scope)
 	if err != nil {
 		return err
 	}
@@ -717,10 +727,11 @@ func (t *treeSectionV1) commitV1(pair []ownedMutation, consulted []ownedConsulte
 	return updateNativeCommit(t.env, t.handles, pair, consulted, t.old, t.write, t.reached, truth)
 }
 
-// commitContextV1 is commitV1 with the admitted context window forwarded to the pair-only readback (D4 site 4).
-func (t *treeSectionV1) commitContextV1(pair []ownedMutation, consulted []ownedConsulted, truth treeTruthV1, window CanonicalContextWindowV1) updateNativeOutcome {
+// commitScopedV1 is commitV1 with the plan's residual scope, sealed, forwarded to the pair-only readback (D4 site 4).
+func (t *treeSectionV1) commitScopedV1(pair []ownedMutation, consulted []ownedConsulted, truth treeTruthV1, scope largeImageScope) updateNativeOutcome {
 	t.ended = true
-	return updateNativeCommit(t.env, t.handles, pair, consulted, t.old, t.write, t.reached, truth, contextTreeScopeV1(window))
+	scope.pairBudget, scope.pairLimit = nil, t.pairReadLimit
+	return updateNativeCommit(t.env, t.handles, pair, consulted, t.old, t.write, t.reached, truth, scope)
 }
 
 // treeWriterEmitterV1 is the writer-position emitter over one section.
@@ -887,6 +898,7 @@ func (r *treeReadbackStateV1) foldPairV1(pair []ownedMutation, consulted []owned
 	if err != nil {
 		return false, false, err
 	}
+	treeSealScopesV1(scopes, nil, r.nativeLimit)
 	return updateNativeReadbackScoped(r.old, r.read, r.handles, pair, nil, oldImage, newImage, scopes...)
 }
 
