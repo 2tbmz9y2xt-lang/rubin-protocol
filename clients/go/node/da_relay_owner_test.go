@@ -358,7 +358,7 @@ func TestDAPreparedCommitStructure(t *testing.T) {
 
 func requireDAAdmissionStructure(t *testing.T) {
 	for path, want := range map[string]string{
-		"da_relay_state.go":          "4dc57e3ae7ba5d0d6f89cff9414bc3758f7df9046871534c609077eed6b0f857",
+		"da_relay_state.go":          "a9b93c47b1724e5b040fe518d9f04ff084afa953eb39607c11491a9cec25f885",
 		"da_relay_record.go":         "2706ab0b65ee400056f6d29e6807d509e937d8d778de5aae5ee36d2a05c8eb11",
 		"da_relay_mutation.go":       "ec140c17b2c9d1c6aaf59aeb2bf14d7881fc27d6bfcb650e05733b3ec7c45644",
 		"da_complete_commit.go":      "3fb456f5668dff7bc089b0472ccc61c2c263d5c7d3917cd512a20182e45709f5",
@@ -391,7 +391,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		for _, spec := range []struct {
 			name, dir         string
 			goFiles, cgoFiles int
-		}{{"node", ".", 74, 0}, {"consensus", "../consensus", 89, 3}} {
+		}{{"node", ".", 75, 0}, {"consensus", "../consensus", 89, 3}} {
 			pkg, err := context.ImportDir(spec.dir, 0)
 			if err != nil {
 				t.Fatal(err)
