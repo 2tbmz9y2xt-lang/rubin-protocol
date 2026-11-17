@@ -561,8 +561,9 @@ func treeScopeAdmitV1(op TreeOperationV1, account *OperationAccount, reader *Rea
 	if uint64(len(pair.ObsoleteDeletes))+uint64(len(pair.ObsoleteConsulted)) > maxUpdateMutations {
 		return updateBoundError()
 	}
-	if err := largeSelectorCounts(pair.LargeConsulted); err != nil {
-		return err
+	countErr := largeSelectorCounts(pair.LargeConsulted)
+	if countErr != nil {
+		return countErr
 	}
 	return treeScopeProvenanceV1(pair, reader)
 }

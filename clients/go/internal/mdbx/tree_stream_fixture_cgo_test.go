@@ -6835,11 +6835,11 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 13, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		if evidence.drift != 1 || evidence.commits != 0 || r.stage != 2 {
+			t.Fatalf("scope final mismatch committed: %+v stage%d %v", evidence, r.stage, r.err)
+		}
 		r.tuple(t, 1, 2, -1)
 		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "final update image mismatch", nil)
-		if evidence.drift != 1 || evidence.commits != 0 {
-			t.Fatalf("scope final mismatch committed: %+v", evidence)
-		}
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc.image(t, tsReopen(t, sc.s, sc.path), false)
 	})
@@ -6847,10 +6847,10 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = sc.run(t, sc.o) })
-		r.tuple(t, 2, 3, -1)
-		if evidence.commits != 1 || evidence.drift != 0 {
-			t.Fatalf("scope strict truth differs: %+v %v", evidence, r.err)
+		if evidence.commits != 1 || evidence.drift != 0 || r.truth != 2 || r.stage != 3 {
+			t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
 		}
+		r.tuple(t, 2, 3, -1)
 		tsConsumed(t, sc.s, sc.o, 2, r.err)
 		sc.image(t, tsReopen(t, sc.s, sc.path), true)
 	})
@@ -6904,21 +6904,21 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 3, 4, sc.key(), func() { r = sc.run(t, sc.o) })
-		r.tuple(t, 3, 3, -1)
-		if evidence.commits != 1 || evidence.drift != 1 {
-			t.Fatalf("scope strict truth differs: %+v %v", evidence, r.err)
+		if evidence.commits != 1 || evidence.drift != 1 || r.truth != 3 || r.stage != 3 {
+			t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
 		}
+		r.tuple(t, 3, 3, -1)
 		tsConsumed(t, sc.s, sc.o, 3, r.err)
 	})
 	t.Run("H1-native-read", func(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 28, 4, sc.key(), func() { r = sc.run(t, sc.o) })
-		r.tuple(t, 1, 1, -1)
 		var engine *EngineError
-		if evidence.gets == 0 || !errors.As(r.err, &engine) || engine.Class != EngineIO {
+		if evidence.gets == 0 || !errors.As(r.err, &engine) || engine.Class != EngineIO || r.stage != 1 {
 			t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
 		}
+		r.tuple(t, 1, 1, -1)
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 	})
 	t.Run("H1-mismatch-then-read-error", func(t *testing.T) {
@@ -6927,15 +6927,15 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 29, 4, sc.key(), func() { r = sc.run(t, sc.o) })
-		r.tuple(t, 3, 3, -1)
 		ce, ok := r.err.(*CommitError)
-		if !ok || evidence.drift != 1 || evidence.commits != 1 || evidence.gets == 0 {
+		if !ok || evidence.drift != 1 || evidence.commits != 1 || evidence.gets == 0 || r.truth != 3 {
 			t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
 		}
 		var engine *EngineError
 		if !errors.As(ce.ReadbackCause, &engine) || engine.Class != EngineIO {
 			t.Fatalf("later scope error lost: %v", ce.ReadbackCause)
 		}
+		r.tuple(t, 3, 3, -1)
 		tsConsumed(t, sc.s, sc.o, 3, r.err)
 	})
 	t.Run("N4-selector-alias", func(t *testing.T) {

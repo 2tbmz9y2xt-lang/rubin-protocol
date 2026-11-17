@@ -4554,7 +4554,7 @@ func psCallback(t *testing.T) {
 			return nil
 		})
 	}()
-	if recovered != marker || reservationLive(o) != before || s.state != storeOPEN {
+	if recovered != any(marker) || reservationLive(o) != before || s.state != storeOPEN {
 		t.Fatalf("scope grant leaked: panic%v live%d state%s", recovered, reservationLive(o), s.state)
 	}
 	r := psRun(t, s, o, LaneOperation, psRawDelete(t, 9))
