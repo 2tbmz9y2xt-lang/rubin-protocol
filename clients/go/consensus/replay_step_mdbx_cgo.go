@@ -187,6 +187,7 @@ func replayStepRun148V1(o *ReplayStepOwnerV1, store *mdbx.Store, reservations *m
 				supplied = nil
 				return c.prepare148V1(reader, input)
 			}, c.lagInputs148V1)
+			c.sourceRead148 = out.sourceRead
 			invocation.out.Truth, invocation.out.Stage, invocation.out.Index, invocation.out.Err, invocation.out.Role = out.Truth, out.Stage, out.Index, out.Err, out.Role
 			return out.Err
 		})
@@ -202,7 +203,7 @@ func replayStepRun148V1(o *ReplayStepOwnerV1, store *mdbx.Store, reservations *m
 
 // release148V1 retires caller backing after native and complete-frame cleanup.
 func (c *replayStepCall) release148V1() {
-	c.reader, c.body, c.old, c.timestamps, c.consulted = nil, nil, nil, nil, nil
+	c.reader, c.body, c.old, c.timestamps, c.consulted, c.path148 = nil, nil, nil, nil, nil, nil
 	c.own, c.tree = replayPathOwn{}, mdbx.TreeAuthorityV1{}
 	c.validate148, c.account = nil, nil
 }
@@ -256,7 +257,11 @@ func (c *replayStepCall) authority148V1(reader *mdbx.Reader) error {
 	}
 	c.bodyBound, c.undoBound = c.promises148V1()
 	c.windowCount = replayStepWindowV1(c.h)
-	return c.account.PrecheckV1(400000000)
+	if err := c.account.PrecheckV1(400000000); err != nil {
+		return err
+	}
+	c.path148, err = c.owner.path.newCall(reader, c.a, nil, c.owner.state.context.Genesis, nil)
+	return err
 }
 
 func replayStepWindowV1(height uint64) uint64 {
@@ -474,6 +479,7 @@ func (c *replayStepCall) pair148V1(rows replayPairRowsV1) (replayPairRowsV1, err
 	rows.Pair.Mutations = append(rows.Pair.Mutations, mdbx.Mutation{DBI: mdbx.SchemaV2DBIs()[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: encoded})
 	slices.SortFunc(rows.Pair.Mutations, replayPairMutationCompareV1)
 	rows.Pair.Consulted, rows.Pair.ContextConsulted = c.finiteRemainder(rows.Pair.Mutations), c.context
+	rows.Pair.PreserveReplayObservations = true
 	return rows, nil
 }
 
@@ -578,8 +584,8 @@ func (c *replayStepCall) lagInputs148V1(_ *mdbx.Reader, result *initial148Comple
 	})
 }
 
-// input148V1 binds the existing spend surface at this height. The two false
-// flags are NOT_OBSERVED validation-only Index fields, never commit evidence.
+// input148V1 binds the spend surface at this height. Its false presence flags
+// are used only by validation; committing indexes use observed membership.
 func (c *replayStepCall) input148V1() (initial148CompleteBlockInputV1, error) {
 	context := c.owner.state.context
 	rotation := bindSpendSurface(context.Rotation, c.h)
@@ -654,6 +660,7 @@ func (c *replayStepCall) selectedCause148V1() error {
 // diagnostic148V1 keeps selected source identity separate from the raw native
 // product, and copies only a diagnostic actually attached to that selection.
 func (c *replayStepCall) diagnostic148V1() {
+	c.select148V1(c.sourceRead148)
 	out, selected := &c.invocation.out, c.selectedCause148V1()
 	out.Cause = selected
 	out.Height, out.Block = c.invocation.observation.h, c.invocation.observation.x
@@ -714,7 +721,7 @@ func (c *replayStepCall) project148V1(runErr error) {
 	}
 	call := c.entry
 	call.planned = replayTreeSnapshotOnly(out.Err)
-	out.Result = replayStepCauses(out.Err, &call)
+	out.Result = replayStepCauses(out.Err, &call, c.sourceRead148)
 	if c.entered && c.a.Replay != nil && c.local148V1() {
 		out.Result, out.Decision = replayEntryRecovery, "target local"
 	}
@@ -735,6 +742,8 @@ type replayStepCall struct {
 	a                                 mdbx.StorageAuthorityV1
 	old                               *mdbx.AuthorityPointV1
 	own                               replayPathOwn
+	path148                           *replayPathCall
+	sourceRead148                      error
 	body                              []byte
 	stored, headerMismatch            bool
 	x, parent, target                 [32]byte
@@ -794,7 +803,15 @@ func (c *replayStepCall) sources(supplied []byte) error {
 	} else {
 		supplied = nil
 	}
-	own, err := c.owner.path.ownLocked(c.reader, c.a, old, c.owner.state.context.Genesis, supplied)
+	var own replayPathOwn
+	if c.path148 != nil {
+		path := c.path148
+		c.path148 = nil
+		path.old, path.supplied = old, supplied
+		own, err = path.own()
+	} else {
+		own, err = c.owner.path.ownLocked(c.reader, c.a, old, c.owner.state.context.Genesis, supplied)
+	}
 	c.own, c.entry.step = own, own.resource
 	if err != nil {
 		if own.missing {
@@ -810,7 +827,19 @@ func (c *replayStepCall) sources(supplied []byte) error {
 	if err := c.targetContext(); err != nil {
 		return err
 	}
+	if err := c.targetWork148V1(); err != nil {
+		return err
+	}
 	return c.bodySource(supplied)
+}
+
+// targetWork148V1 checks the persisted endpoint before acquiring its body.
+func (c *replayStepCall) targetWork148V1() error {
+	target := c.a.Replay.Target
+	if c.owner.path.initial148 && c.h == target.TipHeight && c.work != target.CumulativeChainwork {
+		return selectedSideDefect("replay target cumulative work differs")
+	}
+	return nil
 }
 
 func (c *replayStepCall) bodySource(supplied []byte) error {
@@ -1522,7 +1551,7 @@ func (c *replayStepCall) project() {
 	out := &c.invocation.out
 	out.CanonicalTruth = "OLD"
 	if !c.entered {
-		out.Result = replayStepCauses(out.Err, &replayEntryCall{})
+		out.Result = replayStepCauses(out.Err, &replayEntryCall{}, nil)
 		return
 	}
 	if out.Stage == mdbx.UpdateStageCommitMayHaveCrossed {
@@ -1531,7 +1560,7 @@ func (c *replayStepCall) project() {
 	} else {
 		switch {
 		case out.Truth != mdbx.CommitTruthOld, out.Stage != mdbx.UpdateStagePrewrite, any(out.Err) != any(c.entry.sentinel):
-			out.Result = replayStepCauses(out.Err, &c.entry)
+			out.Result = replayStepCauses(out.Err, &c.entry, nil)
 			if c.carrierInvalid {
 				out.Result = selectedSideInvariant
 			}
@@ -1547,10 +1576,10 @@ func (c *replayStepCall) project() {
 	}
 }
 
-func replayStepCauses(err error, call *replayEntryCall) string {
+func replayStepCauses(err error, call *replayEntryCall, sourceRead error) string {
 	result := ""
 	for _, part := range genesisMDBXCauses(err) {
-		next := replayStepPart(part, call)
+		next := replayStepReadPart148V1(part, call, sourceRead)
 		if next == selectedSideIntegrity || next == selectedSideInvariant {
 			return next
 		}
@@ -1559,6 +1588,16 @@ func replayStepCauses(err error, call *replayEntryCall) string {
 		}
 	}
 	return result
+}
+
+// replayStepReadPart148V1 scopes only the direct committing-source read cause.
+func replayStepReadPart148V1(part error, call *replayEntryCall, sourceRead error) string {
+	if engine, ok := any(part).(*mdbx.EngineError); ok && engine != nil && engine.Operation == "get" && any(part) == any(sourceRead) {
+		scoped := *call
+		scoped.step = replayEntryRecovery
+		return replayEntryPart(part, &scoped)
+	}
+	return replayStepPart(part, call)
 }
 
 func replayStepPart(part error, call *replayEntryCall) string {
@@ -1576,7 +1615,7 @@ func replayStepPart(part error, call *replayEntryCall) string {
 	case *logicalStateFailure:
 		return replayStepLogicalPart(e, call.step)
 	case interface{ Unwrap() error }:
-		return replayStepCauses(e.Unwrap(), call)
+		return replayStepCauses(e.Unwrap(), call, nil)
 	}
 	return replayEntryPart(part, call)
 }

@@ -19,9 +19,8 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
-// stepTreeWorldV1 extends the native btWorld with a constant-UTXO, valid
-// anchor-only history. Literal roots and byte accounting remain independent
-// of the STEP result; no admission, validity or root receipt is supplied.
+// stepTreeWorldV1 builds an anchor-only history with independently derived
+// roots and byte accounting.
 type stepTreeWorldV1 struct {
 	*btWorld
 	step    *ReplayStepOwnerV1
@@ -253,12 +252,12 @@ func stepTreeImageV1(t *testing.T, w *stepTreeWorldV1, h uint64) {
 }
 
 func TestReplayStepTreeV1(t *testing.T) {
-	t.Run("A1_A2_A3_A9", testStepTreeProgressV1)
-	t.Run("A5", testStepTreeContextV1)
-	t.Run("A6_configuration", testStepTreeConfigurationV1)
-	t.Run("A6_R1_R2_R12_R13_H4", testStepTreeBindingV1)
-	t.Run("R6", testStepTreeCapacityV1)
-	t.Run("A11_R3_R11", testStepTreeGrowthV1)
+	t.Run("progress-and-reuse", testStepTreeProgressV1)
+	t.Run("context-window", testStepTreeContextV1)
+	t.Run("configuration", testStepTreeConfigurationV1)
+	t.Run("binding-before-invalidity", testStepTreeBindingV1)
+	t.Run("gross-capacity", testStepTreeCapacityV1)
+	t.Run("growth-before-root", testStepTreeGrowthV1)
 	t.Run("format2", testStepTreeFormat2V1)
 }
 
@@ -266,8 +265,8 @@ func testStepTreeProgressV1(t *testing.T) {
 	for _, tip := range []uint64{0, 15119, 15120, 15840} {
 		for _, present := range []bool{false, true} {
 			t.Run(fmt.Sprintf("tip%d/present%v", tip, present), func(t *testing.T) {
-				// The historical tip0 label covers h0 with no LAG; replay
-				// authority itself requires a nonzero fixed target height.
+				// The zero-tip variant visits genesis without LAG; replay
+				// authority requires a nonzero fixed target height.
 				w := stepTreeNewV1(t, max(tip, 1), 0, nil)
 				if present {
 					w.pair(t, btMutation(3, w.hashes[0][:], w.raw[0][:148]), btMutation(4, w.hashes[0][:], w.raw[0]), btMutation(5, mdbx.UndoManifestKey(w.hashes[0]), stepManifest(0, 0, 1, 0)))
@@ -421,7 +420,7 @@ func (w *stepTreeWorldV1) body(t *testing.T, txs ...[]byte) []byte {
 }
 
 func testStepTreeBindingV1(t *testing.T) {
-	for _, mode := range []string{"short", "legacy116", "root-only", "count-zero", "parse", "merkle", "zero-anchor", "distinct-anchors", "equal-anchors", "wrong-anchor", "witness", "DA", "A10-nonce", "R2-merkle-weight", "R3-weight-anchor-DA"} {
+	for _, mode := range []string{"short", "legacy116", "root-only", "count-zero", "parse", "merkle", "zero-anchor", "distinct-anchors", "equal-anchors", "wrong-anchor", "witness", "DA", "coinbase-nonce", "merkle-before-weight", "weight-before-anchor-DA"} {
 		t.Run(mode, func(t *testing.T) {
 			w := stepTreeNewV1(t, 1, 1, nil)
 			raw := bytes.Clone(w.raw[1])
@@ -442,8 +441,8 @@ func testStepTreeBindingV1(t *testing.T) {
 				raw = append(raw, 1)
 			case "merkle":
 				raw[len(raw)-1] ^= 1
-			case "R2-merkle-weight", "R3-weight-anchor-DA":
-				raw = stepTreeMixedOrderV1(t, w, mode == "R2-merkle-weight")
+			case "merkle-before-weight", "weight-before-anchor-DA":
+				raw = stepTreeMixedOrderV1(t, w, mode == "merkle-before-weight")
 				w.replace(t, 1, raw)
 			default:
 				switch mode {
@@ -461,7 +460,7 @@ func testStepTreeBindingV1(t *testing.T) {
 					tx.TxKind = 0x02
 					tx.DaChunkCore = &DaChunkCore{ChunkHash: sha3.Sum256([]byte{1})}
 					tx.DaPayload = []byte{1}
-				case "A10-nonce":
+				case "coinbase-nonce":
 					tx.TxNonce = 1
 				}
 				encoded, err := MarshalTx(tx)
@@ -480,10 +479,10 @@ func testStepTreeBindingV1(t *testing.T) {
 			i := replayStepRun(w.step, w.s, w.owner, raw)
 			out := i.out
 			logicalMDBXAssert(t, out.NativeCalled && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT" && out.Err != nil && out.Cause != nil && bytes.Equal(raw, before), "binding raw product/source immutability: %+v", out)
-			if mode == "A10-nonce" || mode == "R3-weight-anchor-DA" {
+			if mode == "coinbase-nonce" || mode == "weight-before-anchor-DA" {
 				txErr, ok := any(out.Cause).(*TxError)
 				code := BLOCK_ERR_COINBASE_INVALID
-				if mode == "R3-weight-anchor-DA" {
+				if mode == "weight-before-anchor-DA" {
 					code = BLOCK_ERR_WEIGHT_EXCEEDED
 				}
 				logicalMDBXAssert(t, ok && txErr.Code == code && any(out.Cause) == any(i.observation.incoming) && out.Decision == "consensus invalid" && out.Result == "" && out.Height == 1 && out.Block == w.hashes[1] && errors.Is(out.Err, i.observation.incoming) == false, "bound original invalidity and distinct raw sentinel: %+v", out)
@@ -542,8 +541,8 @@ func testStepTreeCapacityV1(t *testing.T) {
 	}
 }
 
-// testStepTreeGrowthV1 uses actual matured funding, real signatures, independent
-// final leaves and the real complete/native path at both literal growth edges.
+// stepTreeGrowthWorldV1 builds matured funding, signed spends and independent
+// final leaves at the two growth boundaries.
 func stepTreeGrowthWorldV1(t *testing.T, mode string, tip uint64) (*stepTreeWorldV1, map[Outpoint]UtxoEntry) {
 	t.Helper()
 	kp := mustMLDSA87Keypair(t)

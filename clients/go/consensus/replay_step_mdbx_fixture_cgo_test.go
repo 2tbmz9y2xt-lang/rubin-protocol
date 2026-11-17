@@ -17,19 +17,161 @@ import (
 )
 
 func TestReplayStepTreeV1Fixture(t *testing.T) {
-	t.Run("A4", testStepTreeRetentionV1)
-	t.Run("R7_R8_R9_R10", testStepTreeSourcesV1)
-	t.Run("R9_LAG", testStepTreeLagV1)
-	t.Run("A3_R4_R5_H1", testStepTreeUndoV1)
-	t.Run("R6_H1_capacity_abort", testStepTreeCapacityAbortV1)
-	t.Run("R6_floor", testStepTreeFloorV1)
-	t.Run("H1_H3_native", testStepTreeNativeV1)
-	t.Run("A5_R9_H2", testStepTreeContextFaultV1)
-	t.Run("H1_unwind", testStepTreeUnwindV1)
-	t.Run("H1_retained", testStepTreeRetainedV1)
-	t.Run("R4_H4", testStepTreeGlobalRowsV1)
-	t.Run("R11", testStepTreeGrowthBeforeRootV1)
-	t.Run("R9_unequal", testStepTreeUnequalV1)
+	t.Run("retention", testStepTreeRetentionV1)
+	t.Run("source-errors", testStepTreeSourcesV1)
+	t.Run("lag-parent", testStepTreeLagV1)
+	t.Run("undo-family", testStepTreeUndoV1)
+	t.Run("capacity-abort", testStepTreeCapacityAbortV1)
+	t.Run("reservation-floor", testStepTreeFloorV1)
+	t.Run("native-outcomes", testStepTreeNativeV1)
+	t.Run("context-drift", testStepTreeContextFaultV1)
+	t.Run("unwind", testStepTreeUnwindV1)
+	t.Run("retained-resources", testStepTreeRetainedV1)
+	t.Run("hash-global-rows", testStepTreeGlobalRowsV1)
+	t.Run("growth-before-root", testStepTreeGrowthBeforeRootV1)
+	t.Run("lag-root-inequality", testStepTreeUnequalV1)
+	t.Run("target-work-before-body", testStepTreeTargetWorkV1)
+	t.Run("path-capacity-before-tip", testStepTreePathCapacityV1)
+	t.Run("stored-source-read", testStepTreeStoredSourceV1)
+	t.Run("preserved-observations", testStepTreeObservationsV1)
+}
+
+func testStepTreeTargetWorkV1(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprint(corrupt), func(t *testing.T) {
+			w := stepTreeNewV1(t, 1, 1, nil)
+			supplied := w.raw[1]
+			if corrupt {
+				w.a.Authority.Replay.Target.CumulativeChainwork[39]++
+				w.setAuthority(t)
+				logicalMDBXAssert(t, w.step.DiscardV1(), "discard completed path")
+				supplied = []byte{0xff}
+			}
+			var out ReplayStepOutcomeV1
+			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = w.step.StepReplayMDBX(w.s, w.owner, supplied) })
+			logicalMDBXAssert(t, err == nil, "target work observation: %v", err)
+			if !corrupt {
+				stepTreeProgressV1(t, w, 1, out)
+				return
+			}
+			failure, ok := any(out.Cause).(*selectedSideFailure)
+			logicalMDBXAssert(t, ok && failure.cause.Error() == "replay target cumulative work differs" && any(out.Err) == any(out.Cause) && out.Result == "TERMINAL_STORE_INTEGRITY(canonical)" && out.Decision == "" && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT" && out.Height == 1 && out.Block == w.hashes[1] && out.CanonicalTruth == "OLD" && !out.HasObservation && out.Needed == nil, "target work original integrity result: %+v", out)
+			logicalMDBXAssert(t, evidence.OldGets[1] == 0 && evidence.OldGets[4] == 0 && evidence.NodeGets == 0 && evidence.NodePulls == 0 && evidence.BeginWrite == 0 && evidence.Commits == 0, "body or validation preceded target work: %+v", evidence)
+			stepTreeUnchangedV1(t, w, 1)
+			btReservationsReleased(t, w.owner)
+		})
+	}
+}
+
+func testStepTreePathCapacityV1(t *testing.T) {
+	for _, limit := range []uint64{63, 64} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			w := stepTreeNewV1(t, 1, 0, nil)
+			w.step.path.limit = limit
+			var out ReplayStepOutcomeV1
+			var endpoint mdbx.CanonicalTipStepFixtureEvidence
+			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
+				var tipErr error
+				endpoint, tipErr = mdbx.FixtureCanonicalTipStep(w.s, 2, nil, nil, false, func() { out = w.call(0) })
+				logicalMDBXAssert(t, tipErr == nil, "capacity endpoint fixture: %v", tipErr)
+			})
+			logicalMDBXAssert(t, err == nil && out.NativeCalled && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT" && any(out.Err) == any(out.Cause) && out.Decision == "" && out.Needed == nil && !out.HasObservation, "capacity native tuple: %+v/%v", out, err)
+			logicalMDBXAssert(t, evidence.OldGets[0] == 1 && evidence.OldGets[1] == 0 && evidence.OldGets[2] == 0 && evidence.OldGets[3] == 0 && evidence.OldGets[4] == 0 && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.NodeGets == 0 && evidence.NodePulls == 0, "capacity refusal reached establishment: %+v", evidence)
+			logicalMDBXAssert(t, w.step.path.slot == nil && w.step.path.release == nil && !w.step.path.guarded && w.view.versions+w.view.protects+w.view.headerCalls+w.view.releases == 0 && w.step.path.dst148 == ([148]byte{}) && mdbx.FixtureReservationLive(w.owner) == 0, "capacity retained path or charge")
+			if limit == 64 {
+				e, ok := any(out.Cause).(*mdbx.EngineError)
+				logicalMDBXAssert(t, ok && out.Result == selectedSideCanonical && e.Operation == "prefix-page" && e.Class == "IO" && e.Code == 5 && e.Diagnostic == "error 5" && e.Cause == nil && endpoint.Faults == 1 && endpoint.Queries == 1, "exact path admission reaches active tip: %+v/%+v", out, endpoint)
+				w.btWorld.reopen(t)
+			} else {
+				logicalMDBXAssert(t, out.Result == "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)" && endpoint == (mdbx.CanonicalTipStepFixtureEvidence{}), "insufficient path precedes active tip error: %+v/%+v", out, endpoint)
+			}
+			w.step.path.limit = 64
+			stepTreeProgressV1(t, w, 0, w.call(0))
+		})
+	}
+}
+
+func testStepTreeStoredSourceV1(t *testing.T) {
+	t.Run("retained-abort-projection", testStepTreeStoredRetainedV1)
+	for _, abort := range []bool{false, true} {
+		t.Run(fmt.Sprint(abort), func(t *testing.T) {
+			w := stepTreeNewV1(t, 1, 1, nil)
+			stepTreeSeedV1(t, w, 4, w.hashes[1][:], w.raw[1])
+			var out ReplayStepOutcomeV1
+			var gets uint32
+			scenario := mdbx.SelectedDamageProbeOnly
+			if abort {
+				scenario = mdbx.SelectedDamageAbortEIO
+			}
+			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, scenario, 0, nil, func() {
+				var bodyErr error
+				gets, bodyErr = mdbx.FixtureBodyThirdGetEIO(w.s, w.hashes[1][:], func() { out = w.call(1) })
+				logicalMDBXAssert(t, bodyErr == nil, "stored source fixture: %v", bodyErr)
+			})
+			logicalMDBXAssert(t, err == nil && gets == 3 && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0, "stored source third read before writer: %+v/%d/%v", evidence, gets, err)
+			raw := out.Err
+			if abort {
+				parts, ok := raw.(interface{ Unwrap() []error })
+				logicalMDBXAssert(t, ok && len(parts.Unwrap()) == 2 && evidence.Faults == 1, "source and abort causes: %v", raw)
+				raw = parts.Unwrap()[0]
+				btfEngine(t, parts.Unwrap()[1], "abort", mdbx.EngineIO, 5, "error 5")
+			}
+			e, ok := any(out.Cause).(*mdbx.EngineError)
+			logicalMDBXAssert(t, ok && any(raw) == any(out.Cause) && out.NativeCalled && out.Result == "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)" && out.Decision == "" && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "CURRENT" && out.Height == 1 && out.Block == w.hashes[1] && out.CanonicalTruth == "OLD" && out.Needed == nil && !out.HasObservation && e.Operation == "get" && e.Class == "IO" && e.Code == 5 && e.Diagnostic == "error 5" && e.Cause == nil && !e.ReopenRequired && e.TreeObservation == nil, "stored source original read projection: %+v", out)
+			calls := 0
+			next := w.s.View(func(*mdbx.Reader) error { calls++; return nil })
+			logicalMDBXAssert(t, calls == 0 && any(next) == any(out.Err), "stored source consumption changed")
+			w.btWorld.reopen(t)
+			stepTreeUnchangedV1(t, w, 1)
+			w.read(t, 4, w.hashes[1][:], w.raw[1])
+			btReservationsReleased(t, w.owner)
+		})
+	}
+}
+
+// testStepTreeStoredRetainedV1 checks the selected read inside an abort error.
+func testStepTreeStoredRetainedV1(t *testing.T) {
+	for _, role := range []string{"CURRENT", "LAG"} {
+		t.Run(role, func(t *testing.T) {
+			source := &mdbx.EngineError{Operation: "get", Class: "IO", Code: 5, Diagnostic: "error 5"}
+			retained := &mdbx.EngineError{Operation: "abort", Class: "LocalInvariant", Code: -30416, Diagnostic: "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread", Cause: source, ReopenRequired: true}
+			i := &replayStepInvocation{out: ReplayStepOutcomeV1{NativeCalled: true, Truth: 1, Stage: 1, Index: -1, Err: retained, Role: role}}
+			step := &replayStepCall{invocation: i, h: 5, x: [32]byte{7}, sourceRead148: source}
+			step.project148V1(retained)
+			logicalMDBXAssert(t, any(i.out.Cause) == any(source) && any(i.observation.incoming) == any(source) && any(i.out.Err) == any(retained) && i.out.Result == "TERMINAL_LOCAL_INVARIANT(evidence)" && i.out.Decision == "" && i.out.Truth == 1 && i.out.Stage == 1 && i.out.Index == -1 && i.out.Role == role && i.out.Height == 5 && i.out.Block == ([32]byte{7}) && i.out.CanonicalTruth == "OLD" && !i.out.HasObservation && i.out.Needed == nil && source.Cause == nil, "selected read survives retained abort projection: %+v", i.out)
+			btfAbortResult(t, i.out.Err, 10, source)
+		})
+	}
+}
+
+func testStepTreeObservationsV1(t *testing.T) {
+	for _, domain := range []string{"tip", "absent-undo"} {
+		t.Run(domain, func(t *testing.T) {
+			w := stepTreeNewV1(t, 15840, 5, nil)
+			w.a.Authority.Replay.TargetProfile = 1
+			w.setAuthority(t)
+			var out ReplayStepOutcomeV1
+			var counts mdbx.PairReadObservation
+			observe := func() {
+				var err error
+				counts, err = mdbx.FixturePairReadObservation(w.s, nil, func() { out = w.call(5) })
+				logicalMDBXAssert(t, err == nil, "replay observation fixture: %v", err)
+			}
+			if domain == "tip" {
+				value := mdbx.ChainValue(w.hashes[4], w.hashes[3], w.endpoint(4).CumulativeChainwork)
+				evidence, err := mdbx.FixtureCanonicalTipStep(w.s, 4, stepKey(3, 4), value, true, observe)
+				logicalMDBXAssert(t, err == nil && evidence.Drift == 1 && evidence.Queries == 2 && evidence.Commits == 0, "retained callback tip equality: %+v/%v", evidence, err)
+			} else {
+				drift, err := mdbx.FixtureWriteSnapshotDrift(w.s, 5, mdbx.UndoManifestKey(w.hashes[5]), observe)
+				logicalMDBXAssert(t, err == nil && drift == 1, "physical absent undo drift: %d/%v", drift, err)
+			}
+			e, ok := any(out.Cause).(*mdbx.EngineError)
+			logicalMDBXAssert(t, ok && out.NativeCalled && out.Result == "STALE_LOCAL_PLAN" && out.Decision == "" && out.Truth == 1 && out.Stage == 1 && out.Index == -1 && out.Role == "" && any(out.Err) == any(out.Cause) && e.Operation == "update" && e.Class == "StateMismatch" && e.Code == -30779 && e.Diagnostic == "OLD/write snapshot mismatch" && counts.Writes == 0 && !out.HasObservation, "preserved replay equality before writes: %+v/%+v", out, counts)
+			w.btWorld.reopen(t)
+			stepTreeUnchangedV1(t, w, 5)
+			btReservationsReleased(t, w.owner)
+		})
+	}
 }
 
 func stepTreeSeedV1(t *testing.T, w *stepTreeWorldV1, rank uint8, key, value []byte) {
@@ -469,8 +611,7 @@ func testStepTreeUndoV1(t *testing.T) {
 	}
 }
 
-// testStepTreeFloorV1 reaches public STEP before funding; bare account tests
-// cannot detect a zero-charge admission inserted outside the native operation.
+// testStepTreeFloorV1 checks authority and funding order through public STEP.
 func testStepTreeFloorV1(t *testing.T) {
 	for _, limit := range []uint64{0, 805306367} {
 		for _, authority := range []string{"replay", "not-applicable", "malformed"} {
@@ -672,10 +813,8 @@ func testStepTreeNativeIndexV1(t *testing.T) {
 	}
 }
 
-// stepTreeContextStoreV1 is a bounded native-to-STEP-private join probe. It
-// preserves the qualified STEP descriptor and rebinds only the submitted one
-// so the real native Q owner produces its incomplete-OLD tuple. This is not a
-// full public StepReplayMDBX G2 execution.
+// stepTreeContextStoreV1 preserves the prepared context and substitutes an
+// absent submitted window so native context qualification returns its error.
 type stepTreeContextStoreV1 struct {
 	store    *mdbx.Store
 	original mdbx.CanonicalContextWindowV1
@@ -698,7 +837,7 @@ func (s *stepTreeContextStoreV1) UpdateTreeV1(account *mdbx.OperationAccount, pr
 }
 
 func testStepTreeContextFaultV1(t *testing.T) {
-	t.Run("G2_private_join", testStepTreeContextJoinV1)
+	t.Run("same-old-incomplete-context", testStepTreeContextJoinV1)
 	for _, h := range []uint64{10080, 20160} {
 		for _, late := range []bool{false, true} {
 			t.Run(fmt.Sprintf("drift%d/late%v", h, late), func(t *testing.T) {

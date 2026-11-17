@@ -88,6 +88,7 @@ type replayPathCall struct {
 	genesis    PublishedGenesisContextV1
 	supplied   []byte
 	h          uint64
+	n          uint64
 	out        replayPathOwn
 	sameEntry  []byte
 	sameHeader []byte
@@ -103,9 +104,6 @@ func (p *replayPathOwner) ownLocked(reader *mdbx.Reader, authority mdbx.StorageA
 	c, err := p.newCall(reader, authority, oldActive, genesis, supplied)
 	if err != nil {
 		return replayPathOwn{}, err
-	}
-	if err := c.establish(); err != nil {
-		return c.out, err
 	}
 	return c.own()
 }
@@ -123,6 +121,13 @@ func (p *replayPathOwner) newCall(reader *mdbx.Reader, a mdbx.StorageAuthorityV1
 	if rp.Cursor.Kind == mdbx.ReplayCursorAppliedV1 {
 		c.h = rp.Cursor.Height + 1
 	}
+	if p.slot == nil {
+		var ok bool
+		c.n, ok = replayPathAdmit(rp.Target.TipHeight, c.h, p.limit)
+		if !ok {
+			return nil, replayRecoveryRefusal(selectedSideCapacity, "replay path retention exceeds its limit")
+		}
+	}
 	return c, nil
 }
 
@@ -139,21 +144,17 @@ func replayPathAdmit(tip, lo, limit uint64) (uint64, bool) {
 	return n, n <= math.MaxInt && n <= limit/32
 }
 
-// establish admits and allocates N hashes, walks from the target tip, and publishes the slot only on success. The
+// establish allocates the admitted N hashes, walks from the target tip, and publishes the slot only on success. The
 // target/genesis contradiction is checked on every invocation, before a completed slot is reused.
 func (c *replayPathCall) establish() error {
 	if c.p.slot != nil {
 		return c.genesisBound()
 	}
 	target := c.rp.Target
-	n, ok := replayPathAdmit(target.TipHeight, c.h, c.p.limit)
-	if !ok {
-		return replayRecoveryRefusal(selectedSideCapacity, "replay path retention exceeds its limit")
-	}
 	if err := c.genesisBound(); err != nil {
 		return err
 	}
-	s := &replayPathSlot{key: replayPathKey{c.rp.TargetGenerationID, target}, lo: c.h, hashes: make([][32]byte, n)}
+	s := &replayPathSlot{key: replayPathKey{c.rp.TargetGenerationID, target}, lo: c.h, hashes: make([][32]byte, c.n)}
 	if err := c.walk(s); err != nil {
 		return err
 	}
@@ -369,8 +370,11 @@ func (p *replayPathOwner) guard() error {
 	return nil
 }
 
-// own reads the own height h from the completed slot, reusing the walk's same-attempt reads.
+// own establishes or reuses the slot and reads height h with the walk's same-attempt reads.
 func (c *replayPathCall) own() (replayPathOwn, error) {
+	if err := c.establish(); err != nil {
+		return c.out, err
+	}
 	s := c.p.slot
 	if s.attached && c.h <= s.a {
 		return c.ownCanonical()
