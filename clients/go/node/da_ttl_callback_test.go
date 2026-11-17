@@ -3,6 +3,7 @@ package node
 import (
 	"crypto/sha3"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"slices"
@@ -152,10 +153,12 @@ func TestDATTLCallbackBodyRefusalChangesNothing(t *testing.T) {
 			f.setOwnerReadyTTL(r.stateBID, 1) // one would-be expiry and one would-be decrease
 			row.corrupt(f, r)
 			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			indexBefore := daTTLIndexKeys(f.relay)
 			if err := runDATTLBodyInGuard(t, f); !errors.Is(err, errDARelayImageIncompatible) {
 				t.Fatalf("body: err=%v, want %v", err, errDARelayImageIncompatible)
 			}
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+			requireDATTLIndexUnchanged(t, f.relay, indexBefore, true)
 		})
 	}
 }
@@ -164,6 +167,31 @@ func TestDATTLCallbackBodyRefusalChangesNothing(t *testing.T) {
 // that are not State C, so the bounded walk can miss no State A or B record.
 func requireDATTLIndexExact(t *testing.T, relay *DARelayState) {
 	t.Helper()
+	if msg := daTTLIndexMismatch(relay); msg != "" {
+		t.Fatal(msg)
+	}
+}
+
+// daTTLIndexKeys reads the State A/B bucket in its link order.
+func daTTLIndexKeys(relay *DARelayState) [][32]byte {
+	relay.mu.Lock()
+	defer relay.mu.Unlock()
+	return relay.relations.incompleteKeys()
+}
+
+// requireDATTLIndexUnchanged pins the State A/B bucket after a refusal to its link order before
+// the body, and to exactness whenever the row's corruption left it exact before the body.
+func requireDATTLIndexUnchanged(t *testing.T, relay *DARelayState, before [][32]byte, exactBefore bool) {
+	t.Helper()
+	if after := daTTLIndexKeys(relay); !slices.Equal(after, before) {
+		t.Fatalf("refusal changed the State A/B index: %x, want %x", after, before)
+	}
+	if exactBefore {
+		requireDATTLIndexExact(t, relay)
+	}
+}
+
+func daTTLIndexMismatch(relay *DARelayState) string {
 	relay.mu.Lock()
 	defer relay.mu.Unlock()
 	want := map[[32]byte]bool{}
@@ -175,19 +203,20 @@ func requireDATTLIndexExact(t *testing.T, relay *DARelayState) {
 	got := map[[32]byte]bool{}
 	for _, daID := range relay.relations.incompleteKeys() {
 		if got[daID] {
-			t.Fatalf("State A/B index lists %x twice", daID[:1])
+			return fmt.Sprintf("State A/B index lists %x twice", daID[:1])
 		}
 		got[daID] = true
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("State A/B index=%v, want %v", got, want)
+		return fmt.Sprintf("State A/B index=%v, want %v", got, want)
 	}
+	return ""
 }
 
-// TestDATTLCallbackBodyRefusalArms is the body-level C11 row per refusal arm: each arm returns
-// its own error and leaves the DA image and the owner unchanged. For every row except the four
-// member-walk rows marked below, removing the arm lets the body apply and fails the row at its
-// error assertion.
+// TestDATTLCallbackBodyRefusalArms is the body-level C11 row per refusal arm: each row corrupts
+// one stored value, asserts the body's returned error, and asserts that the DA image, the owner
+// and the State A/B index are unchanged after the refusal (the index also exact whenever the
+// row's corruption left it exact before the body).
 func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 	for _, row := range []struct {
 		name    string
@@ -221,14 +250,12 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			token := r.setup.sets[r.stateAID].chunks[0].member.token
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.byToken[token].finalized = false })
 		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "DA victim claim mismatch") }},
-		// The same claim on a survivor is no victim, so the member proof is what refuses it; it
-		// is also the check that refuses the row above once the victim preflight is removed.
+		// The same unfinalized claim on a survivor, which is no victim.
 		{"survivor claim not finalized", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			token := r.setup.sets[r.stateAID].chunks[0].member.token
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.byToken[token].finalized = false })
 		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
-		// A survivor is no victim, so only the member proof's outpoint-row comparison sees a
-		// missing or different row for its input.
+		// A survivor's input with its owner row missing or different.
 		{"survivor outpoint row missing", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { delete(o.byOutpoint, r.stateA.inputs[0]) })
 		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
@@ -239,8 +266,7 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 				o.byOutpoint[r.stateA.inputs[0]] = row
 			})
 		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
-		// An expiring member is a victim, so the victim preflight's input match refuses the same
-		// edit first.
+		// The same owner-row edit on an expiring member, which is a victim.
 		{"expiring outpoint row different", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			f.setOwnerReadyTTL(r.stateAID, 1)
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) {
@@ -289,12 +315,8 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 				s.relations.scalarRecord(r.stateAID, record)
 			})
 		}, func(err error) bool { return errors.Is(err, errDARelayTTLRecordKeyMismatch) }},
-		// The next four rows are refused by ownerReadyTTLMembers before the owner lock, and their
-		// arms are equivalent: with an arm removed, the claim proof ownerReadyTTLMembersBoundLocked
-		// under the owner lock refuses the same state with the same errDARelayImageIncompatible, so
-		// the row still passes. For the three token rows either half of that proof refuses (the
-		// claim match or the outpoint-row comparison); for the input row only the outpoint-row
-		// comparison does.
+		// The next four rows corrupt a member token or input set and assert
+		// errDARelayImageIncompatible.
 		{"zero member token", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			editDATTLChunkMember(f, r.stateAID, func(m *daRelayMemberIdentity) { m.token = PendingOutpointToken{} })
 		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
@@ -306,9 +328,7 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			editDATTLChunkMember(f, r.stateAID, func(m *daRelayMemberIdentity) { m.token = token })
 		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
 		{"input claimed by two members", reuseDATTLInputInStateB, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
-		// The State B commit member stores State A's txid, which its own parsed bytes contradict:
-		// bindRetainedRecord's canonicalDARetainedBinding refuses it, reached from
-		// checkOwnerReadyRetainedRecordLocked while the plan is built.
+		// The State B commit member stores State A's txid, which its own parsed bytes contradict.
 		{"commit member txid contradicts its parsed identity", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			f.mutateRelay(func(s *DARelayState) {
 				record := s.relations.recordValue(r.stateBID)
@@ -322,8 +342,7 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			return errors.As(err, &terminal) && strings.Contains(err.Error(), "contradicts its parsed identity")
 		}},
 		// A count of zero is an inconsistent stored value (ATOM: underflow invalidates the plan
-		// before mutation). ownerReadyRemovalGateFails refuses it first; the survivor bound in
-		// checkOwnerReadyRemovalSurvivor refuses the underflowed count when that clause is gone.
+		// before mutation); the rows assert the bare errDARelayImageIncompatible.
 		{"State A count zero", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			f.setOwnerReadyTTL(r.stateAID, 0)
 		}, daTTLBareIncompatible},
@@ -344,12 +363,14 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			owner := f.mp.pendingOutpoints
 			row.corrupt(f, r)
 			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(owner)
+			indexBefore, exactBefore := daTTLIndexKeys(f.relay), daTTLIndexMismatch(f.relay) == ""
 			err := runDATTLBodyInGuard(t, f)
-			t.Logf("refusal: %v", err)
+			t.Logf("refusal: %v (index exact before the body: %v)", err, exactBefore)
 			if !row.want(err) {
 				t.Fatalf("body: err=%v, want this arm's refusal", err)
 			}
 			requireDANonReplayUnchanged(t, f.relay, owner, before, ownerBefore)
+			requireDATTLIndexUnchanged(t, f.relay, indexBefore, exactBefore)
 		})
 	}
 }
