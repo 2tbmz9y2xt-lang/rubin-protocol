@@ -1293,22 +1293,31 @@ func icbLeafKindV1(leaves map[[36]byte][]byte, op Outpoint, value uint64, kind u
 }
 
 // icbRootV1 is the written CSM 2.6 recursion with literal 19-byte domains.
-func icbRootV1(leaves map[[36]byte][]byte) [32]byte {
+func icbRootV1(leaves map[[36]byte][]byte, observers ...func(mdbx.TreeNodeIDV1, []byte)) [32]byte {
 	keys := make([][36]byte, 0, len(leaves))
 	for k := range leaves {
 		keys = append(keys, k)
 	}
 	slices.SortFunc(keys, func(x, y [36]byte) int { return bytes.Compare(x[:], y[:]) })
-	return icbNodeV1(keys, leaves)
+	var observe func(mdbx.TreeNodeIDV1, []byte)
+	if len(observers) != 0 {
+		observe = observers[0]
+	}
+	return icbNodeV1(keys, leaves, observe).Digest
 }
 
-func icbNodeV1(keys [][36]byte, leaves map[[36]byte][]byte) [32]byte {
+// icbNodeV1 optionally emits the same recursion's complete expected node rows.
+func icbNodeV1(keys [][36]byte, leaves map[[36]byte][]byte, observe func(mdbx.TreeNodeIDV1, []byte)) mdbx.TreeChildV1 {
 	domain, _ := hex.DecodeString("525542494e5f5554584f5f545245455f5631")
 	switch len(keys) {
 	case 0:
-		return sha3.Sum256(append(domain, 0x00))
+		return mdbx.TreeChildV1{Digest: sha3.Sum256(append(domain, 0x00))}
 	case 1:
-		return sha3.Sum256(append(append(domain, 0x01), leaves[keys[0]]...))
+		leaf := mdbx.TreeChildV1{ID: mdbx.TreeNodeIDV1{Kind: 1, Depth: 288, RoutingKey: keys[0]}, Digest: sha3.Sum256(append(append(domain, 0x01), leaves[keys[0]]...))}
+		if observe != nil {
+			observe(leaf.ID, leaf.Digest[:])
+		}
+		return leaf
 	}
 	d := 0
 	for icbBitV1(keys[0], d) == icbBitV1(keys[len(keys)-1], d) {
@@ -1320,10 +1329,20 @@ func icbNodeV1(keys [][36]byte, leaves map[[36]byte][]byte) [32]byte {
 		prefix[d/8] = keys[0][d/8] & byte(0xff<<(8-d%8))
 	}
 	split := slices.IndexFunc(keys, func(k [36]byte) bool { return icbBitV1(k, d) == 1 })
-	left, right := icbNodeV1(keys[:split], leaves), icbNodeV1(keys[split:], leaves)
+	left, right := icbNodeV1(keys[:split], leaves, observe), icbNodeV1(keys[split:], leaves, observe)
 	pre := binary.BigEndian.AppendUint16(append(domain, 0x02), uint16(d))
-	pre = append(append(append(pre, prefix[:]...), left[:]...), right[:]...)
-	return sha3.Sum256(pre)
+	pre = append(append(append(pre, prefix[:]...), left.Digest[:]...), right.Digest[:]...)
+	branch := mdbx.TreeChildV1{ID: mdbx.TreeNodeIDV1{Kind: 2, Depth: uint16(d), Prefix: prefix}, Digest: sha3.Sum256(pre)}
+	if observe != nil {
+		var value []byte
+		for _, child := range [2]mdbx.TreeChildV1{left, right} {
+			key, _ := mdbx.TreeNodeKey(1, child.ID)
+			value = append(value, key[8:]...)
+			value = append(value, child.Digest[:]...)
+		}
+		observe(branch.ID, value)
+	}
+	return branch
 }
 
 func icbBitV1(k [36]byte, i int) byte { return (k[i/8] >> (7 - i%8)) & 1 }

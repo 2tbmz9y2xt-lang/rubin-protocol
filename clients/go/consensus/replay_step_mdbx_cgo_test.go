@@ -115,6 +115,44 @@ func stepTreeRootV1(rows map[Outpoint]UtxoEntry) [32]byte {
 	return icbRootV1(leaves)
 }
 
+// stepTreeStateV1 checks complete large images with the existing independent
+// CSM recursion, including each leaf and branch's exact persisted record.
+func stepTreeStateV1(t *testing.T, w *btWorld, generation uint64, endpoint mdbx.TreeEndpointV1, entries map[Outpoint]UtxoEntry) {
+	t.Helper()
+	leaves := make(map[[36]byte][]byte, len(entries))
+	var total uint64
+	for op, entry := range entries {
+		value := btValue(btFrame(entry.Value, entry.CovenantType, entry.CovenantData), entry.CreationHeight, entry.CreatedByCoinbase)
+		total += 36 + uint64(len(value))
+		w.read(t, 1, btUTXOKey(generation, op), value)
+		icbLeafKindV1(leaves, op, entry.Value, entry.CovenantType, entry.CovenantData, entry.CreationHeight, entry.CreatedByCoinbase)
+	}
+	counter := binary.BigEndian.AppendUint64(nil, total)
+	w.read(t, 0, btMeta(0x10, generation), binary.BigEndian.AppendUint64(counter, uint64(len(entries))))
+	err := w.s.View(func(reader *mdbx.Reader) error {
+		var top mdbx.TreeNodeIDV1
+		digest := icbRootV1(leaves, func(id mdbx.TreeNodeIDV1, value []byte) {
+			key, err := mdbx.TreeNodeKey(generation, id)
+			logicalMDBXAssert(t, err == nil, "independent node identity: %v", err)
+			got, present, err := reader.Get(mdbx.TreeSchemaV1DBIs()[8], key)
+			logicalMDBXAssert(t, err == nil && present, "complete node read %x: %t/%v", key, present, err)
+			logicalMDBXAssert(t, bytes.Equal(got, value), "complete node %x: %x, want %x", key, got, value)
+			top = id
+		})
+		root, present, err := reader.ReadTreeRootBindingV1(generation)
+		logicalMDBXAssert(t, err == nil && present, "complete root read: %t/%v", present, err)
+		logicalMDBXAssert(t, root.Endpoint == endpoint && root.RootDigest == digest, "complete independent root: %+v", root)
+		logicalMDBXAssert(t, root.DatabaseID == ([32]byte{7}) && root.CommitmentVersion == 1 && root.Assurance.Kind == 1, "complete root identity: %+v", root)
+		wantTop := mdbx.TreeTopV1{}
+		if len(entries) != 0 {
+			wantTop = mdbx.TreeTopV1{Kind: mdbx.TreeTopKindV1(top.Kind), Node: &top}
+		}
+		logicalMDBXAssert(t, reflect.DeepEqual(root.Top, wantTop), "complete independent top: %+v, want %+v", root.Top, wantTop)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "complete state View: %v", err)
+}
+
 func (w *stepTreeWorldV1) setAuthority(t *testing.T) {
 	t.Helper()
 	value, err := w.a.Encode()
@@ -564,7 +602,7 @@ func testStepTreeGrowthV1(t *testing.T) {
 			if mode == "equal" {
 				w.reopen(t)
 				stepTreeProgressV1(t, w, 200, i.out)
-				btState(t, w.btWorld, 1, w.endpoint(200), final)
+				stepTreeStateV1(t, w.btWorld, 1, w.endpoint(200), final)
 				return
 			}
 			code := BLOCK_ERR_STATE_GROWTH_EXCEEDED
@@ -574,7 +612,7 @@ func testStepTreeGrowthV1(t *testing.T) {
 			e, ok := any(i.out.Cause).(*TxError)
 			logicalMDBXAssert(t, ok && e.Code == code && any(i.out.Cause) == any(i.observation.incoming) && i.out.Decision == "consensus invalid" && i.out.Err != nil && i.out.Truth == 1 && i.out.Stage == 1 && i.out.Role == "CURRENT" && i.out.Height == 200 && i.out.Block == w.hashes[200], "growth/subsidy before unequal root: %+v", i.out)
 			w.read(t, 2, stepKey(1, 200), nil)
-			btState(t, w.btWorld, 1, w.endpoint(199), w.rows)
+			stepTreeStateV1(t, w.btWorld, 1, w.endpoint(199), w.rows)
 			btReservationsReleased(t, w.owner)
 		})
 	}

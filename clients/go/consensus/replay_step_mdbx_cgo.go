@@ -294,8 +294,8 @@ func (c *replayStepCall) undo148V1(result *initial148CompleteBlockResultV1) ([]m
 		return nil, localLogicalStateFailure("validated replay undo count differs")
 	}
 	var generated [16]byte
-	binary.BigEndian.PutUint64(generated[:8], c.owner.state.generated.Hi)
-	binary.BigEndian.PutUint64(generated[8:], c.owner.state.generated.Lo)
+	binary.BigEndian.PutUint64(generated[:8], result.transition.alreadyGeneratedN1.Hi)
+	binary.BigEndian.PutUint64(generated[8:], result.transition.alreadyGeneratedN1.Lo)
 	rows := make([]mdbx.Mutation, 1, count+1)
 	rows[0] = mdbx.Mutation{DBI: mdbx.SchemaV2DBIs()[5], Key: mdbx.UndoManifestKey(c.x), AfterKind: mdbx.AfterLiteral, Literal: mdbx.UndoManifestValue(c.h, generated, uint32(c.count), uint32(count))}
 	if spent == nil {

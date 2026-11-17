@@ -60,11 +60,11 @@ func stepTreeUnchangedV1(t *testing.T, w *stepTreeWorldV1, h uint64) {
 	logicalMDBXAssert(t, err == nil, "unchanged physical state: %v", err)
 }
 
-// stepTreeManifestV1 derives the pre-block supply from the subsidy schedule,
+// stepTreeManifestV1 derives the next-block supply from the subsidy schedule,
 // independently of the STEP memo and its regenerated undo family.
 func stepTreeManifestV1(h uint64, txs, spent uint32) []byte {
 	generated := new(big.Int)
-	for height := uint64(0); height < h; height++ {
+	for height := uint64(0); height <= h; height++ {
 		generated.Add(generated, new(big.Int).SetUint64(BlockSubsidyBig(height, generated)))
 	}
 	return stepManifest(h, generated.Uint64(), txs, spent)
@@ -450,7 +450,7 @@ func testStepTreeUndoV1(t *testing.T) {
 				w.btWorld.reopen(t)
 				stepTreeProgressV1(t, w, 200, out)
 				for _, g := range []uint64{1, 2} {
-					btState(t, w.btWorld, g, w.endpoint(200), final)
+					stepTreeStateV1(t, w.btWorld, g, w.endpoint(200), final)
 				}
 				w.read(t, 5, mdbx.UndoManifestKey(w.hashes[200]), nil)
 				return
@@ -462,7 +462,7 @@ func testStepTreeUndoV1(t *testing.T) {
 			w.btWorld.reopen(t)
 			stepTreeUnchangedV1(t, w, 200)
 			for _, g := range []uint64{1, 2} {
-				btState(t, w.btWorld, g, w.endpoint(199), w.rows)
+				stepTreeStateV1(t, w.btWorld, g, w.endpoint(199), w.rows)
 			}
 			btReservationsReleased(t, w.owner)
 		})
@@ -573,6 +573,7 @@ func testStepTreeNativeV1(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			w := stepTreeNewV1(t, 15840, 5, nil)
+			logicalMDBXAssert(t, w.a.Authority.Replay.TargetProfile == 2, "native fixture keeps ARCHIVE body and undo")
 			key := []byte{2}
 			if row.generation != 0 {
 				key = btMeta(0x11, row.generation)
@@ -615,13 +616,15 @@ func testStepTreeNativeV1(t *testing.T) {
 			for _, g := range []uint64{1, 2} {
 				btState(t, w.btWorld, g, w.endpoint(h), w.rows)
 			}
-			var header []byte
+			var header, body, undo []byte
 			if h == 5 {
 				header = w.raw[5][:148]
+				body = w.raw[5]
+				undo = stepTreeManifestV1(5, 1, 0)
 			}
 			w.read(t, 3, w.hashes[5][:], header)
-			w.read(t, 4, w.hashes[5][:], nil)
-			w.read(t, 5, mdbx.UndoManifestKey(w.hashes[5]), nil)
+			w.read(t, 4, w.hashes[5][:], body)
+			w.read(t, 5, mdbx.UndoManifestKey(w.hashes[5]), undo)
 			btReservationsReleased(t, w.owner)
 		})
 	}
