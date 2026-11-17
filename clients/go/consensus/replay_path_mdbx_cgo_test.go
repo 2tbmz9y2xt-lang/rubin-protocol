@@ -108,14 +108,19 @@ func (v *pathView148) Header148V1(hash [32]byte, dst *[148]byte) bool {
 
 func pathTreeCase148V1(t *testing.T) *rpCase {
 	t.Helper()
-	c := rpNew(t, 0, 1, mdbx.UndoWriteOrReuseV1)
-	c.request.Authority.Authority.Replay.Target.TipHash = c.in.Endpoint.BlockHash
-	c.request.Authority.Authority.Replay.Target.CumulativeChainwork = c.in.Endpoint.CumulativeChainwork
+	c := rpNew(t, 1, 1, mdbx.UndoWriteOrReuseV1)
+	genesis, err := ParseInitial148HeaderBytes(c.in.Raw[:148])
+	logicalMDBXAssert(t, err == nil, "path genesis header")
+	header := initial148BlockMine(t, initial148BlockHead{version: genesis.Version, parent: c.in.Endpoint.BlockHash, merkle: genesis.MerkleRoot, target: genesis.Target, root: genesis.UtxoRoot, timestamp: genesis.Timestamp + 240})
+	hash, err := Initial148BlockHash(header)
+	logicalMDBXAssert(t, err == nil, "path linked tip header")
+	c.request.Authority.Authority.Replay.Target.TipHash = hash
+	c.request.Authority.Authority.Replay.Target.CumulativeChainwork = [40]byte{39: 2}
 	encoded, err := c.request.Authority.Encode()
 	logicalMDBXAssert(t, err == nil, "path tree authority")
 	mutation := btMutation(0, []byte{2}, encoded)
 	mutation.BeforePresent = true
-	c.w.pair(t, mutation)
+	c.w.pair(t, mutation, btMutation(3, hash[:], header))
 	return c
 }
 
@@ -157,7 +162,7 @@ func TestReplayPath148V1(t *testing.T) {
 		t.Run(source, func(t *testing.T) {
 			c := pathTreeCase148V1(t)
 			view := &pathView148{headers148: map[[32]byte][148]byte{}}
-			p := &replayPathOwner{initial148: true, view148: view, limit: 32}
+			p := &replayPathOwner{initial148: true, view148: view, limit: 64}
 			view.owner = p
 			raw, x := c.in.Raw, c.in.Endpoint.BlockHash
 			if source == "stored" {

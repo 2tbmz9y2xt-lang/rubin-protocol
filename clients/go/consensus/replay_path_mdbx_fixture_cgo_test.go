@@ -26,7 +26,8 @@ func TestReplayPath148FixtureV1(t *testing.T) {
 			}
 			logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(c.w.s, 3, x[:], raw) == nil, "actual stored header width")
 			view := &pathView148{headers148: map[[32]byte][148]byte{x: [148]byte(c.in.Raw[:148])}}
-			p := &replayPathOwner{initial148: true, view148: view, limit: 32}
+			p := &replayPathOwner{initial148: true, view148: view, limit: 64}
+			view.owner = p
 			var selected error
 			err := pathTreeCall148V1(t, c, p, c.in.Raw, func(own replayPathOwn, err error) {
 				selected = err

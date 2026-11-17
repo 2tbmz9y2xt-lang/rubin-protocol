@@ -425,10 +425,21 @@ func testStepTreeUndoV1(t *testing.T) {
 			if mode == "body-second-IO" {
 				stepTreeSeedV1(t, w, 4, w.hashes[200][:], w.raw[200])
 			}
+			if mode == "partial-IO" {
+				// A healthy old-active owner makes an early classification
+				// observable; the undo read failure must precede that lookup.
+				for _, h := range []uint64{199, 200} {
+					stepTreeSeedV1(t, w, 3, w.hashes[h][:], w.raw[h][:148])
+					stepTreeSeedV1(t, w, 2, stepKey(3, h), mdbx.ChainValue(w.hashes[h], w.hashes[h-1], w.endpoint(h).CumulativeChainwork))
+					owner, _ := mdbx.CanonicalOwnerKey(3, w.hashes[h])
+					stepTreeSeedV1(t, w, 7, owner, mdbx.CanonicalOwnerValue(h))
+				}
+			}
 			var out ReplayStepOutcomeV1
 			if mode == "partial-IO" {
 				evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 5, first, func() { out = w.call(200) })
 				logicalMDBXAssert(t, err == nil && evidence.OldGets[5] == 2 && evidence.Faults == 1 && out.Result == selectedSideCanonical && out.Decision == "" && out.Role == "CURRENT", "manifest bytes before non-EOF entry read: %+v/%+v", out, evidence)
+				logicalMDBXAssert(t, evidence.OldGets[7] == 0, "old-active lookup preceded failed undo comparison: %+v", evidence)
 			} else if mode == "body-second-IO" {
 				gets, err := mdbx.FixtureBodySecondGetEIO(w.s, 4, w.hashes[200][:], func() { out = w.call(200) })
 				logicalMDBXAssert(t, err == nil && gets == 2 && out.Result == selectedSideCanonical && out.Role == "CURRENT", "complete body comparison before undo/old-active: %+v", out)
@@ -744,6 +755,7 @@ func testStepTreeUnwindV1(t *testing.T) {
 			var fixtureErr error
 			var out ReplayStepOutcomeV1
 			funded, changed := false, false
+			guarded, guardRetired := false, false
 			go func() {
 				defer func() { done <- recover() }()
 				observation, fixtureErr = mdbx.FixturePairReadObservation(w.s, func(uint32) {
@@ -754,13 +766,18 @@ func testStepTreeUnwindV1(t *testing.T) {
 					if funded && live != 400000000 {
 						changed = true
 					}
+					guarded = guarded || w.step.path.guarded
+					if guarded && (!w.step.path.guarded || w.step.path.release == nil || w.view.releases != 0) {
+						guardRetired = true
+					}
 				}, func() { out = w.call(0) })
 			}()
 			got := <-done
 			logicalMDBXAssert(t, mode == "panic" && any(got) == any(primary) || mode != "panic" && got == nil, "provider unwind identity: %v", got)
 			logicalMDBXAssert(t, !changed && mdbx.FixtureReservationLive(w.owner) == 0 && w.step.path.release == nil && !w.step.path.guarded && w.step.path.dst148 == ([148]byte{}) && w.view.releases == 1, "gross/source retirement after native unwind")
+			logicalMDBXAssert(t, !guardRetired, "source guard retired before native last use")
 			if mode == "nil" {
-				logicalMDBXAssert(t, fixtureErr == nil && funded && observation.Writes != 0, "actual writer funding")
+				logicalMDBXAssert(t, fixtureErr == nil && funded && guarded && observation.Writes != 0, "actual writer funding and source guard")
 				stepTreeProgressV1(t, w, 0, out)
 			} else {
 				logicalMDBXAssert(t, w.step.path.slot == nil && w.s.View(func(*mdbx.Reader) error { return nil }) == nil, "clean provider abort consumed Store or kept partial slot")

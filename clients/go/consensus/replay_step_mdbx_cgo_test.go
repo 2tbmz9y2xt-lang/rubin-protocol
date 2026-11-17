@@ -315,7 +315,8 @@ func testStepTreeConfigurationV1(t *testing.T) {
 					w.pair(t, btMutation(4, w.hashes[0][:], w.raw[0]))
 				}
 			}
-			w.step = NewReplayStepOwner148V1(context, w.view, 32, database)
+			w.step = NewReplayStepOwner148V1(context, w.view, 64, database)
+			w.view.owner = w.step.path
 			if mode == "cloned-publication" {
 				context.Genesis.Published[149] ^= 1
 			}
