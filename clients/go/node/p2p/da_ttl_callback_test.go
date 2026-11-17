@@ -678,3 +678,120 @@ func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	apply(4)
 	f.requireAbsent(commit, "the fresh binding's admitted decrease expired the record at count 1")
 }
+
+// wrappedTTLEntry is a binding over a real Service's own entry that runs before ahead of each
+// attempt, counts the attempts and, when refuse is set, returns it instead of entering.
+type wrappedTTLEntry struct {
+	inner    *Service
+	before   func()
+	refuse   error
+	attempts atomic.Int64
+}
+
+func (w *wrappedTTLEntry) EnterDATTLMutation(decrease func() error) error {
+	w.attempts.Add(1)
+	if w.before != nil {
+		w.before()
+	}
+	if w.refuse != nil {
+		return w.refuse
+	}
+	return w.inner.EnterDATTLMutation(decrease)
+}
+
+// TestDATTLCallbackEndToEndEntryInsideTheHold drives SyncEngine.ApplyBlock through the production
+// selection and, inside the selected entry, starts a ReleasePeerQuotaKey: it stays parked on the
+// admission guard for the whole entry and returns only after the transition releases the guard,
+// so the entry runs inside the exclusive hold (RUBIN_COMPACT_BLOCKS.md Section 5).
+func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
+	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	probe := newSelectionProbe(t, h, source, 0xe5)
+	released := make(chan error, 1)
+	entry := &wrappedTTLEntry{inner: h.service, before: func() {
+		go func() { released <- h.syncEngine.DARelayState().ReleasePeerQuotaKey("unrelated-peer") }()
+		select {
+		case err := <-released:
+			t.Errorf("ReleasePeerQuotaKey returned inside the entry (err=%v): the admission guard was not held", err)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}}
+	h.syncEngine.PublishDATTLBinding(entry)
+	probe.apply()
+	select {
+	case <-released:
+	case <-time.After(lifecycleWatchdog):
+		t.Fatalf("ReleasePeerQuotaKey never proceeded after the guard release")
+	}
+	require(t, entry.attempts.Load() == 1, "entry attempts=%d, want 1", entry.attempts.Load())
+	probe.apply()
+	probe.f.requireRetained(probe.commit, "count 1 after two in-hold decreases")
+}
+
+// TestDATTLCallbackEndToEndEntryErrorConsumed pins that the transition consumes the entry result:
+// an entry returning an error leaves SyncEngine.ApplyBlock's ACCEPTED/NEW summary and nil error,
+// decreases nothing, and the next admitted publications decrease as usual.
+func TestDATTLCallbackEndToEndEntryErrorConsumed(t *testing.T) {
+	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	probe := newSelectionProbe(t, h, source, 0xe6)
+	failing := &wrappedTTLEntry{inner: h.service, refuse: errors.New("ttl entry failure")}
+	h.syncEngine.PublishDATTLBinding(failing)
+	probe.apply()
+	require(t, failing.attempts.Load() == 1, "entry attempts=%d, want 1", failing.attempts.Load())
+	h.syncEngine.PublishDATTLBinding(h.service)
+	probe.apply()
+	probe.apply()
+	probe.f.requireRetained(probe.commit, "count 1: the failed entry decreased nothing")
+	probe.apply()
+	probe.f.requireAbsent(probe.commit, "the third admitted decrease expired the record")
+}
+
+// TestDATTLCallbackEndToEndLatchedInvokesNothing pins that a latched transition invokes no entry:
+// the bound entry records zero attempts across the latching SyncEngine.ApplyBlock.
+func TestDATTLCallbackEndToEndLatchedInvokesNothing(t *testing.T) {
+	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	entry := &wrappedTTLEntry{inner: h.service}
+	h.syncEngine.PublishDATTLBinding(entry)
+	latchDAHarness(t, h, source)
+	require(t, entry.attempts.Load() == 0, "latched transition entry attempts=%d, want 0", entry.attempts.Load())
+}
+
+// TestDATTLCallbackEndToEndDrainingLease pins the lease path while the lease-owning Service is
+// DRAINING: with the worker lease held and Close waiting on it, the peer's applies still run the
+// nested entry, which registers nothing, so three ACCEPTED/NEW publications expire the record; Close
+// returns only after the lease is released.
+func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
+	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	probe := newSelectionProbe(t, h, source, 0xe7)
+	p := testPeerForService(h.service, "remote", 5)
+	require(t, h.service.acquireWork(), "worker lease")
+	closeDone := make(chan struct{})
+	go func() { _ = h.service.Close(); close(closeDone) }()
+	deadline := time.Now().Add(lifecycleWatchdog)
+	for h.service.workAuthorized() {
+		require(t, time.Now().Before(deadline), "S1 did not become DRAINING within %s", lifecycleWatchdog)
+		runtime.Gosched()
+	}
+	for height := uint64(1); height <= 3; height++ {
+		summary, err := p.processRelayedBlock(blockAtHeight(t, source, height))
+		require(t, err == nil && summary != nil, "processRelayedBlock(%d)=(%+v,%v)", height, summary, err)
+		if height == 2 {
+			probe.f.requireRetained(probe.commit, "count 1 after two nested decreases while DRAINING")
+		}
+	}
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned while the worker lease was held")
+	default:
+	}
+	h.service.releaseWork()
+	select {
+	case <-closeDone:
+	case <-time.After(lifecycleWatchdog):
+		t.Fatalf("Close did not return within %s after the release", lifecycleWatchdog)
+	}
+	probe.f.requireAbsent(probe.commit, "the third nested decrease expired the record")
+}
