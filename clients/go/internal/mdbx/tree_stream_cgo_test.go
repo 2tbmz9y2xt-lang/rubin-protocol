@@ -4597,10 +4597,13 @@ func psCallback(t *testing.T) {
 	for _, application := range []error{marker, fmt.Errorf("scope wrapper: %w", marker), typedNil} {
 		mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 			return a.WithReservation(psPageGrant, func() error {
-				r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
+				var kept *Reader
+				r := tsInvoke(s, a, func(rd *Reader) (TreeOperationV1, error) {
+					kept = rd
 					return garbage(), a.WithPhaseReservationV1(64, 0, func(func() error) error { return application })
 				})
 				r.tuple(t, 1, 1, -1)
+				tsExpiredReader(t, kept)
 				if any(r.err) != any(application) {
 					t.Fatalf("scope callback error identity lost: %v want %v", r.err, application)
 				}
@@ -4612,11 +4615,13 @@ func psCallback(t *testing.T) {
 		}
 	}
 	var recovered any
+	var kept *Reader
 	func() {
 		defer func() { recovered = recover() }()
 		_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 			return a.WithReservation(psPageGrant, func() error {
-				tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
+				tsInvoke(s, a, func(rd *Reader) (TreeOperationV1, error) {
+					kept = rd
 					return garbage(), a.WithPhaseReservationV1(64, 0, func(func() error) error { panic(marker) })
 				})
 				return nil
@@ -4626,7 +4631,8 @@ func psCallback(t *testing.T) {
 	if recovered != any(marker) || reservationLive(o) != before || s.state != storeOPEN {
 		t.Errorf("scope grant leaked: panic%v live%d state%s", recovered, reservationLive(o), s.state)
 	}
-	psGoexit(t, s, o, garbage)
+	tsExpiredReader(t, kept)
+	tsExpiredReader(t, psGoexit(t, s, o, garbage))
 	if reservationLive(o) != before || s.state != storeOPEN {
 		t.Errorf("scope grant leaked: Goexit live%d want%d state%s", reservationLive(o), before, s.state)
 	}
@@ -4638,15 +4644,18 @@ func psCallback(t *testing.T) {
 }
 
 // psGoexit runs one Lane operation whose callback calls runtime.Goexit on its own goroutine.
-func psGoexit(t *testing.T, s *Store, o *OperationReservationOwner, garbage func() TreeOperationV1) {
+// It returns the callback's Reader for the caller's expiry check.
+func psGoexit(t *testing.T, s *Store, o *OperationReservationOwner, garbage func() TreeOperationV1) *Reader {
 	t.Helper()
+	var kept *Reader
 	done := make(chan bool)
 	go func() {
 		returned := false
 		defer func() { done <- returned }()
 		_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 			return a.WithReservation(psPageGrant, func() error {
-				tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) {
+				tsInvoke(s, a, func(rd *Reader) (TreeOperationV1, error) {
+					kept = rd
 					return garbage(), a.WithPhaseReservationV1(64, 0, func(func() error) error { runtime.Goexit(); return nil })
 				})
 				return nil
@@ -4657,6 +4666,7 @@ func psGoexit(t *testing.T, s *Store, o *OperationReservationOwner, garbage func
 	if <-done {
 		t.Fatal("scope Goexit callback returned normally")
 	}
+	return kept
 }
 
 // N2: a raw-only delete commits NEW, removes exactly its target and leaves the next operation healthy.

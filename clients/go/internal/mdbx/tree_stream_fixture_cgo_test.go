@@ -7461,10 +7461,11 @@ func psfCallbackCleanup(t *testing.T) {
 		for _, application := range []error{marker, fmt.Errorf("scope wrapper: %w", marker), typedNil} {
 			sc := psfNew(t)
 			var r tsResult
+			var kept *Reader
 			evidence, err := fixtureLargeFault(sc.s, mode, 0, tsRootKey(9), func() {
 				mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 					return a.WithReservation(psPageGrant, func() error {
-						r = tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { return TreeOperationV1{}, application })
+						r = tsInvoke(sc.s, a, func(rd *Reader) (TreeOperationV1, error) { kept = rd; return TreeOperationV1{}, application })
 						return nil
 					})
 				}))
@@ -7477,6 +7478,9 @@ func psfCallbackCleanup(t *testing.T) {
 			if reservationLive(sc.o) != 0 {
 				t.Fatalf("scope grant leaked: mode%d live%d", mode, reservationLive(sc.o))
 			}
+			r.tuple(t, 1, 1, -1)
+			tsExpiredReader(t, kept)
+			psfAbortCause(t, r.err, mode)
 			calls := 0
 			mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 				next := tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return tsPair(9), nil })
@@ -7493,8 +7497,9 @@ func psfCallbackCleanup(t *testing.T) {
 
 // psfCleanupTerminal asserts one OLD abort, the mode's terminal state, released grants and a next call
 // that returns the stored terminal without invoking its callback.
-func psfCleanupTerminal(t *testing.T, sc *psfScene, mode uint32, kind string, evidence fixtureLargeEvidence) {
+func psfCleanupTerminal(t *testing.T, sc *psfScene, mode uint32, kind string, evidence fixtureLargeEvidence, kept *Reader) {
 	t.Helper()
+	tsExpiredReader(t, kept)
 	want := map[uint32]storeState{9: storeCLOSED, 10: storePOISONEDTHREAD}[mode]
 	if evidence.aborts != 1 || evidence.commits != 0 || sc.s.terminal == nil || sc.s.state != want {
 		t.Fatalf("scope next operation differs: %s mode%d evidence%+v state%s terminal%v", kind, mode, evidence, sc.s.state, sc.s.terminal)
@@ -7502,6 +7507,7 @@ func psfCleanupTerminal(t *testing.T, sc *psfScene, mode uint32, kind string, ev
 	if reservationLive(sc.o) != 0 {
 		t.Fatalf("scope grant leaked: %s mode%d live%d", kind, mode, reservationLive(sc.o))
 	}
+	psfAbortCause(t, sc.s.terminal, mode)
 	calls := 0
 	mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 		next := tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return tsPair(9), nil })
@@ -7512,15 +7518,27 @@ func psfCleanupTerminal(t *testing.T, sc *psfScene, mode uint32, kind string, ev
 	}))
 }
 
+// psfAbortCause finds the OLD abort cause each cleanup mode injects: mode 9 consumes with EIO,
+// mode 10 retains with THREAD_MISMATCH.
+func psfAbortCause(t *testing.T, err error, mode uint32) {
+	t.Helper()
+	code := map[uint32]int{9: 5, 10: codeThreadMismatch}[mode]
+	var engine *EngineError
+	if !errors.As(err, &engine) || engine.Operation != "abort" || engine.Code != code {
+		t.Fatalf("scope next operation differs: mode%d cleanup cause %v", mode, err)
+	}
+}
+
 // psfCallbackPanic crosses a callback panic with the mode's cleanup; the panic value reaches the caller.
 func psfCallbackPanic(t *testing.T, mode uint32, marker error) {
 	sc := psfNew(t)
 	var recovered any
+	var kept *Reader
 	evidence, err := fixtureLargeFault(sc.s, mode, 0, tsRootKey(9), func() {
 		defer func() { recovered = recover() }()
 		_ = sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 			return a.WithReservation(psPageGrant, func() error {
-				tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { panic(marker) })
+				tsInvoke(sc.s, a, func(rd *Reader) (TreeOperationV1, error) { kept = rd; panic(marker) })
 				return nil
 			})
 		})
@@ -7529,13 +7547,14 @@ func psfCallbackPanic(t *testing.T, mode uint32, marker error) {
 	if recovered != any(marker) {
 		t.Fatalf("scope next operation differs: panic mode%d recovered %v", mode, recovered)
 	}
-	psfCleanupTerminal(t, sc, mode, "panic", evidence)
+	psfCleanupTerminal(t, sc, mode, "panic", evidence, kept)
 }
 
 // psfCallbackGoexit crosses a callback runtime.Goexit with the mode's cleanup on its own goroutine.
 func psfCallbackGoexit(t *testing.T, mode uint32) {
 	sc := psfNew(t)
 	returned := true
+	var kept *Reader
 	evidence, err := fixtureLargeFault(sc.s, mode, 0, tsRootKey(9), func() {
 		done := make(chan bool)
 		go func() {
@@ -7543,7 +7562,7 @@ func psfCallbackGoexit(t *testing.T, mode uint32) {
 			defer func() { done <- normal }()
 			_ = sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 				return a.WithReservation(psPageGrant, func() error {
-					tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { runtime.Goexit(); return TreeOperationV1{}, nil })
+					tsInvoke(sc.s, a, func(rd *Reader) (TreeOperationV1, error) { kept = rd; runtime.Goexit(); return TreeOperationV1{}, nil })
 					return nil
 				})
 			})
@@ -7555,5 +7574,5 @@ func psfCallbackGoexit(t *testing.T, mode uint32) {
 	if returned {
 		t.Fatalf("scope next operation differs: Goexit mode%d returned normally", mode)
 	}
-	psfCleanupTerminal(t, sc, mode, "Goexit", evidence)
+	psfCleanupTerminal(t, sc, mode, "Goexit", evidence, kept)
 }
