@@ -489,7 +489,13 @@ func testStepTreeFloorV1(t *testing.T) {
 				logicalMDBXAssert(t, err == nil, "valid below-floor owner")
 				w.owner = owner
 				var out ReplayStepOutcomeV1
-				evidence, err := mdbx.FixtureSelectedDamage(w.s, owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = w.call(0) })
+				var endpoint mdbx.CanonicalTipStepFixtureEvidence
+				evidence, err := mdbx.FixtureSelectedDamage(w.s, owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
+					var endpointErr error
+					endpoint, endpointErr = mdbx.FixtureCanonicalTipStep(w.s, 1, nil, nil, false, func() { out = w.call(0) })
+					logicalMDBXAssert(t, endpointErr == nil, "below-floor endpoint adapter: %v", endpointErr)
+				})
+				logicalMDBXAssert(t, endpoint == (mdbx.CanonicalTipStepFixtureEvidence{}), "authority/funding refusal queried endpoint: %+v", endpoint)
 				logicalMDBXAssert(t, err == nil && out.NativeCalled && evidence.BeginOld == 1 && evidence.OldGets[0] == 1 && evidence.BeginWrite == 0 && evidence.BeginRead == 0 && evidence.Commits == 0 && evidence.Deletes == 0 && evidence.NodeGets == 0 && evidence.NodePulls == 0 && evidence.OldPulls == ([8]uint64{}), "below-floor STEP must read actual authority before funding: %+v/%+v/%v", out, evidence, err)
 				for rank := 1; rank < len(evidence.OldGets); rank++ {
 					logicalMDBXAssert(t, evidence.OldGets[rank] == 0, "postauthority data rank%d read before successful precheck", rank)
