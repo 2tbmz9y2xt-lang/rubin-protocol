@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
+	"fmt"
 	"maps"
 	"slices"
 	"sort"
@@ -1055,13 +1056,15 @@ func (s *DARelayState) advanceOwnerReadyTTL() error {
 }
 
 // ownerReadyTTLPlan is one in-guard TTL decrease planned over the State A and State B records
-// of the published image. Counters hold ABSOLUTE post-decrease values; removed and daBytes are
-// parallel.
+// of the published image. records is the ABSOLUTE post-decrease revision high-water; selected
+// totals every selected record's accounting, survivors every surviving record's, and peerBytes
+// projects each selected peer key to its surviving charge (zero deletes the entry).
 type ownerReadyTTLPlan struct {
-	selected, survivors, removed                   []daRelaySetRecord
-	victims                                        []DAAdmissionVictim
-	records, stagedBytes, orphanBytes, commitBytes uint64
-	peerBytes                                      map[string]uint64
+	selected, survivors, removed   []daRelaySetRecord
+	victims                        []DAAdmissionVictim
+	records                        uint64
+	selectedTotals, survivorTotals retainedDAAccountingTotals
+	peerBytes                      map[string]uint64
 }
 
 // advanceOwnerReadyTTLInGuard is the DA TTL decrease body of the canonical transition
@@ -1072,10 +1075,12 @@ type ownerReadyTTLPlan struct {
 // It plans over exactly the State A and State B records of the published image, walking the
 // relations' State A/B bucket, so no State C record is visited, the relay state is not cloned
 // and the standard owner domain is not scanned. Before any mutation it checks, with checked
-// arithmetic, every selected record (stored under its own da_id, State A or B, owner-ready),
-// every locator row, the record's per-da_id orphan byte entry against its own accounting and
-// each expiring record's charges against the totals, and every selected member's exact owner
-// token. On success each selected record with a count above one decreases by one with one
+// arithmetic, every selected record (stored under its own da_id, State A or B, owner-ready, its
+// revision and received time at or below the stored high-waters), every locator row, the
+// record's per-da_id orphan byte entry against its own accounting, the stored staged, orphan,
+// commit-overhead and per-peer totals and the per-da_id entry count against the selected
+// records' sums (those records are their only contributors), and every selected member's exact
+// owner token. On success each selected record with a count above one decreases by one with one
 // fresh revision, and each record at count one is removed with the owner-ready expiry effect:
 // members, locator rows, accounting, prefetch reservation and, on a bound relay, finalized
 // owner claims. On failure it changes nothing, releases every relation reservation it prepared
@@ -1113,13 +1118,20 @@ func (s *DARelayState) ownerReadyTTLOwnerLocked() (*PendingOutpointOwner, error)
 }
 
 func (s *DARelayState) planOwnerReadyTTLLocked() (ownerReadyTTLPlan, error) {
-	plan := ownerReadyTTLPlan{records: s.records, stagedBytes: s.stagedBytes, orphanBytes: s.orphanBytes, commitBytes: s.orphanCommitOverheadBytes, peerBytes: map[string]uint64{}}
+	plan := ownerReadyTTLPlan{records: s.records, selectedTotals: retainedDAAccountingTotals{peerBytes: map[string]uint64{}}, survivorTotals: retainedDAAccountingTotals{peerBytes: map[string]uint64{}}}
 	daIDs := s.relations.incompleteKeys()
 	slices.SortFunc(daIDs, func(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) })
 	for _, daID := range daIDs {
 		if err := s.planOwnerReadyTTLRecordLocked(&plan, daID); err != nil {
 			return ownerReadyTTLPlan{}, err
 		}
+	}
+	if err := plan.selectedTotals.checkOwnerReadyTTLTotalsLocked(s); err != nil {
+		return ownerReadyTTLPlan{}, err
+	}
+	plan.peerBytes = make(map[string]uint64, len(plan.selectedTotals.peerBytes))
+	for key := range plan.selectedTotals.peerBytes {
+		plan.peerBytes[key] = plan.survivorTotals.peerBytes[key]
 	}
 	return plan, nil
 }
@@ -1139,31 +1151,47 @@ func (s *DARelayState) planOwnerReadyTTLRecordLocked(plan *ownerReadyTTLPlan, da
 	if err != nil {
 		return err
 	}
-	if err := checkOwnerReadyRetainedRecordLocked(record); err != nil {
-		return err
-	}
-	if err := s.checkOwnerReadyTTLLocatorsLocked(record); err != nil {
-		return err
-	}
-	accounting, err := s.checkOwnerReadyTTLDAIDBytesLocked(record)
+	accounting, err := s.checkOwnerReadyTTLRecordLocked(record)
 	if err != nil {
+		return err
+	}
+	if err := plan.selectedTotals.addOwnerReadyTTL(accounting); err != nil {
 		return err
 	}
 	plan.selected = append(plan.selected, record)
 	if record.ttlBlocksRemaining == 1 {
-		return s.planOwnerReadyTTLExpiryLocked(plan, record, accounting)
+		plan.removed = append(plan.removed, record)
+		plan.victims = append(plan.victims, ownerReadyRecordVictims(record)...)
+		return nil
 	}
-	survivor := record
-	survivor.ttlBlocksRemaining--
-	if err := checkOwnerReadyRemovalBaseline(record, survivor); err != nil {
-		return err
+	return plan.addOwnerReadyTTLSurvivor(record, accounting)
+}
+
+// checkOwnerReadyTTLRecordLocked runs the per-record checks in order and returns the record's
+// own accounting.
+func (s *DARelayState) checkOwnerReadyTTLRecordLocked(record daRelaySetRecord) (daRelayRecordAccounting, error) {
+	if err := checkOwnerReadyRetainedRecordLocked(record); err != nil {
+		return daRelayRecordAccounting{}, err
 	}
-	revision, err := checkedAddUint64(plan.records, 1)
-	if err != nil {
-		return err
+	if err := s.checkOwnerReadyTTLHighWaterLocked(record); err != nil {
+		return daRelayRecordAccounting{}, err
 	}
-	survivor.revision, plan.records = revision, revision
-	plan.survivors = append(plan.survivors, survivor)
+	if err := s.checkOwnerReadyTTLLocatorsLocked(record); err != nil {
+		return daRelayRecordAccounting{}, err
+	}
+	return s.checkOwnerReadyTTLDAIDBytesLocked(record)
+}
+
+// checkOwnerReadyTTLHighWaterLocked refuses a record above either stored high-water, the
+// precondition every survivor revision minted from s.records relies on (the minting sibling
+// nextDANonReplaySequenceLocked refuses the same two).
+func (s *DARelayState) checkOwnerReadyTTLHighWaterLocked(record daRelaySetRecord) error {
+	if record.revision > s.records {
+		return fmt.Errorf("%w: record %x revision %d above the high-water %d", errDARelayImageIncompatible, record.daID, record.revision, s.records)
+	}
+	if record.receivedTime > s.nextReceivedTime {
+		return fmt.Errorf("%w: record %x received time %d above the high-water %d", errDARelayImageIncompatible, record.daID, record.receivedTime, s.nextReceivedTime)
+	}
 	return nil
 }
 
@@ -1190,36 +1218,54 @@ func (s *DARelayState) checkOwnerReadyTTLDAIDBytesLocked(record daRelaySetRecord
 	return accounting, nil
 }
 
-func (s *DARelayState) planOwnerReadyTTLExpiryLocked(plan *ownerReadyTTLPlan, record daRelaySetRecord, accounting daRelayRecordAccounting) error {
-	if err := plan.releaseOwnerReadyAccounting(accounting, s.orphanBytesByPeerQuotaKey); err != nil {
+// addOwnerReadyTTLSurvivor decreases one record by one with one fresh revision minted from the
+// plan's checked revision high-water and adds its unchanged accounting to the survivor totals.
+func (p *ownerReadyTTLPlan) addOwnerReadyTTLSurvivor(record daRelaySetRecord, accounting daRelayRecordAccounting) error {
+	survivor := record
+	survivor.ttlBlocksRemaining--
+	if err := checkOwnerReadyRemovalBaseline(record, survivor); err != nil {
 		return err
 	}
-	plan.removed = append(plan.removed, record)
-	plan.victims = append(plan.victims, ownerReadyRecordVictims(record)...)
+	revision, err := checkedAddUint64(p.records, 1)
+	if err != nil {
+		return err
+	}
+	if err := p.survivorTotals.addOwnerReadyTTL(accounting); err != nil {
+		return err
+	}
+	survivor.revision, p.records = revision, revision
+	p.survivors = append(p.survivors, survivor)
 	return nil
 }
 
-// releaseOwnerReadyAccounting subtracts one expiring record's charges with checked arithmetic.
-// The peer walk is map-ordered but yields one error identity, so it is order-immune.
-func (p *ownerReadyTTLPlan) releaseOwnerReadyAccounting(accounting daRelayRecordAccounting, livePeerBytes map[string]uint64) error {
+// addOwnerReadyTTL adds one State A or B record's accounting with checked arithmetic; such a
+// record contributes no complete or pinned bytes.
+func (t *retainedDAAccountingTotals) addOwnerReadyTTL(accounting daRelayRecordAccounting) error {
+	if accounting.orphanBytes != 0 {
+		t.daIDEntries++
+	}
+	return t.add(accounting, 0)
+}
+
+// checkOwnerReadyTTLTotalsLocked requires every stored total the State A and B records alone
+// contribute to equal the selected records' sum, so the survivor sums are the post-decrease
+// totals.
+func (t retainedDAAccountingTotals) checkOwnerReadyTTLTotalsLocked(s *DARelayState) error {
 	var err error
-	if p.stagedBytes, err = checkedApplyUint64Delta(p.stagedBytes, accounting.stagedBytes, 0); err != nil {
-		return err
+	switch {
+	case t.stagedBytes != s.stagedBytes:
+		err = fmt.Errorf("staged retained bytes: records imply %d, state holds %d", t.stagedBytes, s.stagedBytes)
+	case t.orphanBytes != s.orphanBytes:
+		err = fmt.Errorf("orphan pool bytes: records imply %d, state holds %d", t.orphanBytes, s.orphanBytes)
+	case t.commitBytes != s.orphanCommitOverheadBytes:
+		err = fmt.Errorf("orphan commit overhead bytes: records imply %d, state holds %d", t.commitBytes, s.orphanCommitOverheadBytes)
+	case t.daIDEntries != len(s.orphanBytesByDAID):
+		err = fmt.Errorf("per-da_id orphan bytes: records imply %d entries, state holds %d", t.daIDEntries, len(s.orphanBytesByDAID))
+	default:
+		err = t.checkPeerBytesLocked(s)
 	}
-	if p.orphanBytes, err = checkedApplyUint64Delta(p.orphanBytes, accounting.orphanBytes, 0); err != nil {
-		return err
-	}
-	if p.commitBytes, err = checkedApplyUint64Delta(p.commitBytes, accounting.commitBytes, 0); err != nil {
-		return err
-	}
-	for key, charge := range accounting.peerBytes {
-		current, seen := p.peerBytes[key]
-		if !seen {
-			current = livePeerBytes[key]
-		}
-		if p.peerBytes[key], err = checkedApplyUint64Delta(current, charge, 0); err != nil {
-			return err
-		}
+	if err != nil {
+		return fmt.Errorf("%w: %w", errDARelayImageIncompatible, err)
 	}
 	return nil
 }
@@ -1336,7 +1382,7 @@ func (s *DARelayState) applyOwnerReadyTTLPlanLocked(plan ownerReadyTTLPlan, rela
 		s.prefetch.releaseSet(record.daID)
 	}
 	s.applyProjectedPeerBytes(plan.peerBytes)
-	s.records, s.stagedBytes, s.orphanBytes, s.orphanCommitOverheadBytes = plan.records, plan.stagedBytes, plan.orphanBytes, plan.commitBytes
+	s.records, s.stagedBytes, s.orphanBytes, s.orphanCommitOverheadBytes = plan.records, plan.survivorTotals.stagedBytes, plan.survivorTotals.orphanBytes, plan.survivorTotals.commitBytes
 }
 
 // commitOwnerReadyRemoval runs one owner-atomic incomplete-record removal batch. It clones

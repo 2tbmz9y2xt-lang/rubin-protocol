@@ -1,8 +1,11 @@
 package node
 
 import (
+	"crypto/sha3"
 	"errors"
+	"math"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -193,6 +196,75 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			token := r.setup.sets[r.stateAID].chunks[0].member.token
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.byToken[token].finalized = false })
 		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "DA victim claim mismatch") }},
+		// The same claim on a survivor is no victim, so the member proof is what refuses it; it
+		// is also the check that refuses the row above once the victim preflight is removed.
+		{"survivor claim not finalized", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			token := r.setup.sets[r.stateAID].chunks[0].member.token
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.byToken[token].finalized = false })
+		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		{"revision above the high-water", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.records = s.relations.recordValue(r.stateAID).revision - 1 })
+		}, daTTLWrapped(errDARelayImageIncompatible, "revision")},
+		{"received time above the high-water", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.nextReceivedTime = s.relations.recordValue(r.stateAID).receivedTime - 1 })
+		}, daTTLWrapped(errDARelayImageIncompatible, "received time")},
+		{"survivor revision overflows", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.records = math.MaxUint64 })
+		}, func(err error) bool { return errors.Is(err, errDARelayArithmeticOverflow) }},
+		{"stored staged total differs", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.stagedBytes++ })
+		}, daTTLWrapped(errDARelayImageIncompatible, "staged retained bytes")},
+		{"stored orphan total differs", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.orphanBytes-- })
+		}, daTTLWrapped(errDARelayImageIncompatible, "orphan pool bytes")},
+		{"stored commit overhead total differs", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.orphanCommitOverheadBytes-- })
+		}, daTTLWrapped(errDARelayImageIncompatible, "orphan commit overhead bytes")},
+		{"stored per-peer entry differs", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.orphanBytesByPeerQuotaKey["ttl-peer"]++ })
+		}, daTTLWrapped(errDARelayImageIncompatible, `per-peer orphan bytes for "ttl-peer"`)},
+		{"selected peer key absent from the stored map", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { delete(s.orphanBytesByPeerQuotaKey, "ttl-peer") })
+		}, daTTLWrapped(errDARelayImageIncompatible, `per-peer orphan bytes for "ttl-peer"`)},
+		{"extra stored per-peer entry", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.orphanBytesByPeerQuotaKey["ghost"] = 1 })
+		}, daTTLWrapped(errDARelayImageIncompatible, "per-peer orphan bytes: records imply")},
+		{"extra stored per-da_id entry", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.orphanBytesByDAID[[32]byte{0xee}] = 1 })
+		}, daTTLWrapped(errDARelayImageIncompatible, "per-da_id orphan bytes: records imply")},
+		{"index entry absent", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) { s.relations.sets[r.stateAID].present = false })
+		}, func(err error) bool { return errors.Is(err, errDARelayTTLRecordKeyMismatch) }},
+		{"index entry State C", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) {
+				record := s.relations.recordValue(r.stateAID)
+				record.state = daRelayStateCompleteSet
+				s.relations.scalarRecord(r.stateAID, record)
+			})
+		}, func(err error) bool { return errors.Is(err, errDARelayTTLRecordKeyMismatch) }},
+		{"zero member token", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			editDATTLChunkMember(f, r.stateAID, func(m *daRelayMemberIdentity) { m.token = PendingOutpointToken{} })
+		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		{"foreign member token", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			editDATTLChunkMember(f, r.stateAID, func(m *daRelayMemberIdentity) { m.token.owner = &PendingOutpointOwner{} })
+		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		{"member token held twice", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			token := r.setup.sets[r.stateBID].commit.member.token
+			editDATTLChunkMember(f, r.stateAID, func(m *daRelayMemberIdentity) { m.token = token })
+		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		{"input claimed by two members", reuseDATTLInputInStateB, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		{"txid claimed by two selected records", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.mutateRelay(func(s *DARelayState) {
+				record := s.relations.recordValue(r.stateBID)
+				member := *record.commit.member
+				member.txid = r.stateA.txid
+				record.commit.member = &member
+				s.relations.putRecord(r.stateBID, record)
+			})
+		}, func(err error) bool {
+			var terminal *canonicalDATerminalError
+			return errors.As(err, &terminal) && strings.Contains(err.Error(), "contradicts its parsed identity")
+		}},
 		{"nil chainstate", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
 			f.mutateRelay(func(s *DARelayState) { s.mempool.chainState = nil })
 		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "nil chainstate") }},
@@ -207,7 +279,9 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			owner := f.mp.pendingOutpoints
 			row.corrupt(f, r)
 			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(owner)
-			if err := runDATTLBodyInGuard(t, f); !row.want(err) {
+			err := runDATTLBodyInGuard(t, f)
+			t.Logf("refusal: %v", err)
+			if !row.want(err) {
 				t.Fatalf("body: err=%v, want this arm's refusal", err)
 			}
 			requireDANonReplayUnchanged(t, f.relay, owner, before, ownerBefore)
@@ -263,5 +337,109 @@ func TestDATTLCallbackBodyWalksOnlyStateAB(t *testing.T) {
 			t.Fatal("State A survived its expiry after the clone swap")
 		}
 		requireDATTLIndexExact(t, f.relay)
+	}
+}
+
+func daTTLWrapped(want error, detail string) func(error) bool {
+	return func(err error) bool { return errors.Is(err, want) && strings.Contains(err.Error(), detail) }
+}
+
+// editDATTLChunkMember replaces chunk 0's member of one record with an edited copy, so the
+// owner and every other record keep their own identities.
+func editDATTLChunkMember(f *daNonReplayFixture, daID [32]byte, edit func(*daRelayMemberIdentity)) {
+	f.mutateRelay(func(s *DARelayState) {
+		mutateOwnerReadyRecord(s, daID, func(record *daRelaySetRecord) {
+			chunks := make(map[uint16]daRelayChunk, len(record.chunks))
+			for index, chunk := range record.chunks {
+				chunks[index] = chunk
+			}
+			chunk := chunks[0]
+			member := *chunk.member
+			edit(&member)
+			chunk.member = &member
+			chunks[0] = chunk
+			record.chunks = chunks
+		})
+	})
+}
+
+// reuseDATTLInputInStateB re-signs State B's commit over State A's input, same length, so the
+// retained bytes, locators and accounting stay consistent and only the input set repeats.
+func reuseDATTLInputInStateB(f *daNonReplayFixture, r daTTLCallbackRecords) {
+	next := f.next
+	f.next = slices.Index(f.outpoints, r.stateA.inputs[0])
+	duplicate := f.signed(r.stateB.spec)
+	f.next = next
+	f.mutateRelay(func(s *DARelayState) {
+		record := s.relations.recordValue(r.stateBID)
+		member := *record.commit.member
+		record.commit.member = &member
+		replaceOwnerReadyMember(f, s, &member, &record.commit.txBytes, duplicate, daRelayLocator{daID: r.stateBID, kind: daRelayLocatorCommit})
+		s.relations.putRecord(r.stateBID, record)
+	})
+}
+
+// requireDATTLIndexStep pins the State A/B index after one production publication and runs one
+// body call that must succeed over it.
+func requireDATTLIndexStep(t *testing.T, f *daNonReplayFixture, step string) {
+	t.Helper()
+	requireDATTLIndexExact(t, f.relay)
+	if err := runDATTLBodyInGuard(t, f); err != nil {
+		t.Fatalf("%s: body after the publication: %v", step, err)
+	}
+	requireDATTLIndexExact(t, f.relay)
+}
+
+// TestDATTLCallbackIndexProductionPaths is the F2 index row on every production path that
+// publishes a record row: orphan-chunk staging (State A created and grown), commit staging
+// (State A to State B), DA completion (State B to State C) and the PEER quota cleanup removal.
+func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
+	f := newDANonReplayFixture(t, 8)
+	grown, staged, completed, released := [32]byte{0xd1}, [32]byte{0xd2}, [32]byte{0xd3}, [32]byte{0xd4}
+	f.ownerReadyChunk(grown, 0, "grow-0", daNonReplayPeer("keep"))
+	requireDATTLIndexStep(t, f, "State A created")
+	f.ownerReadyChunk(grown, 1, "grow-1", daNonReplayPeer("keep"))
+	requireDATTLIndexStep(t, f, "State A grown")
+	f.ownerReadyChunk(staged, 0, "staged", daNonReplayPeer("keep"))
+	f.ownerReadyCommit(staged, 2, daNonReplayPeer("keep"))
+	requireDATTLState(t, f, staged, daRelayStateStagedCommit)
+	requireDATTLIndexStep(t, f, "State A to State B")
+	payload := []byte("complete")
+	f.ownerReadyChunk(completed, 0, string(payload), daNonReplayPeer("keep"))
+	commit := f.signed(daNonReplayTxSpec{kind: 0x01, daID: completed, chunkCount: 1, commitment: sha3.Sum256(payload), commitmentOutputs: 1})
+	f.admit(commit, daNonReplayPeer("keep"))
+	requireDATTLState(t, f, completed, daRelayStateCompleteSet)
+	requireDATTLIndexStep(t, f, "State B to State C")
+	f.ownerReadyChunk(released, 0, "released", daNonReplayPeer("drop"))
+	requireDATTLIndexExact(t, f.relay)
+	if err := f.relay.ReleasePeerQuotaKey("drop"); err != nil {
+		t.Fatalf("ReleasePeerQuotaKey: %v", err)
+	}
+	if _, present := daRelayStateSnapshot(f.relay).sets[released]; present {
+		t.Fatal("PEER cleanup kept the released record")
+	}
+	requireDATTLIndexStep(t, f, "PEER cleanup removal")
+}
+
+func requireDATTLState(t *testing.T, f *daNonReplayFixture, daID [32]byte, want daRelaySetState) {
+	t.Helper()
+	if record, present := daRelayStateSnapshot(f.relay).sets[daID]; !present || record.state != want {
+		t.Fatalf("record %x: present=%v state=%v, want %v", daID[:1], present, record.state, want)
+	}
+}
+
+// TestDATTLCallbackEmptiedBucketDropped is the P3 row: removing the last State A/B record leaves
+// no empty State A/B bucket behind, like every member bucket.
+func TestDATTLCallbackEmptiedBucketDropped(t *testing.T) {
+	f, r := newDATTLCallbackRecords(t)
+	f.setOwnerReadyTTL(r.stateAID, 1)
+	f.setOwnerReadyTTL(r.stateBID, 1)
+	if err := runDATTLBodyInGuard(t, f); err != nil {
+		t.Fatalf("expiry: %v", err)
+	}
+	f.relay.mu.Lock()
+	defer f.relay.mu.Unlock()
+	if bucket, present := f.relay.relations.buckets[daRelayIncompleteKey]; present {
+		t.Fatalf("emptied State A/B bucket retained: %+v", bucket)
 	}
 }

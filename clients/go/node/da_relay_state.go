@@ -362,6 +362,9 @@ func (r *daRelayRelations) prepareRecord(p *daRelayRelationPublication, key [32]
 	for _, member := range old.members {
 		p.keys = append(p.keys, member.keys[:]...)
 	}
+	if old.incomplete.bucket != nil {
+		p.keys = append(p.keys, daRelayIncompleteKey) // discard deletes the emptied State A/B bucket
+	}
 	if present {
 		row.members = r.prepareRecordMembers(p, key, value)
 		r.prepareIncomplete(p, row)
