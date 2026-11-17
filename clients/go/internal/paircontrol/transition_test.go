@@ -27,7 +27,7 @@ func TestReplacementDurability(t *testing.T) {
 				}
 				s, dir := existing(t, v)
 				r, err := s.PersistIntentV1(context.Background(), 17, i, nil)
-				wantResult(t, r, err, ResultV1{2, 18, false}, "persist result %+v")
+				wantResult(t, r, err, ResultV1{2, 18, false}, "persist result")
 				v.Sequence, v.Intent = 18, &i
 				wantBytes := fixtureBytes(v)
 				if !bytes.Equal(diskBytes(t, dir), wantBytes) {

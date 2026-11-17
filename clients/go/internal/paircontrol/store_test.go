@@ -82,7 +82,7 @@ func wantResult(t *testing.T, got ResultV1, err error, want ResultV1, label stri
 	t.Helper()
 	require(t, err)
 	if got != want {
-		t.Fatal(label)
+		t.Fatalf("%s: got %+v want %+v", label, got, want)
 	}
 }
 

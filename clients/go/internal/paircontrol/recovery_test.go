@@ -187,10 +187,9 @@ func terminalPolicy(t *testing.T, p *policycontrol.Store, i IntentV1, kind strin
 		return
 	}
 	if kind == "live_advanced" {
-		p.RequestLatch()
-		g := &policycontrol.Guard{}
-		_, err := p.PersistLatch(policycontrol.LatchProof{PredicateTrue: true, Basis: g.Qualify()})
-		require(t, err)
+		policyChange(t, p, originalOwner(i), func(tx *policycontrol.Tx) error {
+			return tx.PutRow(policycontrol.KindAudit, []byte("live"), []byte("advance"))
+		})
 		return
 	}
 	policyChange(t, p, originalOwner(i), func(tx *policycontrol.Tx) error {
@@ -199,6 +198,14 @@ func terminalPolicy(t *testing.T, p *policycontrol.Store, i IntentV1, kind strin
 		}
 		return tx.AutoBlock()
 	})
+	if kind == "blocked_advanced" {
+		p.RequestLatch()
+		r, err := p.PersistLatch(policycontrol.LatchProof{PredicateTrue: true, Basis: (&policycontrol.Guard{}).Qualify()})
+		require(t, err)
+		if seq, known := r.Sequence(); r.Truth != 2 || !known || seq != 4 {
+			t.Fatal("terminal ownerless latch did not commit NEW sequence4")
+		}
+	}
 	if kind == "observed_later" {
 		d := h1Value().H1Binding.Diagnosis
 		d.Hash[1] = 1
@@ -284,7 +291,7 @@ func terminalPolicy(t *testing.T, p *policycontrol.Store, i IntentV1, kind strin
 }
 
 func TestTerminalH1Bookkeeping(t *testing.T) {
-	for _, kind := range []string{"live", "live_advanced", "blocked", "blocked_not_later", "success", "observed_later", "manual_later", "manual_blocked", "manual_same_epoch", "manual_same_id", "manual_same_d", "manual_short_owner", "manual_future_epoch", "manual_bad_old", "manual_bad_destination", "manual_absolute_destination", "blocked_changed_diagnosis", "rollback", "nil_not_later", "stale_outer", "precommit", "unknown"} {
+	for _, kind := range []string{"live", "live_advanced", "blocked", "blocked_advanced", "blocked_not_later", "success", "observed_later", "manual_later", "manual_blocked", "manual_same_epoch", "manual_same_id", "manual_same_d", "manual_short_owner", "manual_future_epoch", "manual_bad_old", "manual_bad_destination", "manual_absolute_destination", "blocked_changed_diagnosis", "rollback", "nil_not_later", "stale_outer", "precommit", "unknown"} {
 		t.Run(kind, func(t *testing.T) {
 			p, i := h1Policy(t)
 			v := selected()
@@ -309,6 +316,9 @@ func TestTerminalH1Bookkeeping(t *testing.T) {
 			}
 			beforeP, err := p.View()
 			require(t, err)
+			if kind == "blocked_advanced" && (beforeP.Sequence != 4 || beforeP.Receipt.Owner.Kind != 1 || beforeP.Receipt.Owner.Epoch != 4 || len(beforeP.Receipt.Owner.Intent) != 0 || beforeP.Incident == nil || beforeP.Incident.State != 3) {
+				t.Fatal("terminal sequence4 did not retain AUTO_BLOCKED with an ownerless receipt")
+			}
 			before := diskBytes(t, dir)
 			o := installFaults(t, s)
 			if kind == "blocked" {
@@ -579,15 +589,15 @@ func TestRegularBoundedReadAndGrowth(t *testing.T) {
 func TestOriginalObservationSurvivesUnrelatedPAdvances(t *testing.T) {
 	p, i := h1Policy(t)
 	advance := func(key string) {
-		policyChange(t, p, policycontrol.Owner{}, func(tx *policycontrol.Tx) error {
+		policyChange(t, p, originalOwner(i), func(tx *policycontrol.Tx) error {
 			return tx.PutRow(policycontrol.KindAudit, []byte(key), []byte("unrelated"))
 		})
 	}
 	advance("before")
 	view, err := p.View()
 	require(t, err)
-	if view.Sequence != 3 || view.ControlSequence != 2 || view.Receipt.Owner.Kind != 1 || view.Receipt.Owner.Epoch != 3 {
-		t.Fatal("fixture did not produce distinct actual admission and current receipt owners")
+	if view.Sequence != 3 || view.ControlSequence != 2 || view.Receipt.Owner.Kind != 3 || view.Receipt.Owner.Epoch != 2 || !bytes.Equal(view.Receipt.Owner.Intent, i.ID[:]) {
+		t.Fatal("fixture did not advance P while retaining the original admitted H1 owner")
 	}
 	i.H1Binding.ObservedPSequence = view.Sequence
 	s, dir := existing(t, selected())
@@ -604,7 +614,7 @@ func TestOriginalObservationSurvivesUnrelatedPAdvances(t *testing.T) {
 	}
 	wantRecord(t, s, v)
 	r, err = s.RetireV1(context.Background(), 18, i.ID, reference(), p)
-	wantResult(t, r, err, ResultV1{2, 19, false}, "unrelated latest owner displaced original admission")
+	wantResult(t, r, err, ResultV1{2, 19, false}, "advanced P sequence prevented retirement of the original admission")
 	v.Sequence, v.Selector, v.Selected, v.Intent = 19, 3, nil, &i
 	v.Retired = &RetirementV1{originalPair(), 2, reference()}
 	wantRecord(t, s, v)
