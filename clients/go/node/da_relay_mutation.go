@@ -819,7 +819,8 @@ func checkStagedCandidateSlot(next daRelaySetRecord, rows []daRelayLocatorRow, c
 // OrphanChunks and StagedCommit, so only the state equality stops a resident image
 // switching between them; the other five move no counter at INSTALL, but the installed
 // record LIVES in s.relations.sets, where missingChunkIndexes and validateChunkInsert read
-// replaceableChunks and the TTL sweep decrements ttlBlocksRemaining. Staging copies all six.
+// replaceableChunks and advanceOwnerReadyTTLInGuard decrements ttlBlocksRemaining. Staging
+// copies all six.
 func checkPreservedOwnerReadySlots(live, next daRelaySetRecord, target daRelayLocator) error {
 	if !samePreservedRecordFields(live, next) {
 		return errDARelayImageIncompatible
@@ -1929,7 +1930,7 @@ func (s *DARelayState) dropOwnerReadyChunksLocked(record daRelaySetRecord, dropI
 }
 
 // checkOwnerReadyRemovalBaseline re-checks the live record's own shape as a fail-closed backstop —
-// the candidate gate already refuses all three disjuncts before either selector runs — and then
+// the candidate gate already refuses all three disjuncts before the selector runs — and then
 // proves next a byte-identical submultiset of it, so no member, token, provenance, commit slot or
 // locator can change unseen. It does not test the caller's baseline: the caller reads live out of
 // s.relations.sets and mints image.baseline from that same record, unlike checkDARecordImageBaselineLocked,
@@ -1946,7 +1947,7 @@ func checkOwnerReadyRemovalBaseline(live, next daRelaySetRecord) error {
 // every surviving chunk byte-identical, lets ttlBlocksRemaining only decrease and never to
 // zero, and leaves revision to the projector's remint. replaceableChunks is the one live field it
 // does not pin, unlike its admission-side twin samePreservedRecordFields: the candidate gate
-// refuses a non-nil one before either selector runs, and the survivor is a value copy of that
+// refuses a non-nil one before the selector runs, and the survivor is a value copy of that
 // same record. Under shared backing the check is structural only (a value copy compares equal
 // to itself): a fail-closed backstop, not an oracle of the removal arms' copy rules.
 func checkOwnerReadyRemovalSurvivor(live, next daRelaySetRecord) error {
@@ -1994,7 +1995,7 @@ func ownerReadyMemberMatchesPeer(member *daRelayMemberIdentity, quotaIdentity st
 //
 // PRECONDITION shared by both arms: member is non-nil. dropOwnerReadyChunksLocked reads a
 // member only for the indexes ownerReadyPeerMatches accepted, and that predicate starts at
-// member != nil (the TTL selector passes no indexes at all); ownerReadyRecordVictims proves
+// member != nil; ownerReadyRecordVictims proves
 // its own two arms.
 func ownerReadyMemberVictim(member *daRelayMemberIdentity) DAAdmissionVictim {
 	return DAAdmissionVictim{TxID: member.txid, Token: member.token, Inputs: slices.Clone(member.inputs)}

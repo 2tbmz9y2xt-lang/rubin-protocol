@@ -712,14 +712,13 @@ type daTTLBinding struct {
 	service DATTLMutationService
 }
 
-// PublishDATTLBinding replaces the current TTL binding with service.
-// Precondition, not checked here: the only caller is NewService, passing its own
-// fully initialized Service as its final construction step, after
-// ClaimDARelayState succeeded, which is the one relay association check; it
-// compares no relay itself. It is infallible: a nil engine or a nil interface
-// value leaves the binding unchanged, while a typed nil pointer is a non-nil
-// interface value and is published. It touches no DA record, count, claim or
-// lock; Close never clears it.
+// PublishDATTLBinding replaces the current TTL binding with service
+// (RUBIN_COMPACT_BLOCKS.md Section 5). Precondition: the caller is NewService,
+// passing its own non-nil, fully initialized Service as its final construction
+// step after ClaimDARelayState succeeded, the one relay association check. It is
+// one atomic store in the order shared with selections and identity reads, and
+// spans no DA mutation, owner lock, wait or Close; a nil engine or nil service
+// changes nothing. It touches no DA record, count or claim; Close never clears it.
 func (s *SyncEngine) PublishDATTLBinding(service DATTLMutationService) {
 	if s == nil || service == nil {
 		return

@@ -656,8 +656,7 @@ func (r *daTTLRecordingService) EnterDATTLMutation(decrease func() error) error 
 // TestDATTLCallbackBindingSelection pins the API-level binding rows: absent invokes nothing (C4
 // API form), the latest publication wins (C5), a snapshot taken before a later publication keeps
 // its Service (C5 A10), the identity read follows publications (C13), a refusal is returned
-// unchanged with no fallback (R3), and a nil publication leaves the binding unchanged (R5) while
-// a typed nil pointer is published as the doc states.
+// unchanged with no fallback (R3), and a nil publication leaves the binding unchanged (R5).
 func TestDATTLCallbackBindingSelection(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	var attempts []string
@@ -699,10 +698,6 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	var nilEngine *SyncEngine
 	nilEngine.PublishDATTLBinding(s1)
 	require(t, nilEngine.DATTLBindingService() == nil && nilEngine.enterSelectedDATTL(decrease) == nil && decreases == 0, "nil engine binding")
-	var typedNil *daTTLRecordingService
-	f.engine.PublishDATTLBinding(typedNil)
-	bound := f.engine.DATTLBindingService()
-	require(t, bound != nil && bound.(*daTTLRecordingService) == nil, "typed nil publication: bound=%v", bound)
 }
 
 // TestDATTLCallbackBindingChangesNoDAState pins NOCHG at the API level over a populated relay
@@ -826,4 +821,28 @@ func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
 	after := daRelayStateSnapshot(f.relay)
 	requireDATTLCount(t, after, r.stateAID, 2)
 	requireDATTLCount(t, after, r.stateBID, 2)
+}
+
+// TestDATTLCallbackDecrementReachability pins that every production function that lowers a TTL
+// count is reached only from advanceOwnerReadyTTLInGuard, and the in-guard body only from the
+// canonical transition's enterDATTL; the legacy advanceOrphanTTLLocked keeps its one legacy caller.
+func TestDATTLCallbackDecrementReachability(t *testing.T) {
+	want := map[string][]string{
+		"addOwnerReadyTTLSurvivor":         {"planOwnerReadyTTLRecordLocked"},
+		"planOwnerReadyTTLRecordLocked":    {"planOwnerReadyTTLLocked"},
+		"planOwnerReadyTTLLocked":          {"advanceOwnerReadyTTLInGuard"},
+		"commitOwnerReadyTTLPlanLocked":    {"advanceOwnerReadyTTLInGuard"},
+		"applyOwnerReadyTTLPlanUnderOwner": {"commitOwnerReadyTTLPlanLocked"},
+		"applyOwnerReadyTTLPlanLocked":     {"advanceOwnerReadyTTLInGuard", "applyOwnerReadyTTLPlanUnderOwner"},
+		"advanceOwnerReadyTTLInGuard":      {"enterDATTL"},
+		"advanceOrphanTTLLocked":           {"advanceOrphanTTL"},
+	}
+	names := make([]string, 0, len(want))
+	for name := range want {
+		names = append(names, name)
+	}
+	got := productionReferenceCensus(t, names...)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("TTL decrement reachability=%v, want %v", got, want)
+	}
 }

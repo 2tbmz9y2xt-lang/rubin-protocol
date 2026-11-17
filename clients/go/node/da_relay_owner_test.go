@@ -360,7 +360,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 	for path, want := range map[string]string{
 		"da_relay_state.go":          "d2a41b23a56096c1a5c689548ae23037ad20f508e257136207a6e3354af91563",
 		"da_relay_record.go":         "2706ab0b65ee400056f6d29e6807d509e937d8d778de5aae5ee36d2a05c8eb11",
-		"da_relay_mutation.go":       "62d388b3b0b24d2c2c74e3776c0b554f501ff3779582662cc22b10721ebe5bcd",
+		"da_relay_mutation.go":       "b8b3b8fe7a1355353b4914c25e2059caae1db4f4d49e09898cc284ab13a4a51c",
 		"da_complete_commit.go":      "3fb456f5668dff7bc089b0472ccc61c2c263d5c7d3917cd512a20182e45709f5",
 		"da_complete_snapshot.go":    "e1592f7f08d04c2423184a54ed404a86fdaab1057a725fa8acffc7a37f1eb1cc",
 		"sync_da_relay.go":           "54d3cbb55e38cf420724a0da2e353ee240acad3e5a60e191491eb862d04bca8a",
@@ -4470,8 +4470,8 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 	}
 	// OWNED CALLERS: remote, both local arms and detached-reorg ingress are the only
 	// AdmitDA selectors over every non-test Go source.
-	refs := productionReferenceCensus(t, "AdmitDA", "ClaimDARelayState", "NewPeerDAProvenance", "LocalDAProvenance", "DetachedReorgDAProvenance", "PublishDATTLBinding", "enterSelectedDATTL")
-	require(t, reflect.DeepEqual(refs, map[string][]string{"AdmitDA": {"AdmitLocalDA", "admitDetachedReorgDA", "announceLocalDA", "handleRelayDATx"}, "ClaimDARelayState": {"NewService"}, "PublishDATTLBinding": {"NewService"}, "enterSelectedDATTL": {"enterDATTL"}, "NewPeerDAProvenance": {"remoteDAProvenance"}, "LocalDAProvenance": {"AdmitLocalDA", "announceLocalDA"}, "DetachedReorgDAProvenance": {"admitDetachedReorgDA"}}), "production references=%v", refs)
+	refs := productionReferenceCensus(t, "AdmitDA", "ClaimDARelayState", "NewPeerDAProvenance", "LocalDAProvenance", "DetachedReorgDAProvenance", "PublishDATTLBinding", "enterSelectedDATTL", "ApplyBlockWithReorgDeferredUnderLease", "enterDATTL", "enterDATTLMutationLeased")
+	require(t, reflect.DeepEqual(refs, map[string][]string{"AdmitDA": {"AdmitLocalDA", "admitDetachedReorgDA", "announceLocalDA", "handleRelayDATx"}, "ClaimDARelayState": {"NewService"}, "PublishDATTLBinding": {"NewService"}, "enterSelectedDATTL": {"enterDATTL"}, "ApplyBlockWithReorgDeferredUnderLease": {"ApplyBlockWithReorgDeferred", "applyBlockWithReorg"}, "enterDATTL": {"publishCanonicalTransition"}, "enterDATTLMutationLeased": {"applyBlockWithReorg"}, "NewPeerDAProvenance": {"remoteDAProvenance"}, "LocalDAProvenance": {"AdmitLocalDA", "announceLocalDA"}, "DetachedReorgDAProvenance": {"admitDetachedReorgDA"}}), "production references=%v", refs)
 	newService, detached := declaredFunctions("p2p/service.go")["NewService"], declaredFunctions("p2p/da_relay_ingest.go")["admitDetachedReorgDA"]
 	if newService == nil || detached == nil {
 		t.Fatal("detached admission binding functions missing")
@@ -6706,7 +6706,7 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	refs := productionReferenceCensus(t, "releaseOwnerReadyPeerQuota", "releasePeerQuotaKey", "advanceOrphanTTL", "prepareCanonicalDAImage", "advanceOwnerReadyTTLInGuard")
 	require(t, reflect.DeepEqual(refs, map[string][]string{"releaseOwnerReadyPeerQuota": {"ReleasePeerQuotaKey"}, "releasePeerQuotaKey": nil, "advanceOrphanTTL": nil, "prepareCanonicalDAImage": nil, "advanceOwnerReadyTTLInGuard": {"enterDATTL"}}), "production references=%v", refs)
 	// R4: the fenced TTL paths are deleted, so no production declaration of them remains.
-	for _, gone := range []string{"advanceOwnerReadyTTL", "AdvanceOrphanTTL", "tickOwnerReadyTTLRecordLocked", "ownerReadyTTLTickVictims"} {
+	for _, gone := range []string{"AdvanceOrphanTTL", "advanceOwnerReadyTTL", "advanceDAOrphanTTL", "ownerReadyTTLTickVictims", "tickOwnerReadyTTLRecordLocked"} {
 		require(t, len(productionDeclarations(t, gone)) == 0, "deleted fenced TTL function %s is declared again", gone)
 	}
 	// TEETH: `f := s.advanceOwnerReadyTTLInGuard` is a bare SelectorExpr with no CallExpr; the identifier

@@ -90,13 +90,13 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 		return p.handleRelayedBlockApplyError(pb, blockHash, blockBytes, err)
 	}
 	p.clearCompactOutstandingRequestForBlock(blockHash)
-	p.acceptedRelayedBlock(blockHash, summary, nil)
+	p.acceptedRelayedBlock(blockHash, summary)
 	return summary, nil
 }
 
 func (p *peer) acceptRelayedBlockResult(blockHash [32]byte, summary *node.ChainStateConnectSummary, err error) (*node.ChainStateConnectSummary, error) {
 	p.clearCompactOutstandingRequestForBlock(blockHash)
-	p.acceptedRelayedBlock(blockHash, summary, err)
+	p.acceptedRelayedBlock(blockHash, summary)
 	return summary, err
 }
 
@@ -155,7 +155,7 @@ func parseRelayedBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, err
 	return pb, blockHash, nil
 }
 
-func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainStateConnectSummary, applyErr error) {
+func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainStateConnectSummary) {
 	p.service.noteAcceptedBlock(p, blockHash, blockHash, summary)
 	p.service.resolveOrphansFromSupplied(p, blockHash, blockHash)
 }
