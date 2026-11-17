@@ -203,7 +203,7 @@ func replayStepRun148V1(o *ReplayStepOwnerV1, store *mdbx.Store, reservations *m
 
 // release148V1 retires caller backing after native and complete-frame cleanup.
 func (c *replayStepCall) release148V1() {
-	c.reader, c.body, c.old, c.timestamps, c.consulted, c.path148 = nil, nil, nil, nil, nil, nil
+	c.reader, c.body, c.old, c.timestamps, c.consulted = nil, nil, nil, nil, nil
 	c.own, c.tree = replayPathOwn{}, mdbx.TreeAuthorityV1{}
 	c.validate148, c.account = nil, nil
 }
@@ -215,7 +215,11 @@ func (c *replayStepCall) prepare148V1(reader *mdbx.Reader, supplied []byte) (req
 	if err = c.authority148V1(reader); err != nil {
 		return
 	}
-	if err = c.sources(supplied); err != nil {
+	path, err := c.owner.path.newCall(reader, c.a, nil, c.owner.state.context.Genesis, nil)
+	if err != nil {
+		return
+	}
+	if err = c.sources(supplied, path); err != nil {
 		return
 	}
 	var input initial148CompleteBlockInputV1
@@ -257,11 +261,7 @@ func (c *replayStepCall) authority148V1(reader *mdbx.Reader) error {
 	}
 	c.bodyBound, c.undoBound = c.promises148V1()
 	c.windowCount = replayStepWindowV1(c.h)
-	if err := c.account.PrecheckV1(400000000); err != nil {
-		return err
-	}
-	c.path148, err = c.owner.path.newCall(reader, c.a, nil, c.owner.state.context.Genesis, nil)
-	return err
+	return c.account.PrecheckV1(400000000)
 }
 
 func replayStepWindowV1(height uint64) uint64 {
@@ -742,8 +742,7 @@ type replayStepCall struct {
 	a                                 mdbx.StorageAuthorityV1
 	old                               *mdbx.AuthorityPointV1
 	own                               replayPathOwn
-	path148                           *replayPathCall
-	sourceRead148                      error
+	sourceRead148                     error
 	body                              []byte
 	stored, headerMismatch            bool
 	x, parent, target                 [32]byte
@@ -781,7 +780,7 @@ func (c *replayStepCall) plan(r *mdbx.Reader, supplied []byte) (mdbx.Batch, erro
 	if c.denied {
 		return c.decide(selectedSideCapacity, "")
 	}
-	if err := c.sources(supplied); err != nil {
+	if err := c.sources(supplied, nil); err != nil {
 		return mdbx.Batch{}, err
 	}
 	if err := c.qualify(); err != nil {
@@ -790,7 +789,7 @@ func (c *replayStepCall) plan(r *mdbx.Reader, supplied []byte) (mdbx.Batch, erro
 	return c.stateBatch()
 }
 
-func (c *replayStepCall) sources(supplied []byte) error {
+func (c *replayStepCall) sources(supplied []byte, path *replayPathCall) error {
 	c.entry.step = selectedSideCanonical
 	old, err := c.reader.CanonicalTipV1(uint64(c.a.ActiveGenerationID))
 	if err != nil {
@@ -803,15 +802,7 @@ func (c *replayStepCall) sources(supplied []byte) error {
 	} else {
 		supplied = nil
 	}
-	var own replayPathOwn
-	if c.path148 != nil {
-		path := c.path148
-		c.path148 = nil
-		path.old, path.supplied = old, supplied
-		own, err = path.own()
-	} else {
-		own, err = c.owner.path.ownLocked(c.reader, c.a, old, c.owner.state.context.Genesis, supplied)
-	}
+	own, err := c.ownPath(path, supplied)
 	c.own, c.entry.step = own, own.resource
 	if err != nil {
 		if own.missing {
@@ -831,6 +822,16 @@ func (c *replayStepCall) sources(supplied []byte) error {
 		return err
 	}
 	return c.bodySource(supplied)
+}
+
+func (c *replayStepCall) ownPath(path *replayPathCall, supplied []byte) (replayPathOwn, error) {
+	if path == nil {
+		return c.owner.path.ownLocked(c.reader, c.a, c.old, c.owner.state.context.Genesis, supplied)
+	}
+	path.old, path.supplied = c.old, supplied
+	own, err := path.own()
+	*path = replayPathCall{}
+	return own, err
 }
 
 // targetWork148V1 checks the persisted endpoint before acquiring its body.
