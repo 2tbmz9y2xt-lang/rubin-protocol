@@ -151,8 +151,11 @@ func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
 			t.Fatalf("reorg claim binding mismatch: racing NewService did not return within %s", lifecycleWatchdog)
 		}
 		require(t, raceErr != nil && raceErr.Error() == "sync engine DA relay state binding mismatch", "racing NewService error=%v", raceErr)
-		// C7b: the refused construction published no binding, so a selection invokes nothing.
+		// The refused construction published no binding, so a selection invokes nothing: three
+		// ACCEPTED/NEW publications leave a commit retained at count 3 in place.
 		require(t, engine.DATTLBindingService() == nil, "refused construction published a binding")
+		sink := &testHarness{chainState: base.chainState, blockStore: base.blockStore, syncEngine: engine, service: &Service{daRelay: engine.DARelayState()}}
+		requireAbsentBindingDecreasesNothing(t, sink)
 		cfg.Now = time.Now
 		service, err := NewService(cfg)
 		require(t, err == nil && engine.DATTLBindingService() == node.DATTLMutationService(service), "NewService after refused race: %v", err)

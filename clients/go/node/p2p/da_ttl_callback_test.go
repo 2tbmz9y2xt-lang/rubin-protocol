@@ -825,3 +825,26 @@ func TestDATTLCallbackEndToEndAbsentBinding(t *testing.T) {
 	}
 	f.requireAbsent(commit, "the bound Service's three admitted decreases expired the record")
 }
+
+// requireAbsentBindingDecreasesNothing retains a commit at count 3 in sink's DA relay and applies
+// three ACCEPTED/NEW SyncEngine.ApplyBlock publications: with no binding the record survives.
+// DisconnectTip then returns the chain to its starting tip.
+func requireAbsentBindingDecreasesNothing(t *testing.T, sink *testHarness) {
+	t.Helper()
+	source := newTestHarness(t, int(sink.chainState.Height)+4, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, sink)
+	commit := f.commit(daRelayTestID(0xe9), 2)
+	f.admit(commit, "127.0.0.1:19111")
+	start := sink.chainState.Height + 1
+	for height := start; height < start+3; height++ {
+		summary, err := sink.syncEngine.ApplyBlock(blockAtHeight(t, source, height), nil)
+		require(t, err == nil && summary != nil && summary.BlockHeight == height, "ApplyBlock(%d)=(%+v,%v), want ACCEPTED/NEW", height, summary, err)
+	}
+	require(t, sink.syncEngine.DATTLBindingService() == nil, "an apply published a binding")
+	f.requireRetained(commit, "three publications under an absent binding decreased nothing")
+	for range 3 {
+		_, err := sink.syncEngine.DisconnectTip()
+		must(t, err, "DisconnectTip back to the starting tip")
+	}
+	require(t, sink.chainState.Height+1 == start, "tip height=%d after the disconnects, want %d", sink.chainState.Height, start-1)
+}
