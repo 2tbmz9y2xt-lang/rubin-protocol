@@ -984,7 +984,7 @@ func TestTreeStreamDirectionRelationV1(t *testing.T) {
 }
 
 func TestTreeStreamResourceLayoutV1(t *testing.T) {
-	// RUB-1663 derived 64-bit layouts (changed and new types), observed before the census below.
+	// Derived 64-bit layouts (changed and new types), observed before the census below.
 	for _, row := range []struct{ got, want uintptr }{
 		{unsafe.Sizeof(TreeOperationV1{}), 184},
 		{unsafe.Sizeof(treePlanV1{}), 160},
@@ -1063,13 +1063,13 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	if loan != 96 || control != 3661 || control-2709 > 1024 {
 		t.Fatal("selected fixed control increment", control)
 	}
-	// RUB-1663: two 72-byte Pair/operation transports and the 8-byte plan scope field, measured from
+	// Two 72-byte Pair/operation transports and the 8-byte plan scope field, measured from
 	// each changed type's growth over its baseline size.
 	control += uint64(unsafe.Sizeof(TreePairV1{})) - 72 + uint64(unsafe.Sizeof(TreeOperationV1{})) - 112 + uint64(unsafe.Sizeof(treePlanV1{})) - 152
 	if control != 3813 {
 		t.Fatal("scope fixed control census differs", control)
 	}
-	// RUB-1663 raw pair-only fixed grant: entry, operation, plan, three scope values, section, scope,
+	// Raw pair-only fixed grant: entry, operation, plan, three scope values, section, scope,
 	// compose, two Readers, two streams, two rows, read budget, six image records (144), two C metadata
 	// transports (80), admission budget, temporary Batch and fixed scalar/error transports (256).
 	rawFixed := uint64(unsafe.Sizeof(treePublicEntryV1{})) + uint64(unsafe.Sizeof(TreeOperationV1{})) + uint64(unsafe.Sizeof(treePlanV1{})) +
@@ -4490,7 +4490,7 @@ func psScope(t *testing.T, r *Reader, g uint64) ObsoletePageV1 {
 	return page
 }
 
-// psPageGrant is a test-side covering bound, not a production or contract value, of the caller-held input
+// psPageGrant is a test-side covering bound, not a production value, of the caller-held input
 // of a case that reads at most two one-row counter pages or one scene's node/root pages (page, row and
 // witness records, tokens, continuation and key copies), and adds at most one ordinary row with its literal
 // and a few selectors. Cases with larger inputs pass their own bound to psRunG.
@@ -4553,7 +4553,7 @@ func psRefused(t *testing.T, s *Store, r tsResult, capacity bool, label string) 
 	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(10), tsCounterLiteral(10, 1))
 }
 
-// psF is the contract envelope F computed from its literal formula, independently of production.
+// psF is the envelope F computed from its literal formula, independently of production.
 func psF(m, c, d, w, p, l, k, u uint64) uint64 {
 	return 4096 + 128*(m+d) + 48*c + k + 176*w + 8*w + 8*d + 32*p + 32*(p+3*w) + 33*l + u
 }
@@ -4571,7 +4571,7 @@ func TestTreeStreamPhysicalScopeV1(t *testing.T) {
 	t.Run("callback", psCallback)
 }
 
-// N5/R3: callback error, panic and Goexit win before any new field is inspected; the caller grant held
+// Callback error, panic and Goexit win before any new field is inspected; the caller grant held
 // inside the callback and the account are released once on every exit. The scene is seeded without the shared owner-live precondition so a leaked grant
 // fails this row's own assertion.
 func psCallback(t *testing.T) {
@@ -4669,7 +4669,7 @@ func psGoexit(t *testing.T, s *Store, o *OperationReservationOwner, garbage func
 	return kept
 }
 
-// N2: a raw-only delete commits NEW, removes exactly its target and leaves the next operation healthy.
+// A raw-only delete commits NEW, removes exactly its target and leaves the next operation healthy.
 func psAccepted(t *testing.T) {
 	s, path, o := psStore(t)
 	r := psRun(t, s, o, LaneOperation, psRawDelete(t, 9))
@@ -4719,7 +4719,7 @@ func psGone(t *testing.T, s *Store, key []byte) {
 	}))
 }
 
-// R2/M1: every forbidden companion of a nonempty new field refuses under the closed shape.
+// Every forbidden companion of a nonempty new field refuses under the closed shape.
 func psShape(t *testing.T) {
 	s, _, o := psStore(t)
 	edits := []struct {
@@ -4767,7 +4767,7 @@ func psShape(t *testing.T) {
 	psRefused(t, s, r, true, "ordinary-first")
 }
 
-// R1/M2: zero, fabricated and earlier-invocation tokens refuse before any charge.
+// Zero, fabricated and earlier-invocation tokens refuse before any charge.
 func psProvenance(t *testing.T) {
 	s, _, o := psStore(t)
 	var earlier ObsoletePageV1
@@ -4776,7 +4776,7 @@ func psProvenance(t *testing.T) {
 		return tsPair(31)
 	})
 	mustEnvironment(t, r.err)
-	// N4: after callback expiry the row read returns the existing inactive Reader refusal.
+	// After callback expiry the row read returns the existing inactive Reader refusal.
 	if n, err := earlier.Rows[0].ReadAt(make([]byte, 1), 0); n != 0 {
 		t.Fatalf("expired scope row returned %d bytes", n)
 	} else {
@@ -4820,7 +4820,7 @@ func treeNativeIsInvalid(err error) bool {
 	return direct && engine.Diagnostic == "invalid Update Batch"
 }
 
-// R1/M3: duplicate witness identity, duplicate raw delete and an uncovered row refuse.
+// Duplicate witness identity, duplicate raw delete and an uncovered row refuse.
 func psDuplicates(t *testing.T) {
 	s, _, o := psStore(t)
 	builds := map[string]func(*Reader) TreeOperationV1{
@@ -4864,7 +4864,7 @@ func psDuplicates(t *testing.T) {
 	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), nil)
 }
 
-// R1: ordinary-target and Consulted overlap with a raw delete refuse.
+// Ordinary-target and Consulted overlap with a raw delete refuse.
 func psOverlap(t *testing.T) {
 	s, _, o := psStore(t)
 	key := tsCounterKey(9)
@@ -4882,7 +4882,7 @@ func psOverlap(t *testing.T) {
 	psRefused(t, s, r, false, "consulted overlap")
 }
 
-// R2: count capacity precedes unknown-kind/order and token content; zero hash is legal.
+// Count capacity precedes unknown-kind/order and token content; zero hash is legal.
 func psCounts(t *testing.T) {
 	s, _, o := psStore(t)
 	run := func(label string, capacity bool, extra uint64, edit func(*TreeOperationV1)) {
@@ -4951,7 +4951,7 @@ func psCounts(t *testing.T) {
 	}
 }
 
-// N3/R4/M9: F is charged before allocation; F-1 refuses at admission with OPEN, and the
+// F is charged before allocation; F-1 refuses at admission with OPEN, and the
 // scoped read window S is a separate same-account charge refused after the section begins.
 func psMetadata(t *testing.T) {
 	s, _, o := psStore(t)
@@ -4988,7 +4988,7 @@ func psMetadata(t *testing.T) {
 	tsFollowing(t, s2, o2)
 }
 
-// R4: ordinary counter targets and one raw counter delete share the aux cap 16384: 16384 ordinary rows
+// Ordinary counter targets and one raw counter delete share the aux cap 16384: 16384 ordinary rows
 // plus the raw row exceed it, 16383 plus the raw row commit, and 16384 ordinary rows with the witness but
 // no raw row commit (the raw row is what crosses the combined cap).
 func psCombinedCap(t *testing.T) {
@@ -5029,7 +5029,7 @@ func psCombinedCap(t *testing.T) {
 	}
 }
 
-// N6: legacy format-3 Store.Update still refuses before callback; direct Pair rank 8 stays invalid.
+// Legacy format-3 Store.Update still refuses before callback; direct Pair rank 8 stays invalid.
 func psLegacy(t *testing.T) {
 	s, _, o := psStore(t)
 	calls := 0

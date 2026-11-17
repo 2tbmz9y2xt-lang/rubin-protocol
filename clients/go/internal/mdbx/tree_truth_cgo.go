@@ -421,7 +421,7 @@ func (t *treeSectionV1) pairPreflightV1(pair []ownedMutation, consulted []ownedC
 }
 
 // pairPreflightScopedV1 is pairPreflightV1 with the plan's one residual scope (context window or physical
-// scope) as one more consulted domain (D4 site 1).
+// scope) as one more consulted domain.
 func (t *treeSectionV1) pairPreflightScopedV1(pair []ownedMutation, consulted []ownedConsulted, scope largeImageScope) error {
 	_, err := updateNativeImages(t.old, t.handles, pair)
 	if err != nil {
@@ -685,7 +685,7 @@ func (t *treeSectionV1) finalV1(pair []ownedMutation, consulted []ownedConsulted
 	return nil
 }
 
-// finalScopedV1 is finalV1 with the plan's residual scope compared after the Consulted rows (D4 site 2).
+// finalScopedV1 is finalV1 with the plan's residual scope compared after the Consulted rows.
 func (t *treeSectionV1) finalScopedV1(pair []ownedMutation, consulted []ownedConsulted, scope largeImageScope) error {
 	const diagnostic = "final update image mismatch"
 	for _, entry := range t.pw.entries {
@@ -727,7 +727,7 @@ func (t *treeSectionV1) commitV1(pair []ownedMutation, consulted []ownedConsulte
 	return updateNativeCommit(t.env, t.handles, pair, consulted, t.old, t.write, t.reached, truth)
 }
 
-// commitScopedV1 is commitV1 with the plan's residual scope forwarded to the pair-only readback (D4 site 4).
+// commitScopedV1 is commitV1 with the plan's residual scope forwarded to the pair-only readback.
 func (t *treeSectionV1) commitScopedV1(pair []ownedMutation, consulted []ownedConsulted, truth treeTruthV1, scope largeImageScope) updateNativeOutcome {
 	t.ended = true
 	return updateNativeCommit(t.env, t.handles, pair, consulted, t.old, t.write, t.reached, truth, scope)

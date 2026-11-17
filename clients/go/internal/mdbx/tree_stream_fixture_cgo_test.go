@@ -6818,9 +6818,9 @@ func psfDelete(t *testing.T, g uint64, mutations []Mutation, selectors []LargeIm
 	}
 }
 
-// N1: classes 1 (UTXO), 2 (index forward), 3 (counter) and 4 (derived owner), each holding the malformed
+// Classes 1 (UTXO), 2 (index forward), 3 (counter) and 4 (derived owner), each holding the malformed
 // disposable value 0xde, are deleted by the typed raw path next to the untouched tree scene; no value is
-// decoded. Classes 5 and 6 are the scene's node/root rows deleted by the other N1 rows.
+// decoded. Classes 5 and 6 are the scene's node/root rows deleted by the commit rows.
 func psfClassDeletes(t *testing.T) {
 	sc := psfNew(t)
 	utxo := append(obsoleteGenerationLiteral(9), 0x44)
@@ -6855,7 +6855,7 @@ func psfClassDeletes(t *testing.T) {
 	sc.image(t, reopened, false)
 }
 
-// N3: node page bounds 1 and 7 (default scene pages use 1440) delete exactly the rows their page returned.
+// Node page bounds 1 and 7 (default scene pages use 1440) delete exactly the rows their page returned.
 func psfPageBounds(t *testing.T) {
 	family := obsoleteTreeFamily(9)
 	for _, bound := range []uint32{1, 7} {
@@ -6904,7 +6904,7 @@ func psfUndo(t *testing.T, s *Store) ([32]byte, [][]byte) {
 	return hash, undo
 }
 
-// N2: present and empty undo families plus an absent body are valid physical domains.
+// Present and empty undo families plus an absent body are valid physical domains.
 func psfLargeDomains(t *testing.T) {
 	sc := psfNew(t)
 	hash, undo := psfUndo(t, sc.s)
@@ -6930,7 +6930,7 @@ func psfLargeDomains(t *testing.T) {
 	psfRaw(t, reopened, 5, empty[:], nil)
 }
 
-// N2: a raw undo target inside the selected family disappears once; every nontarget member stays equal.
+// A raw undo target inside the selected family disappears once; every nontarget member stays equal.
 func psfTargetInFamily(t *testing.T) {
 	sc := psfNew(t)
 	hash, undo := psfUndo(t, sc.s)
@@ -6957,7 +6957,7 @@ func psfTargetInFamily(t *testing.T) {
 	sc.image(t, reopened, false)
 }
 
-// N7: an identical ordinary put under a witnessed scope satisfies both predicates after a possibly
+// An identical ordinary put under a witnessed scope satisfies both predicates after a possibly
 // crossed commit; OLD is selected first.
 func psfBothIdentical(t *testing.T) {
 	sc := psfNew(t)
@@ -6974,8 +6974,8 @@ func psfBothIdentical(t *testing.T) {
 		}}
 	}
 	evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = psRun(t, sc.s, sc.o, LaneOperation, same) })
-	// The possibly-crossed readback compares under the sealed precommit limit; omitting that seal while the
-	// captured context stays typed turns the readback into the nil-budget capacity refusal.
+	// The readback compares under the sealed precommit limit; without that limit a typed scope with a
+	// nil budget refuses the readback with the capacity error.
 	if ce, ok := r.err.(*CommitError); ok && errors.Is(ce.ReadbackCause, errOperationReservationCapacity) {
 		t.Fatalf("scope missing budget admitted: readback %v", r.err)
 	}
@@ -6989,7 +6989,7 @@ func psfBothIdentical(t *testing.T) {
 	tsRead(t, reopened, TreeSchemaV1DBIs()[0], []byte{2}, psfAuthority(t).Literal)
 }
 
-// N9: raw authority does not consult generation roles: the committed active generation's physical rows
+// Raw authority does not consult generation roles: the committed active generation's physical rows
 // are deleted exactly as tokens name them; eligibility stays the caller's responsibility.
 func psfDormant(t *testing.T) {
 	sc := psfNew(t)
@@ -7013,13 +7013,13 @@ func psfDormant(t *testing.T) {
 }
 
 func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
-	t.Run("N2-large-domains", psfLargeDomains)
-	t.Run("N2-target-in-family", psfTargetInFamily)
-	t.Run("N7-both-identical-OLD-first", psfBothIdentical)
-	t.Run("N9-dormant", psfDormant)
-	t.Run("N1-classes-1-4", psfClassDeletes)
-	t.Run("N3-page-bounds", psfPageBounds)
-	t.Run("N1-commit", func(t *testing.T) {
+	t.Run("large-domains", psfLargeDomains)
+	t.Run("target-in-family", psfTargetInFamily)
+	t.Run("both-identical-OLD-first", psfBothIdentical)
+	t.Run("dormant", psfDormant)
+	t.Run("classes-1-4", psfClassDeletes)
+	t.Run("page-bounds", psfPageBounds)
+	t.Run("commit", func(t *testing.T) {
 		sc := psfNew(t)
 		r := sc.run(t, sc.o)
 		r.tuple(t, 2, 3, -1)
@@ -7031,7 +7031,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsFollowing(t, sc.s, sc.o)
 		sc.image(t, tsReopen(t, sc.s, sc.path), true)
 	})
-	t.Run("R6-write-snapshot", func(t *testing.T) {
+	t.Run("write-snapshot", func(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 14, 4, sc.key(), func() { r = sc.run(t, sc.o) })
@@ -7049,7 +7049,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		}
 		psfRaw(t, reopened, 0, tsRootKey(9), []byte{0xee, 9})
 	})
-	t.Run("R7-final", func(t *testing.T) {
+	t.Run("final", func(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 13, 4, sc.key(), func() { r = sc.run(t, sc.o) })
@@ -7061,7 +7061,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc.image(t, tsReopen(t, sc.s, sc.path), false)
 	})
-	t.Run("N7-crossed-clean", func(t *testing.T) {
+	t.Run("crossed-clean", func(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = sc.run(t, sc.o) })
@@ -7072,7 +7072,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 2, r.err)
 		sc.image(t, tsReopen(t, sc.s, sc.path), true)
 	})
-	t.Run("N7-crossed-complete-OLD", func(t *testing.T) {
+	t.Run("crossed-complete-OLD", func(t *testing.T) {
 		// Mode 7 breaks the write transaction before a commit reported as possibly crossed: the strict
 		// readback finds the complete OLD image (targets and every residual unchanged), so OLD wins.
 		sc := psfNew(t)
@@ -7104,7 +7104,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		{"missing-member", 4, 4, func(sc *psfScene) []byte { return sc.key() }},
 		{"changed-root-point", 3, 0, func(*psfScene) []byte { return tsRootKey(9) }},
 	} {
-		t.Run("N7-neither/"+c.name, func(t *testing.T) {
+		t.Run("neither/"+c.name, func(t *testing.T) {
 			sc := psfNew(t)
 			var r tsResult
 			evidence := ctxTreeFault(t, sc.s, c.mode, c.rank, c.key(sc), func() { r = sc.run(t, sc.o) })
@@ -7118,7 +7118,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 			tsConsumed(t, sc.s, sc.o, 3, r.err)
 		})
 	}
-	t.Run("N7-crossed-drift", func(t *testing.T) {
+	t.Run("crossed-drift", func(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 3, 4, sc.key(), func() { r = sc.run(t, sc.o) })
@@ -7128,7 +7128,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		r.tuple(t, 3, 3, -1)
 		tsConsumed(t, sc.s, sc.o, 3, r.err)
 	})
-	t.Run("H1-native-read", func(t *testing.T) {
+	t.Run("native-read", func(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 28, 4, sc.key(), func() { r = sc.run(t, sc.o) })
@@ -7139,7 +7139,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		r.tuple(t, 1, 1, -1)
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 	})
-	t.Run("H1-mismatch-then-read-error", func(t *testing.T) {
+	t.Run("mismatch-then-read-error", func(t *testing.T) {
 		// Mode 29 drifts the body at commit, then fails every later readback prefix read of another DBI:
 		// the large body mismatch comes first and the raw domain traversal must still reach its EIO.
 		sc := psfNew(t)
@@ -7156,12 +7156,12 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		r.tuple(t, 3, 3, -1)
 		tsConsumed(t, sc.s, sc.o, 3, r.err)
 	})
-	t.Run("H1-domain-mismatch-then-read-error", psfDomainMismatchThenError)
-	t.Run("H1-point-mismatch-then-capacity", psfPointMismatchThenCapacity)
-	t.Run("M14-retained", psfRetained)
-	t.Run("N5-callback-cleanup", psfCallbackCleanup)
-	t.Run("N4-selector-alias", func(t *testing.T) {
-		// At write site 3 the caller rewrites its own LargeConsulted value to an absent body; the body then
+	t.Run("domain-mismatch-then-read-error", psfDomainMismatchThenError)
+	t.Run("point-mismatch-then-capacity", psfPointMismatchThenCapacity)
+	t.Run("retained", psfRetained)
+	t.Run("callback-cleanup", psfCallbackCleanup)
+	t.Run("selector-alias", func(t *testing.T) {
+		// At the first write observation the caller rewrites its own LargeConsulted value to an absent body; the body then
 		// drifts after the first write. The owned selector copy still compares the drifted body at final.
 		sc := psfNew(t)
 		build := sc.build(t)
@@ -7190,7 +7190,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc.image(t, tsReopen(t, sc.s, sc.path), false)
 	})
-	t.Run("M15-same-prefix-sibling", func(t *testing.T) {
+	t.Run("same-prefix-sibling", func(t *testing.T) {
 		// Only the generation-9 one-leaf is a target; its same-generation-prefix sibling, ordered before it,
 		// drifts at the write snapshot. Generation 8 holds byte-equal values under another prefix.
 		sc := psfNew(t)
@@ -7218,7 +7218,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 			psfRaw(t, reopened, 8, row.key, row.value)
 		}
 	})
-	t.Run("N8-larger-candidate-preflight", func(t *testing.T) {
+	t.Run("larger-candidate-preflight", func(t *testing.T) {
 		// The first write-snapshot get reports the body one byte longer than ORIGINAL OLD. The length
 		// mismatch is inequality, not a funded payload comparison (which would refuse with capacity).
 		// Fixture mode 31 fires at preflight, the first write_txn get; it does not reach final/readback.
@@ -7233,7 +7233,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc.image(t, tsReopen(t, sc.s, sc.path), false)
 	})
-	t.Run("N8-larger-candidate-readback", func(t *testing.T) {
+	t.Run("larger-candidate-readback", func(t *testing.T) {
 		// The selected body is present with length 0 in ORIGINAL OLD. Commit drift (mode 3) writes one byte
 		// at it after the real commit, so the possible-crossed readback candidate is longer than ORIGINAL OLD:
 		// the length mismatch is inequality before any funded payload comparison, and the truth is UNKNOWN.
@@ -7257,7 +7257,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 			psfRaw(t, reopened, 8, row.key, nil)
 		}
 	})
-	t.Run("M15-equal-digest-other-generation", func(t *testing.T) {
+	t.Run("equal-digest-other-generation", func(t *testing.T) {
 		// Only the generation-9 one-leaf is a target; the generation-8 node domain is also compared and its
 		// one-leaf holds a byte-equal value under another generation key. That row drifts at the write snapshot.
 		sc := psfNew(t)
@@ -7285,7 +7285,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		reopened := tsReopen(t, sc.s, sc.path)
 		psfRaw(t, reopened, 8, target.key, target.value)
 	})
-	t.Run("N8-operand-window", func(t *testing.T) {
+	t.Run("operand-window", func(t *testing.T) {
 		sc := psfNew(t)
 		f, window := psfF(t), psfWindow(t, sc.s)
 		var r tsResult
@@ -7307,8 +7307,8 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc2 := psfNew(t)
 		r = sc2.run(t, reservationFilled(t, psPageGrant+f+window+2*uint64(len(psfBodyValue))))
-		// Omitting the preflight budget forwarding or the final/readback seal while the captured context
-		// stays typed turns this funded commit into the typed nil-budget capacity refusal.
+		// Without the preflight budget argument or the final/readback sealed limit, a typed scope with a
+		// nil budget refuses this funded commit with the capacity error.
 		if r.err != nil || r.truth != 2 {
 			t.Fatalf("scope missing budget admitted: %v truth%d", r.err, r.truth)
 		}
@@ -7316,7 +7316,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		mustEnvironment(t, r.err)
 		sc2.image(t, sc2.s, true)
 	})
-	t.Run("N8-sealed-helper", func(t *testing.T) {
+	t.Run("sealed-helper", func(t *testing.T) {
 		left, right := bytes.Repeat([]byte{1}, 64), bytes.Repeat([]byte{1}, 64)
 		a := updateImage{present: true, bytes: unsafe.Pointer(&left[0]), length: 64}
 		b := updateImage{present: true, bytes: unsafe.Pointer(&right[0]), length: 64}
@@ -7343,7 +7343,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	})
 }
 
-// H1/M16: mode 29 adds an extra member to the rank-5 undo domain at commit, then fails every later
+// Mode 29 adds an extra member to the rank-5 undo domain at commit, then fails every later
 // readback prefix read of another DBI: the raw-domain mismatch comes first and the rank-8 node domain
 // traversal must still reach its EIO.
 func psfDomainMismatchThenError(t *testing.T) {
@@ -7381,7 +7381,7 @@ func psfUndoScopeOp(t *testing.T) func(*Reader) TreeOperationV1 {
 	}
 }
 
-// H1/M16 point loop: mode 36 makes the rank-2 index point differ in length (unfunded inequality); the
+// Point loop: mode 36 makes the rank-2 index point differ in length (unfunded inequality); the
 // later rank-3 header point needs S plus two 148-byte operands, but the account holds F + S + one
 // operand + 64, so its preflight comparison must still refuse with the capacity singleton.
 func psfPointMismatchThenCapacity(t *testing.T) {
@@ -7429,7 +7429,7 @@ func psfUndoScopeF(t *testing.T) uint64 {
 	return psF(1, 0, 3, 2, 2, 0, k, u)
 }
 
-// N5/M14: mode 15 retains the readback abort (thread mismatch); the scope operation keeps that retained
+// Mode 15 retains the readback abort (thread mismatch); the scope operation keeps that retained
 // ownership, releases its grant and the next operation reuses the terminal refusal without a callback.
 func psfRetained(t *testing.T) {
 	sc := psfNew(t)
