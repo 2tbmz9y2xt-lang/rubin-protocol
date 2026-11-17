@@ -366,7 +366,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		"sync_da_relay.go":           "54d3cbb55e38cf420724a0da2e353ee240acad3e5a60e191491eb862d04bca8a",
 		"sync_da_relay_validate.go":  "6a2c6d3a303b232ab11fa7bf3aa86a05629fce1c0968f6fa5e8d5414f43b1365",
 		"da_observer_conformance.go": "e9a91c8857467de557bd0ad7739576ac42a5310af82613eb0e69450b59a1c9a5",
-		"da_relay_owner.go":          "cf8c60ec422da00509f32517f0ccc83850fafffa1ac221cf05d61b815de2b5a6",
+		"da_relay_owner.go":          "32505102bbaa555e2a74c43ef7bf12fceadc09c7f71acce7aee47655f9baf9bb",
 	} {
 		source, err := os.ReadFile(path)
 		if err != nil || fmt.Sprintf("%x", sha256.Sum256(source)) != want {

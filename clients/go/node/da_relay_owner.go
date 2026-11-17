@@ -282,12 +282,16 @@ type daAdmissionObservation struct {
 // AdmitDA admits txBytes using provenance. It returns a zero DAAdmissionResult on error and a retained or duplicate disposition on success.
 // A bound, parsed candidate with tx_nonce 0 returns the stable-terminal TX_ERR_TX_NONCE_INVALID rejection before any guard,
 // retained, cache or owner access (RUBIN_COMPACT_BLOCKS.md Section 5.1 item 3).
-// A PEER completion attempt with a captured target snapshot whose completion budget declines returns a RelayAdmissionUnavailable
-// decline whose only effect is a best-tip renewal made by that same budget operation, and one whose budget operation overflows or
-// finds a changed best tip while any reservation is outstanding returns RelayAdmissionInternal, each before any step-3 work.
-// After a successful reservation only a State C publication returns the charge; every other end keeps it as used for that
-// quota_identity and globally until a later budget operation renews on another best-tip identity. LOCAL and DETACHED_REORG
-// completions and a PEER completion without a captured target never reach the budget (RUBIN_COMPACT_BLOCKS.md Section 18.5).
+// A PEER completion attempt runs the RUBIN_COMPACT_BLOCKS.md Section 18.5 step 2a reservation before any step-3 work. A declined
+// reservation returns a RelayAdmissionUnavailable decline under the Section 18.5 zero-effect decline postcondition: any Section 5.3
+// miss reconciliation this call made before step 2a and any best-tip renewal made by that step 2a operation stay. A step 2a operation
+// whose charge or limit test overflows, or that observes a changed best tip while any reservation is outstanding, returns
+// RelayAdmissionInternal with the budget unchanged. After a successful reservation only a Section 18.5 step 11 State C acceptance
+// returns the charge; every other end keeps it as used for that quota_identity and globally until a later step 2a operation renews
+// on another best-tip identity. On every ordinary return and completion-hook panic the settlement runs at the Section 18.5 step 12
+// position (after the DA and owner releases, before the ChainState release), or with only the ChainState guard held when the attempt
+// ends in step 3. LOCAL and DETACHED_REORG completions never reach the budget; a PEER completion whose first-DA target snapshot copy
+// fails runs no step 2a operation or settlement and returns the existing retained-image-not-owner-ready error.
 func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (result DAAdmissionResult, err error) {
 	// Registered first so it runs last, after the admission hold is released.
 	// A panicking call has no final result: it is not observed, and its panic
