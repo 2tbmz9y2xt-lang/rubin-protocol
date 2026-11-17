@@ -2067,8 +2067,10 @@ func TestUpdatePlanSurfaceOwnership(t *testing.T) {
 		rawDecls = append(rawDecls, rawFile.Decls...)
 	}
 	owners := map[string]bool{}
-	for _, name := range []string{"updateOwnedObsolete", "obsoleteWitnesses", "obsoleteAdmitRows", "obsoleteRowCurrent", "obsoleteCovered", "obsoleteCharge", "obsoleteCompileRows", "updateObsoleteScope", "obsoleteDomainOrdered", "obsoleteCoalesce", "obsoleteMergeable", "obsoleteCoalescePoints", "obsoleteRetainControls", "obsoleteControlKeys", "obsoleteControlKey", "obsoleteContains", "obsoleteUniqueWitnesses", "obsoleteDBI", "obsoleteMutationCmp", "obsoleteRowCmp", "obsoleteDomainCmp", "obsoletePointCmp", "obsoleteScopeArrays", "obsoleteWitnessPoints",
-		"treePrewriteBytesV1", "treeScopeBytesV1", "treeWitnessKeyBytesV1", "treeScopeRowsV1", "scopeCompileV1", "admitScopedV1", "treeScopePresentV1", "treeScopeShapeV1", "treeScopeAdmitV1", "treeScopeProvenanceV1", "treeEmptyOperationV1"} {
+	for _, name := range []string{
+		"updateOwnedObsolete", "obsoleteWitnesses", "obsoleteAdmitRows", "obsoleteRowCurrent", "obsoleteCovered", "obsoleteCharge", "obsoleteCompileRows", "updateObsoleteScope", "obsoleteDomainOrdered", "obsoleteCoalesce", "obsoleteMergeable", "obsoleteCoalescePoints", "obsoleteRetainControls", "obsoleteControlKeys", "obsoleteControlKey", "obsoleteContains", "obsoleteUniqueWitnesses", "obsoleteDBI", "obsoleteMutationCmp", "obsoleteRowCmp", "obsoleteDomainCmp", "obsoletePointCmp", "obsoleteScopeArrays", "obsoleteWitnessPoints",
+		"treePrewriteBytesV1", "treeScopeBytesV1", "treeWitnessKeyBytesV1", "treeScopeRowsV1", "scopeCompileV1", "admitScopedV1", "treeScopePresentV1", "treeScopeShapeV1", "treeScopeAdmitV1", "treeScopeProvenanceV1", "treeEmptyOperationV1",
+	} {
 		owners[name] = false
 	}
 	for _, declaration := range rawDecls {

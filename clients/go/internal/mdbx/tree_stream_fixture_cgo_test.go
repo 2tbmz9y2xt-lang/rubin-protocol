@@ -7209,6 +7209,34 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 			psfRaw(t, reopened, 8, row.key, row.value)
 		}
 	})
+	t.Run("M15-equal-digest-other-generation", func(t *testing.T) {
+		// Only the generation-9 one-leaf is a target; the generation-8 node domain is also compared and its
+		// one-leaf holds a byte-equal value under another generation key. That row drifts at the write snapshot.
+		sc := psfNew(t)
+		build := sc.build(t)
+		target, other := obsoleteTreeFamily(9)[1], obsoleteTreeFamily(8)[1]
+		one := func(r *Reader) TreeOperationV1 {
+			op := build(r)
+			op.Pair.ObsoleteDeletes = slices.DeleteFunc(op.Pair.ObsoleteDeletes, func(row ObsoleteRowV1) bool { return !bytes.Equal(row.Key(), target.key) })
+			nodes8, err := r.ObsoleteGenerationPageV1(8, ObsoleteNodeV1, nil, 1440)
+			mustEnvironment(t, err)
+			if len(op.Pair.ObsoleteDeletes) != 1 || len(nodes8.Rows) != 3 || !bytes.Equal(target.value, other.value) {
+				t.Fatal("scene equal-digest rows missing")
+			}
+			op.Pair.ObsoleteConsulted = append(op.Pair.ObsoleteConsulted, nodes8.Witness)
+			return op
+		}
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 14, 8, other.key, func() { r = psRun(t, sc.s, sc.o, LaneOperation, one) })
+		if evidence.drift != 1 || evidence.commits != 0 || r.stage != 1 {
+			t.Fatalf("independent residual changed: %+v stage%d %v", evidence, r.stage, r.err)
+		}
+		r.tuple(t, 1, 1, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		reopened := tsReopen(t, sc.s, sc.path)
+		psfRaw(t, reopened, 8, target.key, target.value)
+	})
 	t.Run("N8-operand-window", func(t *testing.T) {
 		sc := psfNew(t)
 		f, window := psfF(t), psfWindow(t, sc.s)
