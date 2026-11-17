@@ -61,13 +61,20 @@ func requireDABudgetDisposition(t *testing.T, err error, want RelayAdmissionDisp
 
 const daBudgetDeclineText = "DA completion work budget unavailable"
 
-// requireDABudgetDecline requires the real budget decline: UNAVAILABLE with
-// its text and without the only cause the PEER ingress penalizes.
+// isDABudgetDecline reports the real budget decline: class TxAdmitUnavailable,
+// disposition UNAVAILABLE, its exact text and without the only cause the PEER
+// ingress penalizes.
+func isDABudgetDecline(err error) bool {
+	var admitErr *TxAdmitError
+	return errors.As(err, &admitErr) && admitErr.Kind == TxAdmitUnavailable && admitErr.Message == daBudgetDeclineText &&
+		relayDispositionOf(err) == RelayAdmissionUnavailable && !errors.Is(err, ErrDARelayChunkHashMismatch)
+}
+
+// requireDABudgetDecline requires the real budget decline (isDABudgetDecline).
 func requireDABudgetDecline(t *testing.T, err error) {
 	t.Helper()
-	requireDABudgetDisposition(t, err, RelayAdmissionUnavailable, daBudgetDeclineText)
-	if errors.Is(err, ErrDARelayChunkHashMismatch) {
-		t.Fatalf("decline carries the penalized cause: %v", err)
+	if !isDABudgetDecline(err) {
+		t.Fatalf("err=%v disposition=%v want budget decline (TxAdmitUnavailable, UNAVAILABLE, %q)", err, relayDispositionOf(err), daBudgetDeclineText)
 	}
 }
 
@@ -977,7 +984,7 @@ func daBudgetAdmissionCases() []daBudgetCase {
 				switch {
 				case errors.Is(err, ErrDARelayPayloadCommitmentMismatch):
 					want.sources[string(rune('a'+i))] = daCompletionUse{used: charge}
-				case err != nil && strings.Contains(err.Error(), daBudgetDeclineText) && relayDispositionOf(err) == RelayAdmissionUnavailable && !errors.Is(err, ErrDARelayChunkHashMismatch):
+				case isDABudgetDecline(err):
 					declined++
 				default:
 					t.Fatalf("attempt %d err=%v", i, err)
