@@ -6856,7 +6856,6 @@ func psfClassDeletes(t *testing.T) {
 	sc.image(t, reopened, false)
 }
 
-// Node page bounds 1 and 7 (default scene pages use 1440) delete exactly the rows their page returned.
 // A Reader EIO inside the callback stays the result whether the callback ignores, returns or wraps
 // it with a physical-scope plan whose selector count is above its bound; the scope is never read.
 func psfCallbackReaderError(t *testing.T) {
@@ -6904,8 +6903,9 @@ func psfCallbackReaderError(t *testing.T) {
 	}
 }
 
+// Node page bounds 1, 7 and 1440 over a nine-row generation-9 family delete exactly the rows their page
+// returned; bounds 1 and 7 stop at the row limit and 1440 exhausts the family.
 func psfPageBounds(t *testing.T) {
-	// Six more generation-9 node rows make a nine-row family, so bound 7 stops at its row limit.
 	var extra []obsoleteTreeRow
 	for k := byte(1); k <= 6; k++ {
 		var upper [36]byte
@@ -7037,8 +7037,7 @@ func psfBothIdentical(t *testing.T) {
 		}}
 	}
 	evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = psRun(t, sc.s, sc.o, LaneOperation, same) })
-	// The readback compares under the sealed precommit limit; without that limit a typed scope with a
-	// nil budget refuses the readback with the capacity error.
+	// The readback compares under the sealed precommit limit.
 	if ce, ok := r.err.(*CommitError); ok && errors.Is(ce.ReadbackCause, errOperationReservationCapacity) {
 		t.Fatalf("scope missing budget admitted: readback %v", r.err)
 	}
@@ -7052,8 +7051,8 @@ func psfBothIdentical(t *testing.T) {
 	tsRead(t, reopened, TreeSchemaV1DBIs()[0], []byte{2}, psfAuthority(t).Literal)
 }
 
-// Raw authority does not consult generation roles: the committed active generation's physical rows
-// are deleted exactly as tokens name them; eligibility stays the caller's responsibility.
+// Raw deletion does not consult generation roles: the committed active generation's physical rows
+// are deleted exactly as tokens name them.
 func psfDormant(t *testing.T) {
 	sc := psfNew(t)
 	for _, row := range obsoleteTreeFamily(1) {
@@ -7284,8 +7283,8 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	})
 	t.Run("larger-candidate-preflight", func(t *testing.T) {
 		// The first write-snapshot get reports the body one byte longer than ORIGINAL OLD. The account holds
-		// exactly what the equal-length body comparison needs, so funding the longer candidate would refuse
-		// with capacity; the length mismatch is inequality without funding. Mode 31 fires at preflight only.
+		// exactly what the equal-length body comparison needs; the length mismatch is inequality without
+		// funding. Mode 31 fires at preflight only.
 		sc := psfNew(t)
 		f, window := psfF(t), psfWindow(t, sc.s)
 		var r tsResult
@@ -7399,8 +7398,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc2 := psfNew(t)
 		r = sc2.run(t, reservationFilled(t, psPageGrant+f+window+2*uint64(len(psfBodyValue))))
-		// Without the preflight budget argument or the final sealed limit, a typed scope with a nil budget
-		// refuses this funded commit with the capacity error.
+		// The preflight budget and the final sealed limit fund this typed scope commit.
 		if r.err != nil || r.truth != 2 {
 			t.Fatalf("scope missing budget admitted: %v truth%d", r.err, r.truth)
 		}

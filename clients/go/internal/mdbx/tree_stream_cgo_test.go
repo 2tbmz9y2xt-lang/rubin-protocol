@@ -4575,8 +4575,8 @@ func TestTreeStreamPhysicalScopeV1(t *testing.T) {
 }
 
 // Callback error, panic and Goexit win before any new field is inspected; the caller grant held
-// inside the callback and the account are released once on every exit. The scene is seeded without the shared owner-live precondition so a leaked grant
-// fails this row's own assertion.
+// inside the callback and the account are released once on every exit. The scene is seeded without
+// the shared owner-live precondition.
 func psCallback(t *testing.T) {
 	s, _, _ := treeNativeStore(t)
 	o := reservationOwner(t, 805_306_368)
@@ -5016,8 +5016,6 @@ func psMetadata(t *testing.T) {
 		t.Fatalf("scope metadata high-water differs: empty %d", got)
 	}
 	r := psRun(t, s, reservationFilled(t, psPageGrant+f-1), LaneOperation, psRawDelete(t, 9))
-	// A smaller production envelope passes this charge and is refused only later by the window, after the
-	// section begins.
 	if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
 		t.Fatalf("scope metadata high-water differs: one byte below the envelope %v %s", r.err, s.state)
 	}
