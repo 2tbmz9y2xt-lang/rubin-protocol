@@ -305,7 +305,8 @@ func (s *Service) enterDATTLMutationLeased(decrease func() error) error {
 // transition under no Service lease (Table A): it registers one call lease and
 // returns exactly "service already closed" with zero effects once Close has
 // published the non-OPEN state; otherwise it runs decrease once, returns its
-// result unchanged and releases the lease exactly once, unwind included.
+// result unchanged and releases the lease exactly once, unwind included. It
+// never reads the binding, retries or falls back to another Service.
 func (s *Service) EnterDATTLMutation(decrease func() error) error {
 	if !s.acquireWork() {
 		return errServiceClosed

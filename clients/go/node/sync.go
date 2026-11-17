@@ -740,11 +740,15 @@ func (s *SyncEngine) DATTLBindingService() DATTLMutationService {
 	return binding.service
 }
 
-// enterSelectedDATTL is the no-lease selection: it snapshots the current binding
-// once, invokes nothing when absent, and otherwise attempts registration exactly
-// once with the snapshotted Service through its own entry, keeping that Service
-// even if a later publication replaces the binding. The entry result is
-// returned unchanged; no resnapshot, retry, fallback or fanout follows it.
+// enterSelectedDATTL is the no-lease selection, run once per unlatched
+// ACCEPTED/NEW publication under no Service lease, immediately after the
+// publication: it snapshots the current binding once, invokes nothing when
+// absent, and otherwise attempts registration exactly once through the
+// snapshotted Service's own entry, which admits it only while that Service is
+// OPEN and otherwise refuses with zero effects. The snapshot keeps that Service
+// through invocation or unwind even if a later publication replaces the
+// binding. The entry result is returned unchanged; no resnapshot, retry,
+// fallback or fanout follows it.
 func (s *SyncEngine) enterSelectedDATTL(decrease func() error) error {
 	service := s.DATTLBindingService()
 	if service == nil {
