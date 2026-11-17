@@ -3636,6 +3636,654 @@ func TestTreeReplayBoundedPreflightV1(t *testing.T) {
 	}
 }
 
+func TestTreeReplayPreservedFixtureV1(t *testing.T) {
+	t.Run("original-prefix", tpOriginalPrefixV1)
+	t.Run("prefix-errors", tpPrefixErrorsV1)
+	t.Run("funding", tpFundingV1)
+	t.Run("strict", tpStrictV1)
+	t.Run("context-and-cursor", tpContextV1)
+	t.Run("getter-failure", tpGetterFailureV1)
+	t.Run("last-use", tpRetirementV1)
+	for _, name := range []string{"current-node-drift-lag-source", "dirty-consulted-before-node", "current-node-drift-success", "lag-new-node-checker"} {
+		t.Run("priority/"+name, func(t *testing.T) { trPreflightV1(t, name, true) })
+	}
+	for _, role := range []int{0, 1} {
+		for _, phase := range []string{"finish", "resolve", "fold"} {
+			t.Run(fmt.Sprintf("priority/role%d/%s", role, phase), func(t *testing.T) { trPrefixFailureV1(t, role, phase, true) })
+		}
+	}
+	for _, roles := range []int{1, 2} {
+		for _, undo := range []TreeUndoEffectV1{1, 2, 3, 4} {
+			for _, body := range []uint8{1, 2, 3} {
+				for _, crossed := range []bool{false, true} {
+					t.Run(fmt.Sprintf("undo/roles%d/effect%d/body%d/crossed%v", roles, undo, body, crossed), func(t *testing.T) {
+						trUndoResultV1(t, roles, undo, undo != 2, crossed, body)
+						if undo == 1 {
+							t.Run("create", func(t *testing.T) { trUndoResultV1(t, roles, undo, false, crossed, body) })
+						}
+					})
+				}
+			}
+		}
+	}
+	for _, position := range []TreePositionV1{1, 2} {
+		for _, role := range []int{0, 1} {
+			for _, mode := range []string{"nil", "direct", "wrapped", "caused", "typed-nil", "panic", "goexit"} {
+				for _, cleanup := range []uint32{0, 9, 10} {
+					t.Run(fmt.Sprintf("lifetime/position%d/role%d/%s/cleanup%d", position, role, mode, cleanup), func(t *testing.T) {
+						trLifecycleV1(t, position, role, mode, cleanup, 1, true)
+					})
+				}
+			}
+		}
+	}
+	for _, phase := range []uint32{14, 13, 3} {
+		for _, orphan := range []bool{false, true} {
+			t.Run(fmt.Sprintf("prefix/phase%d/orphan%v", phase, orphan), func(t *testing.T) { tpPrefixDriftV1(t, phase, orphan) })
+		}
+		for _, kind := range []string{"empty-to-present", "tip-plus-two", "present-to-empty", "raw-parent", "raw-work"} {
+			t.Run(fmt.Sprintf("tip/phase%d/%s", phase, kind), func(t *testing.T) { tpTipDriftV1(t, phase, kind) })
+		}
+	}
+}
+
+func tpOriginalPrefixV1(t *testing.T) {
+	for _, kind := range []string{"empty", "lower", "higher", "large", "manifest", "orphan", "exact32", "malformed34"} {
+		for _, preserve := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/flag%v", kind, preserve), func(t *testing.T) {
+				f := trSceneV1(t)
+				f.op.Pair.PreserveReplayObservations = preserve
+				block := f.op.Primitives[0].Block
+				key, value := tdManifestKey(block), tdManifest(5, [16]byte{}, 1, 0)
+				present := kind == "manifest" || kind == "orphan" || kind == "exact32" || kind == "malformed34"
+				switch kind {
+				case "lower":
+					key = tdManifestKey([32]byte{})
+				case "higher", "large":
+					key = tdEntryKey([32]byte{0xff}, tdTxid(0x88), 1, 0, 0)
+				case "orphan":
+					key = tdEntryKey(block, tdTxid(0x88), 1, 0, 0)
+				case "exact32":
+					key = bytes.Clone(block[:])
+				case "malformed34":
+					key = append(bytes.Clone(block[:]), 0xff, 0xff)
+				}
+				if kind == "large" {
+					value = tdFormed(tdFrame(10, 0, make([]byte, 65536)), 2, 0)
+					if len(value) != 65560 {
+						t.Fatal("maximum legal undo value width")
+					}
+				}
+				if kind != "empty" {
+					treeNativeSeed(t, f.s, 5, key, value)
+				}
+				var result tsResult
+				counts, err := FixturePairReadObservation(f.s, nil, func() { result = tpRunV1(t, f.s, f.o, f.op, 0) })
+				mustEnvironment(t, err)
+				if present && preserve {
+					result.tuple(t, 1, 1, -1)
+					treeNativeError(t, result.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+					if counts.Writes != 0 {
+						t.Fatal("original absence contradiction reached a candidate write", counts)
+					}
+					tsConsumed(t, f.s, f.o, 1, result.err)
+				} else {
+					result.tuple(t, 2, 3, -1)
+					mustEnvironment(t, result.err)
+				}
+				for _, p := range f.p {
+					if p.calls != [3]int{0, 1, 0} {
+						t.Fatal("prefix qualification preceded a required Source", p.calls)
+					}
+				}
+				f.s = tsReopen(t, f.s, f.path)
+				if kind != "empty" {
+					equal, err := FixtureRawRowEqual(f.s, 5, key, value)
+					mustEnvironment(t, err)
+					if !equal {
+						t.Fatal("Transient changed its original physical family")
+					}
+				}
+				tsFollowing(t, f.s, f.o)
+			})
+		}
+	}
+}
+
+func tpPrefixDriftV1(t *testing.T, phase uint32, orphan bool) {
+	t.Helper()
+	f := trSceneV1(t)
+	f.op.Pair.PreserveReplayObservations = true
+	block := f.op.Primitives[0].Block
+	key := tdManifestKey(block)
+	if orphan {
+		key = tdEntryKey(block, tdTxid(0x88), 1, 0, 0)
+	}
+	var result tsResult
+	var counts PairReadObservation
+	evidence, err := fixtureLargeFault(f.s, phase, 5, key, func() {
+		var failure error
+		counts, failure = FixturePairReadObservation(f.s, nil, func() { result = tpRunV1(t, f.s, f.o, f.op, 7) })
+		mustEnvironment(t, failure)
+	})
+	mustEnvironment(t, err)
+	if evidence.drift != 1 {
+		t.Fatal("physical undo drift was not reached", evidence)
+	}
+	tpDriftResultV1(t, f, result, phase, counts.Writes, evidence.commits)
+	f.s = tsReopen(t, f.s, f.path)
+	var want []byte
+	if phase != 13 {
+		want = []byte{0x7f}
+	}
+	equal, err := FixtureRawRowEqual(f.s, 5, key, want)
+	mustEnvironment(t, err)
+	if !equal {
+		t.Fatal("undo drift durable image differs after abort or crossing")
+	}
+	tsFollowing(t, f.s, f.o)
+}
+
+func tpDriftResultV1(t *testing.T, f *tsfScene, result tsResult, phase uint32, writes uint64, commits uint32) {
+	t.Helper()
+	stage, diagnostic := UpdateStage(1), "OLD/write snapshot mismatch"
+	if phase == 13 {
+		stage, diagnostic = 2, "final update image mismatch"
+	}
+	if phase == 3 {
+		result.tuple(t, 3, 3, -1)
+		tipCommit(t, result.err, 3, nil)
+		if commits != 1 || writes == 0 {
+			t.Fatal("readable drift did not follow the candidate commit", commits, writes)
+		}
+	} else {
+		result.tuple(t, 1, stage, -1)
+		treeNativeError(t, result.err, "update", "StateMismatch", -30779, diagnostic, nil)
+		if commits != 0 || phase == 14 && writes != 0 || phase == 13 && writes == 0 {
+			t.Fatal("preserved mismatch reached an incorrect native stage", commits, writes)
+		}
+	}
+	for _, p := range f.p {
+		readback := 0
+		if phase == 3 {
+			readback = 1
+		}
+		if p.calls != [3]int{0, 1, readback} {
+			t.Fatal("preserved mismatch changed Source position or count", p.calls)
+		}
+	}
+	tsConsumed(t, f.s, f.o, result.truth, result.err)
+}
+
+func tpTipDriftV1(t *testing.T, phase uint32, kind string) {
+	t.Helper()
+	f := trSceneV1(t)
+	f.op.Pair.PreserveReplayObservations = true
+	row := tipRow(7, 3, [32]byte{0x44}, [40]byte{39: 2})
+	if kind != "empty-to-present" {
+		treeNativeSeed(t, f.s, 2, row.Key, row.Literal)
+	}
+	key, value, present := bytes.Clone(row.Key), bytes.Clone(row.Literal), true
+	switch kind {
+	case "present-to-empty":
+		value, present = nil, false
+	case "tip-plus-two":
+		key = canonicalForwardKeyLiteral(7, 5)
+	case "raw-parent":
+		value[32] ^= 1
+	case "raw-work":
+		value[103] ^= 1
+	}
+	var result tsResult
+	var counts PairReadObservation
+	evidence, err := FixtureCanonicalTipStep(f.s, map[uint32]uint8{14: 4, 13: 5, 3: 6}[phase], key, value, present, func() {
+		var failure error
+		counts, failure = FixturePairReadObservation(f.s, nil, func() { result = tpRunV1(t, f.s, f.o, f.op, 7) })
+		mustEnvironment(t, failure)
+	})
+	mustEnvironment(t, err)
+	if evidence.Drift != 1 || evidence.Opens != evidence.Closes || evidence.Faults != 0 {
+		t.Fatal("endpoint drift or cursor cleanup was not reached", evidence)
+	}
+	tpDriftResultV1(t, f, result, phase, counts.Writes, evidence.Commits)
+	f.s = tsReopen(t, f.s, f.path)
+	want := value
+	if phase == 13 {
+		want = nil
+		if bytes.Equal(key, row.Key) && kind != "empty-to-present" {
+			want = row.Literal
+		}
+	}
+	equal, err := FixtureRawRowEqual(f.s, 2, key, want)
+	mustEnvironment(t, err)
+	if !equal {
+		t.Fatal("endpoint durable image differs after abort or crossing")
+	}
+	tsFollowing(t, f.s, f.o)
+}
+
+func tpRetirementV1(t *testing.T) {
+	f := trSceneV1(t)
+	f.op.Pair.PreserveReplayObservations = true
+	var reader *Reader
+	var cell *canonicalTipCell
+	for _, p := range f.p {
+		p.before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+			if cell == nil || cell.generation != 7 || reader.usable() {
+				t.Fatal("callback endpoint retired before native last use")
+			}
+			if pos == 2 && reservationLive(f.o) != 421415 {
+				t.Fatal("strict replay lost its fixed preserved hold", reservationLive(f.o))
+			}
+			return nil
+		}
+	}
+	var result tsResult
+	aborts := 0
+	_, err := FixturePairReadObservation(f.s, func(site uint32) {
+		if site == 4 || site == 5 {
+			aborts++
+			if cell == nil || *cell != (canonicalTipCell{}) || reservationLive(f.o) != ctxTreePC(f.op)+512 {
+				t.Error("OLD disposal preceded witness retirement or hold lifetime")
+			}
+		}
+	}, func() {
+		_, failure := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() {
+			mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				result = tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
+					reader = r
+					_, err := r.CanonicalTipV1(7)
+					cell = r.tip
+					return f.op, err
+				})
+				return nil
+			}))
+		})
+		mustEnvironment(t, failure)
+	})
+	mustEnvironment(t, err)
+	result.tuple(t, 2, 3, -1)
+	tipCommit(t, result.err, 2, nil)
+	tipRetired(t, reader, cell)
+	if aborts != 2 || reservationLive(f.o) != 0 {
+		t.Fatal("OLD disposal or final credit release was not reached", aborts)
+	}
+	tsConsumed(t, f.s, f.o, 2, result.err)
+	f.s = tsReopen(t, f.s, f.path)
+	tsFollowing(t, f.s, f.o)
+}
+
+func tpContextV1(t *testing.T) {
+	for _, context := range []bool{false, true} {
+		for _, deletion := range []bool{false, true} {
+			t.Run(fmt.Sprintf("context%v/delete%v", context, deletion), func(t *testing.T) {
+				f := trSceneV1(t)
+				f.op.Pair.PreserveReplayObservations = true
+				raw := trBodyV1(&f.op, 2, deletion)
+				treeNativeSeed(t, f.s, 4, bytes.Clone(f.op.Primitives[0].Block[:]), raw)
+				ctxTreeSeed(t, f.s, 7, 3, 1, nil, nil)
+				if context {
+					ctxTreeSeed(t, f.s, 9, 1, 2, nil, nil)
+					f.op.Pair.ContextConsulted = &CanonicalContextWindowV1{Generation: 9, FirstHeight: 1, Count: 2}
+				}
+				a := treeRoleReplayV1(TreeSourceGenesisReplayV1, TreeProgressNoneV1, ReplayCursorV1{Kind: 2, Height: 4, BlockHash: tdTxid(0xa0)})
+				a.Authority.ActiveGenerationID, a.LagGenerationID, a.Authority.NextGenerationID = 7, 8, 10
+				a.Authority.Replay.TargetGenerationID, a.TargetLagGenerationID = 1, 2
+				a.Authority.Replay.Target = RecoveryTargetV1{ChainID: [32]byte{11}, GenesisHash: [32]byte{12}, TipHash: [32]byte{13}, TipHeight: 6, CumulativeChainwork: [40]byte{39: 3}}
+				old, err := a.Encode()
+				mustEnvironment(t, err)
+				treeNativeSeed(t, f.s, 0, []byte{2}, old)
+				a.Authority.Replay.Cursor = ReplayCursorV1{Kind: 2, Height: 5, BlockHash: f.op.Primitives[0].Block}
+				next, err := a.Encode()
+				mustEnvironment(t, err)
+				f.op.Pair.Mutations = append([]Mutation{{DBI: schemaDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: 2, Literal: next}}, f.op.Pair.Mutations...)
+				var result tsResult
+				if context {
+					_, err = FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() { result = tpRunV1(t, f.s, f.o, f.op, 7) })
+					mustEnvironment(t, err)
+					tipCommit(t, result.err, 2, nil)
+				} else {
+					result = tpRunV1(t, f.s, f.o, f.op, 7)
+					mustEnvironment(t, result.err)
+				}
+				result.tuple(t, 2, 3, -1)
+				f.s = tsReopen(t, f.s, f.path)
+				tsRead(t, f.s, schemaDBIs[0], []byte{2}, next)
+				if deletion {
+					raw = nil
+				}
+				tsRead(t, f.s, schemaDBIs[4], f.op.Primitives[0].Block[:], raw)
+				tsFollowing(t, f.s, f.o)
+			})
+		}
+	}
+}
+
+func tpGetterFailureV1(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		for _, mode := range []string{"nil", "direct", "wrapped", "typed-nil", "panic", "goexit"} {
+			for _, cleanup := range []uint32{0, 9, 10} {
+				t.Run(fmt.Sprintf("failed%v/%s/cleanup%d", failed, mode, cleanup), func(t *testing.T) { tpCallbackCleanupV1(t, failed, mode, cleanup) })
+			}
+		}
+	}
+}
+
+func tpCallbackCleanupV1(t *testing.T, failed bool, mode string, cleanup uint32) {
+	t.Helper()
+	f := trSceneV1(t)
+	var result tsResult
+	var source, application error
+	var reader *Reader
+	var cell *canonicalTipCell
+	var recovered any
+	returned, aborts := false, 0
+	marker := errors.New("callback result")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { recovered = recover() }()
+		run := func() {
+			mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				result = tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
+					reader = r
+					_, source = r.CanonicalTipV1(7)
+					cell = r.tip
+					application = marker
+					if failed {
+						application = source
+					}
+					switch mode {
+					case "nil", "panic", "goexit":
+						application = nil
+					case "wrapped":
+						application = fmt.Errorf("callback: %w", application)
+					case "typed-nil":
+						application = (*pairReadNilErrorV1)(nil)
+					}
+					if mode == "panic" {
+						panic(marker)
+					}
+					if mode == "goexit" {
+						runtime.Goexit()
+					}
+					return TreeOperationV1{Pair: TreePairV1{PreserveReplayObservations: true}}, application
+				})
+				return nil
+			}))
+			returned = true
+		}
+		observe := func() {
+			_, err := FixturePairReadObservation(f.s, func(site uint32) {
+				if site == 4 {
+					aborts++
+					if reader == nil || reader.usable() || reader.tip != nil || cell != nil && *cell != (canonicalTipCell{}) {
+						t.Error("callback endpoint survived until OLD disposal")
+					}
+				}
+			}, run)
+			mustEnvironment(t, err)
+		}
+		withCleanup := func() {
+			if cleanup == 0 {
+				observe()
+				return
+			}
+			_, err := fixtureLargeFault(f.s, cleanup, 0, []byte{2}, observe)
+			mustEnvironment(t, err)
+		}
+		if failed {
+			_, err := fixtureTipCursor(f.s, 11, 1, 1, 0, withCleanup)
+			mustEnvironment(t, err)
+			return
+		}
+		withCleanup()
+	}()
+	eiAwait(t, done)
+	unwound := mode == "panic" || mode == "goexit"
+	if returned == unwound || mode == "panic" && recovered != marker || mode != "panic" && recovered != nil {
+		t.Fatal("callback return or unwind delivery changed", returned, recovered)
+	}
+	tipRetired(t, reader, cell)
+	if aborts != 1 || reservationLive(f.o) != 0 || failed && cell != nil || !failed && cell == nil {
+		t.Fatal("callback acquisition, OLD disposal or account cleanup was not reached", aborts, cell)
+	}
+	if failed {
+		treeNativeError(t, source, "prefix-page", "IO", 5, "error 5", nil)
+		if !sameError(reader.failure, source) {
+			t.Fatal("callback replaced its recorded getter failure")
+		}
+	}
+	if unwound {
+		result = tsResult{truth: 1, stage: 1, index: -1, err: f.s.terminal}
+	}
+	result.tuple(t, 1, 1, -1)
+	tpCallbackErrorsV1(t, result.err, application, source, mode, cleanup)
+	state := "OPEN"
+	if failed || cleanup != 0 {
+		state = "CLOSED"
+	}
+	if cleanup == 10 {
+		state = "POISONED_THREAD"
+		if f.s.txn != reader.txn {
+			t.Fatal("callback cleanup retained a different transaction")
+		}
+	}
+	tipOutcome(t, f.s, result.truth, result.stage, result.err, 1, 1, state)
+	if state == "OPEN" {
+		tsFollowing(t, f.s, f.o)
+	} else {
+		if cleanup != 0 {
+			mustEnvironment(t, fixtureLargeRelease(f.s))
+		}
+		f.s = tsReopen(t, f.s, f.path)
+		tsFollowing(t, f.s, f.o)
+	}
+}
+
+func tpCallbackErrorsV1(t *testing.T, got, application, source error, mode string, cleanup uint32) {
+	t.Helper()
+	if cleanup == 10 {
+		abort := tipError(t, got, "abort", "LocalInvariant", -30416, expectedNativeDiagnostic(-30416), true)
+		got = abort.Cause
+	}
+	if cleanup == 9 {
+		parts, ok := got.(interface{ Unwrap() []error })
+		if !ok || len(parts.Unwrap()) != 2 {
+			if application != nil || source != nil || mode == "nil" {
+				t.Fatal("callback primary and abort order lost", got)
+			}
+			treeNativeError(t, got, "abort", "IO", 5, "error 5", nil)
+			return
+		}
+		treeNativeError(t, parts.Unwrap()[1], "abort", "IO", 5, "error 5", nil)
+		got = parts.Unwrap()[0]
+	}
+	if source == nil && mode == "nil" {
+		treeNativeError(t, got, "update", "InvalidInput", 22, "invalid Update Batch", nil)
+		return
+	}
+	if source != nil && application != nil && mode != "direct" {
+		parts, ok := got.(interface{ Unwrap() []error })
+		if !ok || len(parts.Unwrap()) != 2 || !sameError(parts.Unwrap()[0], application) || !sameError(parts.Unwrap()[1], source) {
+			t.Fatal("callback application then recorded getter order lost", got)
+		}
+		return
+	}
+	want := application
+	if source != nil {
+		want = source
+	}
+	if !sameError(got, want) {
+		t.Fatal("callback primary interface changed", got, want)
+	}
+}
+
+func tpPrefixErrorsV1(t *testing.T) {
+	for _, mode := range []uint32{0, 20, 21, 22, 25} {
+		t.Run(fmt.Sprintf("mode%d", mode), func(t *testing.T) {
+			f := trSceneV1(t)
+			f.op.Pair.PreserveReplayObservations = true
+			block := f.op.Primitives[0].Block
+			higher := [32]byte{0xff}
+			treeNativeSeed(t, f.s, 5, tdManifestKey(higher), tdManifest(5, [16]byte{}, 1, 0))
+			var result tsResult
+			invoke := func() { result = tpRunV1(t, f.s, f.o, f.op, 0) }
+			if mode == 0 {
+				evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageStartupPullEIO, 5, block[:], invoke)
+				mustEnvironment(t, err)
+				treeNativeError(t, result.err, "update", "IO", 5, "error 5", nil)
+				if evidence.OldPulls[5] != 1 || evidence.Commits != 0 {
+					t.Fatal("native prefix failure was not the original prefix read", evidence)
+				}
+			} else {
+				evidence, err := fixtureLargeFault(f.s, mode, 5, block[:], invoke)
+				mustEnvironment(t, err)
+				treeNativeError(t, result.err, "update", "LocalInvariant", -30779, "mdbx_get returned invalid result shape", nil)
+				if evidence.gets != 1 || evidence.commits != 0 {
+					t.Fatal("native prefix shape failure was not reached", evidence)
+				}
+			}
+			result.tuple(t, 1, 1, -1)
+			for _, p := range f.p {
+				if p.calls != [3]int{0, 1, 0} {
+					t.Fatal("prefix failure displaced an earlier Source", p.calls)
+				}
+			}
+			tsConsumed(t, f.s, f.o, 1, result.err)
+		})
+	}
+}
+
+func tpStrictV1(t *testing.T) {
+	for _, witness := range []string{"unchanged", "tip", "prefix"} {
+		t.Run("both-match/"+witness, func(t *testing.T) { trReadbackOldFirstV1(t, witness) })
+	}
+	t.Run("complete-old", func(t *testing.T) {
+		f := trSceneV1(t)
+		f.op.Pair.PreserveReplayObservations = true
+		var result tsResult
+		evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitOld, 0, nil, func() { result = tpRunV1(t, f.s, f.o, f.op, 7) })
+		mustEnvironment(t, err)
+		result.tuple(t, 1, 3, -1)
+		tipCommit(t, result.err, 1, nil)
+		if evidence.Commits != 1 {
+			t.Fatal("OLD truth did not follow the candidate commit attempt")
+		}
+		tsConsumed(t, f.s, f.o, 1, result.err)
+	})
+	t.Run("false-pair-then-tip-error", func(t *testing.T) {
+		f := trSceneV1(t)
+		f.op.Pair.PreserveReplayObservations = true
+		var result tsResult
+		var native fixtureLargeEvidence
+		evidence, err := fixtureTipCursor(f.s, 11, 4, 1, 0, func() {
+			var failure error
+			native, failure = fixtureLargeFault(f.s, 3, 2, f.op.Pair.Mutations[0].Key, func() { result = tpRunV1(t, f.s, f.o, f.op, 7) })
+			mustEnvironment(t, failure)
+		})
+		mustEnvironment(t, err)
+		result.tuple(t, 3, 3, -1)
+		ce := tipCommit(t, result.err, 3, result.err.(*CommitError).ReadbackCause)
+		treeNativeError(t, ce.ReadbackCause, "update", "IO", 5, "error 5", nil)
+		if evidence.queries != 4 || evidence.faults != 1 || native.drift != 1 || native.commits != 1 {
+			t.Fatal("false Pair skipped the later actual endpoint fault", evidence, native)
+		}
+		tsConsumed(t, f.s, f.o, 3, result.err)
+	})
+	for _, tipError := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tip-before-prefix/error%v", tipError), func(t *testing.T) { tpStrictPrefixV1(t, tipError) })
+	}
+}
+
+func tpStrictPrefixV1(t *testing.T, tipError bool) {
+	t.Helper()
+	f := trSceneV1(t)
+	f.op.Pair.PreserveReplayObservations = true
+	row := tipRow(7, 3, [32]byte{0x44}, [40]byte{39: 2})
+	mode := uint32(1)
+	if tipError {
+		mode = 11
+	}
+	var result tsResult
+	var native fixtureLargeEvidence
+	evidence, err := fixtureTipCursor(f.s, mode, 4, 1, 0, func() {
+		mustEnvironment(t, fixtureTipDrift(row.Key, row.Literal, true))
+		var failure error
+		native, failure = fixtureLargeFault(f.s, 29, 8, []byte{0}, func() { result = tpRunV1(t, f.s, f.o, f.op, 7) })
+		mustEnvironment(t, failure)
+	})
+	mustEnvironment(t, err)
+	result.tuple(t, 3, 3, -1)
+	ce, ok := result.err.(*CommitError)
+	if !ok {
+		t.Fatal("strict prefix result lost commit provenance", result.err)
+	}
+	treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+	treeNativeError(t, ce.ReadbackCause, "update", "IO", 5, "error 5", nil)
+	wantFaults, wantPrefix := uint32(0), uint32(1)
+	if tipError {
+		wantFaults, wantPrefix = 1, 0
+	}
+	if native.gets != wantPrefix || native.commits != 1 || native.drift != 1 || evidence.faults != wantFaults || evidence.queries != 4 {
+		t.Fatal("readable tip mismatch skipped prefix or actual tip failure failed to stop", native, evidence)
+	}
+	for _, p := range f.p {
+		if p.calls != [3]int{0, 1, 1} {
+			t.Fatal("strict preserved comparison preceded a complete Source", p.calls)
+		}
+	}
+	tsConsumed(t, f.s, f.o, 3, result.err)
+}
+
+func tpFundingV1(t *testing.T) {
+	for _, short := range []uint64{0, 1} {
+		t.Run(fmt.Sprintf("short%d", short), func(t *testing.T) {
+			f := trSceneV1(t)
+			f.op.Pair.PreserveReplayObservations = true
+			var result tsResult
+			pc := ctxTreePC(f.op)
+			evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageWriteBeginTxnFull, 0, nil, func() {
+				mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					return a.WithReservation(402653184-pc-512+short, func() error {
+						baseline := reservationLive(f.o)
+						result = tsInvoke(f.s, a, func(*Reader) (TreeOperationV1, error) { return f.op, nil })
+						if reservationLive(f.o) != baseline {
+							t.Fatal("preserved hold escaped admission boundary")
+						}
+						return nil
+					})
+				}))
+			})
+			if short == 0 {
+				mustEnvironment(t, err)
+				result.tuple(t, 1, 1, -1)
+				treeNativeError(t, result.err, "update", "Transaction", -30788, expectedNativeDiagnostic(-30788), nil)
+				if evidence.BeginWrite != 1 || evidence.Faults != 1 {
+					t.Fatal("exact grant did not reach write begin", evidence)
+				}
+			} else {
+				result.tuple(t, 1, 1, -1)
+				if !sameError(result.err, errOperationReservationCapacity) || evidence.BeginWrite != 0 || f.s.state != storeOPEN {
+					t.Fatal("minus-one failed outside the added hold", result, evidence)
+				}
+				// The armed write-begin fault is intentionally not reached.
+				if err == nil {
+					t.Fatal("unreached fixture fault was reported as reached")
+				}
+			}
+			if evidence.Commits != 0 || reservationLive(f.o) != 0 {
+				t.Fatal("admission boundary retained credit or committed")
+			}
+			for _, p := range f.p {
+				if p.calls != [3]int{} {
+					t.Fatal("admission boundary reached Source")
+				}
+			}
+		})
+	}
+}
+
 func trOldDriftV1(t *testing.T, role int, domain string) {
 	t.Helper()
 	f := trSceneV1(t)
@@ -3679,7 +4327,7 @@ func trOldDriftV1(t *testing.T, role int, domain string) {
 	tsFollowing(t, f.s, f.o)
 }
 
-func trPrefixFailureV1(t *testing.T, role int, phase string) {
+func trPrefixFailureV1(t *testing.T, role int, phase string, preserve ...bool) {
 	t.Helper()
 	f := trSceneV1(t)
 	switch phase {
@@ -3691,7 +4339,13 @@ func trPrefixFailureV1(t *testing.T, role int, phase string) {
 		treeNativeSeed(t, f.s, 0, tsRootKey(uint64(role+1)), []byte{1})
 	}
 	var result tsResult
-	evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageProbeOnly, 0, nil, func() { result = f.run(t) })
+	invoke := func() { result = f.run(t) }
+	if len(preserve) != 0 {
+		f.op.Pair.PreserveReplayObservations = true
+		treeNativeSeed(t, f.s, 5, tdManifestKey(f.op.Primitives[0].Block), []byte{0x7f})
+		invoke = func() { result = tpRunV1(t, f.s, f.o, f.op, 7) }
+	}
+	evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageProbeOnly, 0, nil, invoke)
 	mustEnvironment(t, err)
 	result.tuple(t, 1, 1, role)
 	if phase == "finish" {
@@ -3718,7 +4372,7 @@ func trPrefixFailureV1(t *testing.T, role int, phase string) {
 	tsConsumed(t, f.s, f.o, 1, result.err)
 }
 
-func trPreflightV1(t *testing.T, name string) {
+func trPreflightV1(t *testing.T, name string, preserve ...bool) {
 	t.Helper()
 	f := trSceneV1(t)
 	marker := errors.New("LAG source owns this result")
@@ -3743,11 +4397,17 @@ func trPreflightV1(t *testing.T, name string) {
 	var result tsResult
 	var counts PairReadObservation
 	var native SelectedDamageEvidence
+	invoke := func() { result = f.run(t) }
+	if len(preserve) != 0 {
+		f.op.Pair.PreserveReplayObservations = true
+		treeNativeSeed(t, f.s, 5, tdManifestKey(f.op.Primitives[0].Block), []byte{0x7f})
+		invoke = func() { result = tpRunV1(t, f.s, f.o, f.op, 7) }
+	}
 	run := func() {
 		var err error
 		native, err = FixtureSelectedDamage(f.s, f.o, SelectedDamageProbeOnly, 0, nil, func() {
 			var observe error
-			counts, observe = FixturePairReadObservation(f.s, nil, func() { result = f.run(t) })
+			counts, observe = FixturePairReadObservation(f.s, nil, invoke)
 			mustEnvironment(t, observe)
 		})
 		mustEnvironment(t, err)
@@ -3766,6 +4426,9 @@ func trPreflightV1(t *testing.T, name string) {
 		}
 	} else {
 		run()
+	}
+	if len(preserve) != 0 && native.OldPulls[5] != 0 {
+		t.Fatal("preserved prefix read preceded an earlier preflight result", native)
 	}
 	trPreflightResultV1(t, f, name, marker, result, counts, native.Commits)
 }
@@ -3937,7 +4600,7 @@ func trUndoUnchangedV1(t *testing.T) {
 	tsFollowing(t, f.s, f.o)
 }
 
-func trUndoResultV1(t *testing.T, roles int, undo TreeUndoEffectV1, existing, crossed bool) {
+func trUndoResultV1(t *testing.T, roles int, undo TreeUndoEffectV1, existing, crossed bool, preserve ...uint8) {
 	t.Helper()
 	f := trSceneV1(t)
 	f.op.Primitives = f.op.Primitives[:roles]
@@ -3973,6 +4636,7 @@ func trUndoResultV1(t *testing.T, roles int, undo TreeUndoEffectV1, existing, cr
 		treeNativeSeed(t, f.s, 0, tsCounterKey(g), tsCounterLiteral(114, 2))
 	}
 	f.op.Primitives[0].Undo = undo
+	raw := bytes.Clone(f.op.Primitives[0].Coverage.CurrentBody)
 	block := f.op.Primitives[0].Block
 	manifest := tdManifest(5, [16]byte{}, 2, 2)
 	values := [][]byte{tdFormed(tdFrame(7, 0, []byte{0x20}), 4, 0), tdFormed(tdFrame(8, 0, []byte{0x21}), 4, 0)}
@@ -3983,8 +4647,19 @@ func trUndoResultV1(t *testing.T, roles int, undo TreeUndoEffectV1, existing, cr
 		}
 	}
 	var result tsResult
+	invoke := func() { result = f.run(t) }
+	if len(preserve) != 0 {
+		f.op.Pair.PreserveReplayObservations = true
+		if preserve[0] != 1 {
+			trBodyV1(&f.op, preserve[0], false)
+			if preserve[0] == 2 {
+				treeNativeSeed(t, f.s, 4, bytes.Clone(block[:]), raw)
+			}
+		}
+		invoke = func() { result = tpRunV1(t, f.s, f.o, f.op, 7) }
+	}
 	if crossed {
-		evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() { result = f.run(t) })
+		evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), invoke)
 		mustEnvironment(t, err)
 		ce, ok := result.err.(*CommitError)
 		if !ok || ce.Truth != 2 || ce.ReadbackCause != nil || evidence.Commits != 1 {
@@ -3993,7 +4668,7 @@ func trUndoResultV1(t *testing.T, roles int, undo TreeUndoEffectV1, existing, cr
 		treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
 		tsConsumed(t, f.s, f.o, 2, result.err)
 	} else {
-		result = f.run(t)
+		invoke()
 		mustEnvironment(t, result.err)
 	}
 	result.tuple(t, 2, 3, -1)
@@ -4021,7 +4696,7 @@ func trUndoResultV1(t *testing.T, roles int, undo TreeUndoEffectV1, existing, cr
 		if f.p[j].calls != [3]int{0, 1, readback} {
 			t.Fatal("undo regeneration reinvoked Source", j, f.p[j].calls)
 		}
-		value := tdFormed(p.Coverage.CurrentBody[148:], 5, 0)
+		value := tdFormed(raw[148:], 5, 0)
 		tsRead(t, f.s, schemaDBIs[1], tdUTXOKey(p.Generation, tdTxid(0x31), 0), value)
 		tsRead(t, f.s, schemaDBIs[0], tsRootKey(p.Generation), tcBinding(t, p.Generation, p.Endpoint, tcEntry(tdUTXOKey(p.Generation, tdTxid(0x31), 0), value)))
 	}
@@ -4298,7 +4973,7 @@ func TestTreeReplayBoundedReadbackV1(t *testing.T) {
 	for _, domain := range []string{"LAG-root", "Consulted", "context"} {
 		t.Run("false-then-unreadable/"+domain, func(t *testing.T) { trReadbackLateV1(t, domain) })
 	}
-	t.Run("both-complete-OLD-first", trReadbackOldFirstV1)
+	t.Run("both-complete-OLD-first", func(t *testing.T) { trReadbackOldFirstV1(t) })
 	t.Run("native-mixed-CURRENT-new-LAG-old", trReadbackMixedV1)
 	t.Run("false-NEW-then-LAG-unavailable", trReadbackNewFalseLateV1)
 	t.Run("neither-complete", func(t *testing.T) {
@@ -4436,7 +5111,7 @@ func trReadbackMixedV1(t *testing.T) {
 	tsFollowing(t, f.s, f.o)
 }
 
-func trReadbackOldFirstV1(t *testing.T) {
+func trReadbackOldFirstV1(t *testing.T, witness ...string) {
 	t.Helper()
 	f := trSceneV1(t)
 	raw := trBodyV1(&f.op, 2, false)
@@ -4452,20 +5127,45 @@ func trReadbackOldFirstV1(t *testing.T) {
 		m.BeforePresent = true
 	}
 	var result tsResult
-	evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() { result = f.run(t) })
-	result.tuple(t, 1, 3, -1)
+	var commits uint64
+	want := CommitTruth(1)
+	if len(witness) == 0 {
+		evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), func() { result = f.run(t) })
+		mustEnvironment(t, err)
+		commits = evidence.Commits
+	} else {
+		f.op.Pair.PreserveReplayObservations = true
+		invoke := func() { result = tpRunV1(t, f.s, f.o, f.op, 7) }
+		if witness[0] == "prefix" {
+			evidence, err := fixtureLargeFault(f.s, 3, 5, tdEntryKey(f.op.Primitives[0].Block, tdTxid(0x88), 1, 0, 0), invoke)
+			mustEnvironment(t, err)
+			commits = uint64(evidence.commits)
+		} else if witness[0] == "tip" {
+			row := tipRow(7, 3, [32]byte{0x44}, [40]byte{39: 2})
+			evidence, err := FixtureCanonicalTipStep(f.s, 6, row.Key, row.Literal, true, invoke)
+			mustEnvironment(t, err)
+			commits = uint64(evidence.Commits)
+		} else {
+			evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageCommitNew, 0, tsRootKey(1), invoke)
+			mustEnvironment(t, err)
+			commits = evidence.Commits
+		}
+		if witness[0] != "unchanged" {
+			want = 3
+		}
+	}
+	result.tuple(t, want, 3, -1)
 	ce, ok := result.err.(*CommitError)
-	if !ok || ce.Truth != 1 || ce.ReadbackCause != nil || evidence.Commits != 1 {
-		t.Fatal("complete OLD must win over also-complete NEW", result, evidence)
+	if !ok || ce.Truth != want || ce.ReadbackCause != nil || commits != 1 {
+		t.Fatal("both-complete roles lost preserved-domain truth", result, commits)
 	}
 	treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
-	mustEnvironment(t, err)
 	for _, provider := range f.p {
 		if provider.calls != [3]int{0, 1, 1} {
 			t.Fatal("OLD-first selected without both complete role predicates", provider.calls)
 		}
 	}
-	tsConsumed(t, f.s, f.o, 1, result.err)
+	tsConsumed(t, f.s, f.o, want, result.err)
 }
 
 func trReadbackLateV1(t *testing.T, domain string) {
@@ -4602,7 +5302,7 @@ func TestTreeReplayBoundedLifecycleV1(t *testing.T) {
 	}
 }
 
-func trLifecycleV1(t *testing.T, position TreePositionV1, role int, mode string, cleanup uint32, body uint8) {
+func trLifecycleV1(t *testing.T, position TreePositionV1, role int, mode string, cleanup uint32, body uint8, preserve ...bool) {
 	t.Helper()
 	f := trSceneV1(t)
 	if body == 2 {
@@ -4637,13 +5337,55 @@ func trLifecycleV1(t *testing.T, position TreePositionV1, role int, mode string,
 		return nil
 	}
 	var result tsResult
+	var public *Reader
+	var cell *canonicalTipCell
+	var sourceReaders []*Reader
+	var sourceCells []*canonicalTipCell
+	if len(preserve) != 0 {
+		for _, p := range f.p {
+			before := p.before
+			p.before = func(pos TreePositionV1, r *Reader, sink *TreeDeltaSinkV1) error {
+				if public == nil || public.usable() || public.tip != nil || cell == nil || cell.generation != 7 {
+					t.Fatal("public endpoint did not survive through Source completion")
+				}
+				if len(sourceCells) != 0 && *sourceCells[len(sourceCells)-1] != (canonicalTipCell{}) {
+					t.Fatal("previous Source retained its endpoint")
+				}
+				_, err := r.CanonicalTipV1(9)
+				if err != nil {
+					return err
+				}
+				sourceReaders, sourceCells = append(sourceReaders, r), append(sourceCells, r.tip)
+				if before != nil {
+					return before(pos, r, sink)
+				}
+				return nil
+			}
+		}
+	}
 	var recovered any
 	returned := false
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer func() { recovered = recover() }()
-		invoke := func() { result = f.run(t); returned = true }
+		invoke := func() {
+			if len(preserve) == 0 {
+				result = f.run(t)
+			} else {
+				f.op.Pair.PreserveReplayObservations = true
+				mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					result = tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
+						public = r
+						_, err := r.CanonicalTipV1(7)
+						cell = r.tip
+						return f.op, err
+					})
+					return nil
+				}))
+			}
+			returned = true
+		}
 		if position == 1 && cleanup == 0 {
 			invoke()
 			return
@@ -4668,6 +5410,12 @@ func trLifecycleV1(t *testing.T, position TreePositionV1, role int, mode string,
 		}
 	}()
 	eiAwait(t, done)
+	if len(preserve) != 0 {
+		tipRetired(t, public, cell)
+		for i, r := range sourceReaders {
+			tipRetired(t, r, sourceCells[i])
+		}
+	}
 	unwound := mode == "panic" || mode == "goexit"
 	if returned == unwound || mode == "panic" && recovered != panicValue || mode != "panic" && recovered != nil {
 		t.Fatal("Source return/error/panic/Goexit disposition", returned, recovered)

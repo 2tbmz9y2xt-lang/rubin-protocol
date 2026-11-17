@@ -992,14 +992,14 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 		{unsafe.Sizeof(treeImageV1{}), 32},
 		{unsafe.Sizeof(updateImage{}), 24},
 		{unsafe.Sizeof(treeAmendedV1{}), 80},
-		{unsafe.Sizeof(treeReadbackStateV1{}), 128},
+		{unsafe.Sizeof(treeReadbackStateV1{}), 136},
 		{unsafe.Sizeof(treeSectionV1{}), 168},
 		{unsafe.Sizeof(treeScopeV1{}), 504},
 		{unsafe.Sizeof(treeComposeV1{}), 112},
-		{unsafe.Sizeof(TreeOperationV1{}), 112},
-		{unsafe.Sizeof(treePlanV1{}), 152},
+		{unsafe.Sizeof(TreeOperationV1{}), 120},
+		{unsafe.Sizeof(treePlanV1{}), 168},
 		{unsafe.Sizeof(Reader{}), 216},
-		{unsafe.Sizeof(treePublicEntryV1{}), 40},
+		{unsafe.Sizeof(treePublicEntryV1{}), 48},
 		{unsafe.Sizeof(operationHold{}), 24},
 		{unsafe.Sizeof(treePairReadBudgetV1{}), 32},
 		{unsafe.Sizeof(treeEntryV1{}), 80},
@@ -1034,7 +1034,7 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	if control != 2257 || helper != 484 || helper > 512 {
 		t.Fatal("fixed control/helper cell census", control, helper)
 	}
-	control += 168 + 112 + 128 + 16 + helper
+	control += 168 + 112 + 136 + 16 + helper
 	// Fixed selected owners: bounded emitter40, readback emitter8, prim144,
 	// target80 and scalar/return transport128, with no per-node collection.
 	control += 40 + 8 + 144 + 80 + 128
@@ -1045,7 +1045,7 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	// ledger interface and fixed defer/size scalars. U itself is a separate hold.
 	loan := uint64(unsafe.Sizeof(treeImageV1{})) + 2*uint64(unsafe.Sizeof(error(nil))) + uint64(unsafe.Sizeof(treeLedgerV1(nil))) + 16
 	control += loan
-	if loan != 96 || control != 3661 || control-2709 > 1024 {
+	if loan != 96 || control != 3669 || control-2709 > 1024 {
 		t.Fatal("selected fixed control increment", control)
 	}
 	// A replay pair retains a second recorder/delta/key/iterator set under its
@@ -1142,7 +1142,7 @@ func TestTreePairReadCompatibilityV1(t *testing.T) {
 		t.Fatal("nonzero credit reached primitive source")
 	}
 	tsFollowing(t, s, o)
-	if unsafe.Sizeof(TreePairV1{}) != 72 || unsafe.Sizeof(TreeOperationV1{}) != 112 || unsafe.Sizeof(treePlanV1{}) != 152 || unsafe.Sizeof(treeSectionV1{}) != 168 || unsafe.Sizeof(treePairReadBudgetV1{}) != 32 {
+	if unsafe.Sizeof(TreePairV1{}) != 80 || unsafe.Sizeof(TreeOperationV1{}) != 120 || unsafe.Sizeof(treePlanV1{}) != 168 || unsafe.Sizeof(treeSectionV1{}) != 168 || unsafe.Sizeof(treePairReadBudgetV1{}) != 32 {
 		t.Fatal("ordinary/ENTRY carrier qualification")
 	}
 }
@@ -3880,7 +3880,240 @@ func TestTreeReplayBoundedPairV1(t *testing.T) {
 	}
 }
 
-func trPairResultV1(t *testing.T, roles int, kind uint8, events uint32, deleteBody bool) {
+// tpRunV1 acquires the real callback endpoint and checks retirement and account restoration.
+func tpRunV1(t *testing.T, s *Store, o *OperationReservationOwner, op TreeOperationV1, generation uint64) tsResult {
+	t.Helper()
+	var result tsResult
+	var reader *Reader
+	var cell *canonicalTipCell
+	baseline := reservationLive(o)
+	mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+		result = tsInvoke(s, a, func(r *Reader) (TreeOperationV1, error) {
+			reader = r
+			if generation != 0 {
+				point, err := r.CanonicalTipV1(generation)
+				if err != nil {
+					return TreeOperationV1{}, err
+				}
+				cell = r.tip
+				if point != nil {
+					point.Height, point.BlockHash = 99, [32]byte{0xff}
+				}
+			}
+			return op, nil
+		})
+		return nil
+	}))
+	tipRetired(t, reader, cell)
+	if reservationLive(o) != baseline {
+		t.Fatal("preserved replay account did not return to baseline")
+	}
+	return result
+}
+
+func TestTreeReplayPreservedV1(t *testing.T) {
+	t.Run("complete-images", func(t *testing.T) {
+		for _, roles := range []int{1, 2} {
+			for _, body := range []uint8{1, 2, 3} {
+				for _, events := range []uint32{0, 1} {
+					for _, deletion := range []bool{false, true} {
+						if deletion && body != 2 {
+							continue
+						}
+						t.Run(fmt.Sprintf("roles%d/body%d/events%d/delete%v", roles, body, events, deletion), func(t *testing.T) {
+							trPairResultV1(t, roles, body, events, deletion, true)
+						})
+					}
+				}
+			}
+		}
+	})
+	t.Run("profile", tpProfileV1)
+	t.Run("no-opt-in-callback", func(t *testing.T) { trPairResultV1(t, 2, 1, 1, false, false) })
+	t.Run("tip-admission", tpTipAdmissionV1)
+	t.Run("callback-lifetime", tpCallbackV1)
+}
+
+func tpProfileV1(t *testing.T) {
+	rows := []struct {
+		name string
+		edit func(*TreeOperationV1)
+	}{
+		{"no-primitives", func(o *TreeOperationV1) { o.Primitives = nil }},
+		{"ordinary", func(o *TreeOperationV1) { o.Primitives[0].Kind = 1 }},
+		{"standalone-lag", func(o *TreeOperationV1) { o.Primitives = o.Primitives[1:] }},
+		{"reversed", func(o *TreeOperationV1) { o.Primitives[0], o.Primitives[1] = o.Primitives[1], o.Primitives[0] }},
+		{"same-generation", func(o *TreeOperationV1) { o.Primitives[1].Generation = 1 }},
+		{"inverse", func(o *TreeOperationV1) { o.Primitives[0].Direction = 2 }},
+		{"header116", func(o *TreeOperationV1) { o.Primitives[0].Coverage.HeaderBytes = 116 }},
+		{"nonsharing", func(o *TreeOperationV1) {
+			trBodyV1(o, 3, false)
+			o.Primitives[1].Coverage.CurrentBody = bytes.Clone(o.Primitives[0].Coverage.CurrentBody)
+		}},
+		{"proof", func(o *TreeOperationV1) { o.Proof = func(*TreeDeltaReportV1) error { return nil } }},
+		{"slot", func(o *TreeOperationV1) { o.HeaderSlot = &TreeHeaderSlotV1{} }},
+		{"inventory", func(o *TreeOperationV1) { o.Pair.EntryInventory = &EntryInventoryV1{} }},
+		{"prepaid", func(o *TreeOperationV1) { o.Pair.PrepaidReadBytes = 1 }},
+		{"undo-consulted", func(o *TreeOperationV1) {
+			o.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[5], Key: tdManifestKey(tdTxid(0x77))}}
+		}},
+		{"other-body", func(o *TreeOperationV1) {
+			o.Pair.Consulted = []ConsultedRow{{DBI: schemaDBIs[4], Key: bytes.Repeat([]byte{0x77}, 32)}}
+		}},
+		{"extra-target", func(o *TreeOperationV1) { o.Pair.Mutations = append(o.Pair.Mutations, tsTarget(99)) }},
+		{"malformed-row", func(o *TreeOperationV1) { o.Pair.Mutations[0].AfterKind = 99 }},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			s, _, owner := tsNew(t)
+			calls := 0
+			op := trOperationV1(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return nil }), 2)
+			op.Pair.PreserveReplayObservations = true
+			row.edit(&op)
+			slices.SortFunc(op.Pair.Mutations, func(a, b Mutation) int { return treeMutationCmpV1(a, treeRowKeyV1{rank: b.DBI.Rank, key: b.Key}) })
+			tsRefusal(t, tpRunV1(t, s, owner, op, 7), false)
+			if calls != 0 || s.state != storeOPEN {
+				t.Fatal("unsupported replay reached Source or consumed Store", calls, s.state)
+			}
+			tsFollowing(t, s, owner)
+		})
+	}
+}
+
+func tpTipAdmissionV1(t *testing.T) {
+	for _, generation := range []uint64{0, 1, 7, 9} {
+		for _, height := range []uint64{3, 5, 7} {
+			t.Run(fmt.Sprintf("generation%d/height%d", generation, height), func(t *testing.T) {
+				s, path, owner := tsNew(t)
+				if generation != 0 {
+					ctxTreeSeed(t, s, generation, height, 1, nil, nil)
+				}
+				calls := 0
+				marker := errors.New("selected replay Source")
+				op := trOperationV1(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return marker }), 1)
+				op.Pair.PreserveReplayObservations = true
+				r := tpRunV1(t, s, owner, op, generation)
+				if generation == 1 {
+					tsRefusal(t, r, false)
+					if calls != 0 || s.state != storeOPEN {
+						t.Fatal("observed generation target reached native work")
+					}
+				} else {
+					r.tuple(t, 1, 1, 0)
+					if !sameError(r.err, marker) || calls != 1 {
+						t.Fatal("independent observed generation refused", r.err, calls)
+					}
+					tsConsumed(t, s, owner, 1, marker)
+					s = tsReopen(t, s, path)
+				}
+				tsFollowing(t, s, owner)
+			})
+		}
+	}
+	for _, deletion := range []string{"undo", "body"} {
+		t.Run("missing-cell/"+deletion, func(t *testing.T) {
+			s, _, owner := tsNew(t)
+			calls := 0
+			op := trOperationV1(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return nil }), 1)
+			op.Pair.PreserveReplayObservations = true
+			if deletion == "undo" {
+				op.Primitives[0].Undo = 4
+			} else {
+				raw := trBodyV1(&op, 2, true)
+				seed := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: schemaDBIs[4], Key: op.Primitives[0].Block[:], AfterKind: 2, Literal: raw}}}}
+				mustEnvironment(t, tsRun(t, s, owner, TreeOperation, seed).err)
+			}
+			tsRefusal(t, tpRunV1(t, s, owner, op, 0), false)
+			if calls != 0 || s.state != storeOPEN {
+				t.Fatal("deletion without endpoint reached Source")
+			}
+			tsFollowing(t, s, owner)
+		})
+	}
+}
+
+func tpCallbackV1(t *testing.T) {
+	for _, mode := range []string{"nil", "direct", "wrapped", "typed-nil", "panic", "goexit"} {
+		t.Run(mode, func(t *testing.T) {
+			s, path, owner := tsNew(t)
+			marker := errors.New("callback stopped")
+			var typed *pairReadNilErrorV1
+			application := error(marker)
+			if mode == "wrapped" {
+				application = fmt.Errorf("callback: %w", marker)
+			}
+			if mode == "typed-nil" {
+				application = typed
+			}
+			var reader *Reader
+			var cell *canonicalTipCell
+			var result tsResult
+			var recovered any
+			returned := false
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				defer func() { recovered = recover() }()
+				mustEnvironment(t, owner.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					result = tsInvoke(s, a, func(r *Reader) (TreeOperationV1, error) {
+						reader = r
+						_, err := r.CanonicalTipV1(7)
+						mustEnvironment(t, err)
+						cell = r.tip
+						if mode == "panic" {
+							panic(marker)
+						}
+						if mode == "goexit" {
+							runtime.Goexit()
+						}
+						if mode != "nil" {
+							return TreeOperationV1{Pair: TreePairV1{PreserveReplayObservations: true}}, application
+						}
+						op := trOperationV1(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { return marker }), 1)
+						op.Pair.PreserveReplayObservations = true
+						return op, nil
+					})
+					return nil
+				}))
+				returned = true
+			}()
+			<-done
+			tipRetired(t, reader, cell)
+			if reservationLive(owner) != 0 {
+				t.Fatal("callback unwind retained its account")
+			}
+			switch mode {
+			case "panic":
+				if recovered != marker || returned || s.state != storeOPEN {
+					t.Fatal("callback panic changed delivery or cleanup")
+				}
+			case "goexit":
+				if recovered != nil || returned || s.state != storeOPEN {
+					t.Fatal("callback Goexit changed delivery or cleanup")
+				}
+			default:
+				want := application
+				index := -1
+				if mode == "nil" {
+					want, index = marker, 0
+				}
+				result.tuple(t, 1, 1, index)
+				if !returned || !sameError(result.err, want) {
+					t.Fatal("callback/source result identity changed", result.err)
+				}
+				if mode == "nil" {
+					tsConsumed(t, s, owner, 1, result.err)
+					s = tsReopen(t, s, path)
+				} else {
+					tipOutcome(t, s, result.truth, result.stage, result.err, 1, 1, "OPEN")
+				}
+			}
+			tsFollowing(t, s, owner)
+		})
+	}
+}
+
+func trPairResultV1(t *testing.T, roles int, kind uint8, events uint32, deleteBody bool, preserve ...bool) {
 	t.Helper()
 	s, path, owner := tsNew(t)
 	var calls [3]int
@@ -3909,7 +4142,13 @@ func trPairResultV1(t *testing.T, roles int, kind uint8, events uint32, deleteBo
 		r := tsRun(t, s, owner, TreeOperation, TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: schemaDBIs[4], Key: op.Primitives[0].Block[:], AfterKind: AfterLiteral, Literal: raw}}}})
 		mustEnvironment(t, r.err)
 	}
-	r := tsRun(t, s, owner, TreeOperation, op)
+	var r tsResult
+	if len(preserve) != 0 {
+		op.Pair.PreserveReplayObservations = preserve[0]
+		r = tpRunV1(t, s, owner, op, 7)
+	} else {
+		r = tsRun(t, s, owner, TreeOperation, op)
+	}
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
 	if calls != [3]int{0, roles, 0} {

@@ -775,6 +775,7 @@ type treeReadbackStateV1 struct {
 	bounded     bool
 	oldImage    bool
 	newImage    bool
+	replay      *treePlanV1
 }
 
 // newTreeReadbackV1 is called only when the plan has at least one primitive. It draws S_r at construction and each
@@ -828,6 +829,11 @@ func (r *treeReadbackStateV1) verdictV1(pair []ownedMutation, consulted []ownedC
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
+	equal, err := r.replay.replayEqualV1(r.read, r.handles)
+	if err != nil {
+		return CommitTruthUnknown, err
+	}
+	oldImage, newImage = oldImage && equal, newImage && equal
 	if oldImage {
 		return CommitTruthOld, nil
 	}
@@ -835,6 +841,57 @@ func (r *treeReadbackStateV1) verdictV1(pair []ownedMutation, consulted []ownedC
 		return CommitTruthNew, nil
 	}
 	return CommitTruthUnknown, nil
+}
+
+// replayOriginalV1 qualifies only the declared CURRENT absent undo prefix in protected OLD.
+func (p *treePlanV1) replayOriginalV1(old *C.MDBX_txn, dbis [9]C.MDBX_dbi) error {
+	if !p.preserveReplay || p.primitives[0].Undo != UndoTransientV1 {
+		return nil
+	}
+	equal, err := treeReplayUndoAbsentV1(old, dbis[5], p.primitives[0].Block)
+	if err == nil && !equal {
+		return treeSnapshotMismatchV1()
+	}
+	return err
+}
+
+// replayMatchV1 projects readable inequality at the reached writer phase.
+func (p *treePlanV1) replayMatchV1(candidate *C.MDBX_txn, dbis [9]C.MDBX_dbi, diagnostic string) error {
+	equal, err := p.replayEqualV1(candidate, dbis)
+	if err == nil && !equal {
+		return adapterError(operationUpdate, EngineStateMismatch, codeProblem, diagnostic, nil)
+	}
+	return err
+}
+
+// replayEqualV1 completes tip then prefix even when the tip is readably unequal.
+func (p *treePlanV1) replayEqualV1(candidate *C.MDBX_txn, dbis [9]C.MDBX_dbi) (bool, error) {
+	if p == nil || !p.preserveReplay {
+		return true, nil
+	}
+	tip, err := canonicalTipEqual(candidate, dbis[2], largeImageScope{tip: p.tip})
+	if err != nil {
+		return false, err
+	}
+	if p.primitives[0].Undo != UndoTransientV1 {
+		return tip, nil
+	}
+	absent, err := treeReplayUndoAbsentV1(candidate, dbis[5], p.primitives[0].Block)
+	return tip && absent, err
+}
+
+// treeReplayUndoAbsentV1 exposes at most the physical successor's first 32 key bytes.
+func treeReplayUndoAbsentV1(txn *C.MDBX_txn, dbi C.MDBX_dbi, block [32]byte) (bool, error) {
+	key, _, found, err := treeNextImagesV1(txn, dbi, block[:])
+	if err != nil || !found {
+		return !found, err
+	}
+	key.length = min(key.length, 32)
+	view, err := treeBorrowV1(key)
+	if err != nil {
+		return false, err
+	}
+	return !bytes.Equal(view.value, block[:]), nil
 }
 
 // foldProjectionV1 returns the selected stream's complete folded predicates.
