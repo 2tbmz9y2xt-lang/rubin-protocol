@@ -360,7 +360,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 	for path, want := range map[string]string{
 		"da_relay_state.go":          "a9b93c47b1724e5b040fe518d9f04ff084afa953eb39607c11491a9cec25f885",
 		"da_relay_record.go":         "2706ab0b65ee400056f6d29e6807d509e937d8d778de5aae5ee36d2a05c8eb11",
-		"da_relay_mutation.go":       "ec140c17b2c9d1c6aaf59aeb2bf14d7881fc27d6bfcb650e05733b3ec7c45644",
+		"da_relay_mutation.go":       "e57ac5452cba2958ca44c592368a90875dd740c1b0446c8062a0f209c7f4f4b0",
 		"da_complete_commit.go":      "3fb456f5668dff7bc089b0472ccc61c2c263d5c7d3917cd512a20182e45709f5",
 		"da_complete_snapshot.go":    "e1592f7f08d04c2423184a54ed404a86fdaab1057a725fa8acffc7a37f1eb1cc",
 		"sync_da_relay.go":           "54d3cbb55e38cf420724a0da2e353ee240acad3e5a60e191491eb862d04bca8a",
@@ -6659,8 +6659,8 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 		return ""
 	}
 	// OWNED CALLERS: each owner-aware entrypoint is named once, in its wrapper; the legacy roots never.
-	refs := productionReferenceCensus(t, "releaseOwnerReadyPeerQuota", "advanceOwnerReadyTTL", "releasePeerQuotaKey", "advanceOrphanTTL", "prepareCanonicalDAImage")
-	require(t, reflect.DeepEqual(refs, map[string][]string{"releaseOwnerReadyPeerQuota": {"ReleasePeerQuotaKey"}, "advanceOwnerReadyTTL": {"AdvanceOrphanTTL"}, "releasePeerQuotaKey": nil, "advanceOrphanTTL": nil, "prepareCanonicalDAImage": nil}), "production references=%v", refs)
+	refs := productionReferenceCensus(t, "releaseOwnerReadyPeerQuota", "advanceOwnerReadyTTL", "releasePeerQuotaKey", "advanceOrphanTTL", "prepareCanonicalDAImage", "advanceOwnerReadyTTLInGuard")
+	require(t, reflect.DeepEqual(refs, map[string][]string{"releaseOwnerReadyPeerQuota": {"ReleasePeerQuotaKey"}, "advanceOwnerReadyTTL": {"AdvanceOrphanTTL"}, "releasePeerQuotaKey": nil, "advanceOrphanTTL": nil, "prepareCanonicalDAImage": nil, "advanceOwnerReadyTTLInGuard": nil}), "production references=%v", refs)
 	// TEETH: `f := s.advanceOwnerReadyTTL` is a bare SelectorExpr with no CallExpr; the identifier
 	// census must count it, or a second activation through a method value would pass.
 	teeth, parseErr := parser.ParseFile(token.NewFileSet(), "teeth.go", "package node\nfunc wire(s *DARelayState) { f := s.advanceOwnerReadyTTL; _ = f }", parser.SkipObjectResolution)
@@ -6713,7 +6713,7 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 		})
 	}
 	// Fail closed on a derivation that stopped selecting the surface it claims to cover.
-	for _, entrypoint := range []string{"releaseOwnerReadyPeerQuota", "advanceOwnerReadyTTL"} {
+	for _, entrypoint := range []string{"releaseOwnerReadyPeerQuota", "advanceOwnerReadyTTL", "advanceOwnerReadyTTLInGuard"} {
 		if !slices.Contains(censused, entrypoint) {
 			t.Fatalf("separation census derived %d functions, none of them entrypoint %s", len(censused), entrypoint)
 		}
