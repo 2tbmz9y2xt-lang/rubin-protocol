@@ -110,10 +110,7 @@ func stepTreeCoinbaseRowsV1(t *testing.T, rows map[Outpoint]UtxoEntry, raw []byt
 func stepTreeRootV1(rows map[Outpoint]UtxoEntry) [32]byte {
 	leaves := make(map[[36]byte][]byte, len(rows))
 	for op, row := range rows {
-		var key [36]byte
-		copy(key[:32], op.Txid[:])
-		binary.BigEndian.PutUint32(key[32:], op.Vout)
-		leaves[key] = btValue(btFrame(row.Value, row.CovenantType, row.CovenantData), row.CreationHeight, row.CreatedByCoinbase)
+		icbLeafKindV1(leaves, op, row.Value, row.CovenantType, row.CovenantData, row.CreationHeight, row.CreatedByCoinbase)
 	}
 	return icbRootV1(leaves)
 }
@@ -146,9 +143,15 @@ func (w *stepTreeWorldV1) seedPrefix(t *testing.T, height uint64) {
 			owner, _ := mdbx.CanonicalOwnerKey(g, w.hashes[h])
 			rows = append(rows, btMutation(2, key, mdbx.ChainValue(w.hashes[h], w.hashes[h-1], w.endpoint(h).CumulativeChainwork)), btMutation(7, owner, mdbx.CanonicalOwnerValue(h)))
 		}
+		// Flush complete heights so each canonical row and reciprocal owner
+		// remain in the same native operation, including the LAG boundary.
+		if len(rows) >= 995 {
+			w.pair(t, rows...)
+			rows = nil
+		}
 	}
-	for from := 0; from < len(rows); from += 1000 {
-		w.pair(t, rows[from:min(from+1000, len(rows))]...)
+	if len(rows) != 0 {
+		w.pair(t, rows...)
 	}
 	for _, g := range []uint64{1, 2} {
 		h := height - 1
@@ -225,7 +228,9 @@ func testStepTreeProgressV1(t *testing.T) {
 	for _, tip := range []uint64{0, 15119, 15120, 15840} {
 		for _, present := range []bool{false, true} {
 			t.Run(fmt.Sprintf("tip%d/present%v", tip, present), func(t *testing.T) {
-				w := stepTreeNewV1(t, tip, 0, nil)
+				// The historical tip0 label covers h0 with no LAG; replay
+				// authority itself requires a nonzero fixed target height.
+				w := stepTreeNewV1(t, max(tip, 1), 0, nil)
 				if present {
 					w.pair(t, btMutation(3, w.hashes[0][:], w.raw[0][:148]), btMutation(4, w.hashes[0][:], w.raw[0]), btMutation(5, mdbx.UndoManifestKey(w.hashes[0]), stepManifest(0, 0, 1, 0)))
 					for _, g := range []uint64{1, 2} {
@@ -287,7 +292,7 @@ func testStepTreeConfigurationV1(t *testing.T) {
 				header.Target[0] = 0x7f
 				raw = append(initial148BlockMine(t, initial148BlockHead{version: header.Version, parent: header.PrevBlockHash, merkle: header.MerkleRoot, target: header.Target, root: header.UtxoRoot, timestamp: header.Timestamp}), original[148:]...)
 			}
-			w := stepTreeNewV1(t, 0, 0, raw)
+			w := stepTreeNewV1(t, 1, 0, raw)
 			context, database := ReplayStepContextV1{Genesis: w.genesis}, [32]byte{7}
 			switch mode {
 			case "identity-only":
@@ -336,7 +341,7 @@ func testStepTreeConfigurationV1(t *testing.T) {
 }
 
 func testStepTreeFormat2V1(t *testing.T) {
-	w := newStepWorld(t, 0, false)
+	w := newStepWorld(t, 1, false)
 	before := w.image()
 	genesis := initial148BlockGenesis(t)
 	context := ReplayStepContextV1{Genesis: PublishedGenesisContextV1{Published: genesis, GenesisHash: sha3.Sum256(genesis[:148]), ChainID: sha3.Sum256(append([]byte("RUBIN-GENESIS-v1"), genesis...))}}
@@ -412,8 +417,10 @@ func testStepTreeBindingV1(t *testing.T) {
 				case "wrong-anchor":
 					tx.Outputs[0].CovenantData = bytes.Repeat([]byte{0x42}, 32)
 				case "witness":
-					tx.Witness = []WitnessItem{{SuiteID: 1, Pubkey: []byte{1}, Signature: []byte{1}}}
+					tx.Witness = []WitnessItem{{SuiteID: SUITE_ID_SENTINEL}}
 				case "DA":
+					tx.TxKind = 0x02
+					tx.DaChunkCore = &DaChunkCore{ChunkHash: sha3.Sum256([]byte{1})}
 					tx.DaPayload = []byte{1}
 				case "A10-nonce":
 					tx.TxNonce = 1
@@ -422,6 +429,13 @@ func testStepTreeBindingV1(t *testing.T) {
 				logicalMDBXAssert(t, err == nil, "binding tx shape: %v", err)
 				raw = w.body(t, encoded)
 				w.replace(t, 1, raw)
+			}
+			if mode == "witness" || mode == "DA" {
+				parsed, err := ParseInitial148BlockBytes(raw)
+				logicalMDBXAssert(t, err == nil && parsed.Header.MerkleRoot == initial148BlockTaggedRoot(parsed.Txids, 0x00, 0x01), "pin fixture parses with matching txid root: %v", err)
+				commit := initial148BlockWitnessCommit(t)
+				logicalMDBXAssert(t, len(parsed.Txs[0].Outputs) == 1 && parsed.Txs[0].Outputs[0].CovenantType == COV_TYPE_ANCHOR && bytes.Equal(parsed.Txs[0].Outputs[0].CovenantData, commit[:]), "pin fixture's sole anchor remains correct")
+				initial148BlockWantError(t, "pin-only complete binding", ValidateInitial148BlockBodyCommitments(raw), BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
 			}
 			before := bytes.Clone(raw)
 			i := replayStepRun(w.step, w.s, w.owner, raw)
@@ -472,7 +486,7 @@ func stepTreeMixedOrderV1(t *testing.T, w *stepTreeWorldV1, unbound bool) []byte
 func testStepTreeCapacityV1(t *testing.T) {
 	for _, free := range []uint64{399999999, 400000000} {
 		t.Run(fmt.Sprint(free), func(t *testing.T) {
-			w := stepTreeNewV1(t, 0, 0, nil)
+			w := stepTreeNewV1(t, 1, 0, nil)
 			original := w.owner
 			w.owner, _ = reservationRemaining(t, free)
 			out := w.call(0)
