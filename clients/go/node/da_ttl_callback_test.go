@@ -463,9 +463,9 @@ func requireDATTLIndexStep(t *testing.T, f *daNonReplayFixture, step string) {
 
 // TestDATTLCallbackIndexProductionPaths is the F2 index row on these production paths that
 // publish a record row: orphan-chunk staging (State A created and grown), commit staging
-// (State A to State B), DA completion (State B to State C) and the PEER quota cleanup removal.
-// It does not run the D1 projection's putRecord and removeRecord on its clone (sync_da_relay.go)
-// or the capacity-victim removal of a DA complete commit (da_complete_commit.go).
+// (State A to State B), DA completion (State B to State C), the PEER quota cleanup removal and
+// the D1 projection publication (TestDATTLCallbackIndexD1Projection). It does not run the
+// capacity-victim removal of a DA complete commit (da_complete_commit.go).
 func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
 	f := newDANonReplayFixture(t, 8)
 	grown, staged, completed, released := [32]byte{0xd1}, [32]byte{0xd2}, [32]byte{0xd3}, [32]byte{0xd4}
@@ -492,6 +492,43 @@ func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
 		t.Fatal("PEER cleanup kept the released record")
 	}
 	requireDATTLIndexStep(t, f, "PEER cleanup removal")
+}
+
+// TestDATTLCallbackIndexD1Projection is the F2 index row on the D1 projection: one
+// buildCanonicalDAOwnerCandidates pass over a snapshot taken as capture() takes it re-puts the
+// State A survivor, removes the included State C record and removes the State B record whose
+// input the final chain spent, and D1 publishes that clone. The O1 half is not published, so the
+// live owner keeps the removed members' claims; the body reads only the State A record's claims.
+// State C is completed through the real admission, which releases its admission reader.
+func TestDATTLCallbackIndexD1Projection(t *testing.T) {
+	x := canonicalDAOwnerFixtureOver(t, newDANonReplayFixture(t, 10))
+	x.stateC = daRelayTestID(0x33)
+	x.admit("a0", daNonReplayTxSpec{kind: 0x02, daID: x.stateA, chunkIndex: 0, payload: []byte("d1 state-a")}, daNonReplayPeer("peer-a"))
+	x.admit("commit", daNonReplayTxSpec{kind: 0x01, daID: x.stateB, chunkCount: 2, commitment: sha3.Sum256([]byte("d1 state-b")), commitmentOutputs: 1}, daNonReplayPeer("peer-b"))
+	x.admit("b0", daNonReplayTxSpec{kind: 0x02, daID: x.stateB, chunkIndex: 0, payload: []byte("d1 state-b chunk")}, daNonReplayPeer("peer-b"))
+	x.admit("c0", daNonReplayTxSpec{kind: 0x02, daID: x.stateC, chunkIndex: 0, payload: []byte("d1 state-c")}, LocalDAProvenance())
+	x.admit("ccommit", daNonReplayTxSpec{kind: 0x01, daID: x.stateC, chunkCount: 1, commitment: sha3.Sum256([]byte("d1 state-c")), commitmentOutputs: 1}, LocalDAProvenance())
+	x.capture()
+	x.included = []canonicalDASetIdentity{x.identityOf(x.stateC, "ccommit", "c0")}
+	x.spendInput("b0")
+	requireDATTLD1Records(t, x, map[[32]byte]daRelaySetState{x.stateA: daRelayStateOrphanChunks, x.stateB: daRelayStateStagedCommit, x.stateC: daRelayStateCompleteSet})
+	requireDATTLIndexExact(t, x.f.relay)
+	pair := x.requirePair()
+	(&preparedCanonicalDAImage{relay: x.f.relay, projected: pair.retained}).publish()
+	requireDATTLD1Records(t, x, map[[32]byte]daRelaySetState{x.stateA: daRelayStateOrphanChunks})
+	requireDATTLIndexStep(t, x.f, "D1 projection")
+}
+
+// requireDATTLD1Records pins the live record set to exactly these records in these states.
+func requireDATTLD1Records(t *testing.T, x *canonicalDAOwnerFixture, want map[[32]byte]daRelaySetState) {
+	t.Helper()
+	got := map[[32]byte]daRelaySetState{}
+	for daID, record := range daRelayStateSnapshot(x.f.relay).sets {
+		got[daID] = record.state
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("records=%v, want %v", got, want)
+	}
 }
 
 func requireDATTLState(t *testing.T, f *daNonReplayFixture, daID [32]byte, want daRelaySetState) {
