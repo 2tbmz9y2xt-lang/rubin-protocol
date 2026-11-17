@@ -299,7 +299,10 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			editDATTLChunkMember(f, r.stateAID, func(m *daRelayMemberIdentity) { m.token = token })
 		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
 		{"input claimed by two members", reuseDATTLInputInStateB, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
-		{"txid claimed by two selected records", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+		// The State B commit member stores State A's txid, which its own parsed bytes contradict:
+		// bindRetainedRecord's canonicalDARetainedBinding refuses it, reached from
+		// checkOwnerReadyRetainedRecordLocked while the plan is built.
+		{"commit member txid contradicts its parsed identity", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			f.mutateRelay(func(s *DARelayState) {
 				record := s.relations.recordValue(r.stateBID)
 				member := *record.commit.member
@@ -311,6 +314,15 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			var terminal *canonicalDATerminalError
 			return errors.As(err, &terminal) && strings.Contains(err.Error(), "contradicts its parsed identity")
 		}},
+		// A count of zero is an inconsistent stored value (ATOM: underflow invalidates the plan
+		// before mutation). ownerReadyRemovalGateFails refuses it first; the survivor bound in
+		// checkOwnerReadyRemovalSurvivor refuses the underflowed count when that clause is gone.
+		{"State A count zero", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.setOwnerReadyTTL(r.stateAID, 0)
+		}, daTTLBareIncompatible},
+		{"State B count zero", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.setOwnerReadyTTL(r.stateBID, 0)
+		}, daTTLBareIncompatible},
 		{"nil chainstate", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
 			f.mutateRelay(func(s *DARelayState) { s.mempool.chainState = nil })
 		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "nil chainstate") }},
@@ -384,6 +396,12 @@ func TestDATTLCallbackBodyWalksOnlyStateAB(t *testing.T) {
 		}
 		requireDATTLIndexExact(t, f.relay)
 	}
+}
+
+// daTTLBareIncompatible accepts only the unwrapped errDARelayImageIncompatible, which both
+// zero-count arms return; a refusal wrapped with a detail suffix fails it.
+func daTTLBareIncompatible(err error) bool {
+	return errors.Is(err, errDARelayImageIncompatible) && err.Error() == errDARelayImageIncompatible.Error()
 }
 
 func daTTLWrapped(want error, detail string) func(error) bool {
