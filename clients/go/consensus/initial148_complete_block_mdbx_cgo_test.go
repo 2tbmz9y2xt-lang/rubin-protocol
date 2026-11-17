@@ -728,14 +728,17 @@ func TestInitial148ReplayCompleteBlockV1(t *testing.T) {
 		w := btNew(t)
 		authority := rtImageRow(t, w, []byte{2})
 		runCalls := 0
-		out, err := withInitial148ReplayCompleteBlockV1(nil, func(func(*mdbx.Reader, initial148CompleteBlockInputV1) (*initial148CompleteBlockResultV1, error)) error { runCalls++; return nil })
-		failure, ok := err.(*logicalStateFailure)
+		out, err := withInitial148ReplayCompleteBlockV1(nil, func(func(*mdbx.Reader, initial148CompleteBlockInputV1) (*initial148CompleteBlockResultV1, error)) error {
+			runCalls++
+			return nil
+		})
+		failure, ok := any(err).(*logicalStateFailure)
 		logicalMDBXAssert(t, ok && failure.kind == logicalStateFailureLocalInvariant && failure.Error() == "invalid complete initial148 request" && out == (initial148CompleteBlockOutcomeV1{}) && runCalls == 0, "nil account direct guard")
 		var closed *mdbx.OperationAccount
 		icbWithAccountV1(t, w, func(a *mdbx.OperationAccount) {
 			closed = a
 			out, err := withInitial148ReplayCompleteBlockV1(a, nil)
-			failure, ok := err.(*logicalStateFailure)
+			failure, ok := any(err).(*logicalStateFailure)
 			logicalMDBXAssert(t, ok && failure.kind == logicalStateFailureLocalInvariant && failure.Error() == "invalid complete initial148 request" && out == (initial148CompleteBlockOutcomeV1{}), "nil run direct guard")
 		})
 		for _, a := range []*mdbx.OperationAccount{{}, closed} {
@@ -750,10 +753,12 @@ func TestInitial148ReplayCompleteBlockV1(t *testing.T) {
 				})
 				return native.err
 			})
-			engine, ok := err.(*mdbx.EngineError)
-			logicalMDBXAssert(t, runCalls == 1 && callbackCalls == 0 && native.truth == 1 && native.stage == 1 && native.index == -1 && err == native.err && ok && engine.Operation == "update" && engine.Class == "InvalidInput" && engine.Code == 22 && engine.Diagnostic == "closed operation account" && engine.Cause == nil && !engine.ReopenRequired && engine.TreeObservation == nil && out == (initial148CompleteBlockOutcomeV1{}), "opaque invalid account must reach actual native input owner: %+v/%+v", native, out)
+			engine, ok := any(err).(*mdbx.EngineError)
+			logicalMDBXAssert(t, runCalls == 1 && callbackCalls == 0 && native.truth == 1 && native.stage == 1 && native.index == -1 && any(err) == any(native.err) && ok && engine.Operation == "update" && engine.Class == "InvalidInput" && engine.Code == 22 && engine.Diagnostic == "closed operation account" && engine.Cause == nil && !engine.ReopenRequired && engine.TreeObservation == nil && out == (initial148CompleteBlockOutcomeV1{}), "opaque invalid account must reach actual native input owner: %+v/%+v", native, out)
 			w.read(t, 0, []byte{2}, authority)
-			for _, g := range []uint64{1, 2} { btState(t, w, g, mdbx.TreeEndpointV1{}, map[Outpoint]UtxoEntry{}) }
+			for _, g := range []uint64{1, 2} {
+				btState(t, w, g, mdbx.TreeEndpointV1{}, map[Outpoint]UtxoEntry{})
+			}
 			rpFollowing(t, w)
 		}
 		btReservationsReleased(t, w.owner)
@@ -763,13 +768,20 @@ func TestInitial148ReplayCompleteBlockV1(t *testing.T) {
 			c := rpNew(t, 15840, 1, mdbx.UndoTransientV1)
 			in := c.in
 			switch mode {
-			case "nil-cap": in.CapRegistry = nil
-			case "admission-second", "ignored-admission": in.CapRegistry = nil
-			case "nil-registry": in.Registry = nil
-			case "rotation": in.Rotation = DefaultRotationProvider{}
-			case "identity": in.DatabaseID = [32]byte{}
-			case "height-context": in.AlreadyGenerated.Lo = 1
-			case "target": in.ExpectedTarget = [32]byte{}
+			case "nil-cap":
+				in.CapRegistry = nil
+			case "admission-second", "ignored-admission":
+				in.CapRegistry = nil
+			case "nil-registry":
+				in.Registry = nil
+			case "rotation":
+				in.Rotation = DefaultRotationProvider{}
+			case "identity":
+				in.DatabaseID = [32]byte{}
+			case "height-context":
+				in.AlreadyGenerated.Lo = 1
+			case "target":
+				in.ExpectedTarget = [32]byte{}
 			case "validation":
 				in, _ = icbGenesisInputV1(t, 0)
 				c.in, c.request.Raw, c.request.Endpoint = in, in.Raw, in.Endpoint
@@ -783,16 +795,25 @@ func TestInitial148ReplayCompleteBlockV1(t *testing.T) {
 				var runErr error
 				out, runErr = withInitial148ReplayCompleteBlockV1(a, func(validate func(*mdbx.Reader, initial148CompleteBlockInputV1) (*initial148CompleteBlockResultV1, error)) error {
 					escaped = validate
-					if mode == "unused" { return nil }
-					if mode == "earlier" { return primary }
+					if mode == "unused" {
+						return nil
+					}
+					if mode == "earlier" {
+						return primary
+					}
 					prepare := c.prepare(t, func(r *mdbx.Reader) (*initial148CompleteBlockResultV1, error) {
 						result, err := validate(r, in)
 						selected = err
 						if mode == "second" || mode == "ignored" || mode == "admission-second" || mode == "ignored-admission" {
-							if mode == "ignored" || mode == "ignored-admission" { return nil, nil }
+							if mode == "ignored" || mode == "ignored-admission" {
+								var omitted *initial148CompleteBlockResultV1
+								return omitted, nil
+							}
 							again, second := validate(r, in)
 							logicalMDBXAssert(t, again == nil && second != nil && second.Error() == "complete initial148 validate is not available", "second use did not refuse")
-							if mode == "admission-second" { return nil, err }
+							if mode == "admission-second" {
+								return nil, err
+							}
 							return nil, second
 						}
 						return result, err
@@ -804,23 +825,35 @@ func TestInitial148ReplayCompleteBlockV1(t *testing.T) {
 					}
 					return got.Err
 				})
-				if mode == "success" { logicalMDBXAssert(t, c.result != nil && reflect.DeepEqual(*c.result, initial148CompleteBlockResultV1{}), "frame retained result after native") }
+				if mode == "success" {
+					logicalMDBXAssert(t, c.result != nil && reflect.DeepEqual(*c.result, initial148CompleteBlockResultV1{}), "frame retained result after native")
+				}
 				return runErr
 			})
 			escapeInput := in
 			// An unused closure must refuse before admission after its frame is released.
-			if mode == "unused" || mode == "earlier" { escapeInput.CapRegistry = nil }
+			if mode == "unused" || mode == "earlier" {
+				escapeInput.CapRegistry = nil
+			}
 			result, escapeErr := escaped(nil, escapeInput)
 			logicalMDBXAssert(t, result == nil && escapeErr != nil && escapeErr.Error() == "complete initial148 validate is not available", "escaped replay validation")
 			switch mode {
-			case "success": logicalMDBXAssert(t, err == nil && out.attempted && out.validationErr == nil && out.required.derived, "successful delayed outcome: %+v/%v", out, err)
-			case "unused": logicalMDBXAssert(t, !out.attempted && out.validationErr == nil && err.Error() == "complete initial148 run returned without validation", "unused outcome")
-			case "earlier": logicalMDBXAssert(t, err == primary && !out.attempted && out.validationErr == nil, "earlier source lost to unused diagnostic")
-			case "validation": logicalMDBXAssert(t, out.attempted && selected != nil && out.validationErr == selected && err == tail && c.result == nil, "first validation selection")
-			case "second": logicalMDBXAssert(t, out.attempted && out.validationErr == nil && err == tail && c.result == nil, "second invocation rewrote first validation outcome")
-			case "ignored": logicalMDBXAssert(t, out.attempted && out.validationErr == nil && err == tail && err != nil, "ignored successful validation tail")
-			case "ignored-admission": logicalMDBXAssert(t, !out.attempted && out.validationErr == selected && selected != nil && err == tail && err != nil, "ignored admission selection lost to tail")
-			default: logicalMDBXAssert(t, !out.attempted && selected != nil && out.validationErr == selected && err == selected && c.result == nil, "admission must precede validation and remain selected: %+v/%v", out, err)
+			case "success":
+				logicalMDBXAssert(t, err == nil && out.attempted && out.validationErr == nil && out.required.derived, "successful delayed outcome: %+v/%v", out, err)
+			case "unused":
+				logicalMDBXAssert(t, !out.attempted && out.validationErr == nil && err.Error() == "complete initial148 run returned without validation", "unused outcome")
+			case "earlier":
+				logicalMDBXAssert(t, any(err) == any(primary) && !out.attempted && out.validationErr == nil, "earlier source lost to unused diagnostic")
+			case "validation":
+				logicalMDBXAssert(t, out.attempted && selected != nil && any(out.validationErr) == any(selected) && any(err) == any(tail) && c.result == nil, "first validation selection")
+			case "second":
+				logicalMDBXAssert(t, out.attempted && out.validationErr == nil && any(err) == any(tail) && c.result == nil, "second invocation rewrote first validation outcome")
+			case "ignored":
+				logicalMDBXAssert(t, out.attempted && out.validationErr == nil && any(err) == any(tail) && err != nil, "ignored successful validation tail")
+			case "ignored-admission":
+				logicalMDBXAssert(t, !out.attempted && any(out.validationErr) == any(selected) && selected != nil && any(err) == any(tail) && err != nil, "ignored admission selection lost to tail")
+			default:
+				logicalMDBXAssert(t, !out.attempted && selected != nil && any(out.validationErr) == any(selected) && any(err) == any(selected) && c.result == nil, "admission must precede validation and remain selected: %+v/%v", out, err)
 			}
 			btReservationsReleased(t, c.w.owner)
 		})
@@ -833,17 +866,26 @@ func TestInitial148ReplayCompleteBlockV1(t *testing.T) {
 			go func() {
 				defer func() { done <- recover() }()
 				_ = w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
-					if err := a.PrecheckV1(400000000); err != nil { return err }
+					if err := a.PrecheckV1(400000000); err != nil {
+						return err
+					}
 					_, err := withInitial148ReplayCompleteBlockV1(a, func(func(*mdbx.Reader, initial148CompleteBlockInputV1) (*initial148CompleteBlockResultV1, error)) error {
-						switch mode { case "panic": panic(primary); case "Goexit": runtime.Goexit() }
+						switch mode {
+						case "panic":
+							panic(primary)
+						case "Goexit":
+							runtime.Goexit()
+						}
 						return primary
 					})
-					if err != primary { t.Errorf("unwind replaced earlier error: %v", err) }
+					if any(err) != any(primary) {
+						t.Errorf("unwind replaced earlier error: %v", err)
+					}
 					return nil
 				})
 			}()
 			got := <-done
-			logicalMDBXAssert(t, mode == "panic" && got == primary || mode != "panic" && got == nil, "unwind identity %v", got)
+			logicalMDBXAssert(t, mode == "panic" && any(got) == any(primary) || mode != "panic" && got == nil, "unwind identity %v", got)
 			btReservationsReleased(t, w.owner)
 		})
 	}

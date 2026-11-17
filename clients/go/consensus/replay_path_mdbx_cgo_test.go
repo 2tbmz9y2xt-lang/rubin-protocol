@@ -94,9 +94,15 @@ func (*pathView148) Inventory148V1(uint64) HeaderCandidateInventory148V1 {
 
 func (v *pathView148) Header148V1(hash [32]byte, dst *[148]byte) bool {
 	v.headerCalls++
-	if run, ok := v.panicWith.(func()); ok { run() } else if v.panicWith != nil { panic(v.panicWith) }
+	if run, ok := v.panicWith.(func()); ok {
+		run()
+	} else if v.panicWith != nil {
+		panic(v.panicWith)
+	}
 	header, present := v.headers148[hash]
-	if present { *dst = header }
+	if present {
+		*dst = header
+	}
 	return present
 }
 
@@ -121,15 +127,21 @@ func pathTreeCall148V1(t *testing.T, c *rpCase, p *replayPathOwner, supplied []b
 	defer p.mu.Unlock()
 	err := c.w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
 		defer p.finishLocked()
-		if err := a.PrecheckV1(400000000); err != nil { return err }
+		if err := a.PrecheckV1(400000000); err != nil {
+			return err
+		}
 		truth, stage, index, err := c.w.s.UpdateTreeV1(a, func(reader *mdbx.Reader) (mdbx.TreeOperationV1, error) {
 			authority, present, err := reader.ReadTreeAuthorityV1()
-			if err != nil { return mdbx.TreeOperationV1{}, err }
+			if err != nil {
+				return mdbx.TreeOperationV1{}, err
+			}
 			logicalMDBXAssert(t, present, "path tree source envelope")
 			genesis := PublishedGenesisContextV1{ChainID: c.in.ChainID, GenesisHash: c.in.Endpoint.BlockHash}
 			own, err := p.ownLocked(reader, authority.Authority, nil, genesis, supplied)
 			inspect(own, err)
-			if err == nil { err = errPathAbort }
+			if err == nil {
+				err = errPathAbort
+			}
 			return mdbx.TreeOperationV1{}, err
 		})
 		logicalMDBXAssert(t, truth == 1 && stage == 1 && index == -1, "path tree callback abort tuple")
@@ -148,12 +160,24 @@ func TestReplayPath148V1(t *testing.T) {
 			p := &replayPathOwner{initial148: true, view148: view, limit: 32}
 			view.owner = p
 			raw, x := c.in.Raw, c.in.Endpoint.BlockHash
-			if source == "stored" { c.w.pair(t, btMutation(3, x[:], raw[:148])) }
-			if source == "point" || source == "bad-point" || source == "root-byte" { view.headers148[x] = [148]byte(raw[:148]) }
-			if source == "bad-point" || source == "root-byte" { value := view.headers148[x]; value[108] ^= 1; view.headers148[x] = value }
-			if source == "nil-release" { view.nilRelease = true }
+			if source == "stored" {
+				c.w.pair(t, btMutation(3, x[:], raw[:148]))
+			}
+			if source == "point" || source == "bad-point" || source == "root-byte" {
+				view.headers148[x] = [148]byte(raw[:148])
+			}
+			if source == "bad-point" || source == "root-byte" {
+				value := view.headers148[x]
+				value[108] ^= 1
+				view.headers148[x] = value
+			}
+			if source == "nil-release" {
+				view.nilRelease = true
+			}
 			var supplied []byte
-			if source == "supplied" || source == "bad-point" { supplied = raw }
+			if source == "supplied" || source == "bad-point" {
+				supplied = raw
+			}
 			err := pathTreeCall148V1(t, c, p, supplied, func(own replayPathOwn, err error) {
 				if source == "stored" || source == "point" || source == "supplied" {
 					want := map[string]replayPathHeaderSource{"stored": replayPathStored, "point": replayPathPoint, "supplied": replayPathSupplied}[source]
@@ -162,9 +186,14 @@ func TestReplayPath148V1(t *testing.T) {
 				}
 				logicalMDBXAssert(t, err != nil && own.header == nil, "invalid point must stop rather than use supplied bytes")
 			})
-			if source == "stored" { logicalMDBXAssert(t, err == errPathAbort && view.protects == 0 && view.headerCalls == 0 && view.releases == 0, "stored source did not suppress point")
-			} else if source != "nil-release" { logicalMDBXAssert(t, view.protects == 1 && view.headerCalls == 1 && view.releases == 1 && view.unclear == 0, "fixed148 guard lifetime: %+v", view) }
-			if source == "bad-point" || source == "root-byte" || source == "absent" || source == "nil-release" { logicalMDBXAssert(t, p.slot == nil, "failed establishment retained partial slot") }
+			if source == "stored" {
+				logicalMDBXAssert(t, any(err) == any(errPathAbort) && view.protects == 0 && view.headerCalls == 0 && view.releases == 0, "stored source did not suppress point")
+			} else if source != "nil-release" {
+				logicalMDBXAssert(t, view.protects == 1 && view.headerCalls == 1 && view.releases == 1 && view.unclear == 0, "fixed148 guard lifetime: %+v", view)
+			}
+			if source == "bad-point" || source == "root-byte" || source == "absent" || source == "nil-release" {
+				logicalMDBXAssert(t, p.slot == nil, "failed establishment retained partial slot")
+			}
 		})
 	}
 }

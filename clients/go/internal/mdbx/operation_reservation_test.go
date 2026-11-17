@@ -638,7 +638,7 @@ func TestOperationPrecheckV1(t *testing.T) {
 
 type precheckStateV1 struct {
 	live, held, gross uint64
-	positive, closed bool
+	positive, closed  bool
 }
 
 func precheckSnapshotV1(a *OperationAccount) precheckStateV1 {
@@ -669,7 +669,9 @@ func precheckInputV1(t *testing.T) {
 		})
 		before := precheckSnapshotV1(saved)
 		wantReservationSentinel(t, "closed before capacity", saved.PrecheckV1(1), errOperationReservationInput, textReservationInput)
-		if after := precheckSnapshotV1(saved); after != before { t.Fatalf("closed refusal changed %+v to %+v", before, after) }
+		if after := precheckSnapshotV1(saved); after != before {
+			t.Fatalf("closed refusal changed %+v to %+v", before, after)
+		}
 	}
 }
 
@@ -700,15 +702,21 @@ func precheckFreshV1(t *testing.T) {
 		holdOK(t, "ordinary positive token", a.WithReservation(1, func() error {
 			before := precheckSnapshotV1(a)
 			wantReservationSentinel(t, "held positive is not fresh", a.PrecheckV1(400000000), errOperationReservationInput, textReservationInput)
-			if after := precheckSnapshotV1(a); before != after || before.held != 1 || !before.positive { t.Fatalf("held input refusal: %+v -> %+v", before, after) }
+			if after := precheckSnapshotV1(a); before != after || before.held != 1 || !before.positive {
+				t.Fatalf("held input refusal: %+v -> %+v", before, after)
+			}
 			return nil
 		}))
 	})
 	accountRun(t, "fresh zero token", owner, TreeOperation, func(a *OperationAccount) {
 		holdOK(t, "ordinary zero token", a.WithReservation(0, func() error { return nil }))
-		if before := precheckSnapshotV1(a); before != (precheckStateV1{}) { t.Fatalf("zero token changed freshness: %+v", before) }
+		if before := precheckSnapshotV1(a); before != (precheckStateV1{}) {
+			t.Fatalf("zero token changed freshness: %+v", before)
+		}
 		holdOK(t, "fresh after zero token", a.PrecheckV1(400000000))
-		if after := precheckSnapshotV1(a); after != (precheckStateV1{live: 400000000, gross: 400000000, positive: true}) { t.Fatalf("zero-token precheck: %+v", after) }
+		if after := precheckSnapshotV1(a); after != (precheckStateV1{live: 400000000, gross: 400000000, positive: true}) {
+			t.Fatalf("zero-token precheck: %+v", after)
+		}
 	})
 	accountRun(t, "zero native hold", owner, TreeOperation, func(a *OperationAccount) {
 		holdOK(t, "open zero hold", a.withHold(func(h *operationHold) error {
@@ -740,7 +748,9 @@ func precheckCapacityV1(t *testing.T) {
 			err := a.PrecheckV1(402653184)
 			if limit < 805306368 {
 				wantReservationSentinel(t, "R floor", err, errOperationReservationCapacity, textReservationCapacity)
-				if after := precheckSnapshotV1(a); after != before { t.Fatalf("R-floor refusal changed %+v to %+v", before, after) }
+				if after := precheckSnapshotV1(a); after != before {
+					t.Fatalf("R-floor refusal changed %+v to %+v", before, after)
+				}
 				return
 			}
 			holdOK(t, "fresh retry after capacity", err)
@@ -786,10 +796,14 @@ func precheckSubclaimsV1(t *testing.T) {
 			return nil
 		}))
 		holdOK(t, "phase subclaim", a.WithPhaseReservationV1(31, 7, func(reduce func() error) error {
-			if accountHeld(a) != 31 { t.Fatal("phase did not hold initial bytes") }
+			if accountHeld(a) != 31 {
+				t.Fatal("phase did not hold initial bytes")
+			}
 			holdOK(t, "phase reduce", reduce())
 			holdOK(t, "phase idempotence", reduce())
-			if accountHeld(a) != 7 || reservationLive(owner) != 805306368 { t.Fatal("phase released gross amount") }
+			if accountHeld(a) != 7 || reservationLive(owner) != 805306368 {
+				t.Fatal("phase released gross amount")
+			}
 			return nil
 		}))
 		h1, d1 := startResizableHold(t, a, 11)
@@ -797,11 +811,15 @@ func precheckSubclaimsV1(t *testing.T) {
 		d1()
 		holdOK(t, "non-LIFO grow", h2.grow(399999987))
 		holdRefuse(t, "one over subclaim", h2, func() error { return h2.grow(1) }, errOperationReservationCapacity, textReservationCapacity)
-		if accountHeld(a) != 400000000 || reservationLive(owner) != 805306368 || h1.amount != 0 { t.Fatal("non-LIFO ownership") }
+		if accountHeld(a) != 400000000 || reservationLive(owner) != 805306368 || h1.amount != 0 {
+			t.Fatal("non-LIFO ownership")
+		}
 		d2()
 		reservationMustRefuse(t, "gross survives subclaim retirement", owner, 1)
 	})
-	if reservationLive(owner) != 405306368 { t.Fatal("close did not return gross amount") }
+	if reservationLive(owner) != 405306368 {
+		t.Fatal("close did not return gross amount")
+	}
 }
 
 func precheckRetainedV1(t *testing.T) {
@@ -820,16 +838,22 @@ func precheckRetainedV1(t *testing.T) {
 		func() error { return a.PrecheckV1(1) },
 		func() error { return a.WithReservation(0, func() error { t.Fatal("closed callback"); return nil }) },
 		func() error { return h1.grow(0) },
-	} { wantReservationSentinel(t, "closed admission", admit(), errOperationReservationInput, textReservationInput) }
+	} {
+		wantReservationSentinel(t, "closed admission", admit(), errOperationReservationInput, textReservationInput)
+	}
 	reservationMustRefuse(t, "closed retained gross", owner, 1)
 	holdOK(t, "closed shrink", h2.shrink(13))
 	d2()
 	reservationMustRefuse(t, "last claim keeps gross", owner, 1)
 	d1()
 	d1()
-	if reservationLive(owner) != 405306368 || accountHeld(a) != 0 { t.Fatal("last release did not retire gross exactly once") }
+	if reservationLive(owner) != 405306368 || accountHeld(a) != 0 {
+		t.Fatal("last release did not retire gross exactly once")
+	}
 	d0()
-	if reservationLive(owner) != 405306368 { t.Fatal("retained zero hold retired gross twice") }
+	if reservationLive(owner) != 405306368 {
+		t.Fatal("retained zero hold retired gross twice")
+	}
 	accountRun(t, "next operation", owner, TreeOperation, func(next *OperationAccount) { holdOK(t, "fresh T", next.PrecheckV1(400000000)) })
 }
 
@@ -844,10 +868,16 @@ func precheckRetainedTokenV1(t *testing.T) {
 		token, err = a.shared.origin.reserve(a.shared, 17)
 		holdOK(t, "token", err)
 	})
-	if state := precheckSnapshotV1(a); state != (precheckStateV1{live: 805306368, held: 17, gross: 400000000, positive: true, closed: true}) { t.Fatalf("closed token state %+v", state) }
+	if state := precheckSnapshotV1(a); state != (precheckStateV1{live: 805306368, held: 17, gross: 400000000, positive: true, closed: true}) {
+		t.Fatalf("closed token state %+v", state)
+	}
 	reservationMustRefuse(t, "retained token keeps T", owner, 1)
-	if !a.shared.origin.release(token) || a.shared.origin.release(token) { t.Fatal("retained token release identity") }
-	if state := precheckSnapshotV1(a); state != (precheckStateV1{live: 405306368, positive: true, closed: true}) { t.Fatalf("last token retirement %+v", state) }
+	if !a.shared.origin.release(token) || a.shared.origin.release(token) {
+		t.Fatal("retained token release identity")
+	}
+	if state := precheckSnapshotV1(a); state != (precheckStateV1{live: 405306368, positive: true, closed: true}) {
+		t.Fatalf("last token retirement %+v", state)
+	}
 	accountRun(t, "after last token", owner, TreeOperation, func(next *OperationAccount) { holdOK(t, "next T", next.PrecheckV1(400000000)) })
 }
 
@@ -863,10 +893,14 @@ func precheckRetainedShrinkV1(t *testing.T) {
 	})
 	reservationMustRefuse(t, "retained shrink keeps T", owner, 1)
 	holdOK(t, "last shrink", h.shrink(23))
-	if state := precheckSnapshotV1(a); state != (precheckStateV1{live: 405306368, positive: true, closed: true}) { t.Fatalf("last shrink retirement %+v", state) }
+	if state := precheckSnapshotV1(a); state != (precheckStateV1{live: 405306368, positive: true, closed: true}) {
+		t.Fatalf("last shrink retirement %+v", state)
+	}
 	accountRun(t, "before zero frame ends", owner, TreeOperation, func(next *OperationAccount) { holdOK(t, "next T", next.PrecheckV1(400000000)) })
 	finish()
-	if reservationLive(owner) != 405306368 { t.Fatal("zero frame release retired gross twice") }
+	if reservationLive(owner) != 405306368 {
+		t.Fatal("zero frame release retired gross twice")
+	}
 }
 
 func precheckConcurrentV1(t *testing.T) {
@@ -882,13 +916,19 @@ func precheckConcurrentV1(t *testing.T) {
 		}
 		close(start)
 		first, second := <-results, <-results
-		if first != nil { first, second = second, first }
-		if first != nil || second != errOperationReservationInput || reservationLive(owner) != 400000000 { t.Fatal("concurrent duplicate", first, second) }
+		if first != nil {
+			first, second = second, first
+		}
+		if first != nil || any(second) != any(errOperationReservationInput) || reservationLive(owner) != 400000000 {
+			t.Fatal("concurrent duplicate", first, second)
+		}
 		_, finish = startResizableHold(t, a, 19)
 		go finish()
 	})
 	finish()
-	if reservationLive(owner) != 0 || accountHeld(saved) != 0 { t.Fatal("concurrent close/release leaked or double-retired gross") }
+	if reservationLive(owner) != 0 || accountHeld(saved) != 0 {
+		t.Fatal("concurrent close/release leaked or double-retired gross")
+	}
 	accountRun(t, "after concurrent close", owner, TreeOperation, func(a *OperationAccount) { holdOK(t, "next admission", a.PrecheckV1(400000000)) })
 }
 
@@ -901,16 +941,29 @@ func precheckExitsV1(t *testing.T) {
 			go func() {
 				defer func() { done <- recover() }()
 				err := owner.WithOperation(TreeOperation, func(a *OperationAccount) error {
-					if err := a.PrecheckV1(400000000); err != nil { return err }
+					if err := a.PrecheckV1(400000000); err != nil {
+						return err
+					}
 					return a.WithReservation(7, func() error {
-						switch mode { case "panic": panic(primary); case "Goexit": runtime.Goexit(); case "error": return primary }
+						switch mode {
+						case "panic":
+							panic(primary)
+						case "Goexit":
+							runtime.Goexit()
+						case "error":
+							return primary
+						}
 						return nil
 					})
 				})
-				if mode == "error" && err != primary || mode == "nil" && err != nil { t.Errorf("application identity %v", err) }
+				if mode == "error" && any(err) != any(primary) || mode == "nil" && err != nil {
+					t.Errorf("application identity %v", err)
+				}
 			}()
 			got := <-done
-			if mode == "panic" && got != primary || mode != "panic" && got != nil || reservationLive(owner) != 0 { t.Fatal("prechecked unwind", mode, got, reservationLive(owner)) }
+			if mode == "panic" && any(got) != any(primary) || mode != "panic" && got != nil || reservationLive(owner) != 0 {
+				t.Fatal("prechecked unwind", mode, got, reservationLive(owner))
+			}
 			accountRun(t, "next after unwind", owner, TreeOperation, func(a *OperationAccount) { holdOK(t, "next T", a.PrecheckV1(400000000)) })
 		})
 	}

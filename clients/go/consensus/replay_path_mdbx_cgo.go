@@ -62,16 +62,16 @@ type replayPathSlot struct {
 
 // replayPathOwner owns mu, the one completed slot, the retention limit, the view and the invocation guard release.
 type replayPathOwner struct {
-	mu      sync.Mutex
-	view    ReplayHeaderCandidateViewV1
-	view148 ReplayHeaderCandidateView148V1
+	mu         sync.Mutex
+	view       ReplayHeaderCandidateViewV1
+	view148    ReplayHeaderCandidateView148V1
 	initial148 bool
-	limit   uint64
-	slot    *replayPathSlot
-	guarded bool
-	release func()
-	dst     [116]byte
-	dst148  [148]byte
+	limit      uint64
+	slot       *replayPathSlot
+	guarded    bool
+	release    func()
+	dst        [116]byte
+	dst148     [148]byte
 }
 
 func newReplayPathOwner(view ReplayHeaderCandidateViewV1, retentionLimit uint64) *replayPathOwner {
@@ -353,7 +353,10 @@ func (p *replayPathOwner) guard() error {
 		return nil
 	}
 	p.guarded = true
-	var view interface { VersionV1() uint64; ProtectV1(uint64) (bool, func()) } = p.view
+	var view interface {
+		VersionV1() uint64
+		ProtectV1(uint64) (bool, func())
+	} = p.view
 	if p.initial148 {
 		view = p.view148
 	}

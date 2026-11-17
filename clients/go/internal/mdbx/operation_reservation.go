@@ -65,11 +65,11 @@ type operationReservationState struct {
 // operationAccountState is the per-operation sum every copy of an account shares; held and
 // closed are guarded by the owner state's mutex.
 type operationAccountState struct {
-	origin  *operationReservationState
-	ceiling uint64
-	held    uint64
-	closed  bool
-	gross   uint64
+	origin       *operationReservationState
+	ceiling      uint64
+	held         uint64
+	closed       bool
+	gross        uint64
 	everPositive bool
 }
 

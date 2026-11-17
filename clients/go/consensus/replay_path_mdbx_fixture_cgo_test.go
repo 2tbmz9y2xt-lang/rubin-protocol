@@ -21,7 +21,9 @@ func TestReplayPath148FixtureV1(t *testing.T) {
 			x := c.in.Endpoint.BlockHash
 			raw := make([]byte, width)
 			copy(raw, c.in.Raw[:148])
-			if width == 148 { raw[108] ^= 1 }
+			if width == 148 {
+				raw[108] ^= 1
+			}
 			logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(c.w.s, 3, x[:], raw) == nil, "actual stored header width")
 			view := &pathView148{headers148: map[[32]byte][148]byte{x: [148]byte(c.in.Raw[:148])}}
 			p := &replayPathOwner{initial148: true, view148: view, limit: 32}
@@ -30,13 +32,13 @@ func TestReplayPath148FixtureV1(t *testing.T) {
 				selected = err
 				logicalMDBXAssert(t, err != nil && own.h == 0 && own.x == x && own.resource != "" == (width != 148), "first stored observation: %+v/%v", own, err)
 			})
-			logicalMDBXAssert(t, err == selected && p.slot == nil && view.headerCalls == 0 && view.protects == 0, "stored failure fell through or retained partial slot")
+			logicalMDBXAssert(t, any(err) == any(selected) && p.slot == nil && view.headerCalls == 0 && view.protects == 0, "stored failure fell through or retained partial slot")
 			next := c.w.s.View(func(*mdbx.Reader) error { return nil })
 			if width == 148 {
 				logicalMDBXAssert(t, next == nil, "clean binding refusal consumed Store")
 				return
 			}
-			engine, ok := selected.(*mdbx.EngineError)
+			engine, ok := any(selected).(*mdbx.EngineError)
 			logicalMDBXAssert(t, ok && engine.Operation == "get" && engine.Class == "Integrity" && engine.Code == -30796 && engine.Diagnostic == "invalid tree native representation" && engine.Cause != nil && !engine.ReopenRequired && engine.TreeObservation == nil && next == selected, "native width error/cause/disposition identity: %v/%v", selected, next)
 		})
 	}
