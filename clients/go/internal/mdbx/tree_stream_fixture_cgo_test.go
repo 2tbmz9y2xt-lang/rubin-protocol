@@ -6857,6 +6857,53 @@ func psfClassDeletes(t *testing.T) {
 }
 
 // Node page bounds 1 and 7 (default scene pages use 1440) delete exactly the rows their page returned.
+// A Reader EIO inside the callback stays the result whether the callback ignores, returns or wraps
+// it with a physical-scope plan whose selector count is above its bound; the scope is never read.
+func psfCallbackReaderError(t *testing.T) {
+	for _, mode := range []string{"ignored", "returned", "wrapped"} {
+		t.Run(mode, func(t *testing.T) {
+			s, _, o := psStore(t)
+			key := tsTarget(71).Key
+			var f, application error
+			var r tsResult
+			_, fixtureErr := FixtureSelectedDamage(s, o, SelectedDamageGetEIO, 6, key, func() {
+				mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+					return a.WithReservation(psPageGrant+33*2881, func() error {
+						r = tsInvoke(s, a, func(reader *Reader) (TreeOperationV1, error) {
+							op := psRawDelete(t, 9)(reader)
+							op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881)
+							_, _, f = reader.Get(TreeSchemaV1DBIs()[6], key)
+							switch mode {
+							case "returned":
+								application = f
+							case "wrapped":
+								application = fmt.Errorf("callback: %w", f)
+							}
+							return op, application
+						})
+						return nil
+					})
+				}))
+			})
+			mustEnvironment(t, fixtureErr)
+			treeNativeError(t, f, "get", "IO", 5, "error 5", nil)
+			if mode == "wrapped" {
+				joined, ok := r.err.(interface{ Unwrap() []error })
+				if !ok || len(joined.Unwrap()) != 2 || any(joined.Unwrap()[0]) != any(application) || any(joined.Unwrap()[1]) != any(f) {
+					t.Fatalf("scope callback error lost: %v", r.err)
+				}
+			} else if any(r.err) != any(f) {
+				t.Fatalf("scope callback error lost: %v want %v", r.err, f)
+			}
+			r.tuple(t, 1, 1, -1)
+			if reservationLive(o) != 0 {
+				t.Fatal("scope grant leaked", reservationLive(o))
+			}
+			tsConsumed(t, s, o, 1, s.terminal)
+		})
+	}
+}
+
 func psfPageBounds(t *testing.T) {
 	// Six more generation-9 node rows make a nine-row family, so bound 7 stops at its row limit.
 	var extra []obsoleteTreeRow
@@ -7035,6 +7082,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("dormant", psfDormant)
 	t.Run("classes-1-4", psfClassDeletes)
 	t.Run("page-bounds", psfPageBounds)
+	t.Run("callback-reader-error", psfCallbackReaderError)
 	t.Run("commit", func(t *testing.T) {
 		sc := psfNew(t)
 		r := sc.run(t, sc.o)

@@ -4566,6 +4566,7 @@ func TestTreeStreamPhysicalScopeV1(t *testing.T) {
 	t.Run("duplicates", psDuplicates)
 	t.Run("overlap", psOverlap)
 	t.Run("counts", psCounts)
+	t.Run("ordinary-first", psOrdinaryFirst)
 	t.Run("metadata", psMetadata)
 	t.Run("successor", psSuccessor)
 	t.Run("combined-cap", psCombinedCap)
@@ -4769,6 +4770,44 @@ func psShape(t *testing.T) {
 		return op
 	})
 	psRefused(t, s, r, true, "ordinary-first")
+}
+
+// Invalid ordinary rows refuse with "invalid Update Batch" ahead of a scope selector count above
+// its bound; an unpaired canonical forward row in a scoped plan refuses with the canonical pairing
+// error from the native preflight and consumes the Store.
+func psOrdinaryFirst(t *testing.T) {
+	s, _, o := psStore(t)
+	rank8 := tsTarget(5)
+	rank8.DBI = TreeSchemaV1DBIs()[8]
+	authority := Mutation{DBI: TreeSchemaV1DBIs()[0], Key: []byte{2}, BeforePresent: true, AfterKind: 2, Literal: []byte{1}}
+	for _, row := range []struct {
+		name      string
+		mutations []Mutation
+	}{
+		{"order", []Mutation{tsTarget(6), tsTarget(5)}},
+		{"rank8", []Mutation{rank8}},
+		{"authority", []Mutation{authority}},
+	} {
+		r := psRunG(t, s, o, LaneOperation, psPageGrant+33*2882, func(reader *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(reader)
+			op.Pair.Mutations = row.mutations
+			op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881)
+			return op
+		})
+		if !treeNativeIsInvalid(r.err) {
+			t.Fatalf("scope shape admitted: ordinary %s %v", row.name, r.err)
+		}
+		psRefused(t, s, r, false, row.name)
+	}
+	forward := canonicalForwardLiteral(1, 5, [32]byte{0x41}, [40]byte{39: 1})
+	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		op := psRawDelete(t, 9)(reader)
+		op.Pair.Mutations = []Mutation{forward}
+		return op
+	})
+	treeNativeError(t, r.err, "update", "InvalidInput", 22, "unpaired canonical owner mutation", nil)
+	r.tuple(t, 1, 1, -1)
+	tsConsumed(t, s, o, 1, s.terminal)
 }
 
 // Zero, fabricated and earlier-invocation tokens refuse before any charge.
