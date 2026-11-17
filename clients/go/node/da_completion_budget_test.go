@@ -61,13 +61,13 @@ func requireDABudgetDisposition(t *testing.T, err error, want RelayAdmissionDisp
 
 const daBudgetDeclineText = "DA completion work budget unavailable"
 
-// isDABudgetDecline reports the real budget decline: class TxAdmitUnavailable,
-// disposition UNAVAILABLE, its exact text and without the only cause the PEER
-// ingress penalizes.
+// isDABudgetDecline reports the real budget decline: err itself is the
+// unwrapped *TxAdmitError of class TxAdmitUnavailable with its exact text, no
+// cause, and disposition UNAVAILABLE.
 func isDABudgetDecline(err error) bool {
 	var admitErr *TxAdmitError
-	return errors.As(err, &admitErr) && admitErr.Kind == TxAdmitUnavailable && admitErr.Message == daBudgetDeclineText &&
-		relayDispositionOf(err) == RelayAdmissionUnavailable && !errors.Is(err, ErrDARelayChunkHashMismatch)
+	return errors.As(err, &admitErr) && admitErr != nil && errors.Unwrap(err) == nil && errors.Is(admitErr, err) && admitErr.Kind == TxAdmitUnavailable &&
+		admitErr.Message == daBudgetDeclineText && relayDispositionOf(err) == RelayAdmissionUnavailable
 }
 
 // requireDABudgetDecline requires the real budget decline (isDABudgetDecline).
