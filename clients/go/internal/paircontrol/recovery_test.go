@@ -55,8 +55,7 @@ func h1PolicyAt(t *testing.T, dir string) (*policycontrol.Store, IntentV1) {
 	require(t, tx.ConsumeIntent(i.H1Binding.Admission))
 	r, err := tx.Commit()
 	require(t, err)
-	seq, known := r.Sequence()
-	if r.Truth != 2 || !known || seq != 2 {
+	if seq, known := r.Sequence(); r.Truth != 2 || !known || seq != 2 {
 		t.Fatal("actual original H1 admission epoch is not2")
 	}
 	v, err := p.View()

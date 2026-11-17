@@ -196,6 +196,7 @@ func TestConstructorRefusals(t *testing.T) {
 				}
 				t.Chdir(dir)
 				if strings.HasPrefix(name, "cwd_") {
+					t.Setenv("PWD", "")
 					require(t, os.Remove(dir))
 					dir = "relative"
 				} else {
