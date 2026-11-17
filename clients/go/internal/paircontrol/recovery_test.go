@@ -381,7 +381,7 @@ func TestTerminalH1Bookkeeping(t *testing.T) {
 }
 
 func TestLostAcknowledgementRecovery(t *testing.T) {
-	for _, kind := range []string{"new", "old", "neither", "neither_identity", "neither_selected", "neither_source", "neither_comparand", "neither_destination", "malformed", "missing", "unreadable", "close_error"} {
+	for _, kind := range []string{"new", "old", "neither", "neither_old_identity", "neither_old_selected", "neither_identity", "neither_selected", "neither_source", "neither_comparand", "neither_destination", "malformed", "missing", "unreadable", "close_error"} {
 		t.Run(kind, func(t *testing.T) {
 			s, dir := existing(t, selected())
 			old := diskBytes(t, dir)
@@ -400,6 +400,14 @@ func TestLostAcknowledgementRecovery(t *testing.T) {
 			case "neither":
 				v := selected()
 				v.Sequence = 99
+				writeFixture(t, dir, fixtureBytes(v))
+			case "neither_old_identity", "neither_old_selected":
+				v := selected()
+				if kind == "neither_old_identity" {
+					v.Identity.ChainID[1] = 1
+				} else {
+					v.Selected.AuthoritySequence++
+				}
 				writeFixture(t, dir, fixtureBytes(v))
 			case "neither_identity", "neither_selected", "neither_source", "neither_comparand", "neither_destination":
 				v, i := selected(), replacement()
@@ -464,6 +472,13 @@ func TestLostAcknowledgementRecovery(t *testing.T) {
 			wantLocal(t, r2, e2, "damage", "unresolved", r)
 			if len(recorder.events) != n {
 				t.Fatal("blocked mutator performed effects")
+			}
+			if strings.HasPrefix(kind, "neither_old_") {
+				observed, err := s.ObserveV1()
+				blocked := wantLocal(t, ResultV1{}, err, "observe", "unresolved", ResultV1{})
+				if !reflect.DeepEqual(observed, RecordV1{}) || blocked.Cause != original || len(recorder.events) != n {
+					t.Fatal("neither OLD-shaped image exposed qualified data or effects")
+				}
 			}
 			require(t, s.CloseV1())
 		})

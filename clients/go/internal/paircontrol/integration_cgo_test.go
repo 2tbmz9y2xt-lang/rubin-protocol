@@ -126,7 +126,7 @@ func TestPReservationThroughEachOuterOperation(t *testing.T) {
 	for _, operation := range []string{"persist_intent", "retire", "end_h1"} {
 		t.Run(operation, func(t *testing.T) {
 			p, i := h1Policy(t)
-			s, _ := existing(t, selected())
+			s, dir := existing(t, selected())
 			expected := uint64(17)
 			if operation != "persist_intent" {
 				_, err := s.PersistIntentV1(context.Background(), 17, i, p)
@@ -203,6 +203,21 @@ func TestPReservationThroughEachOuterOperation(t *testing.T) {
 			if result != (ResultV1{2, expected + 1, false}) {
 				t.Fatal("Gate false was reused as secondary consumer refusal")
 			}
+			want := selected()
+			want.Sequence = expected + 1
+			if operation != "end_h1" {
+				want.Intent = &i
+			}
+			if operation == "retire" {
+				want.Selector, want.Selected = 3, nil
+				want.Retired = &RetirementV1{originalPair(), 2, reference()}
+			}
+			wantRecord(t, s, want)
+			require(t, s.CloseV1())
+			fresh, err := OpenV1(dir, identity())
+			require(t, err)
+			wantRecord(t, fresh, want)
+			require(t, fresh.CloseV1())
 			tx, err := p.Begin()
 			require(t, err)
 			_, err = tx.Abort()

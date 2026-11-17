@@ -209,14 +209,15 @@ func (s *Store) emptyV1() *ErrorV1 {
 	return nil
 }
 
-// directorySyncV1 keeps successful durability distinct from its following Close.
-func (s *Store) directorySyncV1() (bool, error) {
+// directorySyncV1 reports durability and Close qualification independently.
+func (s *Store) directorySyncV1() (synced, consumed bool, err error) {
 	f, err := s.ops.open(s.dir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC|syscall.O_DIRECTORY, 0)
 	if err != nil {
-		return false, err
+		return false, true, err
 	}
 	syncErr := s.ops.sync(f)
-	return syncErr == nil, errors.Join(syncErr, s.ops.close(f))
+	closeErr := s.ops.close(f)
+	return syncErr == nil, closeErr == nil, errors.Join(syncErr, closeErr)
 }
 
 // readV1 consumes one no-follow regular bounded file, including a growth probe.
@@ -252,7 +253,7 @@ func (s *Store) readFileV1(f *os.File) ([]byte, string, error) {
 	if err = s.ops.sync(f); err != nil {
 		return nil, "unreadable", err
 	}
-	if _, err = s.directorySyncV1(); err != nil {
+	if _, _, err = s.directorySyncV1(); err != nil {
 		return nil, "unreadable", err
 	}
 	return readBoundedV1(f, info.Size())
@@ -322,11 +323,7 @@ func (c *crossingV1) armV1() {
 	}
 	c.consumeV1()
 	if c.err == nil {
-		var synced bool
-		synced, c.err = c.s.directorySyncV1()
-		if synced && c.err != nil {
-			c.consumed = false
-		}
+		_, c.consumed, c.err = c.s.directorySyncV1()
 	}
 }
 
@@ -376,7 +373,7 @@ func (c *crossingV1) publishV1(creating bool) {
 	if !creating {
 		c.scratch = false
 	}
-	c.durable, c.err = c.s.directorySyncV1()
+	c.durable, _, c.err = c.s.directorySyncV1()
 	if c.err != nil {
 		c.stopCleanup = true
 	}
@@ -422,7 +419,7 @@ func (c *crossingV1) cleanupV1() {
 		changed = true
 	}
 	if changed {
-		_, err := c.s.directorySyncV1()
+		_, _, err := c.s.directorySyncV1()
 		c.err = errors.Join(c.err, err)
 		if err != nil {
 			c.consumed = false

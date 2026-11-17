@@ -191,6 +191,7 @@ func faultRows() []faultRow {
 		{"arming_close", "close:outer-control.pending", 1, 1, "precommit", true, true},
 		{"arming_dirsync", "sync:dir", 1, 1, "precommit", false, false},
 		{"arming_dirclose", "close:dir", 1, 1, "precommit", true, true},
+		{"arming_dirsync_close", "sync:dir", 1, 1, "precommit", true, true},
 		{"scratch_create", "open:outer-control.scratch", 1, 1, "precommit", false, false},
 		{"scratch_write", "write:outer-control.scratch", 1, 1, "precommit", false, false},
 		{"scratch_sync", "sync:outer-control.scratch", 1, 1, "precommit", false, false},
@@ -267,6 +268,15 @@ func checkAtomicFileFailure(t *testing.T, row faultRow, creating, failRelease bo
 	}
 	primary, release := errors.New(row.name), errors.New("release")
 	faults := []faultAt{{event, row.nth, primary, false}}
+	causes := []error{primary}
+	if row.name == "arming_dirsync_close" {
+		closeCause, nth := errors.New("following-close"), 1
+		if creating {
+			nth++
+		}
+		faults = append(faults, faultAt{"close:dir", nth, closeCause, false})
+		causes = append(causes, closeCause)
+	}
 	if failRelease {
 		faults = append(faults, faultAt{"release", 1, release, false})
 	}
@@ -281,7 +291,6 @@ func checkAtomicFileFailure(t *testing.T, row faultRow, creating, failRelease bo
 		want = ResultV1{row.truth, map[TruthV1]uint64{1: 17, 2: 18, 3: 0}[row.truth], row.latch}
 		failure = wantLocal(t, result, err, "persist_intent", row.code, want)
 	}
-	causes := []error{primary}
 	if failRelease {
 		causes = append(causes, release)
 	}
@@ -289,6 +298,11 @@ func checkAtomicFileFailure(t *testing.T, row faultRow, creating, failRelease bo
 	wantConsumed(t, o)
 	if !creating && row.truth == 1 && !bytes.Equal(diskBytes(t, dir), fixtureBytes(old)) {
 		t.Fatal("OLD preimage changed")
+	}
+	if creating && row.truth == 1 {
+		if _, err := os.Lstat(filepath.Join(dir, "outer-control")); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal("precommit creation published control")
+		}
 	}
 	if row.truth == 2 && !bytes.Equal(diskBytes(t, dir), fixtureBytes(next)) {
 		t.Fatal("known NEW demoted or lost")
