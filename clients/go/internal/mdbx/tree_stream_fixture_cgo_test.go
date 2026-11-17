@@ -6874,6 +6874,23 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		}
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 	})
+	t.Run("H1-mismatch-then-read-error", func(t *testing.T) {
+		// Mode 29 drifts the body at commit, then fails every later readback prefix read of another DBI:
+		// the large body mismatch comes first and the raw domain traversal must still reach its EIO.
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 29, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		r.tuple(t, 3, 3, -1)
+		ce, ok := r.err.(*CommitError)
+		if !ok || evidence.drift != 1 || evidence.commits != 1 || evidence.gets == 0 {
+			t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
+		}
+		var engine *EngineError
+		if !errors.As(ce.ReadbackCause, &engine) || engine.Class != EngineIO {
+			t.Fatalf("later scope error lost: %v", ce.ReadbackCause)
+		}
+		tsConsumed(t, sc.s, sc.o, 3, r.err)
+	})
 	t.Run("N8-operand-window", func(t *testing.T) {
 		sc := psfNew(t)
 		f, window := psfF(t), psfWindow(t, sc.s)
