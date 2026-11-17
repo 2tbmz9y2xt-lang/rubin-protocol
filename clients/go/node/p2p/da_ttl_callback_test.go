@@ -863,7 +863,7 @@ func TestDATTLCallbackEndToEndSnapshotBeforePublication(t *testing.T) {
 	s1.before = func() { once.Do(func() { h.syncEngine.PublishDATTLBinding(s2) }) }
 	h.syncEngine.PublishDATTLBinding(s1)
 	probe.apply()
-	require(t, s1.attempts.Load() == 1 && s2.attempts.Load() == 0, "attempts S1=%d S2=%d, want 1 and 0", s1.attempts.Load(), s2.attempts.Load())
+	require(t, s1.attempts.Load() == 1 && s2.attempts.Load() == 0, "first publication attempts S1=%d S2=%d, want 1 and 0: a second selection or fan-out after the registration reached S2", s1.attempts.Load(), s2.attempts.Load())
 	require(t, h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "binding after the publication, want S2")
 	probe.apply()
 	probe.f.requireRetained(probe.commit, "count 1: S1's snapshotted registration and S2's decreased once each")
