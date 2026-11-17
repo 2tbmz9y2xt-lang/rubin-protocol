@@ -22,21 +22,21 @@ import (
 
 type faultAt struct {
 	event string
-	nth int
-	err error
+	nth   int
+	err   error
 	after bool
 }
 
 type observedFS struct {
-	dir string
-	faults []faultAt
-	counts map[string]int
-	events []string
-	files map[*os.File]int
-	releases int
-	partial bool
-	zero bool
-	block string
+	dir             string
+	faults          []faultAt
+	counts          map[string]int
+	events          []string
+	files           map[*os.File]int
+	releases        int
+	partial         bool
+	zero            bool
+	block           string
 	entered, resume chan struct{}
 }
 
@@ -177,10 +177,10 @@ func wantCauses(t *testing.T, e *ErrorV1, want ...error) {
 }
 
 type faultRow struct {
-	name, event string
-	nth int
-	truth TruthV1
-	code string
+	name, event    string
+	nth            int
+	truth          TruthV1
+	code           string
 	latch, pending bool
 }
 
@@ -211,7 +211,7 @@ func checkBlockedNext(t *testing.T, s *Store, o *observedFS, original *ErrorV1, 
 	n := len(o.events)
 	observed, err := s.ObserveV1()
 	e := wantLocal(t, ResultV1{}, err, "observe", "unresolved", ResultV1{})
-	if e.Cause != original {
+	if !reflect.ValueOf(e.Cause).Equal(reflect.ValueOf(original)) {
 		t.Fatal("Observe replaced original ErrorV1 wrapper")
 	}
 	if want.Truth == 3 {
@@ -230,7 +230,7 @@ func checkBlockedNext(t *testing.T, s *Store, o *observedFS, original *ErrorV1, 
 	if want.Truth != 3 || o.count("ack") == 0 {
 		r, err := s.RecoverV1()
 		e = wantLocal(t, r, err, "recover", "unresolved", want)
-		if e.Cause != original {
+		if !reflect.ValueOf(e.Cause).Equal(reflect.ValueOf(original)) {
 			t.Fatal("Recover replaced original wrapper")
 		}
 		if len(o.events) != n {
@@ -239,7 +239,7 @@ func checkBlockedNext(t *testing.T, s *Store, o *observedFS, original *ErrorV1, 
 	}
 	r, err := s.PersistIntentV1(context.Background(), 17, replacement(), nil)
 	e = wantLocal(t, r, err, "persist_intent", "unresolved", want)
-	if e.Cause != original || len(o.events) != n {
+	if !reflect.ValueOf(e.Cause).Equal(reflect.ValueOf(original)) || len(o.events) != n {
 		t.Fatal("blocked mutator performed effects/lost wrapper")
 	}
 }
@@ -740,4 +740,3 @@ func TestCloseConsumesReportedReleaseFailureOnce(t *testing.T) {
 	wantRecord(t, fresh, selected())
 	require(t, fresh.CloseV1())
 }
-

@@ -269,7 +269,7 @@ func TestEveryMutatorEntryGuard(t *testing.T) {
 				return s.EndH1V1(ctx, seq, id, p)
 			}
 		}
-		for _, state := range []string{"busy", "closed", "cancelled", "nil_context", "stale", "unresolved"} {
+		for _, state := range []string{"busy", "closed", "canceled", "nil_context", "stale", "unresolved"} {
 			t.Run(operation+"/"+state, func(t *testing.T) {
 				s, dir := existing(t, selected())
 				ctx, expected := context.Background(), uint64(17)
@@ -282,7 +282,7 @@ func TestEveryMutatorEntryGuard(t *testing.T) {
 					require(t, s.CloseV1())
 					code = "closed"
 				}
-				if state == "cancelled" {
+				if state == "canceled" {
 					var cancel context.CancelFunc
 					ctx, cancel = context.WithCancel(ctx)
 					cancel()
@@ -307,7 +307,7 @@ func TestEveryMutatorEntryGuard(t *testing.T) {
 				wantLocal(t, r, err, operation, "refused", ResultV1{})
 				r, err = call(s, ctx, expected, false)
 				e := wantLocal(t, r, err, operation, code, want)
-				if state == "cancelled" && !errors.Is(e, context.Canceled) {
+				if state == "canceled" && !errors.Is(e, context.Canceled) {
 					t.Fatal("entry cancellation Cause was replaced")
 				}
 				if !bytes.Equal(before, diskBytes(t, dir)) {
@@ -455,4 +455,3 @@ func TestStoredOwnerPreparationRefusals(t *testing.T) {
 		})
 	}
 }
-

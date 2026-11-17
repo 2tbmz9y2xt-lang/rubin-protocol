@@ -19,7 +19,7 @@ import (
 type waitContext struct {
 	context.Context
 	waiting, resume chan struct{}
-	signal sync.Once
+	signal          sync.Once
 }
 
 func (c *waitContext) Done() <-chan struct{} {
@@ -188,7 +188,9 @@ func TestPReservationThroughEachOuterOperation(t *testing.T) {
 			for _, call := range []func() (ResultV1, error){
 				func() (ResultV1, error) { return s.PersistIntentV1(context.Background(), expected, i, p) },
 				func() (ResultV1, error) { return s.RetireV1(context.Background(), expected, i.ID, reference(), p) },
-				func() (ResultV1, error) { return s.RecordDamageV1(context.Background(), expected, originalPair(), reference()) },
+				func() (ResultV1, error) {
+					return s.RecordDamageV1(context.Background(), expected, originalPair(), reference())
+				},
 				func() (ResultV1, error) { return s.EndH1V1(context.Background(), expected, i.ID, p) },
 			} {
 				r, err := call()
@@ -230,4 +232,3 @@ func localCode(err error, operation, code string) bool {
 	var e *ErrorV1
 	return errors.As(err, &e) && e.Operation == operation && e.Code == code
 }
-

@@ -186,5 +186,3 @@ func TestConstructorRefusals(t *testing.T) {
 		})
 	}
 }
-
-

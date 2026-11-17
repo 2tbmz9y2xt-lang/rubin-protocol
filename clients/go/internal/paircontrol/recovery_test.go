@@ -476,7 +476,7 @@ func TestLostAcknowledgementRecovery(t *testing.T) {
 			if strings.HasPrefix(kind, "neither_old_") {
 				observed, err := s.ObserveV1()
 				blocked := wantLocal(t, ResultV1{}, err, "observe", "unresolved", ResultV1{})
-				if !reflect.DeepEqual(observed, RecordV1{}) || blocked.Cause != original || len(recorder.events) != n {
+				if !reflect.DeepEqual(observed, RecordV1{}) || !reflect.ValueOf(blocked.Cause).Equal(reflect.ValueOf(original)) || len(recorder.events) != n {
 					t.Fatal("neither OLD-shaped image exposed qualified data or effects")
 				}
 			}
@@ -603,6 +603,9 @@ func TestOriginalObservationSurvivesUnrelatedPAdvances(t *testing.T) {
 	policyChange(t, p, originalOwner(i), func(tx *policycontrol.Tx) error { return tx.AutoBlock() })
 	r, err = s.EndH1V1(context.Background(), 19, i.ID, p)
 	require(t, err)
+	if r != (ResultV1{2, 20, false}) {
+		t.Fatal("terminal bookkeeping returned the wrong outer result")
+	}
 	v.Sequence, v.Intent = 20, nil
 	wantRecord(t, s, v)
 	require(t, s.CloseV1())
@@ -667,4 +670,3 @@ func TestRecoveryRetainsActualPhysicalWriter(t *testing.T) {
 	}
 	wantNilStore(t, fresh, err, "open", "busy")
 }
-

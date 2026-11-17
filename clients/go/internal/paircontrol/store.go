@@ -68,10 +68,12 @@ type fileOpsV1 struct {
 
 // realOpsV1 has no mutable package-global hook or exposed test capability.
 func realOpsV1() fileOpsV1 {
-	return fileOpsV1{open: os.OpenFile, write: (*os.File).Write,
+	return fileOpsV1{
+		open: os.OpenFile, write: (*os.File).Write,
 		sync: (*os.File).Sync, close: (*os.File).Close, remove: os.Remove,
 		rename: os.Rename, link: os.Link, release: (*filelock.Handle).Release,
-		ack: func() error { return nil }}
+		ack: func() error { return nil },
+	}
 }
 
 // Store owns one inode flock and immutable bounded data, never a source/native lease.
@@ -250,10 +252,10 @@ func (s *Store) readFileV1(f *os.File) ([]byte, string, error) {
 	if info.Size() < 1 || info.Size() > maxImageV1 {
 		return nil, "integrity", errShapeV1
 	}
-	if err = s.ops.sync(f); err != nil {
+	if err := s.ops.sync(f); err != nil {
 		return nil, "unreadable", err
 	}
-	if _, _, err = s.directorySyncV1(); err != nil {
+	if _, _, err := s.directorySyncV1(); err != nil {
 		return nil, "unreadable", err
 	}
 	return readBoundedV1(f, info.Size())
