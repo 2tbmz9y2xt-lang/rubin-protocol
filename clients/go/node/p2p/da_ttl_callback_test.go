@@ -895,3 +895,69 @@ func TestDATTLCallbackEndToEndNoGuardReacquisition(t *testing.T) {
 		t.Fatalf("ApplyBlock did not return within %s: the TTL body waited for the held admission guard", lifecycleWatchdog)
 	}
 }
+
+// closeRaceEntry is a binding over S1's own entry that, on its one attempt, starts the race and
+// records whether S1 admitted the decrease and whether Close(S1) had returned when it ran.
+type closeRaceEntry struct {
+	inner          *Service
+	start          func()
+	closeReturned  *atomic.Bool
+	attempts       int
+	ran, afterExit bool
+}
+
+func (c *closeRaceEntry) EnterDATTLMutation(decrease func() error) error {
+	c.attempts++
+	c.start()
+	return c.inner.EnterDATTLMutation(func() error {
+		c.ran, c.afterExit = true, c.closeReturned.Load()
+		return decrease()
+	})
+}
+
+// TestDATTLCallbackEndToEndCloseRaceOutcomes drives SyncEngine.ApplyBlock through the production
+// selection with S1 snapshotted, and starts Close(S1) and the construction of S2 between the
+// snapshot and S1's registration: the one registration goes to S1; either S1 admitted it before
+// Close returned and the record at count 1 expired, or S1 refused it and the record is unchanged;
+// the image is the same once Close returned and the apply returned; S2 is the binding afterwards.
+// Even rounds let Close(S1) and S2's binding finish before the registration, so S1 refuses and
+// nothing reaches S2.
+func TestDATTLCallbackEndToEndCloseRaceOutcomes(t *testing.T) {
+	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
+	for i := range 8 {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		probe := newSelectionProbe(t, h, source, 0xec)
+		probe.apply()
+		probe.apply()
+		var closeReturned atomic.Bool
+		var s2 atomic.Pointer[Service]
+		var wg sync.WaitGroup
+		entry := &closeRaceEntry{inner: h.service, closeReturned: &closeReturned}
+		entry.start = func() {
+			wg.Add(2)
+			go func() { defer wg.Done(); _ = h.service.Close(); closeReturned.Store(true) }()
+			go func() {
+				defer wg.Done()
+				if service, err := NewService(h.service.cfg); err == nil {
+					s2.Store(service)
+				}
+			}()
+			if i%2 == 0 {
+				wg.Wait()
+			}
+		}
+		h.syncEngine.PublishDATTLBinding(entry)
+		probe.apply()
+		wg.Wait()
+		require(t, entry.attempts == 1 && !entry.afterExit, "round %d: attempts=%d decrease after Close returned=%v", i, entry.attempts, entry.afterExit)
+		require(t, i%2 != 0 || !entry.ran, "round %d: S1 admitted a registration after Close returned", i)
+		if entry.ran {
+			probe.f.requireAbsent(probe.commit, fmt.Sprintf("round %d: S1 admitted the decrease before Close returned", i))
+		} else {
+			probe.f.requireRetained(probe.commit, fmt.Sprintf("round %d: S1 refused with zero effects", i))
+		}
+		service := s2.Load()
+		require(t, service != nil && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(service), "round %d: S2 construction and binding", i)
+		require(t, service.closeReturnsWithin(lifecycleWatchdog), "round %d: Close(S2) stranded", i)
+	}
+}
