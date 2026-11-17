@@ -7,6 +7,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -1039,7 +1040,7 @@ func requireDATTLLocksFree(t *testing.T, relay *DARelayState, owner *PendingOutp
 }
 
 // requireDATTLAppliedImage requires the complete applied image of one decrease over State A at 3
-// and State B at 1: A at 2 with one fresh revision, B removed with its claim, nothing else
+// and State B at 1: A at 2 with one fresh revision, B removed with its claim and prefetch set, nothing else
 // changed; a following body call then accepts that image and decreases A to 1.
 func requireDATTLAppliedImage(t *testing.T, f *daNonReplayFixture, r daTTLCallbackRecords, before daRelayStateView, ownerBefore *PendingOutpointOwner) {
 	t.Helper()
@@ -1049,6 +1050,10 @@ func requireDATTLAppliedImage(t *testing.T, f *daNonReplayFixture, r daTTLCallba
 	ownerReadyRecordAbsent(t, after, r.stateBID, r.stateB.txid)
 	ownerReadyClaimGone(t, ownerAfter, before.sets[r.stateBID].commit.member.token, r.stateB.inputs)
 	require(t, after.records == before.records+1, "records=%d after the applied decrease, want %d", after.records, before.records+1)
+	wantIndexes, wantExpires := maps.Clone(before.prefetchIndexes), maps.Clone(before.prefetchExpires)
+	delete(wantIndexes, r.stateBID)
+	delete(wantExpires, r.stateBID)
+	require(t, reflect.DeepEqual(after.prefetchIndexes, wantIndexes) && reflect.DeepEqual(after.prefetchExpires, wantExpires), "prefetch after the applied decrease=%v %v, want only the removed State B set released", after.prefetchIndexes, after.prefetchExpires)
 	require(t, advanceDATTLInGuard(f.relay) == nil, "the next body call refused the applied image")
 	requireDATTLCount(t, daRelayStateSnapshot(f.relay), r.stateAID, 1)
 }
@@ -1062,6 +1067,8 @@ func TestDATTLCallbackBodyPanicKeepsWholeImage(t *testing.T) {
 		t.Run(fmt.Sprintf("stage=%d", stage), func(t *testing.T) {
 			f, r := newDATTLCallbackRecords(t)
 			f.setOwnerReadyTTL(r.stateBID, 1)
+			f.relay.prefetch.indexes[r.stateBID] = map[uint16]string{0: "ttl-peer"}
+			f.relay.prefetch.expires[r.stateBID] = time.Now().Add(time.Hour)
 			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			got := panicDATTLBodyAt(t, f, stage)
 			require(t, got == fmt.Sprintf("ttl panic at stage %d", stage), "recovered %v, want the injected panic", got)
