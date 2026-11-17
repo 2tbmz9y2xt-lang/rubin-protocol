@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1010,3 +1011,139 @@ func TestDATTLCallbackEndToEndBodyRefusalConsumed(t *testing.T) {
 type daTTLFuncService struct{ enter func(func() error) error }
 
 func (d *daTTLFuncService) EnterDATTLMutation(decrease func() error) error { return d.enter(decrease) }
+
+// panicDATTLBodyAt runs the in-guard TTL body under the held exclusive admission guard with a
+// panic injected at stage and returns the recovered value; the test, not the body, recovers.
+func panicDATTLBodyAt(t *testing.T, f *daNonReplayFixture, stage daTTLStage) (recovered any) {
+	t.Helper()
+	f.relay.ttlHook = func(at daTTLStage) {
+		if at == stage {
+			panic(fmt.Sprintf("ttl panic at stage %d", stage))
+		}
+	}
+	defer func() { f.relay.ttlHook = nil }()
+	f.state.admissionMu.Lock()
+	defer f.state.admissionMu.Unlock()
+	defer func() { recovered = recover() }()
+	_ = f.relay.advanceOwnerReadyTTLInGuard()
+	return nil
+}
+
+// requireDATTLLocksFree fails by name when the body left the DA relay or owner mutex held.
+func requireDATTLLocksFree(t *testing.T, relay *DARelayState, owner *PendingOutpointOwner) {
+	t.Helper()
+	require(t, relay.mu.TryLock(), "DA relay mutex held after unwind")
+	relay.mu.Unlock()
+	require(t, owner.mu.TryLock(), "owner mutex held after unwind")
+	owner.mu.Unlock()
+}
+
+// requireDATTLAppliedImage requires the complete applied image of one decrease over State A at 3
+// and State B at 1: A at 2 with one fresh revision, B removed with its claim, nothing else
+// changed; a following body call then accepts that image and decreases A to 1.
+func requireDATTLAppliedImage(t *testing.T, f *daNonReplayFixture, r daTTLCallbackRecords, before daRelayStateView, ownerBefore *PendingOutpointOwner) {
+	t.Helper()
+	after, ownerAfter := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+	requireDATTLOutsideSelectedUnchanged(t, before, after, ownerBefore, ownerAfter, r.stateAID, r.stateBID)
+	requireDATTLCount(t, after, r.stateAID, 2)
+	ownerReadyRecordAbsent(t, after, r.stateBID, r.stateB.txid)
+	ownerReadyClaimGone(t, ownerAfter, before.sets[r.stateBID].commit.member.token, r.stateB.inputs)
+	require(t, after.records == before.records+1, "records=%d after the applied decrease, want %d", after.records, before.records+1)
+	require(t, advanceDATTLInGuard(f.relay) == nil, "the next body call refused the applied image")
+	requireDATTLCount(t, daRelayStateSnapshot(f.relay), r.stateAID, 1)
+}
+
+// TestDATTLCallbackBodyPanicKeepsWholeImage injects a panic into the in-guard body after the plan
+// and every check, before the first mutation, and after the last apply mutation, before return:
+// the panic reaches the caller unrecovered, the DA relay and owner mutexes are released, and the
+// image is the complete old one or the complete applied one (RUBIN_COMPACT_BLOCKS.md Section 5).
+func TestDATTLCallbackBodyPanicKeepsWholeImage(t *testing.T) {
+	for _, stage := range []daTTLStage{daTTLPlanned, daTTLApplied} {
+		t.Run(fmt.Sprintf("stage=%d", stage), func(t *testing.T) {
+			f, r := newDATTLCallbackRecords(t)
+			f.setOwnerReadyTTL(r.stateBID, 1)
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			got := panicDATTLBodyAt(t, f, stage)
+			require(t, got == fmt.Sprintf("ttl panic at stage %d", stage), "recovered %v, want the injected panic", got)
+			requireDATTLLocksFree(t, f.relay, f.mp.pendingOutpoints)
+			if stage == daTTLPlanned {
+				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+				return
+			}
+			requireDATTLAppliedImage(t, f, r, before, ownerBefore)
+		})
+	}
+}
+
+// daTTLLeaseService mirrors the Service entry for a transition under no Service lease: it
+// registers one lease, runs decrease once and releases the lease by defer, unwind included.
+type daTTLLeaseService struct {
+	leases           sync.WaitGroup
+	acquired, closed atomic.Int32
+}
+
+func (d *daTTLLeaseService) EnterDATTLMutation(decrease func() error) error {
+	d.leases.Add(1)
+	d.acquired.Add(1)
+	defer func() { d.closed.Add(1); d.leases.Done() }()
+	return decrease()
+}
+
+// TestDATTLCallbackEndToEndBodyPanic drives one ACCEPTED/NEW SyncEngine.ApplyBlock through the
+// production selection into a registered no-lease entry and the real body, with a panic injected
+// at each of the two body points: the panic reaches the apply caller unrecovered, the lease is
+// released exactly once so a Close waiting on it returns, the DA relay and owner mutexes are
+// free, the image is the complete old or applied one, and the admission guard stays held by the
+// transition's non-deferred release while the engine mutation lock is released.
+func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
+	for _, stage := range []daTTLStage{daTTLPlanned, daTTLApplied} {
+		t.Run(fmt.Sprintf("stage=%d", stage), func(t *testing.T) {
+			f := newPendingOutpointSyncFixture(t)
+			x, stateA, stateB := daTTLEngineRecords(t, f)
+			service := &daTTLLeaseService{}
+			var before daRelayStateView
+			var ownerBefore *PendingOutpointOwner
+			f.engine.PublishDATTLBinding(&daTTLFuncService{enter: func(decrease func() error) error {
+				before, ownerBefore = daRelayStateSnapshot(x.relay), cloneDAAdmissionOwner(x.mp.pendingOutpoints)
+				return service.EnterDATTLMutation(decrease)
+			}})
+			want := fmt.Sprintf("e2e ttl panic at stage %d", stage)
+			x.relay.ttlHook = func(at daTTLStage) {
+				if at == stage {
+					panic(want)
+				}
+			}
+			height := f.tipHeight + 1
+			coinbase := reorgTestCoinbaseForAddress(t, height, consensus.BlockSubsidy(height, f.alreadyGenerated), f.sourceAddress)
+			block := buildSingleTxBlock(t, f.tipHash, f.target, 600, coinbase)
+			got := func() (value any) {
+				defer func() { value = recover() }()
+				_, _ = f.engine.ApplyBlock(block, nil)
+				return nil
+			}()
+			x.relay.ttlHook = nil
+			require(t, got == want, "recovered %v, want the injected panic", got)
+			require(t, service.acquired.Load() == 1 && service.closed.Load() == 1, "leases acquired=%d released=%d, want 1 and 1", service.acquired.Load(), service.closed.Load())
+			waited := make(chan struct{})
+			go func() { service.leases.Wait(); close(waited) }()
+			select {
+			case <-waited:
+			case <-time.After(5 * time.Second):
+				t.Fatal("a Close waiting on the lease is stranded")
+			}
+			requireDATTLLocksFree(t, x.relay, x.mp.pendingOutpoints)
+			require(t, !f.engine.chainState.admissionMu.TryLock(), "admission guard released after the unwind")
+			require(t, f.engine.mutationMu.TryLock(), "engine mutation lock held after the unwind")
+			f.engine.mutationMu.Unlock()
+			after := daRelayStateSnapshot(x.relay)
+			if stage == daTTLPlanned {
+				requireDANonReplayUnchanged(t, x.relay, x.mp.pendingOutpoints, before, ownerBefore)
+				return
+			}
+			requireDATTLOutsideSelectedUnchanged(t, before, after, ownerBefore, cloneDAAdmissionOwner(x.mp.pendingOutpoints), stateA, stateB)
+			requireDATTLCount(t, after, stateA, 2)
+			_, present := after.sets[stateB]
+			require(t, !present && after.records == before.records+1, "applied image: State B present=%v records=%d, want removed and %d", present, after.records, before.records+1)
+		})
+	}
+}

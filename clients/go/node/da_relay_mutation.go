@@ -1096,8 +1096,10 @@ func (s *DARelayState) advanceOwnerReadyTTLInGuard() error {
 	if err != nil {
 		return err
 	}
+	s.runTTLHook(daTTLPlanned)
 	if s.mempool == nil { // truly unbound: no claim domain, the DA image is the whole change
 		s.applyOwnerReadyTTLPlanLocked(plan, s.prepareOwnerReadyTTLRelationsLocked(plan))
+		s.runTTLHook(daTTLApplied)
 		return nil
 	}
 	owner, err := s.ownerReadyTTLOwnerLocked()
@@ -1321,6 +1323,7 @@ func (s *DARelayState) applyOwnerReadyTTLPlanUnderOwner(owner *PendingOutpointOw
 	for _, victim := range batch {
 		owner.dropClaimLocked(victim.Token)
 	}
+	s.runTTLHook(daTTLApplied)
 	return PendingOutpointError{}, ownerReadyTTLApplied
 }
 
