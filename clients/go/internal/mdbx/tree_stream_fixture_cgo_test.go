@@ -6854,6 +6854,22 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 2, r.err)
 		sc.image(t, tsReopen(t, sc.s, sc.path), true)
 	})
+	t.Run("N7-crossed-complete-OLD", func(t *testing.T) {
+		// Mode 7 breaks the write transaction before a commit reported as possibly crossed: the strict
+		// readback finds the complete OLD image (targets and every residual unchanged), so OLD wins.
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 7, 0, []byte{9}, func() { r = sc.run(t, sc.o) })
+		if evidence.commits != 1 || evidence.drift != 0 || r.truth != 1 || r.stage != 3 {
+			t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
+		}
+		r.tuple(t, 1, 3, -1)
+		if _, ok := r.err.(*CommitError); !ok {
+			t.Fatalf("scope strict truth differs: cause %T %v", r.err, r.err)
+		}
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		sc.image(t, tsReopen(t, sc.s, sc.path), false)
+	})
 	t.Run("N7-crossed-drift", func(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
