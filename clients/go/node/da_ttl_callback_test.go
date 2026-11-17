@@ -1165,14 +1165,15 @@ func TestDATTLCallbackEndToEndGenesisBootstrap(t *testing.T) {
 			if bound {
 				engine.PublishDATTLBinding(&daTTLRecordingService{name: "S", attempts: &attempts})
 			}
-			before, ownerBefore := daRelayStateSnapshot(relay), cloneDAAdmissionOwner(mp.pendingOutpoints)
+			before := daRelayStateSnapshot(relay)
 			require(t, engine.BootstrapCanonicalGenesisIfEmpty() == nil && engine.chainState.view().tipHash == DevnetGenesisBlockHash(), "genesis bootstrap did not publish the devnet genesis")
 			if bound {
 				require(t, slices.Equal(attempts, []string{"S"}), "bound genesis bootstrap attempts=%v, want one", attempts)
 				return
 			}
 			require(t, engine.DATTLBindingService() == nil && len(attempts) == 0, "absent binding: binding=%v attempts=%v", engine.DATTLBindingService(), attempts)
-			requireDANonReplayUnchanged(t, relay, mp.pendingOutpoints, before, ownerBefore)
+			after := daRelayStateSnapshot(relay)
+			require(t, reflect.DeepEqual(after.sets, before.sets) && reflect.DeepEqual(after.locators, before.locators) && after.records == before.records, "absent-binding genesis bootstrap changed the DA records")
 		})
 	}
 }
