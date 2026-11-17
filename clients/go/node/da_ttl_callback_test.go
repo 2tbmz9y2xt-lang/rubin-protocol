@@ -185,8 +185,9 @@ func requireDATTLIndexExact(t *testing.T, relay *DARelayState) {
 }
 
 // TestDATTLCallbackBodyRefusalArms is the body-level C11 row per refusal arm: each arm returns
-// its own error and leaves the DA image and the owner unchanged; removing the arm lets the body
-// apply and fails the row at its error assertion.
+// its own error and leaves the DA image and the owner unchanged. For every row except the four
+// member-walk rows marked below, removing the arm lets the body apply and fails the row at its
+// error assertion.
 func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 	for _, row := range []struct {
 		name    string
@@ -288,6 +289,12 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 				s.relations.scalarRecord(r.stateAID, record)
 			})
 		}, func(err error) bool { return errors.Is(err, errDARelayTTLRecordKeyMismatch) }},
+		// The next four rows are refused by ownerReadyTTLMembers before the owner lock, and their
+		// arms are equivalent: with an arm removed, the claim proof ownerReadyTTLMembersBoundLocked
+		// under the owner lock refuses the same state with the same errDARelayImageIncompatible, so
+		// the row still passes. For the three token rows either half of that proof refuses (the
+		// claim match or the outpoint-row comparison); for the input row only the outpoint-row
+		// comparison does.
 		{"zero member token", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			editDATTLChunkMember(f, r.stateAID, func(m *daRelayMemberIdentity) { m.token = PendingOutpointToken{} })
 		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
