@@ -635,8 +635,8 @@ func daBudgetAdmissionCases() []daBudgetCase {
 		{"settlement_lock_order", func(t *testing.T) {
 			// Settlement after the planned hook is step-3-side (guard only);
 			// after the effects hook it is later (DA and owner released). Each
-			// stage ends by ordinary return and by panic. The planned ordinary
-			// return unbinds the plan so applyDACompleteCommit returns
+			// stage ends by ordinary return and by panic. On the planned ordinary
+			// return the test hook unbinds the plan so applyDACompleteCommit returns
 			// errDARelayImageIncompatible before the DA lock.
 			for _, row := range []struct {
 				stage  daCompleteStage
@@ -892,8 +892,8 @@ func daBudgetAdmissionCases() []daBudgetCase {
 		}},
 		{"repeated_reserve_refusal", func(t *testing.T) {
 			// A13: repeated Reserve-refused matching completions exhaust one
-			// source; the next attempt declines before step 3 until a later
-			// step 2a observes another stored best-tip identity.
+			// source; the next attempt declines before step 3 until the test
+			// rewrites the stored best-tip identity, after which step 2a renews.
 			a := newDABudgetAdmission(t, false, true)
 			tip := a.tip(t)
 			a.seed(tip, 0, map[string]daCompletionUse{"q": {used: perSource - 2*a.charge}})
@@ -963,11 +963,13 @@ func daBudgetAdmissionCases() []daBudgetCase {
 			}
 		}},
 		{"reconnect_and_passive_tip", func(t *testing.T) {
-			// A10/A7 on the production paths: the disconnect release
-			// (ReleasePeerQuotaKey), a reconnect with the same quota_identity,
-			// the block-connect TTL tick (AdvanceOrphanTTL) and a best-tip
-			// change without step 2a leave the budget unchanged; the next step 2a
-			// observes the new tip and renews.
+			// A10/A7: the disconnect release (ReleasePeerQuotaKey), a reconnect
+			// with the same quota_identity (AdmitDA), a best-tip change and the
+			// block-connect TTL tick (AdvanceOrphanTTL) leave the budget
+			// unchanged; the next step 2a (AdmitDA) observes the new tip and
+			// renews. The best-tip change is simulated: the test writes the chain
+			// state tip and sets the owner's stable tip with setRelaySource; no
+			// production tip-change path runs.
 			a := newDABudgetAdmission(t, false, true)
 			other := a.f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{7}, chunkCount: 2, commitment: [32]byte{9}, commitmentOutputs: 1})
 			a.f.admit(other, daNonReplayPeer("q"))
