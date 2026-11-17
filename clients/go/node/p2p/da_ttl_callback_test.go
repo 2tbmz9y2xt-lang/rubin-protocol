@@ -871,3 +871,27 @@ func TestDATTLCallbackEndToEndSnapshotBeforePublication(t *testing.T) {
 	require(t, s1.attempts.Load() == 1 && s2.attempts.Load() == 2, "attempts S1=%d S2=%d, want 1 and 2", s1.attempts.Load(), s2.attempts.Load())
 	probe.f.requireAbsent(probe.commit, "the third admitted decrease expired the record")
 }
+
+// TestDATTLCallbackEndToEndNoGuardReacquisition drives one ACCEPTED/NEW publication through the
+// production selection and the real in-guard body: SyncEngine.ApplyBlock returns within the
+// watchdog, so the body never waits for the admission guard the transition holds exclusively.
+func TestDATTLCallbackEndToEndNoGuardReacquisition(t *testing.T) {
+	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	probe := newSelectionProbe(t, h, source, 0xeb)
+	type result struct {
+		summary *node.ChainStateConnectSummary
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		summary, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, probe.next), nil)
+		done <- result{summary, err}
+	}()
+	select {
+	case got := <-done:
+		require(t, got.err == nil && got.summary != nil && got.summary.BlockHeight == probe.next, "ApplyBlock=(%+v,%v), want ACCEPTED/NEW", got.summary, got.err)
+	case <-time.After(lifecycleWatchdog):
+		t.Fatalf("ApplyBlock did not return within %s: the TTL body waited for the held admission guard", lifecycleWatchdog)
+	}
+}
