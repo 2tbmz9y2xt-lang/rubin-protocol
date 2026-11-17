@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unsafe"
 )
 
 // The raw native owner distinguishes metadata-only mismatches from payload use.
@@ -6691,4 +6692,232 @@ func TestCtxTreeSlotOverlapV1(t *testing.T) {
 			ctxTreeOpen(t, s)
 		})
 	}
+}
+
+// psfScene is a format-3 Store with generation 9 and 8 node families, both root bindings and one stored body.
+type psfScene struct {
+	s    *Store
+	path string
+	o    *OperationReservationOwner
+	body [32]byte
+}
+
+// key is an independent copy: the scene struct holds Go pointers and cannot back a cgo argument.
+func (sc *psfScene) key() []byte { return bytes.Clone(sc.body[:]) }
+
+var psfBodyValue = bytes.Repeat([]byte{0xb7}, 1000)
+
+func psfNew(t *testing.T) *psfScene {
+	t.Helper()
+	s, path, o := tsNew(t)
+	for _, g := range []uint64{8, 9} {
+		for _, row := range obsoleteTreeFamily(g) {
+			treeNativeSeed(t, s, 8, row.key, row.value)
+		}
+		treeNativeSeed(t, s, 0, tsRootKey(g), []byte{0xee, byte(g)})
+	}
+	scene := &psfScene{s: s, path: path, o: o, body: [32]byte{0xb0, 1}}
+	treeNativeSeed(t, s, 4, scene.key(), psfBodyValue)
+	return scene
+}
+
+// psfAuthority is the complete TreeAuthority literal target committed with the raw deletes.
+func psfAuthority(t *testing.T) Mutation {
+	t.Helper()
+	a := TreeAuthorityV1{Authority: StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 6, Phase: 1, Lifecycle: 1}, LagGenerationID: 2}
+	authority, err := a.Encode()
+	mustEnvironment(t, err)
+	return Mutation{DBI: TreeSchemaV1DBIs()[0], Key: []byte{2}, BeforePresent: true, AfterKind: 2, Literal: authority}
+}
+
+// psfBuild deletes generation 9's nodes and root binding under their witnesses with the body selector.
+func (sc *psfScene) build(t *testing.T) func(*Reader) TreeOperationV1 {
+	return func(r *Reader) TreeOperationV1 {
+		nodes, err := r.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1440)
+		mustEnvironment(t, err)
+		root, err := r.ObsoleteGenerationPageV1(9, ObsoleteRootV1, nil, 1)
+		mustEnvironment(t, err)
+		if len(nodes.Rows) != 3 || len(root.Rows) != 1 {
+			t.Fatalf("scene pages nodes%d root%d", len(nodes.Rows), len(root.Rows))
+		}
+		return TreeOperationV1{Pair: TreePairV1{
+			Mutations:         []Mutation{psfAuthority(t)},
+			ObsoleteDeletes:   append(append([]ObsoleteRowV1(nil), root.Rows...), nodes.Rows...),
+			ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness, root.Witness},
+			LargeConsulted:    []LargeImageSelectorV1{{Kind: LargeImageBlockBodyV1, Hash: sc.body}},
+		}}
+	}
+}
+
+func (sc *psfScene) run(t *testing.T, o *OperationReservationOwner) tsResult {
+	t.Helper()
+	return psRun(t, sc.s, o, LaneOperation, sc.build(t))
+}
+
+// image asserts the generation-9 raw rows (absent when deleted), the untouched generation-8 rows and the body.
+func (sc *psfScene) image(t *testing.T, s *Store, deleted bool) {
+	t.Helper()
+	for _, row := range obsoleteTreeFamily(9) {
+		want := row.value
+		if deleted {
+			want = nil
+		}
+		psfRaw(t, s, 8, row.key, want)
+	}
+	for _, row := range obsoleteTreeFamily(8) {
+		psfRaw(t, s, 8, row.key, row.value)
+	}
+	root9 := []byte{0xee, 9}
+	if deleted {
+		root9 = nil
+	}
+	psfRaw(t, s, 0, tsRootKey(9), root9)
+	psfRaw(t, s, 0, tsRootKey(8), []byte{0xee, 8})
+	psfRaw(t, s, 4, sc.key(), psfBodyValue)
+}
+
+func psfRaw(t *testing.T, s *Store, rank uint8, key, want []byte) {
+	t.Helper()
+	equal, err := FixtureRawRowEqual(s, rank, key, want)
+	if err != nil || !equal {
+		t.Fatalf("scope persisted image differs: rank%d %x want %x: %v", rank, key, want, err)
+	}
+}
+
+// psfF is F for the scene: M=1, D=4, W=2, P=0, L=1 with K and U from the literal row widths.
+func psfF(t *testing.T) uint64 {
+	auth := psfAuthority(t)
+	nodes := obsoleteTreeFamily(9)
+	k := uint64(len(auth.Key)+len(auth.Literal)) + 9
+	for _, row := range nodes {
+		k += uint64(len(row.key))
+	}
+	u := uint64(8+len(nodes[2].key)) + 9 // node prefix + last, root point prefix
+	return psF(1, 0, 4, 2, 0, 1, k, u)
+}
+
+func psfWindow(t *testing.T, s *Store) uint64 {
+	var maxKey uint64
+	mustEnvironment(t, s.View(func(r *Reader) error { maxKey = r.maxKey; return nil }))
+	return 4 * (maxKey + 1)
+}
+
+func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
+	t.Run("N1-commit", func(t *testing.T) {
+		sc := psfNew(t)
+		r := sc.run(t, sc.o)
+		r.tuple(t, 2, 3, -1)
+		mustEnvironment(t, r.err)
+		sc.image(t, sc.s, true)
+		tsRead(t, sc.s, TreeSchemaV1DBIs()[0], []byte{2}, psfAuthority(t).Literal)
+		tsFollowing(t, sc.s, sc.o)
+		sc.image(t, tsReopen(t, sc.s, sc.path), true)
+	})
+	t.Run("R6-write-snapshot", func(t *testing.T) {
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 14, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		r.tuple(t, 1, 1, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+		if evidence.drift != 1 || evidence.commits != 0 {
+			t.Fatalf("scope preflight mismatch committed: %+v", evidence)
+		}
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		// The fixture's drift of the body is itself durable; the raw targets must survive.
+		reopened := tsReopen(t, sc.s, sc.path)
+		for _, row := range obsoleteTreeFamily(9) {
+			psfRaw(t, reopened, 8, row.key, row.value)
+		}
+		psfRaw(t, reopened, 0, tsRootKey(9), []byte{0xee, 9})
+	})
+	t.Run("R7-final", func(t *testing.T) {
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 13, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		r.tuple(t, 1, 2, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "final update image mismatch", nil)
+		if evidence.drift != 1 || evidence.commits != 0 {
+			t.Fatalf("scope final mismatch committed: %+v", evidence)
+		}
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		sc.image(t, tsReopen(t, sc.s, sc.path), false)
+	})
+	t.Run("N7-crossed-clean", func(t *testing.T) {
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = sc.run(t, sc.o) })
+		r.tuple(t, 2, 3, -1)
+		if evidence.commits != 1 || evidence.drift != 0 {
+			t.Fatalf("scope strict truth differs: %+v %v", evidence, r.err)
+		}
+		tsConsumed(t, sc.s, sc.o, 2, r.err)
+		sc.image(t, tsReopen(t, sc.s, sc.path), true)
+	})
+	t.Run("N7-crossed-drift", func(t *testing.T) {
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 3, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		r.tuple(t, 3, 3, -1)
+		if evidence.commits != 1 || evidence.drift != 1 {
+			t.Fatalf("scope strict truth differs: %+v %v", evidence, r.err)
+		}
+		tsConsumed(t, sc.s, sc.o, 3, r.err)
+	})
+	t.Run("H1-native-read", func(t *testing.T) {
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 28, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		r.tuple(t, 1, 1, -1)
+		var engine *EngineError
+		if evidence.gets == 0 || !errors.As(r.err, &engine) || engine.Class != EngineIO {
+			t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
+		}
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+	})
+	t.Run("N8-operand-window", func(t *testing.T) {
+		sc := psfNew(t)
+		f, window := psfF(t), psfWindow(t, sc.s)
+		r := sc.run(t, reservationFilled(t, f-1))
+		if any(r.err) != any(errOperationReservationCapacity) || sc.s.state != storeOPEN {
+			t.Fatalf("scope metadata high-water differs: %v %s", r.err, sc.s.state)
+		}
+		sc.image(t, sc.s, false)
+		// F plus S and one body operand is one operand short of the funded two-span comparison.
+		r = sc.run(t, reservationFilled(t, f+window+uint64(len(psfBodyValue))+64))
+		if any(r.err) != any(errOperationReservationCapacity) {
+			t.Fatalf("scope operand window not funded: %v", r.err)
+		}
+		r.tuple(t, 1, 1, -1)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		sc2 := psfNew(t)
+		r = sc2.run(t, reservationFilled(t, f+window+2*uint64(len(psfBodyValue))+4096))
+		r.tuple(t, 2, 3, -1)
+		mustEnvironment(t, r.err)
+		sc2.image(t, sc2.s, true)
+	})
+	t.Run("N8-sealed-helper", func(t *testing.T) {
+		left, right := bytes.Repeat([]byte{1}, 64), bytes.Repeat([]byte{1}, 64)
+		a := updateImage{present: true, bytes: unsafe.Pointer(&left[0]), length: 64}
+		b := updateImage{present: true, bytes: unsafe.Pointer(&right[0]), length: 64}
+		scope := largeImageScope{databaseID: [32]byte{7}, maxKey: 1, pairLimit: 8 + 127}
+		_, err := scope.rowsEqualV1(largeNativeRow{image: a}, largeNativeRow{image: b})
+		if any(err) != any(errOperationReservationCapacity) {
+			t.Fatalf("scope sealed window grew: %v", err)
+		}
+		scope.pairLimit = 8 + 128
+		equal, err := scope.rowsEqualV1(largeNativeRow{image: a}, largeNativeRow{image: b})
+		if err != nil || !equal {
+			t.Fatalf("sealed equal-length comparison: %v %v", equal, err)
+		}
+		runtime.KeepAlive(left)
+		runtime.KeepAlive(right)
+		// Typed nil budget with a zero seal refuses before acquisition; legacy zero databaseID does not fund.
+		typed := largeImageScope{databaseID: [32]byte{7}}
+		if err := typed.fundV1(); any(err) != any(errOperationReservationCapacity) {
+			t.Fatalf("scope missing budget admitted: %v", err)
+		}
+		if err := (&largeImageScope{}).fundV1(); err != nil {
+			t.Fatal("legacy scope funded", err)
+		}
+	})
 }
