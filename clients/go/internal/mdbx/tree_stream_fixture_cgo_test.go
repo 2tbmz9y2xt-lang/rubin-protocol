@@ -7233,6 +7233,30 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc.image(t, tsReopen(t, sc.s, sc.path), false)
 	})
+	t.Run("N8-larger-candidate-readback", func(t *testing.T) {
+		// The selected body is present with length 0 in ORIGINAL OLD. Commit drift (mode 3) writes one byte
+		// at it after the real commit, so the possible-crossed readback candidate is longer than ORIGINAL OLD:
+		// the length mismatch is inequality before any funded payload comparison, and the truth is UNKNOWN.
+		sc := psfNew(t)
+		treeNativeSeed(t, sc.s, 4, sc.key(), []byte{})
+		psfRaw(t, sc.s, 4, sc.key(), []byte{})
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 3, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		if evidence.commits != 1 || evidence.drift != 1 || r.truth != 3 || r.stage != 3 {
+			t.Fatalf("scope sealed window grew: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
+		}
+		r.tuple(t, 3, 3, -1)
+		var commit *CommitError
+		if !errors.As(r.err, &commit) || commit.ReadbackCause != nil {
+			t.Fatalf("scope sealed window grew: readback cause %T %v", r.err, r.err)
+		}
+		tsConsumed(t, sc.s, sc.o, 3, r.err)
+		reopened := tsReopen(t, sc.s, sc.path)
+		psfRaw(t, reopened, 4, sc.key(), []byte{0x7f})
+		for _, row := range obsoleteTreeFamily(9) {
+			psfRaw(t, reopened, 8, row.key, nil)
+		}
+	})
 	t.Run("M15-equal-digest-other-generation", func(t *testing.T) {
 		// Only the generation-9 one-leaf is a target; the generation-8 node domain is also compared and its
 		// one-leaf holds a byte-equal value under another generation key. That row drifts at the write snapshot.
