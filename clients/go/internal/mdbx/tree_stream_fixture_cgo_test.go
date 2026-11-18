@@ -7459,6 +7459,8 @@ var psfBodyValue = bytes.Repeat([]byte{0xb7}, 1000)
 func psfNew(t *testing.T) *psfScene {
 	t.Helper()
 	s, path, o := tsNew(t)
+	// Releases a retained thread or close-blocked Store left by a failed assertion; no-op when OPEN or CLOSED.
+	t.Cleanup(func() { mustEnvironment(t, fixtureLargeRelease(s)) })
 	for _, g := range []uint64{8, 9} {
 		for _, row := range obsoleteTreeFamily(g) {
 			treeNativeSeed(t, s, 8, row.key, row.value)
