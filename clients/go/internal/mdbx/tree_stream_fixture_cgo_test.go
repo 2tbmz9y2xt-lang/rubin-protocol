@@ -7555,8 +7555,12 @@ func psfWindow(t *testing.T, s *Store) uint64 {
 }
 
 // psfDelete deletes generation g's nodes and root under their witnesses with the given mutations and selectors.
-func psfDelete(t *testing.T, g uint64, mutations []Mutation, selectors []LargeImageSelectorV1) func(*Reader) TreeOperationV1 {
+func psfDelete(t *testing.T, g uint64, mutations []Mutation, selectors func() []LargeImageSelectorV1) func(*Reader) TreeOperationV1 {
 	return func(r *Reader) TreeOperationV1 {
+		var large []LargeImageSelectorV1
+		if selectors != nil {
+			large = selectors()
+		}
 		nodes, err := r.ObsoleteGenerationPageV1(g, ObsoleteNodeV1, nil, 1440)
 		mustEnvironment(t, err)
 		root, err := r.ObsoleteGenerationPageV1(g, ObsoleteRootV1, nil, 1)
@@ -7565,7 +7569,7 @@ func psfDelete(t *testing.T, g uint64, mutations []Mutation, selectors []LargeIm
 			Mutations:         mutations,
 			ObsoleteDeletes:   append(append([]ObsoleteRowV1(nil), root.Rows...), nodes.Rows...),
 			ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness, root.Witness},
-			LargeConsulted:    selectors,
+			LargeConsulted:    large,
 		}}
 	}
 }
@@ -7964,14 +7968,18 @@ func psfLargeDomains(t *testing.T) {
 	hash, undo := psfUndo(t, sc.s)
 	empty := hash
 	empty[31] ^= 1
-	families := []LargeImageSelectorV1{{Kind: LargeImageUndoFamilyV1, Hash: hash}, {Kind: LargeImageUndoFamilyV1, Hash: empty}}
-	if bytes.Compare(empty[:], hash[:]) < 0 {
-		families[0], families[1] = families[1], families[0]
+	absent := [32]byte{0xb0, 2}
+	// The selectors are created inside the callback, under the caller grant.
+	selectors := func() []LargeImageSelectorV1 {
+		families := []LargeImageSelectorV1{{Kind: LargeImageUndoFamilyV1, Hash: hash}, {Kind: LargeImageUndoFamilyV1, Hash: empty}}
+		if bytes.Compare(empty[:], hash[:]) < 0 {
+			families[0], families[1] = families[1], families[0]
+		}
+		return append([]LargeImageSelectorV1{
+			{Kind: LargeImageBlockBodyV1, Hash: sc.body},
+			{Kind: LargeImageBlockBodyV1, Hash: absent},
+		}, families...)
 	}
-	selectors := append([]LargeImageSelectorV1{
-		{Kind: LargeImageBlockBodyV1, Hash: sc.body},
-		{Kind: LargeImageBlockBodyV1, Hash: [32]byte{0xb0, 2}},
-	}, families...)
 	r := psRun(t, sc.s, sc.o, LaneOperation, psfDelete(t, 9, nil, selectors))
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
@@ -7980,7 +7988,6 @@ func psfLargeDomains(t *testing.T) {
 	for i, k := range undo {
 		psfRaw(t, reopened, 5, k, []byte{byte(i)})
 	}
-	absent := selectors[1].Hash
 	psfRaw(t, reopened, 4, absent[:], nil)
 	psfEmptyFamily(t, reopened, empty)
 }
@@ -8231,6 +8238,8 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("point-mismatch-then-capacity", psfPointMismatchThenCapacity)
 	t.Run("selector-row-mismatch-then-capacity", psfSelectorRowMismatchThenCapacity)
 	t.Run("domain-row-mismatch-then-capacity", psfDomainRowMismatchThenCapacity)
+	t.Run("selector-row-insert-then-capacity", psfSelectorRowInsertThenCapacity)
+	t.Run("domain-row-insert-then-capacity", psfDomainRowInsertThenCapacity)
 	t.Run("retained", psfRetained)
 	t.Run("witness-bytes", psfWitnessBytes)
 	t.Run("callback-cleanup", psfCallbackCleanup)
@@ -8624,6 +8633,42 @@ func psfDomainRowMismatchThenCapacity(t *testing.T) {
 			}}
 		}
 		return bytes.Clone(nodes[0].key), bytes.Clone(nodes[1].key), op
+	})
+}
+
+// psfSelectorRowInsertThenCapacity: the write view gains the family key hash||1 between OLD members
+// hash||0 and hash||2||ff, and hash||2||ff holds psfRowBig bytes; the rows pair by key, so the
+// inserted key is an inequality and hash||2||ff still gets its two-operand comparison.
+func psfSelectorRowInsertThenCapacity(t *testing.T) {
+	auth := psfAuthority(t)
+	f := psF(1, 0, 0, 0, 0, 1, uint64(len(auth.Key)+len(auth.Literal)), 0)
+	psfRowMismatchThenCapacity(t, 5, f, func(hash [32]byte) ([]byte, []byte, func(*Reader) TreeOperationV1) {
+		op := func(*Reader) TreeOperationV1 {
+			return TreeOperationV1{Pair: TreePairV1{
+				Mutations:      []Mutation{psfAuthority(t)},
+				LargeConsulted: []LargeImageSelectorV1{{Kind: LargeImageUndoFamilyV1, Hash: hash}},
+			}}
+		}
+		return append(bytes.Clone(hash[:]), 1), append(bytes.Clone(hash[:]), 2, 0xff), op
+	})
+}
+
+// psfDomainRowInsertThenCapacity: the write view gains a node key between the first and second nodes
+// of generation 9's witnessed domain, and the second node holds psfRowBig bytes.
+func psfDomainRowInsertThenCapacity(t *testing.T) {
+	auth := psfAuthority(t)
+	nodes := obsoleteTreeFamily(9)
+	f := psF(1, 0, 0, 1, 0, 0, uint64(len(auth.Key)+len(auth.Literal)), uint64(8+len(nodes[2].key)))
+	psfRowMismatchThenCapacity(t, 8, f, func([32]byte) ([]byte, []byte, func(*Reader) TreeOperationV1) {
+		op := func(reader *Reader) TreeOperationV1 {
+			page, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1440)
+			mustEnvironment(t, err)
+			return TreeOperationV1{Pair: TreePairV1{
+				Mutations:         []Mutation{psfAuthority(t)},
+				ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness},
+			}}
+		}
+		return append(bytes.Clone(nodes[0].key), 0), bytes.Clone(nodes[1].key), op
 	})
 }
 

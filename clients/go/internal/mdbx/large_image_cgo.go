@@ -279,14 +279,17 @@ func largeImageAdvance(key []byte, maxKey uint64) []byte {
 		copy(next, key)
 		return next
 	}
-	next := bytes.Clone(key)
-	for i := len(next) - 1; i >= 0; i-- {
-		if next[i] != 255 {
-			next[i]++
-			return next[:i+1]
-		}
+	i := len(key) - 1
+	for i >= 0 && key[i] == 255 {
+		i--
 	}
-	return nil
+	if i < 0 {
+		return nil
+	}
+	next := make([]byte, i+1)
+	copy(next, key)
+	next[i]++
+	return next
 }
 
 func largeNativeShape(pointer unsafe.Pointer, length uint64) bool {
@@ -298,11 +301,13 @@ func largeNativeKey(pointer unsafe.Pointer, length, maximum uint64, seek []byte)
 	if pointer == nil || length == 0 || length > maximum || !largeNativeShape(pointer, length) {
 		return nil, largeImageShapeError()
 	}
-	key := make([]byte, length)
-	C.memcpy(unsafe.Pointer(&key[0]), pointer, C.size_t(length))
-	if bytes.Compare(key, seek) < 0 {
+	// The borrowed key is ordered against the seek before its one copy is made.
+	native := unsafe.Slice((*byte)(pointer), length)
+	if bytes.Compare(native, seek) < 0 {
 		return nil, largeImageShapeError()
 	}
+	key := make([]byte, length)
+	copy(key, native)
 	return key, nil
 }
 
@@ -388,7 +393,9 @@ func updateOwnedLarge(batch Batch, consulted []ownedConsulted, maxKey uint64) (l
 			return largeImageScope{}, updateInvalidBatch()
 		}
 	}
-	return updateObsoleteScope(batch, largeImageScope{selectors: append([]LargeImageSelectorV1(nil), selectors...), maxKey: maxKey, consulted: consulted})
+	owned := make([]LargeImageSelectorV1, len(selectors))
+	copy(owned, selectors)
+	return updateObsoleteScope(batch, largeImageScope{selectors: owned, maxKey: maxKey, consulted: consulted})
 }
 
 type largeResidualStream struct {
@@ -418,13 +425,14 @@ func (stream *largeResidualStream) excluded(key []byte) bool {
 
 func (stream *largeResidualStream) next() (largeNativeRow, error) {
 	for !stream.done {
-		row, err := stream.fetch()
+		// The seek field is dropped before the fetch, which orders the native key against it.
+		seek := stream.seek
+		stream.seek = nil
+		row, err := stream.fetch(seek)
 		if err != nil || row.done {
 			return row, err
 		}
 		stream.done = stream.selector.Kind == LargeImageBlockBodyV1
-		// The consumed seek is dropped before the successor copy is built.
-		stream.seek = nil
 		stream.seek = largeImageAdvance(row.key, stream.reader.maxKey)
 		if !stream.excluded(row.key) {
 			return row, nil
@@ -433,11 +441,19 @@ func (stream *largeResidualStream) next() (largeNativeRow, error) {
 	return largeNativeRow{done: true}, nil
 }
 
-func (stream *largeResidualStream) fetch() (largeNativeRow, error) {
+// advance drops row before reading the stream's next row into it.
+func (stream *largeResidualStream) advance(row *largeNativeRow) error {
+	*row = largeNativeRow{}
+	next, err := stream.next()
+	*row = next
+	return err
+}
+
+func (stream *largeResidualStream) fetch(seek []byte) (largeNativeRow, error) {
 	if stream.domain == nil {
-		return stream.reader.largeNext(stream.selector, stream.seek)
+		return stream.reader.largeNext(stream.selector, seek)
 	}
-	row, err := stream.reader.obsoleteFetch(*stream.domain, stream.seek, operationUpdate)
+	row, err := stream.reader.obsoleteFetch(*stream.domain, seek, operationUpdate)
 	if err == nil && !row.done && !stream.domain.end && bytes.Compare(row.key, stream.domain.last) > 0 {
 		return largeNativeRow{done: true}, nil
 	}
@@ -469,30 +485,13 @@ func largeDomainEqual(old, candidate *Reader, selector LargeImageSelectorV1, pla
 	})
 	left := largeResidualStream{reader: old, selector: selector, seek: selector.Hash[:], plan: plan[start:]}
 	right := largeResidualStream{reader: candidate, selector: selector, seek: selector.Hash[:], plan: plan[start:]}
-	equal := true
-	for {
-		a, err := left.next()
-		if err != nil {
-			return false, err
-		}
-		b, err := right.next()
-		if err != nil {
-			return false, err
-		}
-		if a.done && b.done {
-			return equal, nil
-		}
-		match, err := fund.rowsEqualV1(a, b)
-		if err != nil {
-			return false, err
-		}
-		equal = equal && match
-	}
+	return obsoleteStreamsEqual(&left, &right, largeImageRank(selector.Kind), fund)
 }
 
 func largeResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ownedMutation) (bool, error) {
-	if err := scope.fundV1(); err != nil {
-		return false, err
+	fundErr := scope.fundV1()
+	if fundErr != nil {
+		return false, fundErr
 	}
 	equal := true
 	if scope.contextPresent {

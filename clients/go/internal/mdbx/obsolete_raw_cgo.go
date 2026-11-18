@@ -513,10 +513,20 @@ func obsoleteCompileRows(batch Batch, rows []ObsoleteRowV1, plan []ownedMutation
 	}
 	for _, row := range rows {
 		span := row.span
-		plan = append(plan, ownedMutation{dbi: obsoleteDBI(span.reader.format, span.rank), key: bytes.Clone(span.key), beforePresent: true, after: AfterAbsent})
+		plan = append(plan, ownedMutation{dbi: obsoleteDBI(span.reader.format, span.rank), key: obsoleteExactCopy(span.key), beforePresent: true, after: AfterAbsent})
 	}
 	slices.SortFunc(plan, obsoleteMutationCmp)
 	return plan, nil
+}
+
+// obsoleteExactCopy is a copy of key with capacity equal to its length; nil stays nil.
+func obsoleteExactCopy(key []byte) []byte {
+	if key == nil {
+		return nil
+	}
+	owned := make([]byte, len(key))
+	copy(owned, key)
+	return owned
 }
 
 func obsoleteMutationCmp(a, b ownedMutation) int {
@@ -536,7 +546,8 @@ func obsoleteAdmitRows(batch Batch, reader *Reader, plan []ownedMutation) ([]Obs
 		domains = append(domains, token.scope.domain)
 	}
 	domains = obsoleteCoalesce(domains)
-	rows := append([]ObsoleteRowV1(nil), batch.ObsoleteDeletes...)
+	rows := make([]ObsoleteRowV1, len(batch.ObsoleteDeletes))
+	copy(rows, batch.ObsoleteDeletes)
 	for _, row := range rows {
 		if !obsoleteRowCurrent(row, reader, domains) {
 			return nil, updateInvalidBatch()
@@ -640,7 +651,7 @@ func obsoleteRetainControls(scope *largeImageScope) error {
 		}
 	}
 	for i := range keys {
-		keys[i].key = bytes.Clone(keys[i].key)
+		keys[i].key = obsoleteExactCopy(keys[i].key)
 	}
 	for i := range scope.domains {
 		domain := &scope.domains[i]
@@ -753,27 +764,62 @@ func obsoleteDomainEqual(old, candidate *Reader, domain obsoleteDomain, plan []o
 	return obsoleteStreamsEqual(&left, &right, domain.rank, fund)
 }
 
-// obsoleteStreamsEqual traverses both residual streams completely; only a read or funding error stops early.
+// obsoleteStreamsEqual traverses both residual streams completely, pairing rows by key; only a read
+// or funding error stops early. A key on one side only is an inequality without payload use; a key on
+// both sides gets its funded comparison.
 func obsoleteStreamsEqual(left, right *largeResidualStream, rank uint8, fund *largeImageScope) (bool, error) {
+	var a, b largeNativeRow
+	if err := left.advance(&a); err != nil {
+		return false, err
+	}
+	if err := right.advance(&b); err != nil {
+		return false, err
+	}
 	equal := true
-	for {
-		a, err := left.next()
-		if err != nil {
-			return false, err
-		}
-		b, err := right.next()
-		if err != nil {
-			return false, err
-		}
-		if a.done && b.done {
-			return equal, nil
-		}
-		match, err := obsoleteRowsFundedV1(a, b, rank, fund)
+	for !a.done || !b.done {
+		order, match, err := obsoleteStreamPair(a, b, rank, fund)
 		if err != nil {
 			return false, err
 		}
 		equal = match && equal
+		if err := obsoleteStreamsAdvance(left, right, &a, &b, order); err != nil {
+			return false, err
+		}
 	}
+	return equal, nil
+}
+
+// obsoleteStreamPair orders a and b by key (an ended stream sorts last) and compares an equal-key pair.
+func obsoleteStreamPair(a, b largeNativeRow, rank uint8, fund *largeImageScope) (int, bool, error) {
+	order := obsoleteStreamOrder(a, b)
+	if order != 0 {
+		return order, false, nil
+	}
+	match, err := obsoleteRowsFundedV1(a, b, rank, fund)
+	return 0, match, err
+}
+
+func obsoleteStreamOrder(a, b largeNativeRow) int {
+	switch {
+	case a.done:
+		return 1
+	case b.done:
+		return -1
+	}
+	return bytes.Compare(a.key, b.key)
+}
+
+// obsoleteStreamsAdvance advances the stream holding the smaller key, or both after an equal-key pair.
+func obsoleteStreamsAdvance(left, right *largeResidualStream, a, b *largeNativeRow, order int) error {
+	if order <= 0 {
+		if err := left.advance(a); err != nil {
+			return err
+		}
+	}
+	if order >= 0 {
+		return right.advance(b)
+	}
+	return nil
 }
 
 func obsoleteRowsEqual(a, b largeNativeRow, rank uint8, consulted []ownedConsulted) bool {

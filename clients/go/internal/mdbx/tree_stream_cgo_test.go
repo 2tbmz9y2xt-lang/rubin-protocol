@@ -4815,6 +4815,8 @@ func TestTreeStreamPhysicalScopeV1(t *testing.T) {
 	t.Run("ordinary-first", psOrdinaryFirst)
 	t.Run("metadata", psMetadata)
 	t.Run("successor", psSuccessor)
+	t.Run("key-slot-order", psKeySlotOrder)
+	t.Run("owned-capacity", psOwnedCapacity)
 	t.Run("combined-cap", psCombinedCap)
 	t.Run("legacy", psLegacy)
 	t.Run("callback", psCallback)
@@ -5353,6 +5355,79 @@ func psSuccessor(t *testing.T) {
 	allocs := testing.AllocsPerRun(100, func() { next = largeImageAdvance(key, 8) })
 	if allocs != 1 || len(next) != 4 || cap(next) != 4 || !bytes.Equal(next, []byte{1, 2, 3, 0}) || &next[0] == &key[0] {
 		t.Fatalf("scope successor copy differs: allocs%v len%d cap%d %x", allocs, len(next), cap(next), next)
+	}
+	// A maximum-width successor is one copy whose capacity equals its length.
+	wide := bytes.Repeat([]byte{7}, 77)
+	allocs = testing.AllocsPerRun(100, func() { next = largeImageAdvance(wide, 77) })
+	if allocs != 1 || len(next) != 77 || cap(next) != 77 || next[76] != 8 || wide[76] != 7 {
+		t.Fatalf("scope successor capacity differs: allocs%v len%d cap%d", allocs, len(next), cap(next))
+	}
+	carried := append(bytes.Repeat([]byte{7}, 74), 9, 255, 255)
+	next = largeImageAdvance(carried, 77)
+	if len(next) != 75 || cap(next) != 75 || next[74] != 10 {
+		t.Fatalf("scope successor capacity differs: carried len%d cap%d", len(next), cap(next))
+	}
+	if next = largeImageAdvance([]byte{255, 255}, 2); next != nil {
+		t.Fatalf("scope successor copy differs: %x", next)
+	}
+}
+
+// The borrowed native key is ordered against the seek before its one copy (a refused key allocates
+// only its error), and a residual stream drops its seek field before the fetch.
+func psKeySlotOrder(t *testing.T) {
+	seek := []byte{5, 5}
+	below, above := []byte{5, 4, 9}, []byte{5, 6}
+	errAllocs := testing.AllocsPerRun(100, func() { _ = largeImageShapeError() })
+	var err error
+	allocs := testing.AllocsPerRun(100, func() { _, err = largeNativeKey(unsafe.Pointer(&below[0]), 3, 8, seek) })
+	if allocs != errAllocs || err == nil {
+		t.Fatalf("scope key slot order differs: refused key allocs%v error allocs%v %v", allocs, errAllocs, err)
+	}
+	var key []byte
+	allocs = testing.AllocsPerRun(100, func() { key, err = largeNativeKey(unsafe.Pointer(&above[0]), 2, 8, seek) })
+	if allocs != 1 || err != nil || !bytes.Equal(key, above) || cap(key) != 2 || &key[0] == &above[0] {
+		t.Fatalf("scope key slot order differs: admitted key allocs%v cap%d %v", allocs, cap(key), err)
+	}
+	stream := largeResidualStream{reader: &Reader{}, selector: LargeImageSelectorV1{Kind: LargeImageUndoFamilyV1}, seek: []byte{1}}
+	if _, err = stream.next(); err == nil || stream.seek != nil {
+		t.Fatalf("scope key slot order differs: seek field %x held across the fetch: %v", stream.seek, err)
+	}
+}
+
+// Owned raw rows, raw target keys, control keys and selectors have capacity equal to their charged
+// length or count; the inputs are sized where an appended or cloned copy rounds its capacity up.
+func psOwnedCapacity(t *testing.T) {
+	reader := &Reader{updateOld: true, format: 3}
+	prefix := bytes.Repeat([]byte{7}, 76)
+	witness := &obsoleteWitness{reader: reader, domain: obsoleteDomain{rank: 8, prefix: prefix, end: true}}
+	deletes := make([]ObsoleteRowV1, 5)
+	for i := range deletes {
+		deletes[i] = ObsoleteRowV1{span: &obsoleteSpan{reader: reader, rank: 8, key: append(bytes.Clone(prefix), byte(5-i))}}
+	}
+	batch := Batch{ObsoleteDeletes: deletes, ObsoleteConsulted: []ObsoletePageWitnessV1{{scope: witness}}}
+	rows, err := obsoleteAdmitRows(batch, reader, nil)
+	if err != nil || len(rows) != 5 || cap(rows) != 5 {
+		t.Fatalf("scope owned capacity differs: rows len%d cap%d %v", len(rows), cap(rows), err)
+	}
+	plan, err := obsoleteCompileRows(batch, rows, make([]ownedMutation, 0, 5))
+	if err != nil || len(plan) != 5 {
+		t.Fatalf("scope owned capacity differs: plan %d %v", len(plan), err)
+	}
+	for _, m := range plan {
+		if len(m.key) != 77 || cap(m.key) != 77 {
+			t.Fatalf("scope owned capacity differs: target key len%d cap%d", len(m.key), cap(m.key))
+		}
+	}
+	selectors := make([]LargeImageSelectorV1, 16)
+	for i := range selectors {
+		selectors[i] = LargeImageSelectorV1{Kind: LargeImageUndoFamilyV1, Hash: [32]byte{byte(i + 1)}}
+	}
+	scope, err := updateOwnedLarge(Batch{LargeConsulted: selectors, ObsoleteConsulted: batch.ObsoleteConsulted}, nil, 77)
+	if err != nil || len(scope.selectors) != 16 || cap(scope.selectors) != 16 {
+		t.Fatalf("scope owned capacity differs: selectors len%d cap%d %v", len(scope.selectors), cap(scope.selectors), err)
+	}
+	if len(scope.domains) != 1 || len(scope.domains[0].prefix) != 76 || cap(scope.domains[0].prefix) != 76 || &scope.domains[0].prefix[0] == &prefix[0] {
+		t.Fatalf("scope owned capacity differs: control key %+v", scope.domains)
 	}
 }
 
