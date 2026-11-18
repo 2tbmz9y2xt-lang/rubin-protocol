@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -703,33 +705,54 @@ func (w *wrappedTTLEntry) EnterDATTLMutation(decrease func() error) error {
 	return w.inner.EnterDATTLMutation(decrease)
 }
 
+// awaitParkedOnAdmissionGuard waits until a goroutine whose stack names caller is parked in the
+// ChainState admission guard's wait.
+func awaitParkedOnAdmissionGuard(t *testing.T, caller string) {
+	t.Helper()
+	stack := make([]byte, 1<<22)
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); runtime.Gosched() {
+		for _, g := range strings.Split(string(stack[:runtime.Stack(stack, true)]), "\n\n") {
+			if strings.Contains(g, "RLockUnlessTerminal") && strings.Contains(g, "sync.(*Cond).Wait") && strings.Contains(g, caller) {
+				return
+			}
+		}
+	}
+	t.Fatalf("no %s goroutine parked on the admission guard", caller)
+}
+
 // TestDATTLCallbackEndToEndEntryInsideTheHold drives SyncEngine.ApplyBlock through the production
-// selection and, inside the selected entry, starts a ReleasePeerQuotaKey: it stays parked on the
-// admission guard for the whole entry and returns only after the transition releases the guard,
-// so the entry runs inside the exclusive hold (RUBIN_COMPACT_BLOCKS.md Section 5).
+// selection and, inside the selected entry, starts a ReleasePeerQuotaKey and a DA admission: both
+// park on the admission guard before the entry proceeds and return only after the transition
+// releases it, so the entry runs inside the exclusive hold (RUBIN_COMPACT_BLOCKS.md Section 5);
+// the admitted record is created after the decrease, so it is still retained after two more.
 func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	probe := newSelectionProbe(t, h, source, 0xe5)
-	released := make(chan error, 1)
-	entry := &wrappedTTLEntry{inner: h.service, before: func() {
-		go func() { released <- h.syncEngine.DARelayState().ReleasePeerQuotaKey("unrelated-peer") }()
-		select {
-		case err := <-released:
-			t.Errorf("ReleasePeerQuotaKey returned inside the entry (err=%v): the admission guard was not held", err)
-		case <-time.After(200 * time.Millisecond):
-		}
-	}}
+	fresh := probe.f.chunk(daRelayTestID(0xe7), 0, []byte("in-hold"))
+	done := make(chan struct{}, 2)
+	entry := &wrappedTTLEntry{inner: h.service}
+	entry.before = func() {
+		entry.before = nil
+		go func() { _ = h.syncEngine.DARelayState().ReleasePeerQuotaKey("unrelated-peer"); done <- struct{}{} }()
+		awaitParkedOnAdmissionGuard(t, "ReleasePeerQuotaKey")
+		go func() { probe.f.admit(fresh, "in-hold-peer"); done <- struct{}{} }()
+		awaitParkedOnAdmissionGuard(t, "AdmitDA")
+	}
 	h.syncEngine.PublishDATTLBinding(entry)
 	probe.apply()
-	select {
-	case <-released:
-	case <-time.After(lifecycleWatchdog):
-		t.Fatalf("ReleasePeerQuotaKey never proceeded after the guard release")
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(lifecycleWatchdog):
+			t.Fatalf("a parked writer never proceeded after the guard release")
+		}
 	}
 	require(t, entry.attempts.Load() == 1, "entry attempts=%d, want 1", entry.attempts.Load())
 	probe.apply()
 	probe.f.requireRetained(probe.commit, "count 1 after two in-hold decreases")
+	probe.apply()
+	probe.f.requireRetained(fresh, "the record admitted after the first decrease at count 1")
 }
 
 // TestDATTLCallbackEndToEndEntryErrorConsumed pins that the transition consumes the entry result:
