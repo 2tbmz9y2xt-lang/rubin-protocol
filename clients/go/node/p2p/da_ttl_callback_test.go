@@ -580,9 +580,10 @@ func mineSideBlock(t *testing.T) []byte {
 
 // TestDATTLCallbackEndToEndNonAcceptedResults pins the non-accepted results end to end over the real
 // SyncEngine, DA owner and Service, counting through the retained image: a valid side-branch block
-// stored non-canonical, a KNOWN_BLOCK_NOOP replay and a DisconnectTip decrease nothing, so the
-// record retained at count 3 survives the next two counted publications and expires only at the
-// third. The side block enters through SyncEngine.ApplyBlockWithReorg (no Service lease).
+// stored non-canonical, a KNOWN_BLOCK_NOOP replay, a MISSING_PARENT block retained as an orphan,
+// a CONSENSUS_INVALID block and a DisconnectTip decrease nothing, so the record retained at count 3
+// survives the next two counted publications and expires only at the third. The side block and
+// DisconnectTip run under no Service lease and make zero attempts on the bound entry.
 func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	sideBlock := mineSideBlock(t)
@@ -596,6 +597,8 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	relay(1)
 	relay(2)
 	probe := newSelectionProbe(t, h, source, 0xd3)
+	entry := &wrappedTTLEntry{inner: h.service}
+	h.syncEngine.PublishDATTLBinding(entry)
 	sideHash, err := consensus.BlockHash(sideBlock[:consensus.BLOCK_HEADER_BYTES])
 	must(t, err, "BlockHash(side block)")
 	known, err := h.service.hasBlock(sideHash)
@@ -604,9 +607,17 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	require(t, err == nil && summary != nil && len(summary.CanonicalAppliedBlocks) == 0 && h.chainState.Height == 2, "side block=(%+v,%v) height=%d, want stored non-canonical", summary, err, h.chainState.Height)
 	summary, err = p.processRelayedBlock(blockAtHeight(t, source, 2))
 	require(t, err == nil && summary == nil, "known block replay=(%+v,%v), want KNOWN_BLOCK_NOOP", summary, err)
+	summary, err = p.processRelayedBlock(blockAtHeight(t, source, 5))
+	require(t, err == nil && summary == nil && h.service.orphans.Len() == 1, "missing parent=(%+v,%v) orphans=%d, want one retained orphan", summary, err, h.service.orphans.Len())
+	invalid := append([]byte(nil), blockAtHeight(t, source, 3)...)
+	invalid[4+32] ^= 0xff // the merkle root
+	summary, err = testPeerForService(h.service, "invalid", 5).processRelayedBlock(invalid)
+	var invalidErr *consensus.TxError
+	require(t, errors.As(err, &invalidErr) && invalidErr.Code == consensus.BLOCK_ERR_MERKLE_INVALID && summary == nil && h.chainState.Height == 2, "invalid block=(%+v,%v), want BLOCK_ERR_MERKLE_INVALID", summary, err)
 	relay(3)
 	disconnected, err := h.syncEngine.DisconnectTip()
 	require(t, err == nil && disconnected != nil && h.chainState.Height == 2, "DisconnectTip=(%+v,%v)", disconnected, err)
+	require(t, entry.attempts.Load() == 0, "entry attempts=%d before the reconnect, want 0", entry.attempts.Load())
 	reconnected, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, 3), nil)
 	require(t, err == nil && reconnected != nil, "reconnect(3)=(%+v,%v)", reconnected, err)
 	probe.f.requireRetained(probe.commit, "count 1: two counted publications after the side block, replay and disconnect")
