@@ -494,11 +494,8 @@ func TestProcessRelayedBlockDropsRetainedDAOrphanNotValidAgainstC1(t *testing.T)
 	f.requireAbsent(commit, "the record the canonical transition could not validate against C1")
 }
 
-// TestAnnounceBlockMakesNoDARelayTTLDecrease pins the TTL cadence: an accepted remote block
-// or a block mined on the engine decreases a retained record once inside its canonical
-// transition (3 -> 2 -> 1, removed at the third), and neither the post-return accepted-block
-// effects nor AnnounceBlock of the block just mined decreases it, observed through the
-// retained image.
+// TestAnnounceBlockMakesNoDARelayTTLDecrease: an accepted remote or mined block decreases a retained record once in its
+// canonical transition (3 -> 2 -> 1, then removed); post-return effects and AnnounceBlock decrease nothing.
 func TestAnnounceBlockMakesNoDARelayTTLDecrease(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -1912,11 +1909,8 @@ func (b *lockedBuffer) Write(p []byte) (int, error) {
 
 func (b *lockedBuffer) String() string { b.Lock(); defer b.Unlock(); return b.Builder.String() }
 
-// requireFirstClaimant observes through a real reorganization that the engine's detached-reorg
-// hook is service's own admitDetachedReorgDA: with service CLOSED and a later Service bound and
-// OPEN, the disconnected DA commit is not retained and the engine's diagnostics carry the closed
-// Service's refusal. A hook held by the later Service or any open Service retains the commit, and
-// an absent hook reports an uninitialized admission instead.
+// requireFirstClaimant observes through a real reorganization that the detached-reorg hook is service's: with service
+// CLOSED and a later Service bound, the commit is not retained and the diagnostics carry the closed refusal.
 func requireFirstClaimant(t *testing.T, sink *testHarness, cfg ServiceConfig, service *Service) {
 	t.Helper()
 	diag := &lockedBuffer{}

@@ -1136,9 +1136,8 @@ func TestServiceWorkLifecycleBlockRetry(t *testing.T) {
 	})
 }
 
-// primeDATTLToOne retains one commit at count 3 and applies source blocks 1 and 2 through the
-// peer path, whose in-guard decreases leave it at count 1, so one more decrease from any path
-// expires it.
+// primeDATTLToOne retains one commit at count 3 and relays source blocks 1 and 2 through the peer path,
+// leaving it at count 1.
 func primeDATTLToOne(t *testing.T, source, h *testHarness, p *peer, daID [32]byte) (*daIngressFixture, []byte, *node.ChainStateConnectSummary) {
 	t.Helper()
 	holdWorkLease(t, p.service)
@@ -1155,9 +1154,8 @@ func primeDATTLToOne(t *testing.T, source, h *testHarness, p *peer, daID [32]byt
 	return f, commit, summary
 }
 
-// TestRelayedBlockPostReturnMakesNoTTLDecrease pins that the relayed-block post-return effects
-// decrease no TTL count, for an ordinary and a terminal-shaped result: the record primed to count
-// 1 survives both, the next accepted block expires it, and the seen-set effect lands.
+// TestRelayedBlockPostReturnMakesNoTTLDecrease: the relayed-block post-return effects of an ordinary and a
+// terminal-shaped result decrease no count; the next accepted block expires the record.
 func TestRelayedBlockPostReturnMakesNoTTLDecrease(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -1267,9 +1265,8 @@ func TestLatchedEngineSkipsThePeerQuotaRelease(t *testing.T) {
 	requireEqual(t, h.service.PeerLifecycleExits(), exits+1, "the lifecycle exit the completed teardown recorded")
 }
 
-// TestResolvedOrphanPostReturnMakesNoTTLDecrease pins that the resolved-orphan entry decreases no
-// TTL count for an ordinary or a terminal-shaped result (the next accepted block then expires
-// the record) and that a terminal result still stops the walk.
+// TestResolvedOrphanPostReturnMakesNoTTLDecrease: the resolved-orphan entry decreases no count for an ordinary or a
+// terminal-shaped result, and a terminal result stops the walk.
 func TestResolvedOrphanPostReturnMakesNoTTLDecrease(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)

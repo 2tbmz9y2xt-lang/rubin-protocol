@@ -167,10 +167,11 @@ type peer struct {
 }
 
 // NewService validates and normalizes cfg, then claims the SyncEngine's DA relay
-// state (the first successful claimant keeps the detached-reorg hook), and as
-// its final step publishes this Service as the current DA TTL binding
-// (RUBIN_COMPACT_BLOCKS.md Section 5).
-// A failed construction leaves the binding unchanged; Close never clears it.
+// state (the first successful claimant keeps the detached-reorg hook; an earlier
+// claim or binding refuses no later construction), and as its final step publishes
+// this OPEN Service as the current DA TTL binding (RUBIN_COMPACT_BLOCKS.md Section 5).
+// Construction and publication change no DA record, count or claim; a failed
+// construction leaves the binding unchanged; Close never clears it.
 func NewService(cfg ServiceConfig) (*Service, error) {
 	if err := validateServiceConfig(cfg); err != nil {
 		return nil, err
@@ -295,20 +296,21 @@ func (s *Service) acquireWork() bool {
 	return true
 }
 
-// enterDATTLMutationLeased is this Service's own nested DA TTL entry, passed by
-// its own peer worker into an apply that already runs under the worker's
-// lease: it registers and releases nothing and never reads the binding.
+// enterDATTLMutationLeased is this Service's own nested DA TTL entry for an apply
+// that runs under this Service's worker lease (applyBlockWithReorg passes it): it
+// registers and releases nothing and never reads the binding.
 func (s *Service) enterDATTLMutationLeased(decrease func() error) error {
 	return decrease()
 }
 
 // EnterDATTLMutation is this Service's own DA TTL entry under no Service lease
-// (RUBIN_L1_P2P_AUX.md Section 5). It runs inside the canonical transition's
-// exclusive ChainState admission guard, never reacquires that guard and takes no
-// lock any path holds while waiting for it. It registers one call lease, or returns
-// "service already closed" with zero effects once Close published the non-OPEN
-// state; otherwise it runs decrease once, returns its result unchanged and releases
-// the lease once, unwind included. It never reads the binding, retries or falls back.
+// (RUBIN_L1_P2P_AUX.md Section 5). Called inside the canonical transition's
+// exclusive ChainState admission guard, it never reacquires that guard and takes
+// no lock any path holds while waiting for it. It registers one call lease, or
+// returns "service already closed" with zero effects once Close published the
+// non-OPEN state; otherwise it runs decrease once, returns its result unchanged and
+// releases the lease once; a panic in decrease propagates unrecovered after that
+// release. It never reads the binding, retries or falls back.
 func (s *Service) EnterDATTLMutation(decrease func() error) error {
 	if !s.acquireWork() {
 		return errServiceClosed

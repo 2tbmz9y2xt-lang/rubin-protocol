@@ -113,15 +113,14 @@ type SyncEngine struct {
 	daRelay          *DARelayState
 	daRelayClaimed   bool
 	reorgDAAdmission func([]byte) (func(bool), error)
-	// daTTLBinding is the retained DA owner's current TTL binding, nil while absent
-	// (RUBIN_COMPACT_BLOCKS.md Section 5);
-	// its atomic operations are the one order of publications, selections and identity reads.
-	// It holds one Service whose own method is the entry, so no other Service's entry can
-	// populate it.
+	// daTTLBinding is the current DA TTL binding, nil while absent
+	// (RUBIN_COMPACT_BLOCKS.md Section 5): the value PublishDATTLBinding last stored,
+	// whose EnterDATTLMutation is the entry. Its atomic operations are the one
+	// order of publications, selections and identity reads.
 	daTTLBinding atomic.Pointer[DATTLMutationService]
-	// daTTLLease is the lease-owning Service's nested DA TTL entry for the one
-	// apply running under mutationMu, nil under no Service lease; it is written
-	// and read only while mutationMu is held.
+	// daTTLLease is the lease argument of the ApplyBlockWithReorgDeferredUnderLease
+	// call running under mutationMu, nil otherwise; that call sets it and clears it
+	// while it holds mutationMu.
 	daTTLLease         func(decrease func() error) error
 	cfg                SyncConfig
 	stderr             io.Writer
@@ -347,6 +346,11 @@ func validateGenesisIdentityPair(chainID, genesisHash, expectedChainID, expected
 // nonterminal apply error on an unlatched engine whose recheck finds a tip
 // another writer installed on the shared ChainState.
 //
+// With a bound DA relay, an ACCEPTED/NEW genesis publication selects the current
+// binding's EnterDATTLMutation once inside the exclusive admission guard, an
+// absent binding invokes nothing, the entry result changes no returned error or
+// latch, and a panic in the entry propagates (RUBIN_COMPACT_BLOCKS.md Section 5).
+//
 // Defensive nil-receiver guard mirrors the pattern used by other exported
 // SyncEngine methods (HeaderSyncRequest, RecordBestKnownHeight, ...). Other
 // exported methods are nil-safe and there are existing tests that exercise
@@ -471,6 +475,12 @@ func raceTolerantBootstrapResult(applyErr error, hasTip, latched bool) error {
 //     staged rows stay noncanonical until an index commit names them, and the
 //     checkpoint row belongs to old and planned-new alike. A latched outcome
 //     likewise publishes nothing and keeps admission closed.
+//
+// With a bound DA relay, only (summary, nil) selects, once after its publication
+// and inside the exclusive admission guard, the current binding's
+// EnterDATTLMutation (RUBIN_COMPACT_BLOCKS.md Section 5); an absent binding
+// invokes nothing. The entry result changes no returned value or latch; a panic
+// in the entry propagates out of ApplyBlock and nothing is returned.
 //
 // Nil-safe on the receiver, like the other exported SyncEngine methods.
 func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
@@ -701,13 +711,13 @@ func (s *SyncEngine) ClaimDARelayState(expectedRelay *DARelayState, admitDetache
 // Precondition: the canonical transition calls it while holding the ChainState
 // admission guard exclusively; the entry and decrease run inside that hold, never
 // reacquire the guard and take no lock that any path holds while waiting for it.
-// EnterDATTLMutation, called for a transition under no Service lease,
-// registers exactly one call lease with that Service, admitted only while it is
-// OPEN; when DRAINING or CLOSED it returns the Service's stable closed error
-// without calling decrease. Once admitted it calls decrease exactly once, returns
-// its result unchanged, and releases the lease exactly once on every exit,
-// unwind included. It never consults the binding; a refusal causes no retry,
-// fallback, other Service or deferred decrease.
+// An implementation's EnterDATTLMutation, called under no Service lease, registers
+// exactly one call lease with that Service, admitted only while it is OPEN; when
+// DRAINING or CLOSED it returns the Service's stable closed error without calling
+// decrease. Once admitted it calls decrease exactly once, returns its result
+// unchanged and releases the lease exactly once; a panic in decrease propagates
+// unrecovered after that release. It never consults the binding; a refusal causes
+// no retry, fallback, other Service or deferred decrease.
 type DATTLMutationService interface {
 	EnterDATTLMutation(decrease func() error) error
 }

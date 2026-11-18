@@ -257,8 +257,8 @@ type daRelayRelationLink struct {
 	record         *daRelayRecordRow
 }
 
-// daRelayIncompleteKey is the relation bucket of every present State A and State B record row,
-// so the in-guard TTL body walks exactly those rows and never a State C row.
+// daRelayIncompleteKey keys the relation bucket that publishRecord links each present State A or
+// State B record row into; incompleteKeys walks only that bucket.
 var daRelayIncompleteKey = daRelayRelationKey{dimension: 6}
 
 type daRelayRelations struct {
@@ -379,8 +379,8 @@ func (r *daRelayRelations) prepareIncomplete(p *daRelayRelationPublication, row 
 	row.incomplete = daRelayRelationLink{bucket: r.prepareBucket(p, daRelayIncompleteKey), record: row}
 }
 
-// incompleteKeys lists the keys of the State A and State B record rows; the walk is bounded by
-// those rows.
+// incompleteKeys lists the keys of the rows linked in the State A/B bucket, in link order; the
+// walk is bounded by those rows.
 func (r *daRelayRelations) incompleteKeys() [][32]byte {
 	bucket := r.buckets[daRelayIncompleteKey]
 	if bucket == nil {
@@ -574,7 +574,7 @@ func (r *daRelayRelations) removeLocator(key [32]byte) {
 	r.publish(p)
 }
 
-// scalarRecord replaces a present row's value in place; every caller keeps the record's state,
+// scalarRecord replaces a present row's value in place. Precondition: value keeps the row's state,
 // so the row's State A/B bucket membership stays exact.
 func (r *daRelayRelations) scalarRecord(key [32]byte, value daRelaySetRecord) {
 	r.sets[key].value = value
@@ -769,14 +769,14 @@ type DARelayState struct {
 	// and may take the owner mutex. Nil at construction; retained-state images
 	// never copy it.
 	completeHook func(daCompleteStage, *daCompleteCommitPlan)
-	// ttlHook, when set by package tests, runs once at each reached stage of
+	// ttlHook, when non-nil, runs once at each reached stage of
 	// one in-guard TTL decrease: daTTLPlanned after the plan and its record,
 	// locator and accounting checks, before a bound relay's owner, owner-token
 	// and victim-claim checks and before the first mutation; daTTLApplied after
 	// the last apply mutation and before the body returns. Both run with s.mu
 	// held and, on a bound relay at daTTLApplied, the owner mutex held. It must
-	// not take either mutex. Nil at construction; retained-state images never
-	// copy it.
+	// not take either mutex. Nil at construction; cloneForAtomicBatchLocked does
+	// not copy it.
 	ttlHook func(daTTLStage)
 }
 

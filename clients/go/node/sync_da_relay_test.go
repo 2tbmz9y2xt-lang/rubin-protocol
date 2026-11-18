@@ -591,8 +591,7 @@ func TestCanonicalDAImagePublishesOnlyForNew(t *testing.T) {
 }
 
 // TestCanonicalDAWritersCannotInterleaveWithTheTransition is the barrier
-// schedule for all four fenced production writers (the DA TTL decrease runs
-// inside the transition's own exclusive hold instead): each one launched while the
+// schedule for the four fenced production writers listed below: each one launched while the
 // admission WRITE guard is held blocks until the guard is released, so no writer
 // can land between a D preparation and its publication. It is the deterministic
 // negative for removing any single fence.

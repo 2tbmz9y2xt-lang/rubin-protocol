@@ -86,6 +86,12 @@ func (c *reorgDACompletions) finish() {
 //     noncanonical, and startup replays the unchanged canonical index forward
 //     from that common row.
 //
+// With a bound DA relay, only an ACCEPTED/NEW (summary, nil) selects, once after
+// its publication and inside the exclusive admission guard, the current binding's
+// EnterDATTLMutation (RUBIN_COMPACT_BLOCKS.md Section 5); a stored side-branch
+// block and an absent binding invoke nothing. The entry result changes no returned
+// value, latch or requeue; a panic in the entry propagates and nothing is returned.
+//
 // Nil-safe on the receiver, like the other exported SyncEngine methods.
 func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
 	summary, finish, err := s.ApplyBlockWithReorgDeferred(blockBytes, prevTimestamps)
@@ -98,21 +104,26 @@ func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uin
 // it synchronously and immediately after releasing its outer canonical lock,
 // including on returned error. finish is serial and idempotent.
 // A panic before handoff cancels pending leases, including diagnostic panics.
+// With a bound DA relay, only an ACCEPTED/NEW (summary, nil) selects, once inside
+// the exclusive admission guard, the current binding's EnterDATTLMutation, and an
+// absent binding invokes nothing; the entry result changes no returned value,
+// latch or requeue, and a panic in the entry propagates and cancels pending leases
+// (RUBIN_COMPACT_BLOCKS.md Section 5).
 func (s *SyncEngine) ApplyBlockWithReorgDeferred(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, func(), error) {
 	return s.ApplyBlockWithReorgDeferredUnderLease(blockBytes, prevTimestamps, nil)
 }
 
 // ApplyBlockWithReorgDeferredUnderLease is ApplyBlockWithReorgDeferred for a
-// caller that holds a Service call lease. lease is that lease-owning Service's
-// own nested DA TTL entry; the Service is already associated with the
-// publication's exact retained DA owner, and a foreign-owner association is
-// neither repaired by a binding lookup nor remapped to a new public apply error
-// (RUBIN_COMPACT_BLOCKS.md Section 5). An ACCEPTED/NEW publication of this apply
-// invokes lease once as a nested callee that registers and releases nothing and
-// never reads the binding (RUBIN_L1_P2P_AUX.md Section 5), while the transition
-// holds the ChainState admission guard exclusively; it never reacquires that
-// guard and takes no lock that any path holds while waiting for it. A nil lease
-// is ApplyBlockWithReorgDeferred, which selects from the current binding.
+// caller holding a Service call lease. Precondition: lease is that Service's own
+// nested DA TTL entry, associated with this engine's DA relay; no binding lookup
+// repairs or remaps a foreign association (RUBIN_COMPACT_BLOCKS.md Section 5).
+// Only an ACCEPTED/NEW publication invokes lease, once, inside the exclusive
+// admission guard, as a nested callee that registers and releases nothing and
+// never reads the binding (RUBIN_L1_P2P_AUX.md Section 5); lease does not reacquire
+// that guard or take a lock any path holds while waiting for it. Its result
+// changes no returned summary, finish, error, latch or requeue; a panic in it
+// propagates and cancels pending leases. A nil lease selects from the current
+// binding instead.
 func (s *SyncEngine) ApplyBlockWithReorgDeferredUnderLease(blockBytes []byte, prevTimestamps []uint64, lease func(decrease func() error) error) (*ChainStateConnectSummary, func(), error) {
 	completions := &reorgDACompletions{}
 	transferred := false

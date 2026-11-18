@@ -6709,9 +6709,9 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	// OWNED CALLERS: each owner-aware entrypoint is named once, in its wrapper; the legacy roots never.
 	refs := productionReferenceCensus(t, "releaseOwnerReadyPeerQuota", "releasePeerQuotaKey", "advanceOrphanTTL", "prepareCanonicalDAImage", "advanceOwnerReadyTTLInGuard")
 	require(t, reflect.DeepEqual(refs, map[string][]string{"releaseOwnerReadyPeerQuota": {"ReleasePeerQuotaKey"}, "releasePeerQuotaKey": nil, "advanceOrphanTTL": nil, "prepareCanonicalDAImage": nil, "advanceOwnerReadyTTLInGuard": {"enterDATTL"}}), "production references=%v", refs)
-	// The fenced TTL paths are deleted, so no production declaration of them remains.
+	// No production file declares or names one of the listed identifiers.
 	for _, gone := range []string{"AdvanceOrphanTTL", "advanceOwnerReadyTTL", "advanceDAOrphanTTL", "ownerReadyTTLTickVictims", "tickOwnerReadyTTLRecordLocked"} {
-		require(t, len(productionDeclarations(t, gone)) == 0, "deleted fenced TTL function %s is declared again", gone)
+		require(t, len(productionDeclarations(t, gone)) == 0, "a production file declares or names %s", gone)
 	}
 	// `f := s.advanceOwnerReadyTTLInGuard` is a bare SelectorExpr with no CallExpr; the identifier
 	// census must count it, or a second activation through a method value would pass.

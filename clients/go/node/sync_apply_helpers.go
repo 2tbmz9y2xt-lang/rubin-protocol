@@ -93,9 +93,9 @@ type canonicalTransitionPlan struct {
 	// so the plan afterwards retains only charged metadata.
 	staged []canonicalStagedRow
 
-	// daTTLAccepted is set only by the two ACCEPTED apply entries (direct connect
-	// and preferred branch), so a NEW publication of any other initiator, such as
-	// DisconnectTip, invokes no DA TTL entry (RUBIN_COMPACT_BLOCKS.md Section 5).
+	// daTTLAccepted marks the plan of an ACCEPTED apply (direct connect or
+	// preferred branch); publishCanonicalTransition invokes the DA TTL entry only
+	// for a NEW publication of a marked plan (RUBIN_COMPACT_BLOCKS.md Section 5).
 	daTTLAccepted bool
 }
 
