@@ -8,6 +8,7 @@ import (
 	"maps"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -907,6 +908,59 @@ func TestDATTLCallbackDecrementReachability(t *testing.T) {
 	}
 }
 
+// TestDATTLCallbackAcceptedMarkerCensus pins every production use of the transition's ACCEPTED
+// marker: only the direct connect and preferred branch applies set it, to true, and only
+// publishCanonicalTransition reads it, so no other initiator invokes a DA TTL entry.
+func TestDATTLCallbackAcceptedMarkerCensus(t *testing.T) {
+	var uses []string
+	walkProductionGoFiles(t, "accepted marker census", func(path string, file *ast.File) {
+		for _, decl := range file.Decls {
+			enclosing := "package-level " + filepath.Base(path)
+			if function, ok := decl.(*ast.FuncDecl); ok {
+				enclosing = function.Name.Name
+			}
+			uses = append(uses, daTTLAcceptedMarkerUses(decl, enclosing)...)
+		}
+	})
+	slices.Sort(uses)
+	want := []string{"set applyCanonicalParsedBlockTracked true", "set applyPreferredBranch true", "use package-level sync_apply_helpers.go", "use publishCanonicalTransition"}
+	require(t, reflect.DeepEqual(uses, want), "daTTLAccepted uses=%q, want %q", uses, want)
+}
+
+// daTTLAcceptedMarkerUses lists each daTTLAccepted identifier in decl: an assignment target as
+// "set <enclosing> <right-hand identifier>", every other occurrence as "use <enclosing>".
+func daTTLAcceptedMarkerUses(decl ast.Node, enclosing string) []string {
+	var uses []string
+	assigned := map[*ast.Ident]bool{}
+	ast.Inspect(decl, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range n.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "daTTLAccepted" {
+					assigned[sel.Sel] = true
+					uses = append(uses, "set "+enclosing+" "+daTTLMarkerValue(n, i))
+				}
+			}
+		case *ast.Ident:
+			if n.Name == "daTTLAccepted" && !assigned[n] {
+				uses = append(uses, "use "+enclosing)
+			}
+		}
+		return true
+	})
+	return uses
+}
+
+func daTTLMarkerValue(assign *ast.AssignStmt, i int) string {
+	if len(assign.Rhs) != len(assign.Lhs) {
+		return "multi-value"
+	}
+	if value, ok := assign.Rhs[i].(*ast.Ident); ok {
+		return value.Name
+	}
+	return "expression"
+}
+
 // TestDATTLCallbackLatchedNewInvokesNothing pins that a TERMINAL_PERSISTENCE(new) publication,
 // which publishes the complete NEW image of an ACCEPTED apply and then latches, invokes no DA TTL
 // entry (RUBIN_COMPACT_BLOCKS.md Section 5): the bound entry, attempted once by the preceding
@@ -964,46 +1018,69 @@ func daTTLEngineRecords(t *testing.T, f *pendingOutpointSyncFixture) (*daNonRepl
 
 // TestDATTLCallbackEndToEndBodyRefusalConsumed drives one ACCEPTED/NEW publication through the
 // real SyncEngine and DA relay, by the no-lease selection and by the lease entry; the entry gives
-// one State B record of the published image an inconsistent stored value before it runs the
-// in-guard body, which refuses with its own error. The
-// apply still returns its ACCEPTED/NEW summary and a nil error, and the whole DA image and owner
-// are unchanged (RUBIN_COMPACT_BLOCKS.md Section 5).
+// one State B record an inconsistent stored value, or unbinds the exact owner token of the State
+// A member, before it runs the in-guard body, which refuses with its own error. The apply still
+// returns its ACCEPTED/NEW summary reporting the block for relay and a nil error, the engine is
+// not latched, the no-lease lease is registered and released once, and the whole DA image and
+// owner are unchanged (RUBIN_COMPACT_BLOCKS.md Section 5).
 func TestDATTLCallbackEndToEndBodyRefusalConsumed(t *testing.T) {
-	for _, leased := range []bool{false, true} {
-		t.Run(fmt.Sprintf("leased=%v", leased), func(t *testing.T) {
-			f := newPendingOutpointSyncFixture(t)
-			x, _, stateB := daTTLEngineRecords(t, f)
-			var results []error
-			var before daRelayStateView
-			var ownerBefore *PendingOutpointOwner
-			entry := func(decrease func() error) error {
-				x.mutateRelay(func(s *DARelayState) {
-					mutateOwnerReadyRecord(s, stateB, func(record *daRelaySetRecord) { record.wireBytes = 1 })
-				})
-				before, ownerBefore = daRelayStateSnapshot(x.relay), cloneDAAdmissionOwner(x.mp.pendingOutpoints)
-				err := decrease()
-				results = append(results, err)
-				return err
-			}
-			height := f.tipHeight + 1
-			coinbase := reorgTestCoinbaseForAddress(t, height, consensus.BlockSubsidy(height, f.alreadyGenerated), f.sourceAddress)
-			block := buildSingleTxBlock(t, f.tipHash, f.target, 500, coinbase)
-			var summary *ChainStateConnectSummary
-			var err error
-			if leased {
-				var finish func()
-				summary, finish, err = f.engine.ApplyBlockWithReorgDeferredUnderLease(block, nil, entry)
-				finish()
-			} else {
-				f.engine.PublishDATTLBinding(&daTTLFuncService{enter: entry})
-				summary, err = f.engine.ApplyBlock(block, nil)
-			}
-			require(t, err == nil && summary != nil && summary.BlockHeight == height, "apply=(%+v,%v), want ACCEPTED/NEW", summary, err)
-			require(t, len(results) == 1 && errors.Is(results[0], errDARelayImageIncompatible), "entry results=%v, want one %v", results, errDARelayImageIncompatible)
-			require(t, !f.engine.TerminalFaulted(), "the consumed refusal latched the engine")
-			requireDANonReplayUnchanged(t, x.relay, x.mp.pendingOutpoints, before, ownerBefore)
-		})
+	corruptions := map[string]func(*daNonReplayFixture, [32]byte, [32]byte){
+		"inconsistent stored value": func(x *daNonReplayFixture, _, stateB [32]byte) {
+			x.mutateRelay(func(s *DARelayState) {
+				mutateOwnerReadyRecord(s, stateB, func(record *daRelaySetRecord) { record.wireBytes = 1 })
+			})
+		},
+		"unbound owner token": func(x *daNonReplayFixture, stateA, _ [32]byte) {
+			token := daRelayStateSnapshot(x.relay).sets[stateA].chunks[0].member.token
+			ownerReadyEditOwner(x, func(o *PendingOutpointOwner) { o.byToken[token].txid[0] ^= 0xff })
+		},
 	}
+	for name, corrupt := range corruptions {
+		for _, leased := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/leased=%v", name, leased), func(t *testing.T) {
+				requireDATTLBodyRefusalConsumed(t, corrupt, leased)
+			})
+		}
+	}
+}
+
+func requireDATTLBodyRefusalConsumed(t *testing.T, corrupt func(*daNonReplayFixture, [32]byte, [32]byte), leased bool) {
+	f := newPendingOutpointSyncFixture(t)
+	x, stateA, stateB := daTTLEngineRecords(t, f)
+	var results []error
+	var before daRelayStateView
+	var ownerBefore *PendingOutpointOwner
+	entry := func(decrease func() error) error {
+		corrupt(x, stateA, stateB)
+		before, ownerBefore = daRelayStateSnapshot(x.relay), cloneDAAdmissionOwner(x.mp.pendingOutpoints)
+		err := decrease()
+		results = append(results, err)
+		return err
+	}
+	height := f.tipHeight + 1
+	coinbase := reorgTestCoinbaseForAddress(t, height, consensus.BlockSubsidy(height, f.alreadyGenerated), f.sourceAddress)
+	block := buildSingleTxBlock(t, f.tipHash, f.target, 500, coinbase)
+	var summary *ChainStateConnectSummary
+	var err error
+	var acquired, released int
+	if leased {
+		var finish func()
+		summary, finish, err = f.engine.ApplyBlockWithReorgDeferredUnderLease(block, nil, entry)
+		finish()
+	} else {
+		f.engine.PublishDATTLBinding(&daTTLFuncService{enter: func(decrease func() error) error {
+			acquired++
+			defer func() { released++ }()
+			return entry(decrease)
+		}})
+		summary, err = f.engine.ApplyBlock(block, nil)
+		require(t, acquired == 1 && released == 1, "no-lease leases acquired=%d released=%d, want 1 and 1", acquired, released)
+	}
+	require(t, err == nil && summary != nil && summary.BlockHeight == height, "apply=(%+v,%v), want ACCEPTED/NEW", summary, err)
+	require(t, len(summary.CanonicalAppliedBlocks) == 1 && summary.CanonicalAppliedBlocks[0].Hash == summary.BlockHash, "relayed blocks=%+v, want the applied block", summary.CanonicalAppliedBlocks)
+	require(t, len(results) == 1 && errors.Is(results[0], errDARelayImageIncompatible), "entry results=%v, want one %v", results, errDARelayImageIncompatible)
+	require(t, !f.engine.TerminalFaulted(), "the consumed refusal latched the engine")
+	requireDANonReplayUnchanged(t, x.relay, x.mp.pendingOutpoints, before, ownerBefore)
 }
 
 // daTTLFuncService is a binding whose entry is enter.

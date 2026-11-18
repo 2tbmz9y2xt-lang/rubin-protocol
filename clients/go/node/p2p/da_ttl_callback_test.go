@@ -516,15 +516,23 @@ func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
 	stateC := [][]byte{probe.f.tx(daTxSpec{kind: 0x01, daID: zID, chunkCount: 1, commitment: [][]byte{zCommitment[:]}}), probe.f.chunk(zID, 0, []byte("lease-z"))}
 	probe.f.admit(stateC[0], "lease-c")
 	probe.f.admit(stateC[1], "lease-c")
+	yInput := mustParseP2PTx(t, probe.commit).Inputs[0]
+	spendY := mustBuildSignedP2PTx(t, h.chainState.Utxos, []consensus.Outpoint{{Txid: yInput.PrevTxid, Vout: yInput.PrevVout}}, 100_000, 100_000, 9581, probe.f.signer, probe.f.address, probe.f.address)
 	relay(2)
 	probe.f.requireRetained(probe.commit, "Y at count 1")
+	var conflict *node.TxAdmitError
+	require(t, errors.As(h.mempool.AddTx(spendY), &conflict) && conflict.Kind == node.TxAdmitConflict, "a spend of Y's input while Y holds its claim: want TxAdmitConflict")
 	relay(3)
-	probe.f.requireAbsent(probe.commit, "Y removed by the lease-path decrease at count 1")
+	must(t, h.mempool.AddTx(spendY), "a spend of Y's input after the expiry released Y's claim")
+	_, err := probe.f.probe(probe.commit)
+	require(t, errors.As(err, &conflict) && conflict.Kind == node.TxAdmitConflict, "Y after its expiry: probe err=%v, want the conflict of an absent member, not its DUPLICATE", err)
 	probe.f.requireRetained(stateA, "X at count 1")
 	probe.f.requireRetained(stateC[0], "Z commit unchanged")
 	probe.f.requireRetained(stateC[1], "Z chunk unchanged")
 	relay(4)
 	probe.f.requireAbsent(stateA, "X removed at the next lease-path decrease")
+	probe.f.requireRetained(stateC[0], "Z commit unchanged where a State A record expires")
+	probe.f.requireRetained(stateC[1], "Z chunk unchanged where a State A record expires")
 	require(t, s2.attempts.Load() == 0, "the OPEN bound S2 recorded %d entry attempts, want 0", s2.attempts.Load())
 }
 
@@ -540,6 +548,25 @@ func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
 	}()
 	require(t, recovered == "ttl body panic", "panic value=%v, want the original propagated unrecovered", recovered)
 	requireReturned(t, lifecycleClose(h.service), "Close after the panicking entry")
+}
+
+// TestDATTLCallbackEndToEndErrorReleasesLease pins the entry on a decrease that returns an error:
+// the decrease runs once under one registered lease, on which a Close started inside it waits,
+// the entry returns that error unchanged, and the lease is released once so Close returns.
+func TestDATTLCallbackEndToEndErrorReleasesLease(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	refusal := errors.New("ttl body refusal")
+	var closed chan error
+	calls := 0
+	got := h.service.EnterDATTLMutation(func() error {
+		calls++
+		closed = lifecycleClose(h.service)
+		waitDraining(t, h.service)
+		requireStillBlocked(t, closed, "Close while the registered decrease runs")
+		return refusal
+	})
+	require(t, got == refusal && calls == 1, "entry=%v after %d decrease calls, want the decrease's own error after 1", got, calls)
+	requireReturned(t, closed, "Close after the entry released its lease")
 }
 
 // TestDATTLCallbackEndToEndPanicWhileCloseWaits pins the panic while Close waits
