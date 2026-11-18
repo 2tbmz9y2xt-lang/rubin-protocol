@@ -671,6 +671,7 @@ func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 	require(t, entry.attempts.Load() == 0, "binding entry attempts=%d, want 0", entry.attempts.Load())
 	relayAccepted(t, p, source, 3)
 	probe.f.requireAbsent(x, "the State A chunk the next counted publication expired")
+	probe.f.requireAbsent(probe.commit, "the State B commit the next counted publication expired")
 }
 
 // TestDATTLCallbackEndToEndDrainingBindingRefused: a DRAINING current binding S2 refuses with zero DA effects and no
@@ -760,6 +761,8 @@ func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 	probe.apply()
 	probe.f.requireAbsent(probe.commit, "the third decrease expired the original record")
 	probe.f.requireRetained(fresh, "the record admitted after the first decrease at count 1")
+	probe.apply()
+	probe.f.requireAbsent(fresh, "the fourth counted publication expired the record at count 1")
 }
 
 // TestDATTLCallbackEndToEndPreCommitLatchInvokesNothing: a transition latching before the commit makes no entry attempt.
@@ -813,6 +816,9 @@ func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 	requireStillBlocked(t, closeDone, "Close(S) while the worker's lease is held")
 	release()
 	requireReturned(t, closeDone, "Close(S) after the worker's lease is released")
+	probe.next = summary.BlockHeight + 1
+	probe.apply()
+	probe.f.requireAbsent(second, "the next counted publication expired the record at count 1")
 }
 
 // TestDATTLCallbackEndToEndAbsentBinding: with no Service, three publications decrease nothing until a Service binds.
@@ -844,25 +850,36 @@ func TestDATTLCallbackEndToEndAbsentBinding(t *testing.T) {
 	f.requireAbsent(x, "the bound Service's third admitted decrease expired the record")
 }
 
-// requireAbsentBindingDecreasesNothing: three publications under no binding keep a commit at 3; DisconnectTip restores.
-func requireAbsentBindingDecreasesNothing(t *testing.T, sink *testHarness) {
+// requireAbsentBindingDecreasesNothing: three publications under no binding keep a commit at 3, so the Service that
+// NewService(cfg) then binds expires it at its third decrease; DisconnectTip restores the tip; returns that Service.
+func requireAbsentBindingDecreasesNothing(t *testing.T, sink *testHarness, cfg ServiceConfig) *Service {
 	t.Helper()
-	source := newTestHarness(t, int(sink.chainState.Height)+4, "127.0.0.1:0", nil)
+	source := newTestHarness(t, int(sink.chainState.Height)+7, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, sink)
 	commit := f.commit(daRelayTestID(0xe9), 2)
 	f.admit(commit, "127.0.0.1:19111")
 	start := sink.chainState.Height + 1
-	for height := start; height < start+3; height++ {
-		summary, err := sink.syncEngine.ApplyBlock(blockAtHeight(t, source, height), nil)
-		require(t, err == nil && summary != nil && summary.BlockHeight == height, "ApplyBlock(%d)=(%+v,%v), want ACCEPTED/NEW", height, summary, err)
+	apply := func(from, to uint64) {
+		t.Helper()
+		for height := from; height < to; height++ {
+			summary, err := sink.syncEngine.ApplyBlock(blockAtHeight(t, source, height), nil)
+			require(t, err == nil && summary != nil && summary.BlockHeight == height, "ApplyBlock(%d)=(%+v,%v), want ACCEPTED/NEW", height, summary, err)
+		}
 	}
+	apply(start, start+3)
 	require(t, sink.syncEngine.DATTLBindingService() == nil, "an apply published a binding")
-	f.requireRetained(commit, "three publications under an absent binding decreased nothing")
-	for range 3 {
+	service, err := NewService(cfg)
+	require(t, err == nil && sink.syncEngine.DATTLBindingService() == node.DATTLMutationService(service), "NewService after the absent-binding publications: %v", err)
+	apply(start+3, start+5)
+	f.requireRetained(commit, "count 1 after two decreases through the bound Service: the absent binding kept count 3")
+	apply(start+5, start+6)
+	f.requireAbsent(commit, "the bound Service's third decrease expired the record")
+	for range 6 {
 		_, err := sink.syncEngine.DisconnectTip()
 		must(t, err, "DisconnectTip back to the starting tip")
 	}
 	require(t, sink.chainState.Height+1 == start, "tip height=%d after the disconnects, want %d", sink.chainState.Height, start-1)
+	return service
 }
 
 // TestDATTLCallbackEndToEndSnapshotBeforePublication: S2 bound after S1's snapshot gets no attempt; S1 admits once.
