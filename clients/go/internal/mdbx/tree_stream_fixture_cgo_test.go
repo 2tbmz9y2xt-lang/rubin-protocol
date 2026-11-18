@@ -8147,6 +8147,93 @@ func psfOldOnlyResidual(t *testing.T) {
 	})
 }
 
+// psfStreamCase is one stored residual family read through a large-image selector stream (domain nil) or
+// a raw obsolete domain stream; keys are its three stored keys in order and length is keys[1]'s value length.
+type psfStreamCase struct {
+	rank     uint8
+	selector LargeImageSelectorV1
+	domain   *obsoleteDomain
+	keys     [][]byte
+	length   uint64
+}
+
+type psfStreamResult struct {
+	equal       bool
+	err         error
+	extra       uint64
+	maxKey      uint64
+	comparisons uint64
+}
+
+// stream reads the family from r with the listed keys excluded as exact plan targets.
+func (c psfStreamCase) stream(r *Reader, out [][]byte) largeResidualStream {
+	plan := make([]ownedMutation, len(out))
+	for i, key := range out {
+		plan[i] = ownedMutation{dbi: DBI{Rank: c.rank}, key: key}
+	}
+	if c.domain != nil {
+		return largeResidualStream{reader: r, domain: c.domain, seek: c.domain.seek(r.maxKey), plan: plan}
+	}
+	return largeResidualStream{reader: r, selector: c.selector, seek: bytes.Clone(c.selector.Hash[:]), plan: plan}
+}
+
+// run compares the OLD stream (oldOut excluded) with the candidate stream (newOut excluded) over one View
+// Reader under a typed scope funded by ledger, and counts native payload comparisons.
+func (c psfStreamCase) run(t *testing.T, s *Store, oldOut, newOut [][]byte, ledger treeLedgerV1) psfStreamResult {
+	t.Helper()
+	var res psfStreamResult
+	observed, err := FixturePairReadObservation(s, func(uint32) {}, func() {
+		mustEnvironment(t, s.View(func(r *Reader) error {
+			budget := &treePairReadBudgetV1{ledger: ledger}
+			fund := &largeImageScope{maxKey: r.maxKey, databaseID: [32]byte{1}, pairBudget: budget}
+			left, right := c.stream(r, oldOut), c.stream(r, newOut)
+			res.equal, res.err = obsoleteStreamsEqual(&left, &right, c.rank, fund)
+			res.extra, res.maxKey = budget.extra, r.maxKey
+			return nil
+		}))
+	})
+	mustEnvironment(t, err)
+	res.comparisons = observed.Comparisons
+	return res
+}
+
+// A key only in the OLD stream is an inequality without payload use: before a key on both sides, that
+// key's refused funding is returned, and ample funding admits exactly its one comparison; a trailing OLD
+// key after the candidate stream ends is an inequality after the shared key's comparison.
+func psfStreamOldOnly(t *testing.T) {
+	sc := psfNew(t)
+	hash, undo := psfUndo(t, sc.s)
+	cases := []struct {
+		name string
+		c    psfStreamCase
+	}{
+		{"undo-family", psfStreamCase{rank: 5, selector: LargeImageSelectorV1{Kind: LargeImageUndoFamilyV1, Hash: hash}, keys: undo, length: 1}},
+		{"raw-domain", psfStreamCase{rank: 8, domain: &obsoleteDomain{rank: 8, prefix: obsoleteGenerationLiteral(8), end: true}, keys: obsoleteTreeKeys(obsoleteTreeFamily(8)), length: 32}},
+	}
+	for _, row := range cases {
+		t.Run(row.name, func(t *testing.T) { psfStreamOldOnlyCase(t, sc.s, row.c) })
+	}
+}
+
+func psfStreamOldOnlyCase(t *testing.T, s *Store, c psfStreamCase) {
+	k := c.keys
+	candidate := [][]byte{k[0], k[2]}
+	refusal := errors.New("scope later comparison refusal")
+	res := c.run(t, s, k[2:], candidate, &pairReadTestLedgerV1{err: refusal})
+	if !treeSameErrorV1(res.err, refusal) || res.equal || res.comparisons != 0 {
+		t.Fatalf("later scope refusal lost: %v equal %v comparisons %d", res.err, res.equal, res.comparisons)
+	}
+	for _, oldOut := range [][][]byte{k[2:], k[:1]} {
+		ledger := &pairReadTestLedgerV1{}
+		res = c.run(t, s, oldOut, candidate, ledger)
+		need := 2*c.length + 4*(res.maxKey+1)
+		if res.err != nil || res.equal || res.comparisons != 1 || ledger.held != need || res.extra != need {
+			t.Fatalf("later scope comparison lost: OLD excludes %x: %v equal %v comparisons %d held %d extra %d want %d",
+				oldOut, res.err, res.equal, res.comparisons, ledger.held, res.extra, need)
+		}
+	}
+}
+
 func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("pre-hold-close-window", psfClosedBeforeHold)
 	t.Run("admission-aborts", psfAdmissionAborts)
@@ -8156,6 +8243,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("target-in-family", psfTargetInFamily)
 	t.Run("both-identical-OLD-first", psfBothIdentical)
 	t.Run("old-only-residual", psfOldOnlyResidual)
+	t.Run("old-only-stream", psfStreamOldOnly)
 	t.Run("dormant", psfDormant)
 	t.Run("classes-1-4", psfClassDeletes)
 	t.Run("page-bounds", psfPageBounds)
