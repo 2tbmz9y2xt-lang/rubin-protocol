@@ -466,7 +466,7 @@ func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
 }
 
 // TestDATTLCallbackEndToEndSelection drives the no-lease selection through real ACCEPTED/NEW
-// applies (SyncEngine.ApplyBlock, the RPC miner's apply) over the real DA owner and Services: the
+// applies (SyncEngine.ApplyBlock) over the real DA owner and Services: the
 // bound OPEN Service admits one decrease per publication, AnnounceBlock decreases
 // nothing, a CLOSED current binding refuses with zero DA effects and no fallback while
 // the apply still returns ACCEPTED/NEW, the closed Service's retained
@@ -815,15 +815,16 @@ func TestDATTLCallbackEndToEndEntryErrorConsumed(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the third admitted decrease expired the record")
 }
 
-// TestDATTLCallbackEndToEndLatchedInvokesNothing pins that a latched transition invokes no entry:
-// the bound entry records zero attempts across the latching SyncEngine.ApplyBlock.
-func TestDATTLCallbackEndToEndLatchedInvokesNothing(t *testing.T) {
+// TestDATTLCallbackEndToEndPreCommitLatchInvokesNothing pins that a transition latching before the
+// durable commit invokes no entry: the bound entry records zero attempts across the latching
+// SyncEngine.ApplyBlock.
+func TestDATTLCallbackEndToEndPreCommitLatchInvokesNothing(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	entry := &wrappedTTLEntry{inner: h.service}
 	h.syncEngine.PublishDATTLBinding(entry)
 	latchDAHarness(t, h, source)
-	require(t, entry.attempts.Load() == 0, "latched transition entry attempts=%d, want 0", entry.attempts.Load())
+	require(t, entry.attempts.Load() == 0, "pre-commit latch entry attempts=%d, want 0", entry.attempts.Load())
 }
 
 // TestDATTLCallbackEndToEndDrainingLease pins the lease path while the lease-owning Service is
