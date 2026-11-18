@@ -363,7 +363,7 @@ func requireCommitRetained(t *testing.T, h *testHarness, fixture detachedReorgFi
 	require(t, err == nil && present == want, "%s: commit present=%v err=%v, want present=%v", step, present, err, want)
 }
 
-// TestDATTLCallbackEndToEndReorgRequeueNotDecreased pins the requeue row through a peer's
+// TestDATTLCallbackEndToEndReorgRequeueNotDecreased pins that the requeue is not decreased, through a peer's
 // lease path: a winning reorganization disconnects the sink block carrying one DA commit and
 // chunk while its first block spends the chunk's input, so the requeue retains the commit alone
 // at count 3. The publication that requeued it does not decrease it: it survives the next two
@@ -446,7 +446,7 @@ func observeDARelayPublicImage(t *testing.T, h *testHarness) daRelayPublicImage 
 // TestDATTLCallbackLaterConstructionChangesNoDAState pins that a later construction changes nothing:
 // over a relay populated with a State A chunk and a State B commit, a later NewService S2 (and so
 // its ClaimDARelayState and binding publication) leaves the exported relay image unchanged. Counts
-// and owner tokens are not exported; the node row TestDATTLCallbackBindingChangesNoDAState
+// and owner tokens are not exported; the node test TestDATTLCallbackBindingChangesNoDAState
 // compares them around the same claim and binding steps.
 func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -523,7 +523,7 @@ func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
 }
 
 // TestDATTLCallbackEndToEndPanicWhileCloseWaits pins the panic while Close waits
-// (RUBIN_L1_P2P_AUX.md Section 5, Table D): Close starts while the registered entry runs, reaches
+// (RUBIN_L1_P2P_AUX.md Section 5): Close starts while the registered entry runs, reaches
 // DRAINING and waits on the entry's lease; the decrease then panics, the panic propagates
 // unrecovered, the lease is released once, and the waiting Close returns.
 func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
@@ -596,7 +596,7 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the record the third counted publication expired")
 }
 
-// TestDATTLCallbackEndToEndStoredSideBlockThroughPeer pins the stored non-canonical row on the
+// TestDATTLCallbackEndToEndStoredSideBlockThroughPeer pins the stored non-canonical result on the
 // peer's lease path: a valid side-branch block relayed by a peer is stored non-canonical and
 // decreases nothing, so the commit retained at count 3 survives the next two counted
 // publications and expires only at the third.

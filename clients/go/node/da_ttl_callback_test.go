@@ -102,8 +102,7 @@ func newDATTLCallbackRecords(t *testing.T) (*daNonReplayFixture, daTTLCallbackRe
 	return f, r
 }
 
-// requireDATTLOutsideSelectedUnchanged compares the full DA image and owner outside the selected
-// records: every other record, every locator of another record, and every owner claim and
+// requireDATTLOutsideSelectedUnchanged checks, outside the selected records: every other record, every locator of another record, and every owner claim and
 // outpoint row whose token no selected member holds are unchanged.
 func requireDATTLOutsideSelectedUnchanged(t *testing.T, before, after daRelayStateView, ownerBefore, ownerAfter *PendingOutpointOwner, selected ...[32]byte) {
 	t.Helper()
@@ -663,7 +662,7 @@ func requireDATTLState(t *testing.T, f *daNonReplayFixture, daID [32]byte, want 
 	}
 }
 
-// TestDATTLCallbackEmptiedBucketDropped is the P3 row: removing the last State A/B record leaves
+// TestDATTLCallbackEmptiedBucketDropped pins that removing the last State A/B record leaves
 // no empty State A/B bucket behind, like every member bucket.
 func TestDATTLCallbackEmptiedBucketDropped(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
@@ -790,7 +789,7 @@ func TestDATTLCallbackBindingChangesNoDAState(t *testing.T) {
 // reads the recorded index before and after it and must select an S_j with before <= j <=
 // after+1 (S_after+1 may be published and not yet recorded), so a cached or stale binding fails.
 // A torn Service/entry pair is structurally impossible: the binding is one interface value
-// behind one atomic pointer, and the entry is that Service's own method, so no row tests it.
+// behind one atomic pointer, and the entry is that Service's own method.
 func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	const publications = 400
@@ -821,8 +820,7 @@ func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 	require(t, f.engine.DATTLBindingService() == DATTLMutationService(services[publications-1]), "final binding is not the last publication")
 }
 
-// TestDATTLCallbackRunsInsideTheTransitionHold replaces the retired fenced-writer row of
-// TestCanonicalDAWritersCannotInterleaveWithTheTransition on the new path: with the
+// TestDATTLCallbackRunsInsideTheTransitionHold pins the TTL path's guard order: with the
 // admission guard held exclusively, a ReleasePeerQuotaKey started first parks on the guard, the
 // in-guard TTL body completes under that same hold, the writer does not run before the release,
 // and after it the writer runs against the decreased image without losing it.
@@ -1063,7 +1061,7 @@ func TestDATTLCallbackBodyPanicKeepsWholeImage(t *testing.T) {
 // TestDATTLCallbackEndToEndBodyPanic drives one ACCEPTED/NEW SyncEngine.ApplyBlock through the
 // production selection into a registered no-lease entry and the real body, with a panic injected
 // at each of the two body points: the panic reaches the apply caller unrecovered, the lease is
-// released exactly once so a Close waiting on it returns, the DA relay and owner mutexes are
+// released exactly once so a wait on that lease returns, the DA relay and owner mutexes are
 // free, the image is the complete old or applied one, and the admission guard stays held by the
 // transition's non-deferred release while the engine mutation lock is released.
 func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
@@ -1106,7 +1104,7 @@ func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
 			select {
 			case <-waited:
 			case <-time.After(5 * time.Second):
-				t.Fatal("a Close waiting on the lease is stranded")
+				t.Fatal("a wait on the released lease is stranded")
 			}
 			requireDATTLLocksFree(t, x.relay, x.mp.pendingOutpoints)
 			require(t, !f.engine.chainState.admissionMu.TryLock(), "admission guard released after the unwind")
@@ -1243,7 +1241,7 @@ func (in *daTTLHoldInputs) commit(b testing.TB, daID [32]byte, manifest, batchSi
 	return daTTLHoldRecord{raw: raw, quota: "ttl-hold-b", charge: uint64(len(raw))}
 }
 
-// stateBShape admits commits under one quota identity until the next would exceed
+// stateBShape builds commits for one quota identity until the next would exceed
 // DA_ORPHAN_POOL_SIZE or DA_ORPHAN_COMMIT_OVERHEAD_MAX.
 func (in *daTTLHoldInputs) stateBShape(b testing.TB, name string, tag byte, manifest, batchSig int) daTTLHoldShape {
 	caps := defaultDARelayCaps()
@@ -1283,7 +1281,7 @@ func (in *daTTLHoldInputs) fullRecordPayloads(b testing.TB) []int {
 	return append(slices.Repeat([]int{consensus.CHUNK_BYTES}, int(n)), last)
 }
 
-// stateAShape admits records of chunks with the given payload lengths under fresh da_ids until
+// stateAShape builds records of chunks with the given payload lengths under fresh da_ids until
 // the next record would exceed DA_ORPHAN_POOL_SIZE; each PEER identity takes members in order
 // until the next would exceed DA_ORPHAN_POOL_PER_PEER_MAX. next is the next record's first chunk.
 func (in *daTTLHoldInputs) stateAShape(b testing.TB, name string, tag byte, payloads []int) daTTLHoldShape {

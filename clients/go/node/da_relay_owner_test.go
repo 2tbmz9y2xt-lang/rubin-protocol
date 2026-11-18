@@ -360,7 +360,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 	for path, want := range map[string]string{
 		"da_relay_state.go":          "17fc9dfedd1ec2594af6859499ae10d149674cdf642afa214d47505896678437",
 		"da_relay_record.go":         "2706ab0b65ee400056f6d29e6807d509e937d8d778de5aae5ee36d2a05c8eb11",
-		"da_relay_mutation.go":       "509a260142cf96c8541c9fdbbb50126b115ab348e789deda06ddd81b3a90d46a",
+		"da_relay_mutation.go":       "f734c32fb556781ca8ce8ee5c23fdfb4b950db3c89861c895487c4e87d56d476",
 		"da_complete_commit.go":      "3fb456f5668dff7bc089b0472ccc61c2c263d5c7d3917cd512a20182e45709f5",
 		"da_complete_snapshot.go":    "e1592f7f08d04c2423184a54ed404a86fdaab1057a725fa8acffc7a37f1eb1cc",
 		"sync_da_relay.go":           "54d3cbb55e38cf420724a0da2e353ee240acad3e5a60e191491eb862d04bca8a",
@@ -4535,7 +4535,7 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 	})
 	tail := newService.Body.List
 	require(t, len(tail) >= 4 && tail[len(tail)-4].Pos() == serviceAt, "reorg claim binding mismatch: construction is not immediately before claim")
-	// TTL BINDING: the publication is the one statement between the successful claim and the
+	// The TTL binding publication is the one statement between the successful claim and the
 	// return, so every fallible step precedes it and a refused claim publishes nothing.
 	publish, publishOK := tail[len(tail)-2].(*ast.ExprStmt)
 	require(t, publishOK, "TTL binding publication is not the statement before the return")
@@ -6719,7 +6719,7 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	for _, gone := range []string{"AdvanceOrphanTTL", "advanceOwnerReadyTTL", "advanceDAOrphanTTL", "ownerReadyTTLTickVictims", "tickOwnerReadyTTLRecordLocked"} {
 		require(t, len(productionDeclarations(t, gone)) == 0, "deleted fenced TTL function %s is declared again", gone)
 	}
-	// TEETH: `f := s.advanceOwnerReadyTTLInGuard` is a bare SelectorExpr with no CallExpr; the identifier
+	// `f := s.advanceOwnerReadyTTLInGuard` is a bare SelectorExpr with no CallExpr; the identifier
 	// census must count it, or a second activation through a method value would pass.
 	teeth, parseErr := parser.ParseFile(token.NewFileSet(), "teeth.go", "package node\nfunc wire(s *DARelayState) { f := s.advanceOwnerReadyTTLInGuard; _ = f }", parser.SkipObjectResolution)
 	if parseErr != nil {
@@ -6789,10 +6789,8 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	}
 	// RECORD-LOCAL WORK: the removal arms and their shared retirement helper never call the global locator traversal, the record deep clone
 	// or the Live projector, nor range locators.
-	// The pure-TTL sink arm this scan once carried went with the deleted fenced tick
-	// the in-guard TTL body's record and locator effects are pinned by the
-	// TestDATTLCallbackBody rows.
-	// A bounded shape check, not a proof over arbitrary Go: which rows the retirement arms retire or keep is pinned by the runtime rows (TestAdmitDANonReplayPrunesOutOfRangeClaims, TestOwnerReadyRemovalPeerAndTTLSelectors, the OWNER-READY IN-GUARD BODY row below).
+	// The in-guard TTL body's record and locator effects are pinned by the TestDATTLCallbackBody tests.
+	// A bounded shape check, not a proof over arbitrary Go: which rows the retirement arms retire or keep is pinned by the runtime rows (TestAdmitDANonReplayPrunesOutOfRangeClaims, TestOwnerReadyRemovalPeerAndTTLSelectors, the in-guard body check below).
 	isLocators := func(expr ast.Expr) bool { sel, ok := expr.(*ast.SelectorExpr); return ok && sel.Sel.Name == "locators" }
 	for _, name := range []string{"removeOwnerReadyWholeRecordLocked", "dropOwnerReadyChunksLocked", "projectOwnerReadyRetirementLocked"} {
 		ast.Inspect(mutationFuncs[name].Body, func(node ast.Node) bool {
@@ -6822,7 +6820,7 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	_, err := legacyState.advanceOrphanTTL()
 	after := daRelayStateSnapshot(legacyState)
 	require(t, err == nil && after.sets[legacyID].ttlBlocksRemaining == 1 && after.sets[legacyID].revision == 0 && after.records == 0, "legacy advanceOrphanTTL err=%v record=%+v high-water=%d, want in-place ttl=1 revision=0", err, after.sets[legacyID], after.records)
-	// OWNER-READY IN-GUARD BODY: one in-guard TTL decrease ticks once, mints one revision, keeps the container and backing.
+	// One in-guard TTL decrease ticks once, mints one revision, keeps the container and backing.
 	f, daID := newDANonReplayFixture(t, 1), [32]byte{0x7b}
 	f.ownerReadyChunk(daID, 0, "wrapped", daNonReplayPeer("keep"))
 	f.setOwnerReadyTTL(daID, 3)

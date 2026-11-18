@@ -168,7 +168,8 @@ type peer struct {
 
 // NewService validates and normalizes cfg, then claims the SyncEngine's DA relay
 // state (the first successful claimant keeps the detached-reorg hook), and as
-// its final step publishes this Service as the current Section 5 DA TTL binding.
+// its final step publishes this Service as the current DA TTL binding
+// (RUBIN_COMPACT_BLOCKS.md Section 5).
 // A failed construction leaves the binding unchanged; Close never clears it.
 func NewService(cfg ServiceConfig) (*Service, error) {
 	if err := validateServiceConfig(cfg); err != nil {
@@ -301,12 +302,13 @@ func (s *Service) enterDATTLMutationLeased(decrease func() error) error {
 	return decrease()
 }
 
-// EnterDATTLMutation is this Service's own DA TTL mutation entry for a
-// transition under no Service lease (Table A): it registers one call lease and
-// returns exactly "service already closed" with zero effects once Close has
-// published the non-OPEN state; otherwise it runs decrease once, returns its
-// result unchanged and releases the lease exactly once, unwind included. It
-// never reads the binding, retries or falls back to another Service.
+// EnterDATTLMutation is this Service's own DA TTL entry under no Service lease
+// (RUBIN_L1_P2P_AUX.md Section 5). It runs inside the canonical transition's
+// exclusive ChainState admission guard, never reacquires that guard and takes no
+// lock any path holds while waiting for it. It registers one call lease, or returns
+// "service already closed" with zero effects once Close published the non-OPEN
+// state; otherwise it runs decrease once, returns its result unchanged and releases
+// the lease once, unwind included. It never reads the binding, retries or falls back.
 func (s *Service) EnterDATTLMutation(decrease func() error) error {
 	if !s.acquireWork() {
 		return errServiceClosed
@@ -338,7 +340,7 @@ func (s *Service) workAuthorized() bool {
 // mutation or broadcast: once Close has published the non-OPEN state it
 // returns exactly "service already closed" with zero effects, and a call that
 // won the lease first finishes while Close waits for it. It performs no DA TTL
-// decrease: the canonical transition applied it before the block was returned.
+// decrease; only the canonical transition of an ACCEPTED/NEW apply invokes one.
 func (s *Service) AnnounceBlock(blockBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")

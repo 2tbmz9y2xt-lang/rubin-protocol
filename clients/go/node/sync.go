@@ -113,7 +113,8 @@ type SyncEngine struct {
 	daRelay          *DARelayState
 	daRelayClaimed   bool
 	reorgDAAdmission func([]byte) (func(bool), error)
-	// daTTLBinding is the retained DA owner's current Section 5 TTL binding, nil while absent;
+	// daTTLBinding is the retained DA owner's current TTL binding, nil while absent
+	// (RUBIN_COMPACT_BLOCKS.md Section 5);
 	// its atomic operations are the one order of publications, selections and identity reads.
 	// It holds one Service whose own method is the entry, so no other Service's entry can
 	// populate it.
@@ -697,7 +698,10 @@ func (s *SyncEngine) ClaimDARelayState(expectedRelay *DARelayState, admitDetache
 }
 
 // DATTLMutationService is a Service together with its own DA TTL mutation entry
-// (RUBIN_COMPACT_BLOCKS.md Section 5; RUBIN_L1_P2P_AUX.md Section 5, Table A).
+// (RUBIN_COMPACT_BLOCKS.md Section 5; RUBIN_L1_P2P_AUX.md Section 5).
+// Precondition: the canonical transition calls it while holding the ChainState
+// admission guard exclusively; the entry and decrease run inside that hold, never
+// reacquire the guard and take no lock that any path holds while waiting for it.
 // EnterDATTLMutation, called for a transition under no Service lease,
 // registers exactly one call lease with that Service, admitted only while it is
 // OPEN; when DRAINING or CLOSED it returns the Service's stable closed error

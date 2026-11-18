@@ -163,8 +163,8 @@ func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainState
 // noteAcceptedBlock runs the post-return effects of one accepted block, in
 // order: best-known height, seen-set, inventory relay. They also run for
 // TERMINAL_PERSISTENCE(new), whose summary is published: the block IS canonical.
-// It performs no DA TTL decrease: the canonical transition applied it inside its
-// exclusive admission guard before this function's caller saw the summary.
+// It performs no DA TTL decrease; only the canonical transition of an
+// ACCEPTED/NEW apply invokes one, inside its exclusive admission guard.
 //
 // It performs NO retained-DA cleanup for the block's complete DA sets. That
 // cleanup is not a post-return effect at all: the canonical transition selects

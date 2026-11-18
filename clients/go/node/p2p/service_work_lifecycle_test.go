@@ -1262,7 +1262,7 @@ func TestLatchedEngineSkipsThePeerQuotaRelease(t *testing.T) {
 	requireEqual(t, h.service.PeerLifecycleExits(), exits+1, "the lifecycle exit the completed teardown recorded")
 }
 
-// TestResolvedOrphanPostReturnMakesNoTTLDecrease is the resolved-orphan entry's own row: its
+// TestResolvedOrphanPostReturnMakesNoTTLDecrease pins the resolved-orphan entry: its
 // call site of noteAcceptedBlock decreases no TTL count for an ordinary or a terminal-shaped
 // result, and a terminal result still stops the walk.
 func TestResolvedOrphanPostReturnMakesNoTTLDecrease(t *testing.T) {
