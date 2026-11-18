@@ -88,7 +88,10 @@ type PreparedSourceV1 struct {
 	incarnation *sourceIncarnation
 }
 
-type sourceIncarnation struct{ file filelock.IdentityV1 }
+type sourceIncarnation struct {
+	file   filelock.IdentityV1
+	footer [sha256.Size]byte
+}
 
 const (
 	sourceDirectory = "source-captures-v1"
@@ -110,7 +113,7 @@ func NewSourceOwnerV1(store *policycontrol.Store, expected policycontrol.Identit
 	if !limits.valid() || account == nil {
 		return nil, ErrCapacityV1
 	}
-	o := &SourceOwnerV1{store: store, dir: dir, id: id, parent: parent, limits: limits, ops: realSourceFS}
+	o := &SourceOwnerV1{store: store, dir: dir, id: id, parent: parent, limits: limits, ops: realSourceFS, live: make(map[string]*sourceIncarnation)}
 	o.self = o
 	err = b.WithSourceOwnerClaimV1(func() error {
 		return account.WithReservation(limits.WorkingBytesV1(), o.openSourceRoot)
@@ -137,7 +140,7 @@ func (l SourceLimitsV1) valid() bool {
 // WorkingBytesV1 bounds copy scratch, directory metadata and constant operation/borrow state.
 func (l SourceLimitsV1) WorkingBytesV1() uint64 { return scratchBytes + 4096 + l.Scans*512 }
 
-func (l SourceLimitsV1) retainedRAM() uint64 { return 1024 + l.Files*128 }
+func (l SourceLimitsV1) retainedRAM() uint64 { return 1024 + l.Files*(128+sha256.Size) }
 
 func (o *SourceOwnerV1) operation(account *mdbx.OperationAccount, use func() error) error {
 	if o == nil || o.self != o {
@@ -151,7 +154,7 @@ func (o *SourceOwnerV1) operation(account *mdbx.OperationAccount, use func() err
 	if !o.matchesBinding(b) {
 		return ErrIdentityV1
 	}
-	if account == nil || !o.limits.valid() {
+	if account == nil {
 		return ErrCapacityV1
 	}
 	if !o.busy.CompareAndSwap(false, true) {
@@ -179,10 +182,8 @@ func (m SourceManifestV1) kinds() []PartKindV1 {
 // SizeV1 validates the closed manifest and returns its exact encoded length before allocation.
 func (m SourceManifestV1) SizeV1() (uint64, error) {
 	kinds := m.kinds()
-	if kinds == nil || len(m.Parts) != len(kinds) || m.Identity == [32]byte{} {
-		return 0, ErrIntegrityV1
-	}
-	if (m.Class == RecoveryCoreImpossibleV1) != (m.AcquiredDigest != [32]byte{}) {
+	if kinds == nil || len(m.Parts) != len(kinds) || m.Identity == [32]byte{} ||
+		(m.Class == RecoveryCoreImpossibleV1) != (m.AcquiredDigest != [32]byte{}) {
 		return 0, ErrIntegrityV1
 	}
 	total := uint64(bundleHeader + 32)
@@ -196,10 +197,8 @@ func (m SourceManifestV1) SizeV1() (uint64, error) {
 }
 
 func (p SourcePartSpecV1) fits(kind PartKindV1, total uint64) bool {
-	if p.Kind != kind || (p.Length == 0 && p.Kind != AcceptedPrefixV1) {
-		return false
-	}
-	return total <= math.MaxInt64-9 && p.Length <= math.MaxInt64-total-9
+	return p.Kind == kind && (p.Length != 0 || p.Kind == AcceptedPrefixV1) &&
+		total <= math.MaxInt64-9 && p.Length <= math.MaxInt64-total-9
 }
 
 func (m SourceManifestV1) header(id policycontrol.Identity) []byte {

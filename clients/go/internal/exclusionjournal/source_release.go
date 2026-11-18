@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"math"
 	"os"
 	"syscall"
 
@@ -22,10 +21,9 @@ const (
 )
 
 type sourceRelease struct {
+	sourceIncarnation
 	name     string
 	size     uint64
-	file     filelock.IdentityV1
-	footer   [32]byte
 	manifest SourceManifestV1
 	record   []byte
 	reopened bool
@@ -71,19 +69,18 @@ func (o *SourceOwnerV1) hasReleaseAuthority(p *PreparedSourceV1) bool {
 }
 
 func (o *SourceOwnerV1) beginRelease(r *sourceRoot, p *PreparedSourceV1, scratch []byte) error {
-	if _, _, err := o.census(r); err != nil {
+	if _, err := o.census(r); err != nil {
 		return err
 	}
 	size, _ := p.manifest.SizeV1()
-	d := &sourceRelease{name: p.name, size: size, file: p.incarnation.file, manifest: p.manifest}
-	footer, present, err := o.releaseDigest(r, d, scratch)
+	d := &sourceRelease{name: p.name, size: size, sourceIncarnation: *p.incarnation, manifest: p.manifest}
+	present, err := o.releaseBacking(r, d, scratch)
 	if err != nil {
 		return err
 	}
 	if !present {
 		return ErrIdentityV1
 	}
-	d.footer = footer
 	d.record = o.releaseRecord(d)
 	return o.persistRelease(r, d)
 }
@@ -134,7 +131,8 @@ func (o *SourceOwnerV1) decodeRelease(record []byte) (*sourceRelease, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &sourceRelease{name: m.name(o.id), manifest: m, file: releaseIdentity(record[20:]), size: binary.LittleEndian.Uint64(record[36:]), record: record, reopened: true}
+	d := &sourceRelease{name: m.name(o.id), manifest: m, size: binary.LittleEndian.Uint64(record[36:]), record: record, reopened: true}
+	d.file = releaseIdentity(record[20:])
 	copy(d.footer[:], record[44:releasePrefix])
 	if size, _ := m.SizeV1(); size != d.size || d.file == (filelock.IdentityV1{}) {
 		return nil, ErrIntegrityV1
@@ -169,30 +167,17 @@ func (o *SourceOwnerV1) releaseManifest(header []byte) (SourceManifestV1, error)
 	return m, err
 }
 
-func (o *SourceOwnerV1) releaseDigest(r *sourceRoot, d *sourceRelease, scratch []byte) ([32]byte, bool, error) {
-	var zero [32]byte
+func (o *SourceOwnerV1) releaseBacking(r *sourceRoot, d *sourceRelease, scratch []byte) (bool, error) {
 	f, err := r.OpenFile(d.name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) {
-		return zero, false, nil
+		return false, nil
 	}
 	if err != nil {
-		return zero, false, ErrIdentityV1
+		return false, ErrIdentityV1
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil || filelock.FileIdentityV1(info) != d.file || info.Size() != int64(min(d.size, math.MaxInt64)) {
-		return zero, false, ErrIdentityV1
-	}
-	footer, err := o.qualify(f, d.manifest, scratch)
-	return footer, true, err
-}
-
-func (o *SourceOwnerV1) releaseBacking(r *sourceRoot, d *sourceRelease, scratch []byte) (bool, error) {
-	footer, present, err := o.releaseDigest(r, d, scratch)
-	if err == nil && present && footer != d.footer {
-		return false, ErrIntegrityV1
-	}
-	return present, err
+	_, err = o.qualify(f, d.manifest, d.size, scratch, &d.sourceIncarnation, ErrIdentityV1)
+	return true, err
 }
 
 func (o *SourceOwnerV1) openRelease(r *sourceRoot) error {
@@ -231,8 +216,8 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease) error {
 	if err := o.writeRelease(r, d.record); err != nil {
 		return err
 	}
-	err := o.ops.rename(r.Root, releaseScratch, releaseFile)
-	if _, statErr := r.Lstat(releaseFile); err == nil || !errors.Is(statErr, os.ErrNotExist) {
+	visible, err := o.renameVisible(r, releaseScratch, releaseFile)
+	if visible {
 		o.release = d
 	}
 	return err

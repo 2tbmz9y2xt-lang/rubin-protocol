@@ -39,7 +39,7 @@ func (s *Store) BorrowSourceAuthorityV1() (*SourceAuthorityBorrowV1, error) {
 
 // BindingV1 returns the immutable installation and held directory identity while the borrow is live.
 func (b *SourceAuthorityBorrowV1) BindingV1() (string, Identity, filelock.IdentityV1, error) {
-	if b == nil || b.state == nil || b.state.store == nil {
+	if b == nil || b.state == nil {
 		return "", Identity{}, filelock.IdentityV1{}, ErrClosed
 	}
 	s := b.state.store
@@ -51,6 +51,11 @@ func (b *SourceAuthorityBorrowV1) BindingV1() (string, Identity, filelock.Identi
 	dir, id, expected := s.dir, s.st.id, s.directory
 	s.mu.Unlock()
 	current, err := os.Lstat(dir)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !b.state.live {
+		return "", Identity{}, filelock.IdentityV1{}, ErrClosed
+	}
 	if err != nil || !current.IsDir() || expected != filelock.FileIdentityV1(current) {
 		return "", Identity{}, filelock.IdentityV1{}, ErrRefused
 	}
@@ -68,19 +73,19 @@ func (b *SourceAuthorityBorrowV1) WithSourceOwnerClaimV1(use func() error) (err 
 	case !b.state.live:
 		s.mu.Unlock()
 		return ErrClosed
-	case s.sourceClaimed:
+	case s.sourceClaimed, s.sourceBorrows == math.MaxUint64:
 		s.mu.Unlock()
 		return ErrBusy
 	}
 	s.sourceClaimed = true
+	s.sourceBorrows++
 	s.mu.Unlock()
 	success := false
 	defer func() {
-		if !success {
-			s.mu.Lock()
-			s.sourceClaimed = false
-			s.mu.Unlock()
-		}
+		s.mu.Lock()
+		s.sourceClaimed = success
+		s.sourceBorrows--
+		s.mu.Unlock()
 	}()
 	err = use()
 	success = err == nil
@@ -89,7 +94,7 @@ func (b *SourceAuthorityBorrowV1) WithSourceOwnerClaimV1(use func() error) (err 
 
 // ReleaseV1 ends this borrow once without changing control state or releasing the lock.
 func (b *SourceAuthorityBorrowV1) ReleaseV1() {
-	if b == nil || b.state == nil || b.state.store == nil {
+	if b == nil || b.state == nil {
 		return
 	}
 	s := b.state.store

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
@@ -36,14 +37,18 @@ type SourcePartV1 struct {
 }
 
 type partScope struct {
-	mu   sync.Mutex
-	part SourcePartV1
+	mu      sync.Mutex
+	closing atomic.Bool
+	part    SourcePartV1
 }
 
 func (s *partScope) read(dst []byte, offset int64) (int, error) {
+	if s.closing.Load() {
+		return 0, ErrUnavailableV1
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.part.ReadAt == nil {
+	if s.closing.Load() {
 		return 0, ErrUnavailableV1
 	}
 	if offset < 0 || uint64(offset) > s.part.Length || uint64(len(dst)) > s.part.Length-uint64(offset) {
@@ -53,6 +58,7 @@ func (s *partScope) read(dst []byte, offset int64) (int, error) {
 }
 
 func (s *partScope) expire() {
+	s.closing.Store(true)
 	s.mu.Lock()
 	s.part = SourcePartV1{}
 	s.mu.Unlock()
@@ -297,15 +303,19 @@ func (c *exportCursor) waitBacking() {
 
 // WithSourceExportV1 holds source authority during export and expires readers and callbacks on exit.
 func (o *SourceOwnerV1) WithSourceExportV1(account *mdbx.OperationAccount, m SourceManifestV1, producer SourceExporterV1, visit func(SourcePartV1) error) error {
-	return o.withManifest(account, m, func(_ *sourceRoot, admitted SourceManifestV1) error {
+	return o.withManifest(account, m, func(_ *sourceRoot, admitted SourceManifestV1, _ uint64) error {
 		return o.export(account, admitted, producer, visit)
 	})
 }
 
-func (o *SourceOwnerV1) withManifest(account *mdbx.OperationAccount, m SourceManifestV1, use func(*sourceRoot, SourceManifestV1) error) error {
+func (o *SourceOwnerV1) withManifest(account *mdbx.OperationAccount, m SourceManifestV1, use func(*sourceRoot, SourceManifestV1, uint64) error) error {
 	return o.operation(account, func() error {
-		if err := o.admitManifest(m); err != nil {
+		size, err := m.SizeV1()
+		if err != nil {
 			return err
+		}
+		if !o.manifestFits(m, size) {
+			return ErrCapacityV1
 		}
 		m.Parts = slices.Clone(m.Parts)
 		r, err := o.root(false)
@@ -313,19 +323,12 @@ func (o *SourceOwnerV1) withManifest(account *mdbx.OperationAccount, m SourceMan
 			return err
 		}
 		defer r.Close()
-		return use(r, m)
+		return use(r, m, size)
 	})
 }
 
-func (o *SourceOwnerV1) admitManifest(m SourceManifestV1) error {
-	size, err := m.SizeV1()
-	if err != nil {
-		return err
-	}
-	if size > o.limits.Bytes || uint64(len(m.Parts))*3+o.limits.Files*2+2 > o.limits.Scans {
-		return ErrCapacityV1
-	}
-	return nil
+func (o *SourceOwnerV1) manifestFits(m SourceManifestV1, size uint64) bool {
+	return size <= o.limits.Bytes && uint64(len(m.Parts))*3+o.limits.Files*2+2 <= o.limits.Scans
 }
 
 func copyPart(part SourcePartV1, dst io.Writer, scratch []byte) error {
@@ -336,12 +339,8 @@ func copyPart(part SourcePartV1, dst io.Writer, scratch []byte) error {
 		if read != len(chunk) || err != nil {
 			return ErrIntegrityV1
 		}
-		written, err := dst.Write(chunk)
-		if err != nil {
+		if _, err := dst.Write(chunk); err != nil {
 			return err
-		}
-		if written != len(chunk) {
-			return io.ErrShortWrite
 		}
 		offset += n
 	}

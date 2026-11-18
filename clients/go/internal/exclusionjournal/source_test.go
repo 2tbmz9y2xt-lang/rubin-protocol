@@ -43,6 +43,11 @@ func sourceFailIf(t *testing.T, failed bool, format string, args ...any) {
 	}
 }
 
+func sourceWantError(t *testing.T, got, want error, action string) {
+	t.Helper()
+	sourceFailIf(t, any(got) != any(want), "%s: %v, want %v", action, got, want)
+}
+
 func sourceAccount(t *testing.T, use func(*mdbx.OperationAccount) error) {
 	t.Helper()
 	o, err := mdbx.NewOperationReservationOwner(mdbx.MinReservationLimit)
@@ -56,9 +61,8 @@ func sourceOpen(t *testing.T, s *policycontrol.Store, id policycontrol.Identity,
 	sourceAccount(t, func(a *mdbx.OperationAccount) error {
 		var err error
 		owner, err = NewSourceOwnerV1(s, id, limits, a)
-		if any(err) != any(want) || (owner == nil) != (want != nil) {
-			t.Fatalf("source owner: %v/%v want=%v limits=%+v identity=%+v", owner, err, want, limits, id)
-		}
+		sourceFailIf(t, any(err) != any(want) || (owner == nil) != (want != nil),
+			"source owner: %v/%v want=%v limits=%+v identity=%+v", owner, err, want, limits, id)
 		return nil
 	})
 	return owner
@@ -188,9 +192,8 @@ func sourceCheckPart(t *testing.T, part SourcePartV1, i int, kinds []byte, want 
 	sourceFailIf(t, i >= len(want), "extra source part")
 	buf := make([]byte, len(want[i]))
 	n, err := part.ReadAt(buf, 0)
-	if byte(part.Kind) != kinds[i] || part.Length != uint64(len(want[i])) || n != len(buf) || err != nil || !bytes.Equal(buf, want[i]) {
-		t.Fatalf("part %d: kind=%d length=%d n=%d err=%v bytes=%x", i, part.Kind, part.Length, n, err, buf)
-	}
+	sourceFailIf(t, byte(part.Kind) != kinds[i] || part.Length != uint64(len(want[i])) || n != len(buf) || err != nil || !bytes.Equal(buf, want[i]),
+		"part %d: kind=%d length=%d n=%d err=%v bytes=%x", i, part.Kind, part.Length, n, err, buf)
 	return buf
 }
 
@@ -205,9 +208,7 @@ func sourcePrepareResult(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, pro
 	sourceAccount(t, func(a *mdbx.OperationAccount) error {
 		var err error
 		p, err = o.PrepareSourceV1(a, m, producer)
-		if any(err) != any(want) || (p == nil) != (want != nil) {
-			t.Fatalf("source preparation: %v/%v, want %v", p, err, want)
-		}
+		sourceFailIf(t, any(err) != any(want) || (p == nil) != (want != nil), "source preparation: %v/%v, want %v", p, err, want)
 		return nil
 	})
 	return p
@@ -330,19 +331,14 @@ func TestSourceExportScope(t *testing.T) {
 							return nil
 						}
 						escaped = part
-						if limits, err := scope.LimitsV1(); err != nil || limits != o.limits {
-							t.Fatalf("live source limits: %+v/%v", limits, err)
-						}
+						limits, err := scope.LimitsV1()
+						sourceFailIf(t, err != nil || limits != o.limits, "live source limits: %+v/%v", limits, err)
 						copied = buf
-						if n, err := part.ReadAt(make([]byte, 1), -1); n != 0 || any(err) != any(ErrIntegrityV1) {
-							t.Fatal("negative range was read")
-						}
-						if n, err := part.ReadAt(make([]byte, part.Length+1), 0); n != 0 || any(err) != any(ErrIntegrityV1) {
-							t.Fatal("oversized range was read")
-						}
-						if err := s.Close(); any(err) != any(policycontrol.ErrBusy) {
-							t.Fatalf("close during export: %v", err)
-						}
+						n, err := part.ReadAt(make([]byte, 1), -1)
+						sourceFailIf(t, n != 0 || any(err) != any(ErrIntegrityV1), "negative range read: %d/%v", n, err)
+						n, err = part.ReadAt(make([]byte, part.Length+1), 0)
+						sourceFailIf(t, n != 0 || any(err) != any(ErrIntegrityV1), "oversized range read: %d/%v", n, err)
+						sourceWantError(t, s.Close(), policycontrol.ErrBusy, "close during export")
 						tx, err := s.Begin()
 						sourceMust(t, err)
 						_, err = tx.Abort()
@@ -356,16 +352,13 @@ func TestSourceExportScope(t *testing.T) {
 				}()
 				if row.name == "panic" {
 					sourceFailIf(t, panicValue != any(row.cause), "panic=%v", panicValue)
-				} else if any(got) != any(row.cause) || row.name == "success" && calls != 6 {
-					t.Fatalf("export result=%v count=%d", got, calls)
+				} else {
+					sourceFailIf(t, any(got) != any(row.cause) || row.name == "success" && calls != 6, "export result=%v count=%d", got, calls)
 				}
-				if n, err := escaped.ReadAt(make([]byte, 1), 0); n != 0 || any(err) != any(ErrUnavailableV1) {
-					t.Fatalf("escaped read: %d/%v", n, err)
-				}
+				n, err := escaped.ReadAt(make([]byte, 1), 0)
+				sourceFailIf(t, n != 0 || any(err) != any(ErrUnavailableV1), "escaped read: %d/%v", n, err)
 				for _, expired := range []*SourceOperationV1{nil, {}, scope} {
-					if err := expired.WithBackingV1(nil, nil, nil); any(err) != any(ErrUnavailableV1) {
-						t.Fatalf("expired source operation: %v", err)
-					}
+					sourceWantError(t, expired.WithBackingV1(nil, nil, nil), ErrUnavailableV1, "expired source operation")
 				}
 				parts[0][0] ^= 0x80
 				sourceFailIf(t, !bytes.Equal(copied, want), "visitor copy aliases original backing")
@@ -466,19 +459,24 @@ func TestSourcePreparedManifestOwnership(t *testing.T) {
 
 func TestSourceExpiryWaitsForAdmittedRead(t *testing.T) {
 	s, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	reservations, err := mdbx.NewOperationReservationOwner(mdbx.MinReservationLimit)
+	sourceMust(t, err)
 	entered, allow, visitorLeft, done := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	release := sync.OnceFunc(func() { close(allow) })
-	wait := func(signal <-chan struct{}, message string) {
+	var outcome error
+	wait := func(signal, stopped <-chan struct{}, message string) {
 		t.Helper()
 		select {
 		case <-signal:
+		case <-stopped:
+			t.Fatalf("source operation ended before the visitor: %v", outcome)
 		case <-time.After(5 * time.Second):
 			t.Fatal(message)
 		}
 	}
 	t.Cleanup(func() {
 		release()
-		wait(done, "source operation did not finish")
+		wait(done, nil, "source operation did not finish")
 	})
 	readDone := make(chan error, 1)
 	var escaped SourcePartV1
@@ -494,37 +492,35 @@ func TestSourceExpiryWaitsForAdmittedRead(t *testing.T) {
 	}
 	go func() {
 		defer close(done)
-		sourceAccount(t, func(a *mdbx.OperationAccount) error {
-			err := o.WithSourceExportV1(a, m, producer, func(part SourcePartV1) error {
+		outcome = reservations.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+			return o.WithSourceExportV1(a, m, producer, func(part SourcePartV1) error {
 				escaped = part
 				go func() { _, err := part.ReadAt(buf, 0); readDone <- err }()
-				<-entered
+				select {
+				case <-entered:
+				case <-allow:
+				case err := <-readDone:
+					return fmt.Errorf("read ended before entering its backing: %v", err)
+				}
 				close(visitorLeft)
 				return io.EOF
 			})
-			if any(err) != any(io.EOF) {
-				t.Errorf("visitor result: %v", err)
-			}
-			return nil
 		})
 	}()
-	wait(visitorLeft, "visitor did not enter")
+	wait(visitorLeft, done, "visitor did not enter")
 	sourceChild(t, dir, "busy")
 	select {
 	case <-done:
 		t.Fatal("export ended before an admitted read")
 	default:
 	}
-	if err := s.Close(); any(err) != any(policycontrol.ErrBusy) {
-		t.Fatalf("read lifetime lost source authority: %v", err)
-	}
+	sourceWantError(t, s.Close(), policycontrol.ErrBusy, "read lifetime lost source authority")
 	release()
-	wait(done, "read expiry did not finish")
-	if err := <-readDone; err != nil || !bytes.Equal(buf, parts[0]) {
-		t.Fatalf("admitted copy: %v/%x", err, buf)
-	}
-	if n, err := escaped.ReadAt(buf, 0); n != 0 || any(err) != any(ErrUnavailableV1) {
-		t.Fatalf("expired read: %d/%v", n, err)
-	}
+	wait(done, nil, "read expiry did not finish")
+	sourceFailIf(t, any(outcome) != any(io.EOF), "visitor result: %v", outcome)
+	err = <-readDone
+	sourceFailIf(t, err != nil || !bytes.Equal(buf, parts[0]), "admitted copy: %v/%x", err, buf)
+	n, err := escaped.ReadAt(buf, 0)
+	sourceFailIf(t, n != 0 || any(err) != any(ErrUnavailableV1), "expired read: %d/%v", n, err)
 	sourceMust(t, s.Close())
 }
