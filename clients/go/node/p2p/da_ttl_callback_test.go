@@ -249,8 +249,7 @@ func TestDATTLCallbackEndToEndCloseRace(t *testing.T) {
 	}
 }
 
-// detachedReorgFixture is a sink tip block carrying one DA commit and chunk, plus a longer source branch that a peer or
-// local apply reorganizes onto.
+// detachedReorgFixture is a sink tip block with one DA commit and chunk and a longer source branch to reorganize onto.
 type detachedReorgFixture struct {
 	commitRaw, chunkRaw []byte
 	oldTip              [32]byte
@@ -367,8 +366,7 @@ func detachedReorgHookRetains(t *testing.T, source, sink *testHarness) bool {
 	return result.Disposition == node.DAAdmissionDuplicate
 }
 
-// requireCommitRetained reports through LookupRetainedTx, which changes nothing, whether the requeued commit is
-// retained and fails unless it equals want.
+// requireCommitRetained requires LookupRetainedTx, which changes nothing, to report the commit's retention as want.
 func requireCommitRetained(t *testing.T, h *testHarness, fixture detachedReorgFixture, want bool, step string) {
 	t.Helper()
 	_, txid, _, _, err := consensus.ParseTx(fixture.commitRaw)
@@ -455,10 +453,9 @@ func observeDARelayPublicImage(t *testing.T, h *testHarness) daRelayPublicImage 
 	return image
 }
 
-// TestDATTLCallbackLaterConstructionChangesNoDAState pins that a later construction changes nothing: over a relay
-// populated with a State A chunk and a State B commit, a later NewService S2 (and so its ClaimDARelayState and binding
-// publication) leaves the exported relay image unchanged. Counts and owner tokens are not exported; the node test
-// TestDATTLCallbackBindingChangesNoDAState compares them around the same claim and binding steps.
+// TestDATTLCallbackLaterConstructionChangesNoDAState: over a relay populated with a State A chunk and a State B commit,
+// a later NewService S2 (its ClaimDARelayState and binding publication) leaves the exported relay image unchanged;
+// TestDATTLCallbackBindingChangesNoDAState compares the unexported counts and owner tokens.
 func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
@@ -633,19 +630,10 @@ func mineSideBlock(t *testing.T) []byte {
 	return block
 }
 
-// relayAccepted relays source's block at height through p and requires an applied summary.
-func relayAccepted(t *testing.T, p *peer, source *testHarness, height uint64) {
+// newSideBlockSetup relays heights 1 and 2 to h through p under a held work lease, retains the probe id and returns a
+// valid side-branch block h does not know.
+func newSideBlockSetup(t *testing.T, id byte) (*testHarness, *testHarness, *peer, *selectionProbe, []byte, [32]byte) {
 	t.Helper()
-	summary, err := p.processRelayedBlock(blockAtHeight(t, source, height))
-	require(t, err == nil && summary != nil, "processRelayedBlock(%d)=(%+v,%v)", height, summary, err)
-}
-
-// TestDATTLCallbackEndToEndNonAcceptedResults pins the non-accepted results end to end over the real SyncEngine, DA
-// owner and Service, counting through the retained image: a valid side-branch block stored non-canonical, a
-// KNOWN_BLOCK_NOOP replay, a MISSING_PARENT block retained as an orphan, a CONSENSUS_INVALID block and a DisconnectTip
-// decrease nothing, so the record retained at count 3 survives the next two counted publications and expires only at
-// the third. Peer calls hold a work lease; the direct side block and DisconnectTip make zero attempts on the entry.
-func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	sideBlock := mineSideBlock(t)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -653,13 +641,29 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	holdWorkLease(t, h.service)
 	relayAccepted(t, p, source, 1)
 	relayAccepted(t, p, source, 2)
-	probe := newSelectionProbe(t, h, source, 0xd3)
-	entry := &wrappedTTLEntry{inner: h.service}
-	h.syncEngine.PublishDATTLBinding(entry)
+	probe := newSelectionProbe(t, h, source, id)
 	sideHash, err := consensus.BlockHash(sideBlock[:consensus.BLOCK_HEADER_BYTES])
 	must(t, err, "BlockHash(side block)")
 	known, err := h.service.hasBlock(sideHash)
 	require(t, err == nil && !known, "the side block is already known: err=%v", err)
+	return source, h, p, probe, sideBlock, sideHash
+}
+
+// relayAccepted relays source's block at height through p and requires an applied summary.
+func relayAccepted(t *testing.T, p *peer, source *testHarness, height uint64) {
+	t.Helper()
+	summary, err := p.processRelayedBlock(blockAtHeight(t, source, height))
+	require(t, err == nil && summary != nil, "processRelayedBlock(%d)=(%+v,%v)", height, summary, err)
+}
+
+// TestDATTLCallbackEndToEndNonAcceptedResults, over the real SyncEngine, DA owner and Service: a side-branch block
+// stored non-canonical, a KNOWN_BLOCK_NOOP replay, a MISSING_PARENT orphan, a CONSENSUS_INVALID block and a
+// DisconnectTip decrease nothing, so the record at count 3 survives two counted publications and expires at the third.
+// Peer calls hold a work lease; the direct side block and DisconnectTip make no entry attempt.
+func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
+	source, h, p, probe, sideBlock, _ := newSideBlockSetup(t, 0xd3)
+	entry := &wrappedTTLEntry{inner: h.service}
+	h.syncEngine.PublishDATTLBinding(entry)
 	summary, err := h.syncEngine.ApplyBlockWithReorg(sideBlock, nil)
 	require(t, err == nil && summary != nil && len(summary.CanonicalAppliedBlocks) == 0 && h.chainState.Height == 2, "side block=(%+v,%v) height=%d, want stored non-canonical", summary, err, h.chainState.Height)
 	summary, err = p.processRelayedBlock(blockAtHeight(t, source, 2))
@@ -686,19 +690,8 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 // valid side-branch block relayed by a peer is stored non-canonical and decreases nothing, so the commit retained at
 // count 3 survives the next two counted publications and expires only at the third.
 func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
-	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
-	sideBlock := mineSideBlock(t)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	p := testPeerForService(h.service, "remote", 5)
-	holdWorkLease(t, h.service)
-	relayAccepted(t, p, source, 1)
-	relayAccepted(t, p, source, 2)
-	probe := newSelectionProbe(t, h, source, 0xd4)
-	sideHash, err := consensus.BlockHash(sideBlock[:consensus.BLOCK_HEADER_BYTES])
-	must(t, err, "BlockHash(side block)")
-	known, err := h.service.hasBlock(sideHash)
-	require(t, err == nil && !known, "the side block is already known: err=%v", err)
-	_, err = p.processRelayedBlock(sideBlock)
+	source, h, p, probe, sideBlock, sideHash := newSideBlockSetup(t, 0xd4)
+	_, err := p.processRelayedBlock(sideBlock)
 	must(t, err, "processRelayedBlock(side block)")
 	stored, err := h.blockStore.GetBlockByHash(sideHash)
 	require(t, err == nil && bytes.Equal(stored, sideBlock) && h.chainState.Height == 2 && h.chainState.TipHash != sideHash, "side block stored=%v err=%v height=%d, want stored non-canonical", stored != nil, err, h.chainState.Height)
@@ -732,8 +725,7 @@ func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the fresh binding's admitted decrease expired the record at count 1")
 }
 
-// wrappedTTLEntry is a binding over a real Service's own entry that runs before ahead of each attempt, counts attempts
-// and returns refuse, when set, instead of entering.
+// wrappedTTLEntry runs before, counts each attempt and returns refuse, when set, instead of entering.
 type wrappedTTLEntry struct {
 	inner    *Service
 	before   func()
@@ -944,8 +936,7 @@ func TestDATTLCallbackEndToEndNoGuardReacquisition(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the third counted publication expired the record")
 }
 
-// closeRaceEntry is a binding over S1's own entry that, on its one attempt, starts the race and records whether S1
-// admitted the decrease and Close(S1) had returned.
+// closeRaceEntry wraps S1's entry; its one attempt starts the race and records S1's admission and Close(S1)'s return.
 type closeRaceEntry struct {
 	inner          *Service
 	start          func(inside bool)

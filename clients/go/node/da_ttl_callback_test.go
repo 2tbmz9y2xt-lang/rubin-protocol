@@ -20,15 +20,14 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-// runDATTLBodyInGuard runs the in-guard TTL body while the test holds the ChainState admission guard EXCLUSIVELY, as
-// the canonical transition does. A body that reacquired the guard would block on its own caller, so completion within
-// the timeout shows the body never reacquires it.
+// runDATTLBodyInGuard runs advanceDATTLChecked under the exclusively held ChainState admission guard, as the canonical
+// transition does; completion within the timeout shows the body never reacquires the guard.
 func runDATTLBodyInGuard(t *testing.T, f *daNonReplayFixture) error {
 	t.Helper()
 	f.state.admissionMu.Lock()
 	defer f.state.admissionMu.Unlock()
 	done := make(chan error, 1)
-	go func() { done <- f.relay.advanceOwnerReadyTTLInGuard() }()
+	go func() { done <- advanceDATTLChecked(f.relay, f.mp.pendingOutpoints) }()
 	select {
 	case err := <-done:
 		return err
@@ -46,18 +45,19 @@ func requireDATTLOK(t *testing.T, err error, format string, args ...any) {
 	}
 }
 
-// advanceDATTLInGuard runs the in-guard TTL body as the canonical transition does: with the bound ChainState admission
-// guard held exclusively, or bare on an unbound relay, which has no guard.
+// advanceDATTLInGuard runs advanceDATTLChecked as the canonical transition runs the body: with the bound ChainState
+// admission guard held exclusively and the relay's owner, or bare on an unbound relay, which has neither.
 func advanceDATTLInGuard(s *DARelayState) error {
+	var owner *PendingOutpointOwner
 	if s.mempool != nil && s.mempool.chainState != nil {
 		s.mempool.chainState.admissionMu.Lock()
 		defer s.mempool.chainState.admissionMu.Unlock()
+		owner = s.mempool.pendingOutpoints
 	}
-	return s.advanceOwnerReadyTTLInGuard()
+	return advanceDATTLChecked(s, owner)
 }
 
-// ownerReadyTTLSelector names the in-guard TTL body's arm in the shared owner-ready selector tables; rows whose premise
-// is the clone path's whole-image check branch on it.
+// ownerReadyTTLSelector names the in-guard TTL body's arm in the shared owner-ready selector tables.
 const ownerReadyTTLSelector = "ttl tick"
 
 // requireDATTLSkipsStateC pins the State A and B walk on a State-C-only image: the in-guard TTL body walks only State A
@@ -91,8 +91,7 @@ type daTTLCallbackRecords struct {
 	base, setup                  daRelayStateView
 }
 
-// newDATTLCallbackRecords admits State C first (the base image), then State A (PEER chunk with a prefetch reservation)
-// and State B (LOCAL staged commit), both at count 3.
+// newDATTLCallbackRecords admits State C, then State A (PEER chunk, prefetch reserved) and State B (LOCAL commit) at 3.
 func newDATTLCallbackRecords(t *testing.T) (*daNonReplayFixture, daTTLCallbackRecords) {
 	f := newDANonReplayFixture(t, 6)
 	r := daTTLCallbackRecords{stateAID: [32]byte{0xa7}, stateBID: [32]byte{0xb7}, stateCID: [32]byte{0xc7}}
@@ -111,49 +110,107 @@ func newDATTLCallbackRecords(t *testing.T) (*daNonReplayFixture, daTTLCallbackRe
 	return f, r
 }
 
-// requireDATTLOutsideSelectedUnchanged checks, outside the selected records: every other record, every locator of
-// another record, and every owner claim and outpoint row whose token no selected member holds are unchanged.
-func requireDATTLOutsideSelectedUnchanged(t *testing.T, before, after daRelayStateView, ownerBefore, ownerAfter *PendingOutpointOwner, selected ...[32]byte) {
-	t.Helper()
-	isSelected := map[[32]byte]bool{}
-	tokens := map[PendingOutpointToken]bool{}
-	for _, daID := range selected {
-		isSelected[daID] = true
-		record := before.sets[daID]
-		if record.commit.member != nil {
-			tokens[record.commit.member.token] = true
+// daTTLImage is the DA image, the owner image (empty when no owner is given) and the owner's operation counts.
+type daTTLImage struct {
+	view   daRelayStateView
+	owner  *PendingOutpointOwner
+	counts [4]uint64
+}
+
+func daTTLSnapshot(relay *DARelayState, owner *PendingOutpointOwner) daTTLImage {
+	image := daTTLImage{view: daRelayStateSnapshot(relay), owner: &PendingOutpointOwner{}}
+	if owner != nil {
+		image.owner, image.counts = cloneDAAdmissionOwner(owner), daObservationCounts(owner)
+	}
+	return image
+}
+
+// advanceDATTLChecked runs the in-guard TTL body and returns its error, or after a success daTTLOutsideErr.
+func advanceDATTLChecked(relay *DARelayState, owner *PendingOutpointOwner) error {
+	before := daTTLSnapshot(relay, owner)
+	if err := relay.advanceOwnerReadyTTLInGuard(); err != nil {
+		return err
+	}
+	return daTTLOutsideErr(before, daTTLSnapshot(relay, owner))
+}
+
+// daTTLOutsideErr compares two images outside the selected set, the State A and B records of before (daTTLResidual,
+// daTTLOwnerResidual), and the owner's operation counts; the revision high-water rises once per surviving selected record.
+func daTTLOutsideErr(before, after daTTLImage) error {
+	selected, tokens := map[[32]byte]bool{}, map[PendingOutpointToken]bool{}
+	for daID, record := range before.view.sets {
+		if record.state != daRelayStateCompleteSet {
+			selected[daID] = true
+			daTTLMembers(record, func(member *daRelayMemberIdentity, _ uint64, _ bool) { tokens[member.token] = true })
 		}
-		for _, chunk := range record.chunks {
-			if chunk.member != nil {
-				tokens[chunk.member.token] = true
-			}
+	}
+	wasView, isView := daTTLResidual(before.view, selected), daTTLResidual(after.view, selected)
+	wasOwner, isOwner := daTTLOwnerResidual(before.owner, tokens), daTTLOwnerResidual(after.owner, tokens)
+	survivors := uint64(len(after.view.sets) - len(isView.sets))
+	switch {
+	case after.view.records != before.view.records+survivors:
+		return fmt.Errorf("revision high-water %d -> %d, want one minted per surviving selected record (%d)", before.view.records, after.view.records, survivors)
+	case !reflect.DeepEqual(wasView, isView): //nolint:govet // Complete private state-image equality requires structural comparison, error identities included.
+		return fmt.Errorf("DA image outside the selected set changed: %+v -> %+v", wasView, isView)
+	case !reflect.DeepEqual(wasOwner, isOwner) || before.counts != after.counts:
+		return fmt.Errorf("owner outside the selected set changed: %+v %+v -> %+v %+v", wasOwner, before.counts, isOwner, after.counts)
+	}
+	return nil
+}
+
+// daTTLMembers visits each present member of record with its charge (RUBIN_COMPACT_BLOCKS.md Section 18.1).
+func daTTLMembers(record daRelaySetRecord, visit func(member *daRelayMemberIdentity, charge uint64, commit bool)) {
+	if record.commit.member != nil {
+		visit(record.commit.member, uint64(len(record.commit.txBytes)), true)
+	}
+	for _, chunk := range record.chunks {
+		if chunk.member != nil {
+			visit(chunk.member, uint64(len(chunk.txBytes)+len(chunk.payload)), false)
 		}
-	}
-	for daID := range mergedKeys(before.sets, after.sets) {
-		require(t, isSelected[daID] || reflect.DeepEqual(before.sets[daID], after.sets[daID]), "record %x outside the selected set changed", daID[:1])
-	}
-	for txid := range mergedKeys(before.locators, after.locators) {
-		was, is := before.locators[txid], after.locators[txid]
-		require(t, isSelected[was.daID] || was == is, "locator %x outside the selected set changed: %+v -> %+v", txid[:1], was, is)
-	}
-	for token := range mergedKeys(ownerBefore.byToken, ownerAfter.byToken) {
-		require(t, tokens[token] || reflect.DeepEqual(ownerBefore.byToken[token], ownerAfter.byToken[token]), "owner claim %+v outside the selected set changed", token)
-	}
-	for op := range mergedKeys(ownerBefore.byOutpoint, ownerAfter.byOutpoint) {
-		was, is := ownerBefore.byOutpoint[op], ownerAfter.byOutpoint[op]
-		require(t, tokens[was.token] || was == is, "owner row %+v outside the selected set changed: %+v -> %+v", op, was, is)
 	}
 }
 
-func mergedKeys[K comparable, V any](a, b map[K]V) map[K]struct{} {
-	keys := make(map[K]struct{}, len(a)+len(b))
-	for k := range a {
-		keys[k] = struct{}{}
+// daTTLResidual removes the selected records from view with their locator rows, per-da_id and prefetch entries and
+// own charges (RUBIN_COMPACT_BLOCKS.md Section 18.1), and zeroes the high-water.
+func daTTLResidual(view daRelayStateView, selected map[[32]byte]bool) daRelayStateView {
+	view.peerBytes = maps.Collect(maps.All(view.peerBytes))
+	for daID := range selected {
+		staged := view.sets[daID].state == daRelayStateStagedCommit
+		daTTLMembers(view.sets[daID], func(member *daRelayMemberIdentity, charge uint64, commit bool) {
+			if commit {
+				view.commitBytes -= charge
+			}
+			if staged {
+				view.stagedBytes -= charge
+				return
+			}
+			view.orphanBytes -= charge
+			if member.provenance.kind == daProvenancePeer {
+				view.peerBytes[member.provenance.quotaKey()] -= charge
+			}
+		})
 	}
-	for k := range b {
-		keys[k] = struct{}{}
-	}
-	return keys
+	maps.DeleteFunc(view.peerBytes, func(_ string, bytes uint64) bool { return bytes == 0 })
+	view.locators = maps.Collect(maps.All(view.locators))
+	maps.DeleteFunc(view.locators, func(_ [32]byte, locator daRelayLocator) bool { return selected[locator.daID] })
+	view.sets, view.daIDBytes = daTTLWithout(view.sets, selected), daTTLWithout(view.daIDBytes, selected)
+	view.prefetchIndexes, view.prefetchExpires = daTTLWithout(view.prefetchIndexes, selected), daTTLWithout(view.prefetchExpires, selected)
+	view.records = 0
+	return view
+}
+
+func daTTLWithout[V any](m map[[32]byte]V, selected map[[32]byte]bool) map[[32]byte]V {
+	kept := maps.Collect(maps.All(m))
+	maps.DeleteFunc(kept, func(daID [32]byte, _ V) bool { return selected[daID] })
+	return kept
+}
+
+// daTTLOwnerResidual is a copy of owner without the claims and outpoint rows of tokens.
+func daTTLOwnerResidual(owner *PendingOutpointOwner, tokens map[PendingOutpointToken]bool) *PendingOutpointOwner {
+	residual := cloneDAAdmissionOwner(owner)
+	maps.DeleteFunc(residual.byToken, func(token PendingOutpointToken, _ *pendingOutpointClaim) bool { return tokens[token] })
+	maps.DeleteFunc(residual.byOutpoint, func(_ consensus.Outpoint, row pendingOutpointRow) bool { return tokens[row.token] })
+	return residual
 }
 
 func requireDATTLCount(t *testing.T, view daRelayStateView, daID [32]byte, want uint64) {
@@ -162,17 +219,15 @@ func requireDATTLCount(t *testing.T, view daRelayStateView, daID [32]byte, want 
 	require(t, present && record.ttlBlocksRemaining == want, "record %x: present=%v ttl=%d, want ttl %d", daID[:1], present, record.ttlBlocksRemaining, want)
 }
 
-// TestDATTLCallbackBodyThreeCountedPublications decreases over repeated body calls: one State A and one State B record
-// created at 3 decrease to 2, then 1, and are removed with the owner-ready expiry effect at the third body call; State
-// C is untouched; every counter returns to the base image.
+// TestDATTLCallbackBodyThreeCountedPublications decreases over repeated body calls, each compared outside the selected
+// set by runDATTLBodyInGuard: one State A and one State B record created at 3 decrease to 2, then 1, and are removed
+// with the owner-ready expiry effect at the third body call; State C is untouched; every counter returns to the base.
 func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	tokenA, tokenB := r.setup.sets[r.stateAID].chunks[0].member.token, r.setup.sets[r.stateBID].commit.member.token
 	for call, want := range []uint64{2, 1} {
-		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 		requireDATTLOK(t, runDATTLBodyInGuard(t, f), "body call %d", call+1)
 		view := daRelayStateSnapshot(f.relay)
-		requireDATTLOutsideSelectedUnchanged(t, before, view, ownerBefore, cloneDAAdmissionOwner(f.mp.pendingOutpoints), r.stateAID, r.stateBID)
 		requireDATTLCount(t, view, r.stateAID, want)
 		requireDATTLCount(t, view, r.stateBID, want)
 		if wantRecords := r.setup.records + 2*uint64(call+1); view.records != wantRecords {
@@ -182,10 +237,8 @@ func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
 			t.Fatalf("body call %d released the prefetch reservation of a surviving record", call+1)
 		}
 	}
-	before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 	requireDATTLOK(t, runDATTLBodyInGuard(t, f), "body call 3")
 	after := daRelayStateSnapshot(f.relay)
-	requireDATTLOutsideSelectedUnchanged(t, before, after, ownerBefore, cloneDAAdmissionOwner(f.mp.pendingOutpoints), r.stateAID, r.stateBID)
 	ownerReadyRecordAbsent(t, after, r.stateAID, r.stateA.txid)
 	ownerReadyRecordAbsent(t, after, r.stateBID, r.stateB.txid)
 	ownerReadyClaimGone(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), tokenA, r.stateA.inputs)
@@ -200,9 +253,8 @@ func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
 	require(t, got == want && reflect.DeepEqual(after.peerBytes, r.base.peerBytes) && reflect.DeepEqual(after.daIDBytes, r.base.daIDBytes), "accounting after expiry: got=%+v peer=%v da=%v, want=%+v peer=%v da=%v", got, after.peerBytes, after.daIDBytes, want, r.base.peerBytes, r.base.daIDBytes)
 }
 
-// TestDATTLCallbackBodySurvivorRevisions pins revisions over repeated body calls: each body call gives every surviving
-// record its own fresh revision, minted one by one above the stored high-water in ascending da_id order. The third
-// record is admitted last with the smallest da_id, so admission order differs from da_id order at either bucket end.
+// TestDATTLCallbackBodySurvivorRevisions: each body call gives each survivor a fresh revision above the high-water in
+// ascending da_id order; the third record, admitted last, has the smallest da_id.
 func TestDATTLCallbackBodySurvivorRevisions(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	late := [32]byte{0x17}
@@ -230,15 +282,12 @@ func TestDATTLCallbackBodyRefusalChangesNothing(t *testing.T) {
 		name    string
 		corrupt func(*daNonReplayFixture, daTTLCallbackRecords)
 	}{
-		{"inconsistent stored value", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) {
-				mutateOwnerReadyRecord(s, r.stateBID, func(record *daRelaySetRecord) { record.wireBytes = 1 })
-			})
-		}},
-		{"unbound owner token", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			token := r.setup.sets[r.stateAID].chunks[0].member.token
-			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.byToken[token].txid[0] ^= 0xff })
-		}},
+		{"inconsistent stored value", daTTLRelayEdit(func(s *DARelayState, r daTTLCallbackRecords) {
+			mutateOwnerReadyRecord(s, r.stateBID, func(record *daRelaySetRecord) { record.wireBytes = 1 })
+		})},
+		{"unbound owner token", daTTLOwnerEdit(func(o *PendingOutpointOwner, r daTTLCallbackRecords) {
+			o.byToken[r.setup.sets[r.stateAID].chunks[0].member.token].txid[0] ^= 0xff
+		})},
 		{"count above the configured orphan TTL", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			f.setOwnerReadyTTL(r.stateAID, f.relay.caps.orphanTTLBlocks+1)
 		}},
@@ -277,8 +326,7 @@ func requireDATTLIndexUnchanged(t *testing.T, relay *DARelayState, before [][32]
 	}
 }
 
-// requireDATTLIndexExact pins the relations' State A/B bucket to exactly the present records that are not State C, so
-// the bounded walk can miss no State A or B record.
+// requireDATTLIndexExact pins the State A/B bucket to exactly the present records that are not State C.
 func requireDATTLIndexExact(t *testing.T, relay *DARelayState) {
 	t.Helper()
 	if msg := daTTLIndexMismatch(relay); msg != "" {
@@ -308,58 +356,44 @@ func daTTLIndexMismatch(relay *DARelayState) string {
 	return ""
 }
 
-// TestDATTLCallbackBodyRefusalArms pins one refusal per check arm: each case corrupts one stored value, asserts the
-// body's returned error, and asserts that the DA image, the owner and the State A/B index are unchanged (the index also
-// exact whenever the corruption left it exact).
+// TestDATTLCallbackBodyRefusalArms corrupts one stored value per check arm and asserts the body's error and an
+// unchanged DA image, owner and State A/B index (exact whenever the corruption left it exact).
 func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 	for _, row := range []struct {
 		name    string
 		corrupt func(*daNonReplayFixture, daTTLCallbackRecords)
 		want    func(error) bool
 	}{
-		{"locator row moved", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) {
-				s.relations.putLocator(r.stateA.txid, daRelayLocator{daID: r.stateAID, kind: daRelayLocatorChunk, chunkIndex: 1})
-			})
-		}, func(err error) bool { return errors.Is(err, errDARelayLocatorMismatch) }},
-		{"survivor per-da_id entry differs", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.orphanBytesByDAID[r.stateAID]++ })
-		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		{"locator row moved", daTTLRelayEdit(func(s *DARelayState, r daTTLCallbackRecords) {
+			s.relations.putLocator(r.stateA.txid, daRelayLocator{daID: r.stateAID, kind: daRelayLocatorChunk, chunkIndex: 1})
+		}), daTTLIs(errDARelayLocatorMismatch)},
+		{"survivor per-da_id entry differs", daTTLRelayEdit(func(s *DARelayState, r daTTLCallbackRecords) { s.orphanBytesByDAID[r.stateAID]++ }), daTTLIs(errDARelayImageIncompatible)},
 		{"expiring per-da_id entry larger", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			f.setOwnerReadyTTL(r.stateAID, 1)
 			f.mutateRelay(func(s *DARelayState) { s.orphanBytesByDAID[r.stateAID]++ })
-		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
-		{"State B carries a per-da_id entry", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.orphanBytesByDAID[r.stateBID] = 5 })
-		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
-		{"record stored under another da_id", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) {
-				record := s.relations.recordValue(r.stateAID)
-				record.daID = [32]byte{0xa8}
-				s.relations.scalarRecord(r.stateAID, record)
-			})
-		}, func(err error) bool { return errors.Is(err, errDARelayTTLRecordKeyMismatch) }},
+		}, daTTLIs(errDARelayImageIncompatible)},
+		{"State B carries a per-da_id entry", daTTLRelayEdit(func(s *DARelayState, r daTTLCallbackRecords) { s.orphanBytesByDAID[r.stateBID] = 5 }), daTTLIs(errDARelayImageIncompatible)},
+		{"record stored under another da_id", daTTLRelayEdit(func(s *DARelayState, r daTTLCallbackRecords) {
+			record := s.relations.recordValue(r.stateAID)
+			record.daID = [32]byte{0xa8}
+			s.relations.scalarRecord(r.stateAID, record)
+		}), daTTLIs(errDARelayTTLRecordKeyMismatch)},
 		{"victim claim not finalized", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			f.setOwnerReadyTTL(r.stateAID, 1)
 			token := r.setup.sets[r.stateAID].chunks[0].member.token
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.byToken[token].finalized = false })
 		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "DA victim claim mismatch") }},
 		// The same unfinalized claim on a survivor, which is no victim.
-		{"survivor claim not finalized", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			token := r.setup.sets[r.stateAID].chunks[0].member.token
-			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.byToken[token].finalized = false })
-		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		{"survivor claim not finalized", daTTLOwnerEdit(func(o *PendingOutpointOwner, r daTTLCallbackRecords) {
+			o.byToken[r.setup.sets[r.stateAID].chunks[0].member.token].finalized = false
+		}), daTTLIs(errDARelayImageIncompatible)},
 		// A survivor's input with its owner row missing or different.
-		{"survivor outpoint row missing", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { delete(o.byOutpoint, r.stateA.inputs[0]) })
-		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
-		{"survivor outpoint row different", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) {
-				row := o.byOutpoint[r.stateA.inputs[0]]
-				row.txid[0] ^= 0xff
-				o.byOutpoint[r.stateA.inputs[0]] = row
-			})
-		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		{"survivor outpoint row missing", daTTLOwnerEdit(func(o *PendingOutpointOwner, r daTTLCallbackRecords) { delete(o.byOutpoint, r.stateA.inputs[0]) }), daTTLIs(errDARelayImageIncompatible)},
+		{"survivor outpoint row different", daTTLOwnerEdit(func(o *PendingOutpointOwner, r daTTLCallbackRecords) {
+			row := o.byOutpoint[r.stateA.inputs[0]]
+			row.txid[0] ^= 0xff
+			o.byOutpoint[r.stateA.inputs[0]] = row
+		}), daTTLIs(errDARelayImageIncompatible)},
 		// The same owner-row edit on an expiring member, which is a victim.
 		{"expiring outpoint row different", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			f.setOwnerReadyTTL(r.stateAID, 1)
@@ -369,80 +403,54 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 				o.byOutpoint[r.stateA.inputs[0]] = row
 			})
 		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "DA victim input mismatch") }},
-		{"revision above the high-water", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.records = s.relations.recordValue(r.stateAID).revision - 1 })
-		}, daTTLWrapped(errDARelayImageIncompatible, "revision")},
-		{"received time above the high-water", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.nextReceivedTime = s.relations.recordValue(r.stateAID).receivedTime - 1 })
-		}, daTTLWrapped(errDARelayImageIncompatible, "received time")},
-		{"survivor revision overflows", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.records = math.MaxUint64 })
-		}, func(err error) bool { return errors.Is(err, errDARelayArithmeticOverflow) }},
-		{"stored staged total differs", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.stagedBytes++ })
-		}, daTTLWrapped(errDARelayImageIncompatible, "staged retained bytes")},
-		{"stored orphan total differs", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.orphanBytes-- })
-		}, daTTLWrapped(errDARelayImageIncompatible, "orphan pool bytes")},
-		{"stored commit overhead total differs", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.orphanCommitOverheadBytes-- })
-		}, daTTLWrapped(errDARelayImageIncompatible, "orphan commit overhead bytes")},
-		{"stored per-peer entry differs", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.orphanBytesByPeerQuotaKey["ttl-peer"]++ })
-		}, daTTLWrapped(errDARelayImageIncompatible, `per-peer orphan bytes for "ttl-peer"`)},
-		{"selected peer key absent from the stored map", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { delete(s.orphanBytesByPeerQuotaKey, "ttl-peer") })
-		}, daTTLWrapped(errDARelayImageIncompatible, `per-peer orphan bytes for "ttl-peer"`)},
-		{"extra stored per-peer entry", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.orphanBytesByPeerQuotaKey["ghost"] = 1 })
-		}, daTTLWrapped(errDARelayImageIncompatible, "per-peer orphan bytes: records imply")},
-		{"extra stored per-da_id entry", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.orphanBytesByDAID[[32]byte{0xee}] = 1 })
-		}, daTTLWrapped(errDARelayImageIncompatible, "per-da_id orphan bytes: records imply")},
-		{"index entry absent", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.relations.sets[r.stateAID].present = false })
-		}, func(err error) bool { return errors.Is(err, errDARelayTTLRecordKeyMismatch) }},
-		{"index entry State C", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) {
-				record := s.relations.recordValue(r.stateAID)
-				record.state = daRelayStateCompleteSet
-				s.relations.scalarRecord(r.stateAID, record)
-			})
-		}, func(err error) bool { return errors.Is(err, errDARelayTTLRecordKeyMismatch) }},
+		{"revision above the high-water", daTTLRelayEdit(func(s *DARelayState, r daTTLCallbackRecords) {
+			s.records = s.relations.recordValue(r.stateAID).revision - 1
+		}), daTTLWrapped(errDARelayImageIncompatible, "revision")},
+		{"received time above the high-water", daTTLRelayEdit(func(s *DARelayState, r daTTLCallbackRecords) {
+			s.nextReceivedTime = s.relations.recordValue(r.stateAID).receivedTime - 1
+		}), daTTLWrapped(errDARelayImageIncompatible, "received time")},
+		{"survivor revision overflows", daTTLRelayEdit(func(s *DARelayState, _ daTTLCallbackRecords) { s.records = math.MaxUint64 }), daTTLIs(errDARelayArithmeticOverflow)},
+		{"stored staged total differs", daTTLRelayEdit(func(s *DARelayState, _ daTTLCallbackRecords) { s.stagedBytes++ }), daTTLWrapped(errDARelayImageIncompatible, "staged retained bytes")},
+		{"stored orphan total differs", daTTLRelayEdit(func(s *DARelayState, _ daTTLCallbackRecords) { s.orphanBytes-- }), daTTLWrapped(errDARelayImageIncompatible, "orphan pool bytes")},
+		{"stored commit overhead total differs", daTTLRelayEdit(func(s *DARelayState, _ daTTLCallbackRecords) { s.orphanCommitOverheadBytes-- }), daTTLWrapped(errDARelayImageIncompatible, "orphan commit overhead bytes")},
+		{"stored per-peer entry differs", daTTLRelayEdit(func(s *DARelayState, _ daTTLCallbackRecords) { s.orphanBytesByPeerQuotaKey["ttl-peer"]++ }), daTTLWrapped(errDARelayImageIncompatible, `per-peer orphan bytes for "ttl-peer"`)},
+		{"selected peer key absent from the stored map", daTTLRelayEdit(func(s *DARelayState, _ daTTLCallbackRecords) { delete(s.orphanBytesByPeerQuotaKey, "ttl-peer") }), daTTLWrapped(errDARelayImageIncompatible, `per-peer orphan bytes for "ttl-peer"`)},
+		{"extra stored per-peer entry", daTTLRelayEdit(func(s *DARelayState, _ daTTLCallbackRecords) { s.orphanBytesByPeerQuotaKey["ghost"] = 1 }), daTTLWrapped(errDARelayImageIncompatible, "per-peer orphan bytes: records imply")},
+		{"extra stored per-da_id entry", daTTLRelayEdit(func(s *DARelayState, _ daTTLCallbackRecords) { s.orphanBytesByDAID[[32]byte{0xee}] = 1 }), daTTLWrapped(errDARelayImageIncompatible, "per-da_id orphan bytes: records imply")},
+		{"index entry absent", daTTLRelayEdit(func(s *DARelayState, r daTTLCallbackRecords) { s.relations.sets[r.stateAID].present = false }), daTTLIs(errDARelayTTLRecordKeyMismatch)},
+		{"index entry State C", daTTLRelayEdit(func(s *DARelayState, r daTTLCallbackRecords) {
+			record := s.relations.recordValue(r.stateAID)
+			record.state = daRelayStateCompleteSet
+			s.relations.scalarRecord(r.stateAID, record)
+		}), daTTLIs(errDARelayTTLRecordKeyMismatch)},
 		// The next four rows corrupt a member token or input set and assert errDARelayImageIncompatible.
 		{"zero member token", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			editDATTLChunkMember(f, r.stateAID, func(m *daRelayMemberIdentity) { m.token = PendingOutpointToken{} })
-		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		}, daTTLIs(errDARelayImageIncompatible)},
 		{"foreign member token", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			editDATTLChunkMember(f, r.stateAID, func(m *daRelayMemberIdentity) { m.token.owner = &PendingOutpointOwner{} })
-		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		}, daTTLIs(errDARelayImageIncompatible)},
 		{"member token held twice", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			token := r.setup.sets[r.stateBID].commit.member.token
 			editDATTLChunkMember(f, r.stateAID, func(m *daRelayMemberIdentity) { m.token = token })
-		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
-		{"input claimed by two members", reuseDATTLInputInStateB, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
+		}, daTTLIs(errDARelayImageIncompatible)},
+		{"input claimed by two members", reuseDATTLInputInStateB, daTTLIs(errDARelayImageIncompatible)},
 		// The State B commit member stores State A's txid, which its own parsed bytes contradict.
-		{"commit member txid contradicts its parsed identity", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) {
-				record := s.relations.recordValue(r.stateBID)
-				member := *record.commit.member
-				member.txid = r.stateA.txid
-				record.commit.member = &member
-				s.relations.putRecord(r.stateBID, record)
-			})
-		}, func(err error) bool {
+		{"commit member txid contradicts its parsed identity", daTTLRelayEdit(func(s *DARelayState, r daTTLCallbackRecords) {
+			record := s.relations.recordValue(r.stateBID)
+			member := *record.commit.member
+			member.txid = r.stateA.txid
+			record.commit.member = &member
+			s.relations.putRecord(r.stateBID, record)
+		}), func(err error) bool {
 			var terminal *canonicalDATerminalError
 			return errors.As(err, &terminal) && strings.Contains(err.Error(), "contradicts its parsed identity")
 		}},
 		// A zero count is an inconsistent stored value (underflow invalidates the plan); the rows assert the bare error.
 		{"State A count zero", func(f *daNonReplayFixture, r daTTLCallbackRecords) { f.setOwnerReadyTTL(r.stateAID, 0) }, daTTLBareIncompatible},
 		{"State B count zero", func(f *daNonReplayFixture, r daTTLCallbackRecords) { f.setOwnerReadyTTL(r.stateBID, 0) }, daTTLBareIncompatible},
-		{"nil chainstate", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.mempool.chainState = nil })
-		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "nil chainstate") }},
-		{"nil pending-outpoint owner", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
-			f.mutateRelay(func(s *DARelayState) { s.mempool.pendingOutpoints = nil })
-		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "nil pending-outpoint owner") }},
+		{"nil chainstate", daTTLRelayEdit(func(s *DARelayState, _ daTTLCallbackRecords) { s.mempool.chainState = nil }), func(err error) bool { return err != nil && strings.Contains(err.Error(), "nil chainstate") }},
+		{"nil pending-outpoint owner", daTTLRelayEdit(func(s *DARelayState, _ daTTLCallbackRecords) { s.mempool.pendingOutpoints = nil }), func(err error) bool { return err != nil && strings.Contains(err.Error(), "nil pending-outpoint owner") }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			f, r := newDATTLCallbackRecords(t)
@@ -513,6 +521,23 @@ func daTTLWrapped(want error, detail string) func(error) bool {
 	return func(err error) bool { return errors.Is(err, want) && strings.Contains(err.Error(), detail) }
 }
 
+func daTTLIs(want error) func(error) bool {
+	return func(err error) bool { return errors.Is(err, want) }
+}
+
+// daTTLRelayEdit and daTTLOwnerEdit run edit on the relay or on the pending-outpoint owner under its mutex.
+func daTTLRelayEdit(edit func(*DARelayState, daTTLCallbackRecords)) func(*daNonReplayFixture, daTTLCallbackRecords) {
+	return func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+		f.mutateRelay(func(s *DARelayState) { edit(s, r) })
+	}
+}
+
+func daTTLOwnerEdit(edit func(*PendingOutpointOwner, daTTLCallbackRecords)) func(*daNonReplayFixture, daTTLCallbackRecords) {
+	return func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+		ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { edit(o, r) })
+	}
+}
+
 // editDATTLChunkMember replaces chunk 0's member of one record with an edited copy, keeping other identities.
 func editDATTLChunkMember(f *daNonReplayFixture, daID [32]byte, edit func(*daRelayMemberIdentity)) {
 	f.mutateRelay(func(s *DARelayState) {
@@ -531,8 +556,7 @@ func editDATTLChunkMember(f *daNonReplayFixture, daID [32]byte, edit func(*daRel
 	})
 }
 
-// reuseDATTLInputInStateB re-signs State B's commit over State A's input, same length, so the retained bytes, locators
-// and accounting stay consistent and only the input set repeats.
+// reuseDATTLInputInStateB re-signs State B's commit over State A's same-length input, so only the input set repeats.
 func reuseDATTLInputInStateB(f *daNonReplayFixture, r daTTLCallbackRecords) {
 	next := f.next
 	f.next = slices.Index(f.outpoints, r.stateA.inputs[0])
@@ -555,9 +579,8 @@ func requireDATTLIndexStep(t *testing.T, f *daNonReplayFixture, step string) {
 	requireDATTLIndexExact(t, f.relay)
 }
 
-// TestDATTLCallbackIndexProductionPaths pins the index across orphan-chunk staging (State A created and grown), commit
-// staging (State A to State B), completion by the commit (State A to State C) and by the last chunk (State B to State
-// C) and the PEER quota cleanup removal (D1 projection: TestDATTLCallbackIndexD1Projection).
+// TestDATTLCallbackIndexProductionPaths pins the index across orphan-chunk staging, commit staging (A to B), completion
+// by the commit (A to C) or the last chunk (B to C) and the PEER quota cleanup removal.
 func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
 	f := newDANonReplayFixture(t, 10)
 	grown, staged, completed, released, late := [32]byte{0xd1}, [32]byte{0xd2}, [32]byte{0xd3}, [32]byte{0xd4}, [32]byte{0xd5}
@@ -643,9 +666,8 @@ func TestDATTLCallbackEmptiedBucketDropped(t *testing.T) {
 	}
 }
 
-// daTTLRecordingService is a node-level DATTLMutationService that records each entry attempt by name and, unless
-// refused, runs decrease once as an admitted registration would. beforeAttempt, when set, runs after the selection
-// snapshot and before the attempt is recorded, the point a registration would linearize.
+// daTTLRecordingService records each entry attempt by name and, unless refused, runs decrease once; beforeAttempt, when
+// set, runs between the selection snapshot and the recorded attempt.
 type daTTLRecordingService struct {
 	name          string
 	attempts      *[]string
@@ -720,10 +742,9 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	require(t, nilEngine.DATTLBindingService() == nil && nilEngine.enterSelectedDATTL(decrease) == nil && decreases == 0, "nil engine binding")
 }
 
-// TestDATTLCallbackBindingChangesNoDAState pins that binding and selection change nothing over a populated relay (State
-// A and B at nonzero counts with owner tokens and a prefetch reservation, State C): the first and a later
-// ClaimDARelayState, publication, the identity read and an absent, refused or admitted selection whose decrease does
-// nothing change no DA state, and the later claim keeps the first hook.
+// TestDATTLCallbackBindingChangesNoDAState: over a populated relay (State A and B at nonzero counts with owner tokens
+// and a prefetch reservation, State C), the first and a later ClaimDARelayState, publication, the identity read and an
+// absent, refused or admitted no-op selection change no DA state; the later claim keeps the first hook.
 func TestDATTLCallbackBindingChangesNoDAState(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	engine := &SyncEngine{chainState: f.state, daRelay: f.relay}
@@ -755,9 +776,8 @@ func TestDATTLCallbackBindingChangesNoDAState(t *testing.T) {
 	f.relay.mu.Unlock()
 }
 
-// TestDATTLCallbackBindingConcurrentPublications runs under -race: one publisher stores S_i in increasing i and then
-// records i, while selections run concurrently. A selection reads the recorded index before and after it and must
-// select an S_j with before <= j <= after+1 (S_after+1 may be unrecorded), so a stale binding fails.
+// TestDATTLCallbackBindingConcurrentPublications (-race): a publisher stores S_i then records i during concurrent
+// selections, each of which must select S_j with before <= j <= after+1 of the recorded index.
 func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	const publications = 400
@@ -793,10 +813,9 @@ func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 	require(t, f.engine.DATTLBindingService() == DATTLMutationService(services[publications-1]), "final binding is not the last publication")
 }
 
-// TestDATTLCallbackRunsInsideTheTransitionHold pins the in-guard TTL body under an admission guard the test holds
-// exclusively: a ReleasePeerQuotaKey and a DA admission started first park on it, the body completes under that hold,
-// neither writer runs before the release, and after it both run against the decreased image: the admitted record is
-// created at the full orphan TTL and the decreased records keep count 2.
+// TestDATTLCallbackRunsInsideTheTransitionHold: under a held exclusive admission guard, a ReleasePeerQuotaKey and a DA
+// admission started first park while the body completes and run only after the release, against the decreased image:
+// the admitted record starts at the full orphan TTL, the decreased records keep count 2.
 func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	f.state.admissionMu.Lock()
@@ -814,7 +833,7 @@ func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
 	go func() { _, err := f.tryAdmit(fresh, daNonReplayPeer("fresh-peer")); done <- err }()
 	awaitCanonicalMOAdmissionRLock(t, "BeginDAAdmission", 1)
 	body := make(chan error, 1)
-	go func() { body <- f.relay.advanceOwnerReadyTTLInGuard() }()
+	go func() { body <- advanceDATTLChecked(f.relay, f.mp.pendingOutpoints) }()
 	select {
 	case err := <-body:
 		require(t, err == nil, "in-guard TTL body: %v", err)
@@ -842,9 +861,8 @@ func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
 	requireDATTLCount(t, after, freshID, 7) // the fixture's orphan TTL: created after the decrease
 }
 
-// TestDATTLCallbackDecrementReachability pins the callers of the listed TTL functions: the count-lowering helpers are
-// reached only from advanceOwnerReadyTTLInGuard, and the in-guard body only from the canonical transition's enterDATTL;
-// the legacy advanceOrphanTTLLocked keeps its one legacy caller.
+// TestDATTLCallbackDecrementReachability: the count-lowering helpers are reached only from advanceOwnerReadyTTLInGuard,
+// that body only from enterDATTL, and advanceOrphanTTLLocked keeps its one legacy caller.
 func TestDATTLCallbackDecrementReachability(t *testing.T) {
 	want := map[string][]string{
 		"addOwnerReadyTTLSurvivor":         {"planOwnerReadyTTLRecordLocked"},
@@ -916,9 +934,8 @@ func daTTLMarkerValue(assign *ast.AssignStmt, i int) string {
 	return "expression"
 }
 
-// TestDATTLCallbackLatchedNewInvokesNothing pins that a TERMINAL_PERSISTENCE(new) publication, which publishes the
-// complete NEW image of an ACCEPTED apply and then latches, invokes no DA TTL entry (RUBIN_COMPACT_BLOCKS.md Section
-// 5): the bound entry, attempted once by the preceding ACCEPTED/NEW publication, records no further attempt.
+// TestDATTLCallbackLatchedNewInvokesNothing: a TERMINAL_PERSISTENCE(new) publication invokes no DA TTL entry
+// (RUBIN_COMPACT_BLOCKS.md Section 5) beyond the one attempt of the preceding ACCEPTED/NEW publication.
 func TestDATTLCallbackLatchedNewInvokesNothing(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	require(t, f.engine.DARelayState() != nil, "fixture engine has no bound DA relay")
@@ -948,8 +965,7 @@ func TestDATTLCallbackLatchedNewInvokesNothing(t *testing.T) {
 	require(t, slices.Equal(attempts, []string{"S"}), "TERMINAL_PERSISTENCE(new) invoked the entry: attempts=%v", attempts)
 }
 
-// daTTLEngineRecords retains one State A chunk at count 3 and one State B commit at count 1 in the DA relay bound to
-// f.engine, through the real admission over fresh spendable outputs.
+// daTTLEngineRecords admits one State A chunk at count 3 and one State B commit at count 1 into f.engine's DA relay.
 func daTTLEngineRecords(t *testing.T, f *pendingOutpointSyncFixture) (*daNonReplayFixture, [32]byte, [32]byte) {
 	t.Helper()
 	signer := mustNodeMLDSA87Keypair(t)
@@ -1065,13 +1081,13 @@ func requireDATTLLocksFree(t *testing.T, relay *DARelayState, owner *PendingOutp
 	owner.mu.Unlock()
 }
 
-// requireDATTLAppliedImage requires the complete applied image of one decrease over State A at 3 and State B at 1: A at
-// 2 with one fresh revision, B removed with its claim and prefetch set, nothing else changed; a following body call
-// then accepts that image and decreases A to 1.
-func requireDATTLAppliedImage(t *testing.T, f *daNonReplayFixture, r daTTLCallbackRecords, before daRelayStateView, ownerBefore *PendingOutpointOwner) {
+// requireDATTLAppliedImage requires the applied image of one decrease over A at 3 and B at 1 (A at 2 with a fresh
+// revision, B removed with its claim and prefetch set, nothing else changed) and a next body call decreasing A to 1.
+func requireDATTLAppliedImage(t *testing.T, f *daNonReplayFixture, r daTTLCallbackRecords, image daTTLImage) {
 	t.Helper()
-	after, ownerAfter := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-	requireDATTLOutsideSelectedUnchanged(t, before, after, ownerBefore, ownerAfter, r.stateAID, r.stateBID)
+	applied := daTTLSnapshot(f.relay, f.mp.pendingOutpoints)
+	requireDATTLOK(t, daTTLOutsideErr(image, applied), "applied image")
+	before, after, ownerAfter := image.view, applied.view, applied.owner
 	requireDATTLCount(t, after, r.stateAID, 2)
 	ownerReadyRecordAbsent(t, after, r.stateBID, r.stateB.txid)
 	ownerReadyClaimGone(t, ownerAfter, before.sets[r.stateBID].commit.member.token, r.stateB.inputs)
@@ -1084,10 +1100,9 @@ func requireDATTLAppliedImage(t *testing.T, f *daNonReplayFixture, r daTTLCallba
 	requireDATTLCount(t, daRelayStateSnapshot(f.relay), r.stateAID, 1)
 }
 
-// TestDATTLCallbackBodyPanicKeepsWholeImage injects a panic into the in-guard body after the plan and every check,
-// before the first mutation, and after the last apply mutation, before return: the panic reaches the caller
-// unrecovered, the DA relay and owner mutexes are released, and the image is the complete old one or the complete
-// applied one (RUBIN_COMPACT_BLOCKS.md Section 5).
+// TestDATTLCallbackBodyPanicKeepsWholeImage injects a panic after the plan and every check (before the first mutation)
+// and after the last apply mutation (before return): it reaches the caller unrecovered, the DA relay and owner mutexes
+// are released, and the image is the complete old or applied one (RUBIN_COMPACT_BLOCKS.md Section 5).
 func TestDATTLCallbackBodyPanicKeepsWholeImage(t *testing.T) {
 	for _, stage := range []daTTLStage{daTTLPlanned, daTTLApplied} {
 		t.Run(fmt.Sprintf("stage=%d", stage), func(t *testing.T) {
@@ -1095,15 +1110,15 @@ func TestDATTLCallbackBodyPanicKeepsWholeImage(t *testing.T) {
 			f.setOwnerReadyTTL(r.stateBID, 1)
 			f.relay.prefetch.indexes[r.stateBID] = map[uint16]string{0: "ttl-peer"}
 			f.relay.prefetch.expires[r.stateBID] = time.Now().Add(time.Hour)
-			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			before := daTTLSnapshot(f.relay, f.mp.pendingOutpoints)
 			got := panicDATTLBodyAt(t, f, stage)
 			require(t, got == fmt.Sprintf("ttl panic at stage %d", stage), "recovered %v, want the injected panic", got)
 			requireDATTLLocksFree(t, f.relay, f.mp.pendingOutpoints)
 			if stage == daTTLPlanned {
-				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before.view, before.owner)
 				return
 			}
-			requireDATTLAppliedImage(t, f, r, before, ownerBefore)
+			requireDATTLAppliedImage(t, f, r, before)
 		})
 	}
 }
@@ -1121,10 +1136,9 @@ func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
 			// The entry mirrors the Service entry under no lease: one registered lease, one decrease, released by defer.
 			var leases sync.WaitGroup
 			var acquired, released atomic.Int32
-			var before daRelayStateView
-			var ownerBefore *PendingOutpointOwner
+			var before daTTLImage
 			f.engine.PublishDATTLBinding(&daTTLFuncService{enter: func(decrease func() error) error {
-				before, ownerBefore = daRelayStateSnapshot(x.relay), cloneDAAdmissionOwner(x.mp.pendingOutpoints)
+				before = daTTLSnapshot(x.relay, x.mp.pendingOutpoints)
 				leases.Add(1)
 				acquired.Add(1)
 				defer func() { released.Add(1); leases.Done() }()
@@ -1160,21 +1174,20 @@ func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
 			f.engine.mutationMu.Unlock()
 			after := daRelayStateSnapshot(x.relay)
 			if stage == daTTLPlanned {
-				requireDANonReplayUnchanged(t, x.relay, x.mp.pendingOutpoints, before, ownerBefore)
+				requireDANonReplayUnchanged(t, x.relay, x.mp.pendingOutpoints, before.view, before.owner)
 				return
 			}
-			requireDATTLOutsideSelectedUnchanged(t, before, after, ownerBefore, cloneDAAdmissionOwner(x.mp.pendingOutpoints), stateA, stateB)
+			requireDATTLOK(t, daTTLOutsideErr(before, daTTLSnapshot(x.relay, x.mp.pendingOutpoints)), "applied image")
 			requireDATTLCount(t, after, stateA, 2)
 			_, present := after.sets[stateB]
-			require(t, !present && after.records == before.records+1, "applied image: State B present=%v records=%d, want removed and %d", present, after.records, before.records+1)
+			require(t, !present && after.records == before.view.records+1, "applied image: State B present=%v records=%d, want removed and %d", present, after.records, before.view.records+1)
 		})
 	}
 }
 
-// TestDATTLCallbackEndToEndGenesisBootstrap drives bootstrapCanonicalGenesisIfEmpty on an empty devnet engine with a
-// bound DA relay: genesis is an ACCEPTED/NEW publication, so a published binding is attempted exactly once, while under
-// an absent binding the bootstrap invokes nothing, publishes no binding and leaves the DA image unchanged
-// (RUBIN_COMPACT_BLOCKS.md Section 5).
+// TestDATTLCallbackEndToEndGenesisBootstrap: bootstrapCanonicalGenesisIfEmpty on an empty devnet engine with a bound DA
+// relay is an ACCEPTED/NEW publication, so a published binding is attempted once; under an absent binding it invokes
+// nothing, publishes no binding and leaves the DA image unchanged (RUBIN_COMPACT_BLOCKS.md Section 5).
 func TestDATTLCallbackEndToEndGenesisBootstrap(t *testing.T) {
 	for _, bound := range []bool{true, false} {
 		t.Run(fmt.Sprintf("bound=%v", bound), func(t *testing.T) {
@@ -1204,16 +1217,14 @@ func TestDATTLCallbackEndToEndGenesisBootstrap(t *testing.T) {
 	}
 }
 
-// daTTLHoldRecord is one signed DA transaction of a guard-hold shape, admitted with PEER provenance, and its booked
-// charge.
+// daTTLHoldRecord is one signed DA transaction of a guard-hold shape, admitted as PEER, and its booked charge.
 type daTTLHoldRecord struct {
 	raw    []byte
 	quota  string
 	charge uint64
 }
 
-// daTTLHoldShape is one retained DA image: records admitted in order, then next, which the default caps refuse with
-// capErr (E has neither).
+// daTTLHoldShape: records admitted in order, then next, which the default caps refuse with capErr (E has neither).
 type daTTLHoldShape struct {
 	name    string
 	records []daTTLHoldRecord
@@ -1273,8 +1284,7 @@ func (in *daTTLHoldInputs) buildFill(b testing.TB) {
 	}
 }
 
-// commit signs a State B commit-only record: one CORE_DA_COMMIT output, chunk_count 1, batch_sig_suite 0, the given
-// manifest and batch_sig lengths; its charge is its tx bytes.
+// commit signs a State B commit-only record (one CORE_DA_COMMIT output, chunk_count 1) charging its tx bytes.
 func (in *daTTLHoldInputs) commit(b testing.TB, daID [32]byte, manifest, batchSig int) daTTLHoldRecord {
 	b.Helper()
 	commitment := sha3.Sum256(daID[:])
@@ -1288,8 +1298,7 @@ func (in *daTTLHoldInputs) commit(b testing.TB, daID [32]byte, manifest, batchSi
 	return daTTLHoldRecord{raw: raw, quota: "ttl-hold-b", charge: uint64(len(raw))}
 }
 
-// stateBShape builds commits for one quota identity until the next would exceed DA_ORPHAN_POOL_SIZE or
-// DA_ORPHAN_COMMIT_OVERHEAD_MAX.
+// stateBShape builds one quota identity's commits up to DA_ORPHAN_POOL_SIZE and DA_ORPHAN_COMMIT_OVERHEAD_MAX.
 func (in *daTTLHoldInputs) stateBShape(b testing.TB, name string, tag byte, manifest, batchSig int) daTTLHoldShape {
 	caps := defaultDARelayCaps()
 	shape := daTTLHoldShape{name: name, capErr: errDARelayOrphanCommitCapExceeded}
@@ -1314,8 +1323,7 @@ func (in *daTTLHoldInputs) chunk(b testing.TB, daID [32]byte, index uint16, payl
 	return daTTLHoldRecord{raw: raw, charge: uint64(len(raw) + payloadLen)}
 }
 
-// fullRecordPayloads gives the fewest chunk payloads of one record charging at most DA_ORPHAN_POOL_PER_DA_ID_MAX:
-// CHUNK_BYTES each, then the largest last payload that fits.
+// fullRecordPayloads gives the fewest chunk payloads charging at most DA_ORPHAN_POOL_PER_DA_ID_MAX for one record.
 func (in *daTTLHoldInputs) fullRecordPayloads(b testing.TB) []int {
 	full := in.chunk(b, [32]byte{0xaf}, 0, consensus.CHUNK_BYTES).charge
 	n := daOrphanPoolPerDAIDMaxBytes / full
@@ -1327,9 +1335,8 @@ func (in *daTTLHoldInputs) fullRecordPayloads(b testing.TB) []int {
 	return append(slices.Repeat([]int{consensus.CHUNK_BYTES}, int(n)), last)
 }
 
-// stateAShape builds records of chunks with the given payload lengths under fresh da_ids until the next record would
-// exceed DA_ORPHAN_POOL_SIZE; each PEER identity takes members in order until the next would exceed
-// DA_ORPHAN_POOL_PER_PEER_MAX. next is the next record's first chunk.
+// stateAShape builds records of chunks with the given payload lengths under fresh da_ids up to DA_ORPHAN_POOL_SIZE,
+// each PEER identity taking members up to DA_ORPHAN_POOL_PER_PEER_MAX; next starts the next record.
 func (in *daTTLHoldInputs) stateAShape(b testing.TB, name string, tag byte, payloads []int) daTTLHoldShape {
 	shape := daTTLHoldShape{name: name, capErr: errDARelayOrphanPoolCapExceeded}
 	identity, used := 0, uint64(0)
@@ -1425,8 +1432,7 @@ func (in *daTTLHoldInputs) preState(b testing.TB, shape daTTLHoldShape, ttl uint
 	return f
 }
 
-// requireDATTLHoldEffect checks the timed block's DA effect: with the binding every record decreases once (removed at
-// TTL 1), without it none changes.
+// requireDATTLHoldEffect: with the binding each record decreases once (removed at TTL 1), without it none changes.
 func requireDATTLHoldEffect(b testing.TB, before, after daRelayStateView, ttl uint64, bound bool) {
 	b.Helper()
 	switch {
@@ -1482,9 +1488,8 @@ func benchDATTLGuardHold(b *testing.B, in *daTTLHoldInputs, shape daTTLHoldShape
 	b.ReportMetric(float64(len(in.fill)), "fill-txs")
 }
 
-// BenchmarkDATTLCallbackGuardHold times one ACCEPTED/NEW ApplyBlock over a full standard mempool and one retained DA
-// shape, with a binding whose entry runs the decrease directly and with no binding; the difference is the guard hold
-// the in-guard TTL decrease adds (RUBIN_COMPACT_BLOCKS.md Section 5).
+// BenchmarkDATTLCallbackGuardHold times one ACCEPTED/NEW ApplyBlock over a full mempool and a retained DA shape with
+// and without a decreasing binding; the difference is the in-guard TTL hold (RUBIN_COMPACT_BLOCKS.md Section 5).
 func BenchmarkDATTLCallbackGuardHold(b *testing.B) {
 	in := newDATTLHoldInputs(b)
 	for _, shape := range in.shapes {
