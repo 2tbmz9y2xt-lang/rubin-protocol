@@ -162,28 +162,43 @@ func advanceDATTLChecked(relay *DARelayState, owner *PendingOutpointOwner) error
 	return daTTLOutsideErr(before, daTTLSnapshot(relay, owner))
 }
 
-// daTTLOutsideErr compares two images outside the selected set, the State A and B records of before (daTTLResidual,
-// daTTLOwnerResidual), and the owner's operation counts; the revision high-water rises once per surviving selected record.
+// daTTLOutsideErr compares two images outside the selected set, the State A and B records of before: before less the
+// records the body removed, with their locator rows, charges, per-da_id and prefetch entries, claims and outpoint rows,
+// derived once from before, equals after; the operation counts are equal; the revision high-water rises once per
+// surviving selected record.
 func daTTLOutsideErr(before, after daTTLImage) error {
-	selected, tokens := map[[32]byte]bool{}, map[PendingOutpointToken]bool{}
-	for daID, record := range before.view.sets {
-		if record.state != daRelayStateCompleteSet {
-			selected[daID] = true
-			daTTLMembers(record, func(member *daRelayMemberIdentity, _ uint64, _ bool) { tokens[member.token] = true })
-		}
+	selected, removed := daTTLSelection(before.view, after.view)
+	wantView, isView := daTTLExpectedView(before.view, selected, removed), daTTLWithoutSelected(after.view, selected)
+	released := removed
+	if before.view.mempool == nil { // an unbound relay has no claim domain
+		released = nil
 	}
-	wasView, isView := daTTLResidual(before.view, selected), daTTLResidual(after.view, selected)
-	wasOwner, isOwner := daTTLOwnerResidual(before.owner, tokens), daTTLOwnerResidual(after.owner, tokens)
-	survivors := uint64(len(after.view.sets) - len(isView.sets))
+	wantOwner := daTTLExpectedOwner(before.owner, released)
+	survivors := uint64(len(selected) - len(removed))
 	switch {
 	case after.view.records != before.view.records+survivors:
 		return fmt.Errorf("revision high-water %d -> %d, want one minted per surviving selected record (%d)", before.view.records, after.view.records, survivors)
-	case !reflect.DeepEqual(wasView, isView): //nolint:govet // Complete private state-image equality requires structural comparison, error identities included.
-		return fmt.Errorf("DA image outside the selected set changed: %+v -> %+v", wasView, isView)
-	case !reflect.DeepEqual(wasOwner, isOwner) || before.counts != after.counts:
-		return fmt.Errorf("owner outside the selected set changed: %+v %+v -> %+v %+v", wasOwner, before.counts, isOwner, after.counts)
+	case !reflect.DeepEqual(wantView, isView): //nolint:govet // Complete private state-image equality requires structural comparison, error identities included.
+		return fmt.Errorf("DA image outside the selected set changed: want %+v, got %+v", wantView, isView)
+	case !reflect.DeepEqual(wantOwner, after.owner) || before.counts != after.counts:
+		return fmt.Errorf("owner outside the selected set changed: want %+v %+v, got %+v %+v", wantOwner, before.counts, after.owner, after.counts)
 	}
 	return nil
+}
+
+// daTTLSelection returns the State A and B records of before and the subset absent from after.
+func daTTLSelection(before, after daRelayStateView) (selected, removed map[[32]byte]daRelaySetRecord) {
+	selected, removed = map[[32]byte]daRelaySetRecord{}, map[[32]byte]daRelaySetRecord{}
+	for daID, record := range before.sets {
+		if record.state == daRelayStateCompleteSet {
+			continue
+		}
+		selected[daID] = record
+		if _, present := after.sets[daID]; !present {
+			removed[daID] = record
+		}
+	}
+	return selected, removed
 }
 
 // daTTLMembers visits each present member of record with its charge (RUBIN_COMPACT_BLOCKS.md Section 18.1).
@@ -198,47 +213,73 @@ func daTTLMembers(record daRelaySetRecord, visit func(member *daRelayMemberIdent
 	}
 }
 
-// daTTLResidual removes the selected records from view with their locator rows, per-da_id and prefetch entries and
-// own charges (RUBIN_COMPACT_BLOCKS.md Section 18.1), and zeroes the high-water.
-func daTTLResidual(view daRelayStateView, selected map[[32]byte]bool) daRelayStateView {
-	view.peerBytes = maps.Collect(maps.All(view.peerBytes))
-	for daID := range selected {
-		staged := view.sets[daID].state == daRelayStateStagedCommit
-		daTTLMembers(view.sets[daID], func(member *daRelayMemberIdentity, charge uint64, commit bool) {
-			if commit {
-				view.commitBytes -= charge
-			}
-			if staged {
-				view.stagedBytes -= charge
-				return
-			}
-			view.orphanBytes -= charge
-			if member.provenance.kind == daProvenancePeer {
-				view.peerBytes[member.provenance.quotaKey()] -= charge
-			}
-		})
+// daTTLExpectedView is before less the removed records' locator rows (keyed by their before txids), own charges
+// (RUBIN_COMPACT_BLOCKS.md Section 18.1), per-da_id and prefetch entries, with the selected records and the high-water
+// left out.
+func daTTLExpectedView(view daRelayStateView, selected, removed map[[32]byte]daRelaySetRecord) daRelayStateView {
+	view = daTTLWithoutSelected(view, selected)
+	for _, record := range removed {
+		daTTLUncharge(&view, record)
 	}
-	maps.DeleteFunc(view.peerBytes, func(_ string, bytes uint64) bool { return bytes == 0 })
-	view.locators = maps.Collect(maps.All(view.locators))
-	maps.DeleteFunc(view.locators, func(_ [32]byte, locator daRelayLocator) bool { return selected[locator.daID] })
-	view.sets, view.daIDBytes = daTTLWithout(view.sets, selected), daTTLWithout(view.daIDBytes, selected)
-	view.prefetchIndexes, view.prefetchExpires = daTTLWithout(view.prefetchIndexes, selected), daTTLWithout(view.prefetchExpires, selected)
+	maps.DeleteFunc(view.locators, func(_ [32]byte, locator daRelayLocator) bool {
+		_, gone := removed[locator.daID]
+		return gone
+	})
+	view.daIDBytes = daTTLWithout(view.daIDBytes, removed)
+	view.prefetchIndexes, view.prefetchExpires = daTTLWithout(view.prefetchIndexes, removed), daTTLWithout(view.prefetchExpires, removed)
+	return view
+}
+
+// daTTLUncharge subtracts record's member charges from view's counters and drops a peer entry its charges bring to 0.
+func daTTLUncharge(view *daRelayStateView, record daRelaySetRecord) {
+	staged := record.state == daRelayStateStagedCommit
+	daTTLMembers(record, func(member *daRelayMemberIdentity, charge uint64, commit bool) {
+		if commit {
+			view.commitBytes -= charge
+		}
+		if staged {
+			view.stagedBytes -= charge
+			return
+		}
+		view.orphanBytes -= charge
+		if member.provenance.kind == daProvenancePeer {
+			key := member.provenance.quotaKey()
+			if view.peerBytes[key] -= charge; view.peerBytes[key] == 0 {
+				delete(view.peerBytes, key)
+			}
+		}
+	})
+}
+
+// daTTLWithoutSelected is a copy of view's maps with the selected records and the high-water left out.
+func daTTLWithoutSelected(view daRelayStateView, selected map[[32]byte]daRelaySetRecord) daRelayStateView {
+	view.sets = daTTLWithout(view.sets, selected)
+	view.peerBytes, view.locators = maps.Collect(maps.All(view.peerBytes)), maps.Collect(maps.All(view.locators))
+	view.daIDBytes = maps.Collect(maps.All(view.daIDBytes))
+	view.prefetchIndexes, view.prefetchExpires = maps.Collect(maps.All(view.prefetchIndexes)), maps.Collect(maps.All(view.prefetchExpires))
 	view.records = 0
 	return view
 }
 
-func daTTLWithout[V any](m map[[32]byte]V, selected map[[32]byte]bool) map[[32]byte]V {
+func daTTLWithout[V, S any](m map[[32]byte]V, selected map[[32]byte]S) map[[32]byte]V {
 	kept := maps.Collect(maps.All(m))
-	maps.DeleteFunc(kept, func(daID [32]byte, _ V) bool { return selected[daID] })
+	maps.DeleteFunc(kept, func(daID [32]byte, _ V) bool {
+		_, drop := selected[daID]
+		return drop
+	})
 	return kept
 }
 
-// daTTLOwnerResidual is a copy of owner without the claims and outpoint rows of tokens.
-func daTTLOwnerResidual(owner *PendingOutpointOwner, tokens map[PendingOutpointToken]bool) *PendingOutpointOwner {
-	residual := cloneDAAdmissionOwner(owner)
-	maps.DeleteFunc(residual.byToken, func(token PendingOutpointToken, _ *pendingOutpointClaim) bool { return tokens[token] })
-	maps.DeleteFunc(residual.byOutpoint, func(_ consensus.Outpoint, row pendingOutpointRow) bool { return tokens[row.token] })
-	return residual
+// daTTLExpectedOwner is a copy of before less the claims and outpoint rows of the removed records' member tokens.
+func daTTLExpectedOwner(owner *PendingOutpointOwner, removed map[[32]byte]daRelaySetRecord) *PendingOutpointOwner {
+	tokens := map[PendingOutpointToken]bool{}
+	for _, record := range removed {
+		daTTLMembers(record, func(member *daRelayMemberIdentity, _ uint64, _ bool) { tokens[member.token] = true })
+	}
+	expected := cloneDAAdmissionOwner(owner)
+	maps.DeleteFunc(expected.byToken, func(token PendingOutpointToken, _ *pendingOutpointClaim) bool { return tokens[token] })
+	maps.DeleteFunc(expected.byOutpoint, func(_ consensus.Outpoint, row pendingOutpointRow) bool { return tokens[row.token] })
+	return expected
 }
 
 func requireDATTLCount(t *testing.T, view daRelayStateView, daID [32]byte, want uint64) {
