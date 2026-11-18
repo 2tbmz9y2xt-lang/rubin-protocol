@@ -2068,7 +2068,7 @@ func TestUpdatePlanSurfaceOwnership(t *testing.T) {
 	}
 	owners := map[string]bool{}
 	for _, name := range []string{
-		"updateOwnedObsolete", "obsoleteWitnesses", "obsoleteAdmitRows", "obsoleteRowCurrent", "obsoleteCovered", "obsoleteCharge", "obsoleteCompileRows", "updateObsoleteScope", "obsoleteDomainOrdered", "obsoleteCoalesce", "obsoleteMergeable", "obsoleteCoalescePoints", "obsoleteRetainControls", "obsoleteControlKeys", "obsoleteControlKey", "obsoleteContains", "obsoleteUniqueWitnesses", "obsoleteDBI", "obsoleteMutationCmp", "obsoleteRowCmp", "obsoleteDomainCmp", "obsoletePointCmp", "obsoleteScopeArrays", "obsoleteWitnessPoints",
+		"updateOwnedObsolete", "obsoleteWitnesses", "obsoleteAdmitRows", "obsoleteRowCurrent", "obsoleteCovered", "obsoleteCharge", "obsoleteCompileRows", "updateObsoleteScope", "obsoleteDomainOrdered", "obsoleteCoalesce", "obsoleteMergeable", "obsoleteCoalescePoints", "obsoleteRetainControls", "obsoleteControlKeys", "obsoleteControlKey", "obsoleteContains", "obsoleteUniqueWitnesses", "obsoleteDBI", "obsoleteMutationCmp", "obsoleteRowCmp", "obsoleteDomainCmp", "obsoletePointCmp", "obsoleteScopeArrays", "obsoleteWitnessPoints", "obsoleteExactCopy",
 		"treePrewriteBytesV1", "treeScopeBytesV1", "treeWitnessChargeV1", "treeScopeRowsV1", "scopeCompileV1", "admitScopedV1", "treeScopePresentV1", "treeScopeShapeV1", "treeScopeAdmitV1", "treeScopeProvenanceV1", "treeEmptyOperationV1", "treeAdmitSlotV1",
 	} {
 		owners[name] = false
