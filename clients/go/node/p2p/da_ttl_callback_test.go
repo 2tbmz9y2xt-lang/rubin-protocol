@@ -65,9 +65,12 @@ func TestDATTLCallbackServiceBinding(t *testing.T) {
 	probe := newSelectionProbe(t, h, source, 0xe1)
 	engine, s1 := h.syncEngine, h.service
 	require(t, engine.DATTLBindingService() == node.DATTLMutationService(s1), "identity read after S1 construction")
+	w1 := &wrappedTTLEntry{inner: s1}
+	engine.PublishDATTLBinding(w1)
 	s2 := newBoundService(t, h.service.cfg)
 	require(t, s2.daRelay == s1.daRelay && engine.DATTLBindingService() == node.DATTLMutationService(s2), "identity read after S2 construction")
 	probe.apply()
+	require(t, w1.attempts.Load() == 0, "S1 recorded %d registrations after S2 bound, want 0", w1.attempts.Load())
 	s3 := newBoundService(t, h.service.cfg)
 	require(t, s3.Close() == nil && engine.DATTLBindingService() == node.DATTLMutationService(s3), "Close(S3) cleared or replaced the binding")
 	probe.apply()
@@ -487,25 +490,40 @@ func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the record S2's admitted decrease expired at count 1")
 }
 
-// TestDATTLCallbackEndToEndLeasePath pins the lease path end to end: the peer path runs
-// the lease-owning Service's own nested entry and never reads the binding, so with the binding
-// naming a later, CLOSED Service S2 (whose selection would refuse) the peer applies still count
-// 3 -> 2 -> 1 -> removed.
+// TestDATTLCallbackEndToEndLeasePath pins the lease path end to end through the peer's
+// applyBlockWithReorg: with State A X at 2, State B Y at 1 and a State C set Z retained, one
+// relayed block leaves X at 1, removes Y and keeps Z; the binding names another OPEN Service S2
+// that records zero entry attempts, so the lease path never reads the binding.
 func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
-	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
+	source := newTestHarness(t, 5, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	probe := newSelectionProbe(t, h, source, 0xd2)
-	s2 := newBoundService(t, h.service.cfg)
-	must(t, s2.Close(), "Close(S2): the bound Service is CLOSED, so a selection would refuse")
+	s2 := &wrappedTTLEntry{inner: newBoundService(t, h.service.cfg)}
+	h.syncEngine.PublishDATTLBinding(s2)
 	p := testPeerForService(h.service, "remote", 3)
-	for height := uint64(1); height <= 2; height++ {
+	relay := func(height uint64) {
+		t.Helper()
 		_, err := p.processRelayedBlock(blockAtHeight(t, source, height))
 		must(t, err, "processRelayedBlock")
 	}
-	probe.f.requireRetained(probe.commit, "count 1 after two lease-path decreases")
-	_, err := p.processRelayedBlock(blockAtHeight(t, source, 3))
-	must(t, err, "processRelayedBlock(3)")
-	probe.f.requireAbsent(probe.commit, "the lease path decreased although the binding names a CLOSED Service")
+	relay(1)
+	stateA := probe.f.chunk(daRelayTestID(0xa2), 0, []byte("lease-x"))
+	probe.f.admit(stateA, "lease-a")
+	zID := daRelayTestID(0xc2)
+	zCommitment := sha3.Sum256([]byte("lease-z"))
+	stateC := [][]byte{probe.f.tx(daTxSpec{kind: 0x01, daID: zID, chunkCount: 1, commitment: [][]byte{zCommitment[:]}}), probe.f.chunk(zID, 0, []byte("lease-z"))}
+	probe.f.admit(stateC[0], "lease-c")
+	probe.f.admit(stateC[1], "lease-c")
+	relay(2)
+	probe.f.requireRetained(probe.commit, "Y at count 1")
+	relay(3)
+	probe.f.requireAbsent(probe.commit, "Y removed by the lease-path decrease at count 1")
+	probe.f.requireRetained(stateA, "X at count 1")
+	probe.f.requireRetained(stateC[0], "Z commit unchanged")
+	probe.f.requireRetained(stateC[1], "Z chunk unchanged")
+	relay(4)
+	probe.f.requireAbsent(stateA, "X removed at the next lease-path decrease")
+	require(t, s2.attempts.Load() == 0, "the OPEN bound S2 recorded %d entry attempts, want 0", s2.attempts.Load())
 }
 
 // TestDATTLCallbackEndToEndPanicReleasesLease pins the entry under a panic: a panic inside the decrease
