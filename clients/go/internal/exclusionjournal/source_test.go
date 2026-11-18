@@ -36,6 +36,13 @@ func sourceMust(t *testing.T, err error) {
 	}
 }
 
+func sourceFailIf(t *testing.T, failed bool, format string, args ...any) {
+	t.Helper()
+	if failed {
+		t.Fatalf(format, args...)
+	}
+}
+
 func sourceAccount(t *testing.T, use func(*mdbx.OperationAccount) error) {
 	t.Helper()
 	o, err := mdbx.NewOperationReservationOwner(mdbx.MinReservationLimit)
@@ -173,16 +180,12 @@ func sourceRead(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, want [][]byt
 			return nil
 		})
 	})
-	if i != len(want) {
-		t.Fatalf("part count=%d, want %d", i, len(want))
-	}
+	sourceFailIf(t, i != len(want), "part count=%d, want %d", i, len(want))
 }
 
 func sourceCheckPart(t *testing.T, part SourcePartV1, i int, kinds []byte, want [][]byte) []byte {
 	t.Helper()
-	if i >= len(want) {
-		t.Fatal("extra source part")
-	}
+	sourceFailIf(t, i >= len(want), "extra source part")
 	buf := make([]byte, len(want[i]))
 	n, err := part.ReadAt(buf, 0)
 	if byte(part.Kind) != kinds[i] || part.Length != uint64(len(want[i])) || n != len(buf) || err != nil || !bytes.Equal(buf, want[i]) {
@@ -253,9 +256,7 @@ func TestSourceDurableRoundTrip(t *testing.T) {
 				original := sourceReadFile(t, file)
 				sourcePrepareResult(t, o, m, producer, nil)
 				sourceMust(t, held.Close())
-				if !bytes.Equal(sourceReadFile(t, file), original) {
-					t.Fatal("identical preparation changed bytes")
-				}
+				sourceFailIf(t, !bytes.Equal(sourceReadFile(t, file), original), "identical preparation changed bytes")
 				for _, path := range generations {
 					sourceMust(t, os.RemoveAll(path))
 				}
@@ -274,9 +275,7 @@ func TestSourceChildV1(t *testing.T) {
 	}
 	s, err := policycontrol.Open(dir, sourceID())
 	if os.Getenv("RUBIN_SOURCE_SHAPE") == "busy" {
-		if s != nil || !errors.Is(err, policycontrol.ErrBusy) {
-			t.Fatalf("writer exclusion: %v %v", s, err)
-		}
+		sourceFailIf(t, s != nil || !errors.Is(err, policycontrol.ErrBusy), "writer exclusion: %v %v", s, err)
 		return
 	}
 	sourceMust(t, err)
@@ -356,9 +355,7 @@ func TestSourceExportScope(t *testing.T) {
 					})
 				}()
 				if row.name == "panic" {
-					if panicValue != any(row.cause) {
-						t.Fatalf("panic=%v", panicValue)
-					}
+					sourceFailIf(t, panicValue != any(row.cause), "panic=%v", panicValue)
 				} else if any(got) != any(row.cause) || row.name == "success" && calls != 6 {
 					t.Fatalf("export result=%v count=%d", got, calls)
 				}
@@ -371,9 +368,7 @@ func TestSourceExportScope(t *testing.T) {
 					}
 				}
 				parts[0][0] ^= 0x80
-				if !bytes.Equal(copied, want) {
-					t.Fatal("visitor copy aliases original backing")
-				}
+				sourceFailIf(t, !bytes.Equal(copied, want), "visitor copy aliases original backing")
 				return a.WithReservation(17, func() error { return nil })
 			})
 			sourceMust(t, s.Close())
@@ -464,9 +459,7 @@ func TestSourcePreparedManifestOwnership(t *testing.T) {
 	admitted := slices.Clone(m.Parts)
 	p := sourcePrepare(t, o, m, parts)
 	m.Parts[0].Length++
-	if !slices.Equal(p.manifest.Parts, admitted) {
-		t.Fatal("prepared manifest aliases caller metadata")
-	}
+	sourceFailIf(t, !slices.Equal(p.manifest.Parts, admitted), "prepared manifest aliases caller metadata")
 	m.Parts[0] = admitted[0]
 	sourceRead(t, o, m, parts, func() { m.Parts[1].Length++ })
 }

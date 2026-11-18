@@ -62,6 +62,29 @@ func TestSourceAuthorityCloseOnly(t *testing.T) {
 	s := mustCreate(t, storeDir(t), testIdentity(1))
 	before := fileBytes(t, s.dir)
 	one, two := sourceBorrow(t, s), sourceBorrow(t, s)
+	claim := func(b *SourceAuthorityBorrowV1, use func() error, want error) {
+		t.Helper()
+		if err := b.WithSourceOwnerClaimV1(use); !sameDependentValue(err, want) {
+			t.Fatalf("source owner claim: %v, want %v", err, want)
+		}
+	}
+	unreached := func() error {
+		t.Fatal("refused source owner claim entered callback")
+		return nil
+	}
+	claim(one, nil, ErrClosed)
+	cause := errors.New("source construction refusal")
+	claim(one, func() error { return cause }, cause)
+	calls := 0
+	claim(one, func() error {
+		calls++
+		claim(two, unreached, ErrBusy)
+		return nil
+	}, nil)
+	claim(two, unreached, ErrBusy)
+	if calls != 1 {
+		t.Fatalf("source construction calls: %d", calls)
+	}
 	copied := *one
 	ask, finish := dependentChild(t, s)
 	if got := ask(); got != "busy\n" {
@@ -99,6 +122,7 @@ func TestSourceAuthorityCloseOnly(t *testing.T) {
 		t.Fatalf("released writer exclusion: %q", got)
 	}
 	for _, b := range []*SourceAuthorityBorrowV1{nil, {}, one, two} {
+		claim(b, unreached, ErrClosed)
 		dir, id, physical, err := b.BindingV1()
 		if dir != "" || id != (Identity{}) || physical != (filelock.IdentityV1{}) || !sameDependentValue(err, ErrClosed) {
 			t.Fatalf("expired binding: %q %+v %v", dir, id, err)
