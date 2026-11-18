@@ -8229,6 +8229,8 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	})
 	t.Run("domain-mismatch-then-read-error", psfDomainMismatchThenError)
 	t.Run("point-mismatch-then-capacity", psfPointMismatchThenCapacity)
+	t.Run("selector-row-mismatch-then-capacity", psfSelectorRowMismatchThenCapacity)
+	t.Run("domain-row-mismatch-then-capacity", psfDomainRowMismatchThenCapacity)
 	t.Run("retained", psfRetained)
 	t.Run("witness-bytes", psfWitnessBytes)
 	t.Run("callback-cleanup", psfCallbackCleanup)
@@ -8545,6 +8547,84 @@ func psfPointMismatchThenCapacity(t *testing.T) {
 	_, r, _ = run(36, func(f, window uint64) uint64 { return f + window + 2*obsoleteHeaderWidth(3) + 4096 })
 	r.tuple(t, 1, 1, -1)
 	treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+}
+
+const psfRowBig = 4000
+
+// psfRowMismatchThenCapacity: mode 14 changes the first residual row of one stream before the write
+// section, and a later row of the same stream holds psfRowBig bytes. The account funds the envelope f,
+// the window and psfRowBig+64 bytes, so after the first row's inequality the later row's two-operand
+// comparison must still refuse with the capacity singleton.
+func psfRowMismatchThenCapacity(t *testing.T, rank uint8, f uint64, keys func([32]byte) ([]byte, []byte, func(*Reader) TreeOperationV1)) {
+	t.Helper()
+	big := bytes.Repeat([]byte{0xc5}, psfRowBig)
+	var first, later []byte
+	run := func(fault bool, extra uint64) (*psfScene, tsResult, fixtureLargeEvidence) {
+		sc := psfNew(t)
+		hash, _ := psfUndo(t, sc.s)
+		var op func(*Reader) TreeOperationV1
+		first, later, op = keys(hash)
+		treeNativeSeed(t, sc.s, rank, later, big)
+		sc.o = reservationFilled(t, psPageGrant+f+psfWindow(t, sc.s)+extra)
+		if !fault {
+			return sc, psRun(t, sc.s, sc.o, LaneOperation, op), fixtureLargeEvidence{}
+		}
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 14, rank, first, func() { r = psRun(t, sc.s, sc.o, LaneOperation, op) })
+		return sc, r, evidence
+	}
+	sc, r, evidence := run(true, psfRowBig+64)
+	if any(r.err) != any(errOperationReservationCapacity) || evidence.drift != 1 || evidence.aborts != 1 || evidence.commits != 0 {
+		t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
+	}
+	r.tuple(t, 1, 1, -1)
+	tsConsumed(t, sc.s, sc.o, 1, r.err)
+	reopened := tsReopen(t, sc.s, sc.path)
+	psfRaw(t, reopened, rank, first, []byte{0x7f})
+	psfRaw(t, reopened, rank, later, big)
+	// Attribution: without the fault the same account refuses at the later row; with ample capacity
+	// the first row's mismatch alone is the OLD/write refusal.
+	if _, r, _ = run(false, psfRowBig+64); any(r.err) != any(errOperationReservationCapacity) {
+		t.Fatalf("scope operand window not funded: %v", r.err)
+	}
+	_, r, _ = run(true, 2*psfRowBig+4096)
+	r.tuple(t, 1, 1, -1)
+	treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+}
+
+// psfSelectorRowMismatchThenCapacity runs the row case inside one undo-family selector: the family's
+// first member drifts and its second member is the later row.
+func psfSelectorRowMismatchThenCapacity(t *testing.T) {
+	auth := psfAuthority(t)
+	f := psF(1, 0, 0, 0, 0, 1, uint64(len(auth.Key)+len(auth.Literal)), 0)
+	psfRowMismatchThenCapacity(t, 5, f, func(hash [32]byte) ([]byte, []byte, func(*Reader) TreeOperationV1) {
+		op := func(*Reader) TreeOperationV1 {
+			return TreeOperationV1{Pair: TreePairV1{
+				Mutations:      []Mutation{psfAuthority(t)},
+				LargeConsulted: []LargeImageSelectorV1{{Kind: LargeImageUndoFamilyV1, Hash: hash}},
+			}}
+		}
+		return bytes.Clone(hash[:]), append(bytes.Clone(hash[:]), 0), op
+	})
+}
+
+// psfDomainRowMismatchThenCapacity runs the row case inside one witnessed node domain of generation 9:
+// the first node drifts and the second node is the later row.
+func psfDomainRowMismatchThenCapacity(t *testing.T) {
+	auth := psfAuthority(t)
+	nodes := obsoleteTreeFamily(9)
+	f := psF(1, 0, 0, 1, 0, 0, uint64(len(auth.Key)+len(auth.Literal)), uint64(8+len(nodes[2].key)))
+	psfRowMismatchThenCapacity(t, 8, f, func([32]byte) ([]byte, []byte, func(*Reader) TreeOperationV1) {
+		op := func(reader *Reader) TreeOperationV1 {
+			page, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1440)
+			mustEnvironment(t, err)
+			return TreeOperationV1{Pair: TreePairV1{
+				Mutations:         []Mutation{psfAuthority(t)},
+				ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness},
+			}}
+		}
+		return bytes.Clone(nodes[0].key), bytes.Clone(nodes[1].key), op
+	})
 }
 
 // psfUndoScopeF is psfUndoScopeOp's metadata envelope: one Mutation, three deletes, two witnesses, two
