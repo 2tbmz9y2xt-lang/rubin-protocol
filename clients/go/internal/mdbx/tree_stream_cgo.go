@@ -59,7 +59,10 @@ type TreePairV1 struct {
 	// selector, or a Consulted row inside a selector, is "invalid Update Batch"; last, more than
 	// 2391106 coalesced domains, points and selectors, or their control keys above 137676154 bytes,
 	// is "Update Batch exceeds bound". ObsoleteDeletes may be unordered and may delete rank-8 and
-	// generation root rows.
+	// generation root rows. The caller charges each raw page, token, key, continuation and selector
+	// backing and each ordinary input backing on this same LaneOperation account before creating or
+	// reading it and keeps that grant through the backing's last use; the engine neither
+	// authenticates that grant nor supplies a second account.
 	ObsoleteDeletes   []ObsoleteRowV1
 	ObsoleteConsulted []ObsoletePageWitnessV1
 	LargeConsulted    []LargeImageSelectorV1

@@ -693,7 +693,8 @@ func updateObsoleteScope(batch Batch, scope largeImageScope) (largeImageScope, e
 	return scope, nil
 }
 
-// obsoleteScopeArrays copies witness domains and points into exact-capacity arrays.
+// obsoleteScopeArrays copies each witness domain with a non-nil prefix into an array of capacity
+// len(tokens) and all witness points into an array of capacity equal to their summed count.
 func obsoleteScopeArrays(tokens []ObsoletePageWitnessV1) ([]obsoleteDomain, []obsoletePoint) {
 	domains := make([]obsoleteDomain, 0, len(tokens))
 	points := make([]obsoletePoint, 0, obsoleteWitnessPoints(tokens))
