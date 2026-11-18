@@ -499,7 +499,7 @@ func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 
 // TestDATTLCallbackEndToEndLeasePath pins the lease path end to end through the peer's applyBlockWithReorg: with State
 // A X at 2, State B Y at 1 and a State C set Z retained, one relayed block leaves X at 1, removes Y and keeps Z; the
-// binding names another OPEN Service S2 that records zero entry attempts, so the lease path never reads the binding.
+// binding names another OPEN Service S2 whose wrapper records zero entry attempts.
 func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
 	source, h, probe := newSourceAndProbe(t, 5, 0xd2)
 	s2 := &wrappedTTLEntry{inner: newBoundService(t, h.service.cfg)}
