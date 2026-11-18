@@ -204,11 +204,10 @@ func TestDATTLCallbackServiceCloseRace(t *testing.T) {
 	}
 }
 
-// TestDATTLCallbackEndToEndCloseRace drives the production selection: Close(S1)
-// and the construction of S2 race one ACCEPTED/NEW SyncEngine.ApplyBlock publication whose
-// selection snapshots S1 or S2. The apply returns ACCEPTED/NEW, Close returns, the record at
-// count 1 is either expired by one admitted decrease or kept by a refusal, and the binding names
-// S1 or S2.
+// TestDATTLCallbackEndToEndCloseRace drives the production selection: Close(S1) and the
+// construction of S2 race one ACCEPTED/NEW SyncEngine.ApplyBlock publication whose selection
+// snapshots S1 or S2. The apply returns ACCEPTED/NEW, Close returns, the record at count 1 is
+// either expired by one admitted decrease or kept by a refusal, and the binding names S1 or S2.
 func TestDATTLCallbackEndToEndCloseRace(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	for i := range 5 {
@@ -466,10 +465,9 @@ func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
 }
 
 // TestDATTLCallbackEndToEndSelection drives the no-lease selection through real ACCEPTED/NEW
-// applies (SyncEngine.ApplyBlock) over the real DA owner and Services: the
-// bound OPEN Service admits one decrease per publication, AnnounceBlock decreases
-// nothing, a CLOSED current binding changes no count while the apply still returns
-// ACCEPTED/NEW, the closed Service's retained
+// applies (SyncEngine.ApplyBlock) over the real DA owner and Services: the bound OPEN Service
+// admits one decrease per publication, AnnounceBlock decreases nothing, a CLOSED current binding
+// changes no count while the apply still returns ACCEPTED/NEW, the closed Service's retained
 // AnnounceBlock returns "service already closed", and a fresh Service binds and decreases.
 func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 	source := newTestHarness(t, 7, "127.0.0.1:0", nil)
@@ -930,30 +928,33 @@ func TestDATTLCallbackEndToEndSnapshotBeforePublication(t *testing.T) {
 }
 
 // TestDATTLCallbackEndToEndNoGuardReacquisition drives one ACCEPTED/NEW publication through the
-// production selection and the real in-guard body: the entry is attempted once and ApplyBlock
-// returns within the watchdog, so the body never waits for the guard the transition holds.
+// production selection: the entry is attempted once, ApplyBlock returns within the watchdog and
+// the record's count shows the body ran, so the body never waits for the held guard.
 func TestDATTLCallbackEndToEndNoGuardReacquisition(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	probe := newSelectionProbe(t, h, source, 0xeb)
 	entry := &wrappedTTLEntry{inner: h.service}
 	h.syncEngine.PublishDATTLBinding(entry)
-	type result struct {
-		summary *node.ChainStateConnectSummary
-		err     error
-	}
-	done := make(chan result, 1)
+	var summary *node.ChainStateConnectSummary
+	var err error
+	done := make(chan struct{})
 	go func() {
-		summary, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, probe.next), nil)
-		done <- result{summary, err}
+		defer close(done)
+		summary, err = h.syncEngine.ApplyBlock(blockAtHeight(t, source, probe.next), nil)
 	}()
 	select {
-	case got := <-done:
-		require(t, got.err == nil && got.summary != nil && got.summary.BlockHeight == probe.next, "ApplyBlock=(%+v,%v), want ACCEPTED/NEW", got.summary, got.err)
+	case <-done:
+		require(t, err == nil && summary != nil && summary.BlockHeight == probe.next, "ApplyBlock=(%+v,%v), want ACCEPTED/NEW", summary, err)
 	case <-time.After(lifecycleWatchdog):
 		t.Fatalf("ApplyBlock did not return within %s: the TTL body waited for the held admission guard", lifecycleWatchdog)
 	}
 	require(t, entry.attempts.Load() == 1, "entry attempts=%d, want 1", entry.attempts.Load())
+	probe.next++
+	probe.apply()
+	probe.f.requireRetained(probe.commit, "count 1: the first publication's body decreased it")
+	probe.apply()
+	probe.f.requireAbsent(probe.commit, "the third counted publication expired the record")
 }
 
 // closeRaceEntry is a binding over S1's own entry that, on its one attempt, starts the race and

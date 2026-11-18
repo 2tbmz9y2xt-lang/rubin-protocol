@@ -584,12 +584,12 @@ func requireDATTLIndexStep(t *testing.T, f *daNonReplayFixture, step string) {
 }
 
 // TestDATTLCallbackIndexProductionPaths pins the index across orphan-chunk staging (State A
-// created and grown), commit staging (State A to State B), DA completion (State B to State C)
-// and the PEER quota cleanup removal; the D1 projection is TestDATTLCallbackIndexD1Projection.
-// It does not run the capacity-victim removal of a DA complete commit (da_complete_commit.go).
+// created and grown), commit staging (State A to State B), completion by the commit (State A to
+// State C) and by the last chunk (State B to State C) and the PEER quota cleanup removal
+// (D1 projection: TestDATTLCallbackIndexD1Projection); capacity-victim removal is not run.
 func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
-	f := newDANonReplayFixture(t, 8)
-	grown, staged, completed, released := [32]byte{0xd1}, [32]byte{0xd2}, [32]byte{0xd3}, [32]byte{0xd4}
+	f := newDANonReplayFixture(t, 10)
+	grown, staged, completed, released, late := [32]byte{0xd1}, [32]byte{0xd2}, [32]byte{0xd3}, [32]byte{0xd4}, [32]byte{0xd5}
 	f.ownerReadyChunk(grown, 0, "grow-0", daNonReplayPeer("keep"))
 	requireDATTLIndexStep(t, f, "State A created")
 	f.ownerReadyChunk(grown, 1, "grow-1", daNonReplayPeer("keep"))
@@ -603,6 +603,12 @@ func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
 	commit := f.signed(daNonReplayTxSpec{kind: 0x01, daID: completed, chunkCount: 1, commitment: sha3.Sum256(payload), commitmentOutputs: 1})
 	f.admit(commit, daNonReplayPeer("keep"))
 	requireDATTLState(t, f, completed, daRelayStateCompleteSet)
+	requireDATTLIndexStep(t, f, "State A to State C")
+	f.admit(f.signed(daNonReplayTxSpec{kind: 0x01, daID: late, chunkCount: 1, commitment: sha3.Sum256(payload), commitmentOutputs: 1}), daNonReplayPeer("keep"))
+	requireDATTLState(t, f, late, daRelayStateStagedCommit)
+	requireDATTLIndexStep(t, f, "commit staged without chunks")
+	f.ownerReadyChunk(late, 0, string(payload), daNonReplayPeer("keep"))
+	requireDATTLState(t, f, late, daRelayStateCompleteSet)
 	requireDATTLIndexStep(t, f, "State B to State C")
 	f.ownerReadyChunk(released, 0, "released", daNonReplayPeer("drop"))
 	requireDATTLIndexExact(t, f.relay)
@@ -692,11 +698,10 @@ func (r *daTTLRecordingService) EnterDATTLMutation(decrease func() error) error 
 	return decrease()
 }
 
-// TestDATTLCallbackBindingSelection pins the binding API: absent invokes nothing,
-// the latest publication wins, a snapshot taken before a later publication keeps its Service,
-// the identity read follows publications and returns while the DA relay and owner mutexes are
-// held, a refusal is returned unchanged with no fallback,
-// and a nil publication leaves the binding unchanged.
+// TestDATTLCallbackBindingSelection pins the binding API: absent invokes nothing, the latest
+// publication wins, a snapshot taken before a later publication keeps its Service, the identity
+// read follows publications and returns while the DA relay and owner mutexes are held, a refusal is
+// returned unchanged with no fallback, and a nil publication leaves the binding unchanged.
 func TestDATTLCallbackBindingSelection(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	var attempts []string
@@ -1522,10 +1527,9 @@ func benchDATTLGuardHold(b *testing.B, in *daTTLHoldInputs, shape daTTLHoldShape
 	b.ReportMetric(float64(len(in.fill)), "fill-txs")
 }
 
-// BenchmarkDATTLCallbackGuardHold times one ACCEPTED/NEW ApplyBlock over a full standard mempool
-// and one retained DA shape, with a binding whose entry runs the decrease directly and with no
-// binding; the difference is the guard hold the in-guard TTL decrease adds
-// (RUBIN_COMPACT_BLOCKS.md Section 5).
+// BenchmarkDATTLCallbackGuardHold times one ACCEPTED/NEW ApplyBlock over a full standard mempool and
+// one retained DA shape, with a binding whose entry runs the decrease directly and with no binding;
+// the difference is the guard hold the in-guard TTL decrease adds (RUBIN_COMPACT_BLOCKS.md Section 5).
 func BenchmarkDATTLCallbackGuardHold(b *testing.B) {
 	in := newDATTLHoldInputs(b)
 	for _, shape := range in.shapes {
