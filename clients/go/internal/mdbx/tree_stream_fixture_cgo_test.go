@@ -7019,6 +7019,56 @@ func psfCombinedUTXOCap(t *testing.T) {
 	}
 }
 
+// Raw undo rows outside the 33-byte manifest form share the undo entry delete cap 414634: one
+// generation-9 family with 414635 such rows exceeds it after the metadata charge and aborts ORIGINAL
+// OLD; 414634 such rows pass the cap.
+func psfUndoEntryCap(t *testing.T) {
+	for _, n := range []int{414_635, 414_634} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			s, path, o := psStore(t)
+			hash, undo := psfUndo(t, s)
+			mustEnvironment(t, fixtureLargeBulk(s, 6, uint32(n-2), 20, hash))
+			first := append(bytes.Clone(hash[:]), 1, 0, 0, 0, 0)
+			last := bytes.Clone(first)
+			binary.BigEndian.PutUint32(last[33:], uint32(n-3))
+			pages := uint64(n/1440 + 1)
+			grant := psPageGrant*(pages+1) + uint64(n+1)*(8+uint64(unsafe.Sizeof(obsoleteSpan{}))+37)
+			var r tsResult
+			evidence := ctxTreeFault(t, s, 12, 0, []byte{9}, func() {
+				r = psRunG(t, s, o, LaneOperation, grant, func(reader *Reader) TreeOperationV1 {
+					batch := obsoleteCollectUndo(t, reader, obsoleteIndexPage(t, reader, 9).Rows[0])
+					if len(batch.ObsoleteDeletes) != n+1 {
+						t.Fatalf("undo family rows%d, want%d", len(batch.ObsoleteDeletes), n+1)
+					}
+					return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: batch.ObsoleteDeletes, ObsoleteConsulted: batch.ObsoleteConsulted}}
+				})
+			})
+			if n == 414_635 {
+				psRefused(t, s, r, true, "undo entry delete cap")
+				if evidence.aborts != 1 || evidence.commits != 0 {
+					t.Fatalf("scope next operation differs: undo cap OLD abort %+v", evidence)
+				}
+				for i, k := range undo {
+					psfRaw(t, s, 5, k, []byte{byte(i)})
+				}
+				psfRaw(t, s, 5, first, append([]byte{0x5a}, make([]byte, 19)...))
+				psfRaw(t, s, 5, last, append([]byte{0x5a}, make([]byte, 19)...))
+				return
+			}
+			// At the bound admission completes and the commit is reached, then its fixture fault leaves NEW.
+			r.tuple(t, 2, 3, -1)
+			if evidence.commits != 1 || evidence.drift != 0 {
+				t.Fatalf("undo entry delete cap refused at its bound: %+v %v", evidence, r.err)
+			}
+			tsConsumed(t, s, o, 2, r.err)
+			reopened := tsReopen(t, s, path)
+			for _, k := range append(undo, first, last) {
+				psfRaw(t, reopened, 5, k, nil)
+			}
+		})
+	}
+}
+
 // A Reader EIO inside the callback stays the result whether the callback ignores, returns or wraps
 // it with a physical-scope plan whose selector count is above its bound; the scope is never read.
 func psfCallbackReaderError(t *testing.T) {
@@ -7241,6 +7291,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("pre-hold-close-window", psfClosedBeforeHold)
 	t.Run("admission-aborts", psfAdmissionAborts)
 	t.Run("combined-utxo-cap", psfCombinedUTXOCap)
+	t.Run("undo-entry-cap", psfUndoEntryCap)
 	t.Run("large-domains", psfLargeDomains)
 	t.Run("target-in-family", psfTargetInFamily)
 	t.Run("both-identical-OLD-first", psfBothIdentical)
