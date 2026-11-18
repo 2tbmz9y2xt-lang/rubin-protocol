@@ -4808,6 +4808,7 @@ func TestTreeStreamPhysicalScopeV1(t *testing.T) {
 	t.Run("accepted", psAccepted)
 	t.Run("shape", psShape)
 	t.Run("provenance", psProvenance)
+	t.Run("provenance-recreated", psProvenanceRecreated)
 	t.Run("duplicates", psDuplicates)
 	t.Run("overlap", psOverlap)
 	t.Run("counts", psCounts)
@@ -5103,6 +5104,50 @@ func psProvenance(t *testing.T) {
 			continue
 		}
 		t.Fatalf("foreign scope admitted: %d %v", i, r.err)
+	}
+}
+
+// An earlier invocation's generation-9 counter token refuses before the metadata charge after a later
+// invocation deleted that counter through its own token and the counter was written again with other
+// bytes; the rewritten counter stays readable through View.
+func psProvenanceRecreated(t *testing.T) {
+	s, _, o := psStore(t)
+	var earlier ObsoletePageV1
+	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		earlier = psScope(t, reader, 9)
+		return tsPair(31)
+	})
+	mustEnvironment(t, r.err)
+	r = psRun(t, s, o, LaneOperation, psRawDelete(t, 9))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	psGone(t, s, tsCounterKey(9))
+	recreated := tsCounterLiteral(9, 2)
+	if bytes.Equal(recreated, tsCounterLiteral(9, 1)) {
+		t.Fatal("recreated counter bytes equal the deleted bytes")
+	}
+	tsSeedCounter(t, s, o, 9, false, recreated)
+	builds := []struct {
+		name  string
+		build func(*Reader) TreeOperationV1
+	}{
+		{"earlier-row", func(reader *Reader) TreeOperationV1 {
+			page := psScope(t, reader, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: earlier.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness}}}
+		}},
+		{"earlier-row-and-witness", func(*Reader) TreeOperationV1 {
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: earlier.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{earlier.Witness}}}
+		}},
+	}
+	f := psF(0, 0, 1, 1, 0, 0, 9, 9)
+	for _, row := range builds {
+		r = psRun(t, s, reservationFilled(t, psPageGrant+f-1), LaneOperation, row.build)
+		if s.state != storeOPEN || !treeNativeIsInvalid(r.err) {
+			t.Fatalf("recreated slot admitted an earlier scope token: %s %s %v", row.name, s.state, r.err)
+		}
+		tsRefusal(t, r, false)
+		tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), recreated)
+		tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(10), tsCounterLiteral(10, 1))
 	}
 }
 

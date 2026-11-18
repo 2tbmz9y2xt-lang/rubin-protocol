@@ -8703,8 +8703,8 @@ func psfRetained(t *testing.T) {
 	calls := 0
 	mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 		next := tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return tsPair(9), nil })
-		if any(next.err) != any(r.err) || calls != 0 || sc.s.state != storePOISONEDTHREAD {
-			t.Fatalf("scope next operation differs: %v calls%d %s", next.err, calls, sc.s.state)
+		if any(next.err) != any(r.err) || next.truth != sc.s.terminalTruth || next.truth != r.truth || calls != 0 || sc.s.state != storePOISONEDTHREAD {
+			t.Fatalf("scope next operation differs: %v truth%d stored%d calls%d %s", next.err, next.truth, sc.s.terminalTruth, calls, sc.s.state)
 		}
 		return nil
 	}))
@@ -8745,8 +8745,8 @@ func psfCallbackCleanup(t *testing.T) {
 			calls := 0
 			mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 				next := tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return tsPair(9), nil })
-				if any(next.err) != any(r.err) || calls != 0 || sc.s.state != want {
-					t.Fatalf("scope next operation differs: mode%d %v calls%d %s", mode, next.err, calls, sc.s.state)
+				if any(next.err) != any(r.err) || next.truth != sc.s.terminalTruth || next.truth != r.truth || calls != 0 || sc.s.state != want {
+					t.Fatalf("scope next operation differs: mode%d %v truth%d stored%d calls%d %s", mode, next.err, next.truth, sc.s.terminalTruth, calls, sc.s.state)
 				}
 				return nil
 			}))
@@ -8773,8 +8773,8 @@ func psfCleanupTerminal(t *testing.T, sc *psfScene, mode uint32, kind string, ev
 	calls := 0
 	mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
 		next := tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return tsPair(9), nil })
-		if any(next.err) != any(sc.s.terminal) || calls != 0 || sc.s.state != want {
-			t.Fatalf("scope next operation differs: %s mode%d %v calls%d %s", kind, mode, next.err, calls, sc.s.state)
+		if any(next.err) != any(sc.s.terminal) || next.truth != sc.s.terminalTruth || next.truth != CommitTruthOld || calls != 0 || sc.s.state != want {
+			t.Fatalf("scope next operation differs: %s mode%d %v truth%d stored%d calls%d %s", kind, mode, next.err, next.truth, sc.s.terminalTruth, calls, sc.s.state)
 		}
 		return nil
 	}))
