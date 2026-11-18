@@ -2109,7 +2109,7 @@ func TestClaimDARelayStateAtomicReorgBinding(t *testing.T) {
 	require(t, got == want && err == nil, "reorg claim binding mismatch: B5 claim=(%p,%v), want %p/nil", got, err, want)
 	require(t, winnerCalls == 0 && f.engine.daRelayClaimed && f.engine.reorgDAAdmission != nil, "reorg claim binding mismatch: claimed=%v callback=%v calls=%d", f.engine.daRelayClaimed, f.engine.reorgDAAdmission != nil, winnerCalls)
 	got, err = f.engine.ClaimDARelayState(nil, nil)
-	require(t, got == nil && err != nil && err.Error() == "sync engine DA relay state binding mismatch", "reorg claim binding mismatch: B2 claim=(%p,%v)", got, err)
+	require(t, got == nil && err != nil && err.Error() == "sync engine DA relay state binding mismatch", "reorg claim binding mismatch: nil claim=(%p,%v)", got, err)
 	got, err = f.engine.ClaimDARelayState(want, func([]byte) (completion func(bool), err error) { t.Error("later claimant hook called"); return })
 	require(t, got == want && err == nil, "reorg claim binding mismatch: later claim=(%p,%v)", got, err)
 	require(t, f.engine.reorgDAAdmission != nil, "reorg claim binding mismatch: B2 replaced the winning callback")

@@ -1188,8 +1188,12 @@ func (s *DARelayState) checkOwnerReadyTTLRecordLocked(record daRelaySetRecord) (
 
 // checkOwnerReadyTTLHighWaterLocked refuses a record above either stored high-water, the
 // precondition every survivor revision minted from s.records relies on (the minting sibling
-// nextDANonReplaySequenceLocked refuses the same two).
+// nextDANonReplaySequenceLocked refuses the same two), and a count above the configured orphan
+// TTL, which every count starts at and never exceeds (RUBIN_COMPACT_BLOCKS.md Section 5).
 func (s *DARelayState) checkOwnerReadyTTLHighWaterLocked(record daRelaySetRecord) error {
+	if record.ttlBlocksRemaining > s.caps.orphanTTLBlocks {
+		return fmt.Errorf("%w: record %x count %d above the orphan TTL %d", errDARelayImageIncompatible, record.daID, record.ttlBlocksRemaining, s.caps.orphanTTLBlocks)
+	}
 	if record.revision > s.records {
 		return fmt.Errorf("%w: record %x revision %d above the high-water %d", errDARelayImageIncompatible, record.daID, record.revision, s.records)
 	}

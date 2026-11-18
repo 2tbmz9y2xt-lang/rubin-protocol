@@ -252,6 +252,9 @@ func TestDATTLCallbackBodyRefusalChangesNothing(t *testing.T) {
 			token := r.setup.sets[r.stateAID].chunks[0].member.token
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.byToken[token].txid[0] ^= 0xff })
 		}},
+		{"count above the configured orphan TTL", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
+			f.setOwnerReadyTTL(r.stateAID, f.relay.caps.orphanTTLBlocks+1)
+		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			f, r := newDATTLCallbackRecords(t)
@@ -265,15 +268,6 @@ func TestDATTLCallbackBodyRefusalChangesNothing(t *testing.T) {
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 			requireDATTLIndexUnchanged(t, f.relay, indexBefore, true)
 		})
-	}
-}
-
-// requireDATTLIndexExact pins the relations' State A/B bucket to exactly the present records
-// that are not State C, so the bounded walk can miss no State A or B record.
-func requireDATTLIndexExact(t *testing.T, relay *DARelayState) {
-	t.Helper()
-	if msg := daTTLIndexMismatch(relay); msg != "" {
-		t.Fatal(msg)
 	}
 }
 
@@ -293,6 +287,15 @@ func requireDATTLIndexUnchanged(t *testing.T, relay *DARelayState, before [][32]
 	}
 	if exactBefore {
 		requireDATTLIndexExact(t, relay)
+	}
+}
+
+// requireDATTLIndexExact pins the relations' State A/B bucket to exactly the present records
+// that are not State C, so the bounded walk can miss no State A or B record.
+func requireDATTLIndexExact(t *testing.T, relay *DARelayState) {
+	t.Helper()
+	if msg := daTTLIndexMismatch(relay); msg != "" {
+		t.Fatal(msg)
 	}
 }
 
@@ -459,9 +462,7 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "nil chainstate") }},
 		{"nil pending-outpoint owner", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
 			f.mutateRelay(func(s *DARelayState) { s.mempool.pendingOutpoints = nil })
-		}, func(err error) bool {
-			return err != nil && strings.Contains(err.Error(), "nil pending-outpoint owner")
-		}},
+		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "nil pending-outpoint owner") }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			f, r := newDATTLCallbackRecords(t)
@@ -487,9 +488,7 @@ func TestDATTLCallbackBodyUnboundRelay(t *testing.T) {
 	owner := f.mp.pendingOutpoints
 	ownerBefore := cloneDAAdmissionOwner(owner)
 	f.mutateRelay(func(s *DARelayState) { s.mempool = nil })
-	if err := runDATTLBodyInGuard(t, f); err != nil {
-		t.Fatalf("unbound body: %v", err)
-	}
+	mustAtomic(t, runDATTLBodyInGuard(t, f))
 	view := daRelayStateSnapshot(f.relay)
 	requireDATTLCount(t, view, r.stateAID, 2)
 	requireDATTLCount(t, view, r.stateBID, 2)
@@ -504,9 +503,7 @@ func TestDATTLCallbackBodyUnboundRelay(t *testing.T) {
 func TestDATTLCallbackBodyWalksOnlyStateAB(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	requireDATTLIndexExact(t, f.relay)
-	if err := f.relay.ReleasePeerQuotaKey("unrelated-peer"); err != nil {
-		t.Fatalf("ReleasePeerQuotaKey: %v", err)
-	}
+	mustAtomic(t, f.relay.ReleasePeerQuotaKey("unrelated-peer"))
 	requireDATTLIndexExact(t, f.relay)
 	f.mutateRelay(func(s *DARelayState) {
 		mutateOwnerReadyRecord(s, r.stateCID, func(record *daRelaySetRecord) { record.wireBytes = 1 })
@@ -611,9 +608,7 @@ func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
 	requireDATTLIndexStep(t, f, "State B to State C")
 	f.ownerReadyChunk(released, 0, "released", daNonReplayPeer("drop"))
 	requireDATTLIndexExact(t, f.relay)
-	if err := f.relay.ReleasePeerQuotaKey("drop"); err != nil {
-		t.Fatalf("ReleasePeerQuotaKey: %v", err)
-	}
+	mustAtomic(t, f.relay.ReleasePeerQuotaKey("drop"))
 	if _, present := daRelayStateSnapshot(f.relay).sets[released]; present {
 		t.Fatal("PEER cleanup kept the released record")
 	}
@@ -670,9 +665,7 @@ func TestDATTLCallbackEmptiedBucketDropped(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	f.setOwnerReadyTTL(r.stateAID, 1)
 	f.setOwnerReadyTTL(r.stateBID, 1)
-	if err := runDATTLBodyInGuard(t, f); err != nil {
-		t.Fatalf("expiry: %v", err)
-	}
+	mustAtomic(t, runDATTLBodyInGuard(t, f))
 	f.relay.mu.Lock()
 	defer f.relay.mu.Unlock()
 	if bucket, present := f.relay.relations.buckets[daRelayIncompleteKey]; present {
@@ -1504,13 +1497,14 @@ func requireDATTLHoldEffect(b testing.TB, before, after daRelayStateView, ttl ui
 }
 
 func benchDATTLGuardHold(b *testing.B, in *daTTLHoldInputs, shape daTTLHoldShape, ttl uint64, bound bool) {
+	b.StopTimer()
 	b.ReportAllocs()
 	quotas := map[string]struct{}{}
 	for _, rec := range shape.records {
 		quotas[rec.quota] = struct{}{}
 	}
+	b.ResetTimer()
 	for range b.N {
-		b.StopTimer()
 		f := in.preState(b, shape, ttl)
 		if bound {
 			f.engine.PublishDATTLBinding(&daTTLFuncService{enter: func(decrease func() error) error { return decrease() }})
