@@ -1141,6 +1141,7 @@ func TestServiceWorkLifecycleBlockRetry(t *testing.T) {
 // expires it.
 func primeDATTLToOne(t *testing.T, source, h *testHarness, p *peer, daID [32]byte) (*daIngressFixture, []byte, *node.ChainStateConnectSummary) {
 	t.Helper()
+	holdWorkLease(t, p.service)
 	f := newDAIngressFixture(t, h)
 	commit := f.commit(daID, 2)
 	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit")

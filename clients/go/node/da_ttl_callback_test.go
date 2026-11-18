@@ -220,7 +220,7 @@ func TestDATTLCallbackBodySurvivorRevisions(t *testing.T) {
 		}
 	}
 	requireDATTLOK(t, runDATTLBodyInGuard(t, f), "body call 3")
-	require(t, len(daRelayStateSnapshot(f.relay).sets) == 1, "the third body call left %d sets, want only State C", len(daRelayStateSnapshot(f.relay).sets))
+	require(t, reflect.DeepEqual(daRelayStateSnapshot(f.relay).sets, r.base.sets), "the third body call left %v, want only the unchanged State C record", daRelayStateSnapshot(f.relay).sets)
 }
 
 // TestDATTLCallbackBodyRefusalChangesNothing pins that a refused check on one selected record, or a selected member
@@ -475,7 +475,7 @@ func TestDATTLCallbackBodyUnboundRelay(t *testing.T) {
 	}
 	mustAtomic(t, runDATTLBodyInGuard(t, f))
 	mustAtomic(t, runDATTLBodyInGuard(t, f))
-	require(t, len(daRelayStateSnapshot(f.relay).sets) == 1, "the third unbound body call left %d sets, want only State C", len(daRelayStateSnapshot(f.relay).sets))
+	require(t, reflect.DeepEqual(daRelayStateSnapshot(f.relay).sets, r.base.sets), "the third unbound body call left %v, want only the unchanged State C record", daRelayStateSnapshot(f.relay).sets)
 }
 
 // TestDATTLCallbackBodyWalksOnlyStateAB pins the walk bound: a State C record whose stored value the owner-ready check

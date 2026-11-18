@@ -505,6 +505,7 @@ func TestAnnounceBlockMakesNoDARelayTTLDecrease(t *testing.T) {
 	commit := f.commit(daRelayTestID(101), 2)
 	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "handleTx")
 	remote := testPeerForService(h.service, "remote", 4)
+	holdWorkLease(t, h.service)
 	for height := uint64(1); height <= 2; height++ {
 		if _, err := remote.processRelayedBlock(blockAtHeight(t, source, height)); err != nil {
 			t.Fatalf("processRelayedBlock(%d): %v", height, err)

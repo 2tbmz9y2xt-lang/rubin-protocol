@@ -644,12 +644,13 @@ func relayAccepted(t *testing.T, p *peer, source *testHarness, height uint64) {
 // owner and Service, counting through the retained image: a valid side-branch block stored non-canonical, a
 // KNOWN_BLOCK_NOOP replay, a MISSING_PARENT block retained as an orphan, a CONSENSUS_INVALID block and a DisconnectTip
 // decrease nothing, so the record retained at count 3 survives the next two counted publications and expires only at
-// the third. The side block and DisconnectTip run under no Service lease and make zero attempts on the bound entry.
+// the third. Peer calls hold a work lease; the direct side block and DisconnectTip make zero attempts on the entry.
 func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	sideBlock := mineSideBlock(t)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	p := testPeerForService(h.service, "remote", 5)
+	holdWorkLease(t, h.service)
 	relayAccepted(t, p, source, 1)
 	relayAccepted(t, p, source, 2)
 	probe := newSelectionProbe(t, h, source, 0xd3)
@@ -751,18 +752,12 @@ func (w *wrappedTTLEntry) EnterDATTLMutation(decrease func() error) error {
 	return w.inner.EnterDATTLMutation(decrease)
 }
 
-// awaitParkedOnAdmissionGuard waits until a goroutine naming caller is parked in the ChainState admission guard wait.
-func awaitParkedOnAdmissionGuard(t *testing.T, caller string) {
-	t.Helper()
+// goroutineParked reports whether one goroutine's stack dump contains the given fragments.
+func goroutineParked(fragments ...string) bool {
 	stack := make([]byte, 1<<22)
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); runtime.Gosched() {
-		for _, g := range strings.Split(string(stack[:runtime.Stack(stack, true)]), "\n\n") {
-			if strings.Contains(g, "RLockUnlessTerminal") && strings.Contains(g, "sync.(*Cond).Wait") && strings.Contains(g, caller) {
-				return
-			}
-		}
-	}
-	t.Fatalf("no %s goroutine parked on the admission guard", caller)
+	return slices.ContainsFunc(strings.Split(string(stack[:runtime.Stack(stack, true)]), "\n\n"), func(g string) bool {
+		return !slices.ContainsFunc(fragments, func(f string) bool { return !strings.Contains(g, f) })
+	})
 }
 
 // TestDATTLCallbackEndToEndEntryInsideTheHold drives SyncEngine.ApplyBlock through the production selection and, inside
@@ -777,9 +772,9 @@ func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 	entry.before = func() {
 		entry.before = nil
 		go func() { done <- h.syncEngine.DARelayState().ReleasePeerQuotaKey("unrelated-peer") }()
-		awaitParkedOnAdmissionGuard(t, "ReleasePeerQuotaKey")
+		waitUntil(t, func() bool { return goroutineParked("RLockUnlessTerminal", "sync.(*Cond).Wait", "ReleasePeerQuotaKey") }, "ReleasePeerQuotaKey parked on the admission guard")
 		go func() { done <- probe.f.tryAdmit(fresh, "in-hold-peer") }()
-		awaitParkedOnAdmissionGuard(t, "AdmitDA")
+		waitUntil(t, func() bool { return goroutineParked("RLockUnlessTerminal", "sync.(*Cond).Wait", "AdmitDA") }, "AdmitDA parked on the admission guard")
 	}
 	h.syncEngine.PublishDATTLBinding(entry)
 	probe.apply()
@@ -1000,6 +995,9 @@ func TestDATTLCallbackEndToEndCloseRaceOutcomes(t *testing.T) {
 			if inside {
 				waitUntil(t, func() bool { return s2.Load() != nil }, "S2 bound while the decrease is held")
 				waitDraining(t, h.service)
+				waitUntil(t, func() bool {
+					return closeReturned.Load() || goroutineParked("[sync.WaitGroup.Wait", "(*Service).Close", "TestDATTLCallbackEndToEndCloseRaceOutcomes")
+				}, "Close(S1) parked on its work leases or returned")
 				require(t, !closeReturned.Load(), "Close(S1) returned while its registered decrease ran")
 			} else if i%2 == 0 {
 				waitWithin(t, &wg, "the racing goroutines")
