@@ -565,7 +565,7 @@ func TestDATTLCallbackEndToEndErrorReleasesLease(t *testing.T) {
 		requireStillBlocked(t, closed, "Close while the registered decrease runs")
 		return refusal
 	})
-	require(t, got == refusal && calls == 1, "entry=%v after %d decrease calls, want the decrease's own error after 1", got, calls)
+	require(t, errors.Is(got, refusal) && errors.Unwrap(got) == nil && calls == 1, "entry=%v after %d decrease calls, want the decrease's own unwrapped error after 1", got, calls)
 	requireReturned(t, closed, "Close after the entry released its lease")
 }
 
