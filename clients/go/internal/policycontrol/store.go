@@ -87,8 +87,9 @@ type Store struct {
 	closed                       bool
 	dependentView                bool // one synchronous consumer of committed P
 	sourceBorrows                uint64
-	sourceDir                    string
-	sourceInfo                   os.FileInfo
+	sourceClaimed                bool
+	directory                    filelock.IdentityV1
+	self                         *Store
 	latchRequested, latchRenewed bool // the one coalesced RAM latch request; one recorded since the latest latch decision
 }
 
@@ -130,32 +131,21 @@ func start(dir string, id Identity, proof *NewInstallationProof, h hooks) (*Stor
 		return nil, refused("invalid identity or new-installation proof")
 	}
 	sourceDir, pathErr := filepath.Abs(dir)
-	before, beforeErr := sourceDirectoryInfo(sourceDir)
 	lock, res, err := h.acquire(dir)
-	switch {
-	case lock == nil, res != "", err != nil:
+	if lock == nil || res != "" || err != nil {
 		return nil, refuseLock(lock, res, err, proof != nil)
 	}
-	after, afterErr := sourceDirectoryInfo(sourceDir)
-	switch {
-	case pathErr != nil, beforeErr != nil, afterErr != nil, !os.SameFile(before, after):
+	held, identityErr := lock.DirectoryIdentityV1()
+	current, statErr := os.Lstat(sourceDir)
+	if pathErr != nil || identityErr != nil || statErr != nil || !current.IsDir() || held != filelock.FileIdentityV1(current) {
 		return nil, errors.Join(ErrRefused, lock.Release())
 	}
-	s := &Store{dir: dir, sourceDir: sourceDir, sourceInfo: after, lock: lock, fault: h.fault, ops: h.ops}
+	s := &Store{dir: sourceDir, directory: held, lock: lock, fault: h.fault, ops: h.ops}
+	s.self = s
 	if err = s.load(id, proof != nil); err != nil {
 		return nil, errors.Join(err, lock.Release())
 	}
 	return s, nil
-}
-
-// sourceDirectoryInfo observes the configured name without following its final component.
-func sourceDirectoryInfo(dir string) (os.FileInfo, error) {
-	parent, err := os.OpenRoot(filepath.Dir(dir))
-	if err != nil {
-		return nil, err
-	}
-	defer parent.Close()
-	return parent.Lstat(filepath.Join(".", filepath.Base(dir)))
 }
 
 func (s *Store) load(id Identity, creating bool) (err error) {

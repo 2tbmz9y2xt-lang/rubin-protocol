@@ -6,8 +6,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
 )
 
 func sourceBorrow(t *testing.T, s *Store) *SourceAuthorityBorrowV1 {
@@ -24,12 +27,16 @@ func TestSourceAuthorityBorrowAdmission(t *testing.T) {
 		}
 	}
 	s := mustCreate(t, storeDir(t), testIdentity(1))
+	copied := reflect.New(reflect.TypeFor[Store]())
+	copied.Elem().Set(reflect.ValueOf(s).Elem())
+	if b, err := copied.Interface().(*Store).BorrowSourceAuthorityV1(); b != nil || err != ErrClosed {
+		t.Fatalf("copied store borrow: %v/%v", b, err)
+	}
 	tx := mustBegin(t, s)
 	if b, err := s.BorrowSourceAuthorityV1(); b != nil || any(err) != any(ErrBusy) || errors.Is(err, ErrUnresolved) {
 		t.Fatalf("held transaction borrow: %v %v", b, err)
 	}
-	_, err := tx.Abort()
-	must(t, err)
+	wantErr(t, nil)(tx.Abort())
 	s.sourceBorrows = math.MaxUint64
 	if b, err := s.BorrowSourceAuthorityV1(); b != nil || any(err) != any(ErrBusy) {
 		t.Fatalf("counter exhaustion: %v %v", b, err)
@@ -38,17 +45,13 @@ func TestSourceAuthorityBorrowAdmission(t *testing.T) {
 	s.fault = failAt(stageAck)
 	r, err := controlTx(t, s, "source").Commit()
 	wantResult(t, r, UNKNOWN, 0)
-	if !errors.Is(err, ErrUnresolved) {
-		t.Fatalf("crossing: %v", err)
-	}
+	wantErr(t, ErrUnresolved)(r, err)
 	if b, err := s.BorrowSourceAuthorityV1(); b != nil || !errors.Is(err, ErrBusy) || !errors.Is(err, ErrUnresolved) {
 		t.Fatalf("unresolved borrow: %v %v", b, err)
 	}
 	s.fault = nil
-	_, err = s.Recover()
-	must(t, err)
-	b := sourceBorrow(t, s)
-	b.ReleaseV1()
+	wantErr(t, nil)(s.Recover())
+	sourceBorrow(t, s).ReleaseV1()
 	must(t, s.Close())
 	if b, err := s.BorrowSourceAuthorityV1(); b != nil || any(err) != any(ErrClosed) {
 		t.Fatalf("closed borrow: %v %v", b, err)
@@ -61,27 +64,23 @@ func TestSourceAuthorityCloseOnly(t *testing.T) {
 	one, two := sourceBorrow(t, s), sourceBorrow(t, s)
 	copied := *one
 	ask, finish := dependentChild(t, s)
-	defer finish()
 	if got := ask(); got != "busy\n" {
 		t.Fatalf("borrowed writer exclusion: %q", got)
 	}
-	dir, id, err := one.BindingV1()
+	dir, id, physical, err := one.BindingV1()
 	must(t, err)
-	if dir != s.dir || id != testIdentity(1) {
+	if dir != s.dir || id != testIdentity(1) || physical == (filelock.IdentityV1{}) {
 		t.Fatalf("binding: %q %+v", dir, id)
 	}
 	tx := mustBegin(t, s)
 	if err := s.Close(); any(err) != any(ErrBusy) || s.tx != tx || tx.done || s.closed || s.lock == nil {
 		t.Fatalf("borrowed close changed transaction: %v", err)
 	}
-	_, err = tx.Abort()
-	must(t, err)
-	if _, err = s.Recover(); err != nil {
-		t.Fatalf("borrow blocked recovery: %v", err)
-	}
+	wantErr(t, nil)(tx.Abort())
+	wantErr(t, nil)(s.Recover())
 	one.ReleaseV1()
 	one.ReleaseV1()
-	if dir, id, err := copied.BindingV1(); dir != "" || id != (Identity{}) || any(err) != any(ErrClosed) {
+	if dir, id, physical, err := copied.BindingV1(); dir != "" || id != (Identity{}) || physical != (filelock.IdentityV1{}) || err != ErrClosed {
 		t.Fatalf("copied expired binding: %q %+v %v", dir, id, err)
 	}
 	copied.ReleaseV1()
@@ -100,14 +99,14 @@ func TestSourceAuthorityCloseOnly(t *testing.T) {
 		t.Fatalf("released writer exclusion: %q", got)
 	}
 	for _, b := range []*SourceAuthorityBorrowV1{nil, {}, one, two} {
-		dir, id, err := b.BindingV1()
-		if dir != "" || id != (Identity{}) || any(err) != any(ErrClosed) {
+		dir, id, physical, err := b.BindingV1()
+		if dir != "" || id != (Identity{}) || physical != (filelock.IdentityV1{}) || err != ErrClosed {
 			t.Fatalf("expired binding: %q %+v %v", dir, id, err)
 		}
 		b.ReleaseV1()
 	}
-	opened := mustOpen(t, s.dir, testIdentity(1))
-	must(t, opened.Close())
+	finish()
+	must(t, mustOpen(t, s.dir, testIdentity(1)).Close())
 }
 
 func TestSourceAuthorityCloseBorrowRace(t *testing.T) {
@@ -140,11 +139,56 @@ func TestSourceAuthorityDirectoryReplacement(t *testing.T) {
 	old := filepath.Join(t.TempDir(), "old")
 	must(t, os.Rename(s.dir, old))
 	must(t, os.Mkdir(s.dir, 0o700))
-	if _, _, err := b.BindingV1(); any(err) != any(ErrRefused) {
+	if _, _, _, err := b.BindingV1(); err != ErrRefused {
 		t.Fatalf("replaced directory binding: %v", err)
 	}
 	b.ReleaseV1()
 	must(t, s.Close())
+}
+
+func TestSourceAuthorityDirectoryAliases(t *testing.T) {
+	parent := t.TempDir()
+	left, right := filepath.Join(parent, "left"), filepath.Join(parent, "right")
+	clean, held := filepath.Join(left, "policy"), filepath.Join(right, "policy")
+	for _, dir := range []string{left, right, filepath.Join(right, "leaf"), clean, held} {
+		must(t, os.Mkdir(dir, 0o700))
+	}
+	must(t, os.Symlink(filepath.Join(right, "leaf"), filepath.Join(left, "link")))
+	must(t, os.Symlink(right, filepath.Join(left, "alias")))
+	id := testIdentity(1)
+	raw := left + "/link/../policy"
+	checkMismatch := func() {
+		t.Helper()
+		a, err := os.Stat(clean)
+		must(t, err)
+		b, err := os.Stat(raw)
+		must(t, err)
+		if os.SameFile(a, b) {
+			t.Fatal("clean and opened policy directories have the same inode")
+		}
+	}
+	checkMismatch()
+	s, err := Create(raw, id, NewInstallationProof{Identity: id})
+	if s != nil || !errors.Is(err, ErrRefused) {
+		t.Fatalf("aliased create: %v/%v", s, err)
+	}
+	must(t, mustCreate(t, clean, id).Close())
+	must(t, mustCreate(t, held, id).Close())
+	checkMismatch()
+	x, y := fileBytes(t, clean), fileBytes(t, held)
+	s, err = Open(raw, id)
+	if s != nil || !errors.Is(err, ErrRefused) || !bytes.Equal(x, fileBytes(t, clean)) || !bytes.Equal(y, fileBytes(t, held)) {
+		t.Fatalf("aliased open changed or qualified policy: %v/%v", s, err)
+	}
+	must(t, mustOpen(t, held, id).Close())
+	must(t, os.Chmod(right, 0o100))
+	t.Cleanup(func() { _ = os.Chmod(right, 0o700) })
+	if _, err := os.ReadDir(right); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("search-only parent read: %v", err)
+	}
+	dir := filepath.Join(left, "alias", "leaf")
+	must(t, mustCreate(t, dir, id).Close())
+	must(t, mustOpen(t, dir, id).Close())
 }
 
 func TestSourceAuthorityUnknownAfterBorrow(t *testing.T) {
@@ -153,14 +197,12 @@ func TestSourceAuthorityUnknownAfterBorrow(t *testing.T) {
 	s.fault = failAt(stageAck)
 	r, err := controlTx(t, s, "retained").Commit()
 	wantResult(t, r, UNKNOWN, 0)
-	if !errors.Is(err, ErrUnresolved) {
-		t.Fatalf("crossing: %v", err)
-	}
+	wantErr(t, ErrUnresolved)(r, err)
 	pending, handle := s.pending, s.pending.handle
 	if err := s.Close(); any(err) != any(ErrBusy) || s.pending != pending || s.pending.handle != handle || s.closed {
 		t.Fatalf("borrowed close changed pending owner: %v", err)
 	}
-	if dir, id, err := b.BindingV1(); err != nil || dir != s.dir || id != testIdentity(1) {
+	if dir, id, _, err := b.BindingV1(); err != nil || dir != s.dir || id != testIdentity(1) {
 		t.Fatalf("source lifetime after transaction: %q/%v/%v", dir, id, err)
 	}
 	s.fault = nil
@@ -191,7 +233,6 @@ func TestSourceAuthorityCrossingAdmission(t *testing.T) {
 	}
 	finish()
 	s.fault = nil
-	b := sourceBorrow(t, s)
-	b.ReleaseV1()
+	sourceBorrow(t, s).ReleaseV1()
 	must(t, s.Close())
 }

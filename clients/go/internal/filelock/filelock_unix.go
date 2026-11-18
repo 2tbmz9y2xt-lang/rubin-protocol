@@ -5,6 +5,7 @@ package filelock
 import (
 	"errors"
 	"fmt"
+	"os"
 	"syscall"
 )
 
@@ -26,6 +27,34 @@ func AcquireDirectory(path string) (*Handle, Result, error) {
 		return nil, ResultInvalidOrUnopenable, err
 	}
 	return lock(fd)
+}
+
+// IdentityV1 identifies an inode on its device.
+type IdentityV1 [2]uint64
+
+// FileIdentityV1 obtains the device and inode of a stat observation.
+func FileIdentityV1(info os.FileInfo) IdentityV1 {
+	if info != nil {
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			return IdentityV1{uint64(stat.Dev), uint64(stat.Ino)}
+		}
+	}
+	return IdentityV1{}
+}
+
+// DirectoryIdentityV1 obtains the identity of the actual held directory.
+func (h *Handle) DirectoryIdentityV1() (IdentityV1, error) {
+	var stat syscall.Stat_t
+	if h == nil || h.fd < 0 {
+		return IdentityV1{}, syscall.EBADF
+	}
+	if err := syscall.Fstat(h.fd, &stat); err != nil {
+		return IdentityV1{}, err
+	}
+	if stat.Mode&syscall.S_IFMT != syscall.S_IFDIR {
+		return IdentityV1{}, syscall.ENOTDIR
+	}
+	return IdentityV1{uint64(stat.Dev), uint64(stat.Ino)}, nil
 }
 
 func acquire(path string, flags int) (*Handle, Result, error) {

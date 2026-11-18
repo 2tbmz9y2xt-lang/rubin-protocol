@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"math"
 	"os"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
 )
 
-// SourceAuthorityBorrowV1 keeps the Store and its directory lock alive until release.
-// It grants no sequence qualification and excludes only Close.
+// SourceAuthorityBorrowV1 excludes Close and keeps the Store's directory lock alive until release.
 type SourceAuthorityBorrowV1 struct {
 	state *sourceAuthorityStateV1
 }
@@ -17,10 +18,9 @@ type sourceAuthorityStateV1 struct {
 	live  bool
 }
 
-// BorrowSourceAuthorityV1 admits one source lifetime without holding a transaction or mutex.
-// Closed admission precedes UNKNOWN, held transaction/crossing and counter exhaustion.
+// BorrowSourceAuthorityV1 admits a source lifetime without holding a transaction or mutex.
 func (s *Store) BorrowSourceAuthorityV1() (*SourceAuthorityBorrowV1, error) {
-	if s == nil {
+	if s == nil || s.self != s {
 		return nil, ErrClosed
 	}
 	s.mu.Lock()
@@ -37,24 +37,54 @@ func (s *Store) BorrowSourceAuthorityV1() (*SourceAuthorityBorrowV1, error) {
 	return &SourceAuthorityBorrowV1{state: &sourceAuthorityStateV1{store: s, live: true}}, nil
 }
 
-// BindingV1 returns the immutable directory and identity while this borrow is live.
-func (b *SourceAuthorityBorrowV1) BindingV1() (string, Identity, error) {
+// BindingV1 returns the immutable installation and held directory identity while the borrow is live.
+func (b *SourceAuthorityBorrowV1) BindingV1() (string, Identity, filelock.IdentityV1, error) {
 	if b == nil || b.state == nil || b.state.store == nil {
-		return "", Identity{}, ErrClosed
+		return "", Identity{}, filelock.IdentityV1{}, ErrClosed
 	}
 	s := b.state.store
 	s.mu.Lock()
 	if !b.state.live {
 		s.mu.Unlock()
-		return "", Identity{}, ErrClosed
+		return "", Identity{}, filelock.IdentityV1{}, ErrClosed
 	}
-	dir, id, expected := s.sourceDir, s.st.id, s.sourceInfo
+	dir, id, expected := s.dir, s.st.id, s.directory
 	s.mu.Unlock()
 	current, err := os.Lstat(dir)
-	if err != nil || !os.SameFile(expected, current) {
-		return "", Identity{}, ErrRefused
+	if err != nil || !current.IsDir() || expected != filelock.FileIdentityV1(current) {
+		return "", Identity{}, filelock.IdentityV1{}, ErrRefused
 	}
-	return dir, id, nil
+	return dir, id, expected, nil
+}
+
+// WithSourceOwnerClaimV1 reserves the Store's sole source construction until success or unwinding.
+func (b *SourceAuthorityBorrowV1) WithSourceOwnerClaimV1(use func() error) (err error) {
+	if b == nil || b.state == nil || use == nil {
+		return ErrClosed
+	}
+	s := b.state.store
+	s.mu.Lock()
+	switch {
+	case !b.state.live:
+		s.mu.Unlock()
+		return ErrClosed
+	case s.sourceClaimed:
+		s.mu.Unlock()
+		return ErrBusy
+	}
+	s.sourceClaimed = true
+	s.mu.Unlock()
+	success := false
+	defer func() {
+		if !success {
+			s.mu.Lock()
+			s.sourceClaimed = false
+			s.mu.Unlock()
+		}
+	}()
+	err = use()
+	success = err == nil
+	return err
 }
 
 // ReleaseV1 ends this borrow once without changing control state or releasing the lock.

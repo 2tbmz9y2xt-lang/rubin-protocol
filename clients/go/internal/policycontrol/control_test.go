@@ -388,8 +388,9 @@ func TestAPICensus(t *testing.T) {
 		"Store":  {"Begin", "BorrowSourceAuthorityV1", "Close", "Gate", "Latch", "Membership", "PersistLatch", "Recover", "RequestLatch", "View", "WithDependentViewV1"},
 		"Tx":     {"Abort", "AdmitOwner", "AutoBlock", "Batch", "Commit", "ConsumeIntent", "DeleteRow", "ObserveIncident", "Operation", "Ownerless", "PutRow", "RemoveOnSuccess", "ReplaceObserved", "Require", "RetainOwner"},
 		"Result": {"Sequence"},
+		"Borrow": {"BindingV1", "ReleaseV1", "WithSourceOwnerClaimV1"},
 	}
-	got := map[string][]string{"Store": methods(&Store{}), "Tx": methods(&Tx{}), "Result": methods(Result{})}
+	got := map[string][]string{"Store": methods(&Store{}), "Tx": methods(&Tx{}), "Result": methods(Result{}), "Borrow": methods(&SourceAuthorityBorrowV1{})}
 	for name := range want {
 		if !reflect.DeepEqual(got[name], want[name]) {
 			t.Fatalf("%s methods %v, want %v", name, got[name], want[name])

@@ -2,15 +2,16 @@ package exclusionjournal
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -58,8 +59,8 @@ func sourceOpen(t *testing.T, s *policycontrol.Store, id policycontrol.Identity,
 
 func sourceScene(t *testing.T, limits SourceLimitsV1) (*policycontrol.Store, *SourceOwnerV1, string) {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "policy")
-	sourceMust(t, os.Mkdir(dir, 0o700))
+	dir := t.TempDir()
+	sourceMust(t, os.Chmod(dir, 0o700))
 	s, err := policycontrol.Create(dir, sourceID(), policycontrol.NewInstallationProof{Identity: sourceID()})
 	sourceMust(t, err)
 	t.Cleanup(func() { _ = s.Close() })
@@ -99,27 +100,73 @@ func sourceBundle(class byte, conditional bool) (SourceManifestV1, [][]byte) {
 	return m, parts
 }
 
-func sourceProducer(m SourceManifestV1, parts [][]byte) SourceExporterV1 {
-	return func(visit func(SourcePartV1) error) error { return ExportSourceBytesV1(m, parts, visit) }
+func sourceBundleScene(t *testing.T, class byte, conditional bool) (*policycontrol.Store, *SourceOwnerV1, string, SourceManifestV1, [][]byte) {
+	t.Helper()
+	s, o, dir := sourceScene(t, sourceLimits())
+	m, parts := sourceBundle(class, conditional)
+	return s, o, dir, m, parts
 }
 
-func sourceRead(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, want [][]byte) {
+func sourceProducer(m SourceManifestV1, parts [][]byte) SourceExporterV1 {
+	return func(op *SourceOperationV1, visit func(SourcePartV1) error) error { return sourceExportParts(op, m, parts, visit) }
+}
+
+func sourceOrigins(parts [][]byte) ([]SourceOriginV1, []SourceViewV1) {
+	var origins []SourceOriginV1
+	views := make([]SourceViewV1, 0, len(parts))
+	for _, part := range parts {
+		if cap(part) == 0 {
+			views = append(views, SourceViewV1{Origin: -1})
+		} else {
+			views = append(views, SourceViewV1{Origin: len(origins), Length: uint64(len(part))})
+			origins = append(origins, SourceOriginV1{Bytes: part[:cap(part)]})
+		}
+	}
+	return origins, views
+}
+
+func sourceExportParts(op *SourceOperationV1, m SourceManifestV1, parts [][]byte, visit func(SourcePartV1) error) error {
+	origins, views := sourceOrigins(parts)
+	return op.WithBackingV1(origins, views, func() error {
+		for i, data := range parts {
+			if err := visit(sourceMemoryPart(m.Parts[i].Kind, data)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func sourceMemoryPart(kind PartKindV1, data []byte) SourcePartV1 {
+	return SourcePartV1{Kind: kind, Length: uint64(len(data)), ReadAt: func(dst []byte, off int64) (int, error) {
+		return copy(dst, data[off:]), nil
+	}}
+}
+
+func sourceAfterFirstPart(m SourceManifestV1, parts [][]byte, after func() error) SourceExporterV1 {
+	return func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
+		return sourceExportParts(op, m, parts, func(part SourcePartV1) error {
+			if err := visit(part); err != nil || part.Kind != m.Parts[0].Kind {
+				return err
+			}
+			return after()
+		})
+	}
+}
+
+func sourceRead(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, want [][]byte, beforeFirst ...func()) {
 	t.Helper()
+	kinds := []byte{1, 2, 3, 4, 5, 6}
+	if byte(m.Class) == 3 {
+		kinds = []byte{7, 8, 3, 4, 9}
+	}
 	i := 0
 	sourceAccount(t, func(a *mdbx.OperationAccount) error {
 		return o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error {
-			if i >= len(want) {
-				t.Fatal("extra source part")
+			if i == 0 && len(beforeFirst) != 0 {
+				beforeFirst[0]()
 			}
-			kinds := []byte{1, 2, 3, 4, 5, 6}
-			if byte(m.Class) == 3 {
-				kinds = []byte{7, 8, 3, 4, 9}
-			}
-			buf := make([]byte, len(want[i]))
-			n, err := part.ReadAt(buf, 0)
-			if byte(part.Kind) != kinds[i] || part.Length != uint64(len(want[i])) || n != len(buf) || err != nil || !bytes.Equal(buf, want[i]) {
-				t.Fatalf("part %d: kind=%d length=%d n=%d err=%v bytes=%x", i, part.Kind, part.Length, n, err, buf)
-			}
+			sourceCheckPart(t, part, i, kinds, want)
 			i++
 			return nil
 		})
@@ -129,43 +176,82 @@ func sourceRead(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, want [][]byt
 	}
 }
 
+func sourceCheckPart(t *testing.T, part SourcePartV1, i int, kinds []byte, want [][]byte) []byte {
+	t.Helper()
+	if i >= len(want) {
+		t.Fatal("extra source part")
+	}
+	buf := make([]byte, len(want[i]))
+	n, err := part.ReadAt(buf, 0)
+	if byte(part.Kind) != kinds[i] || part.Length != uint64(len(want[i])) || n != len(buf) || err != nil || !bytes.Equal(buf, want[i]) {
+		t.Fatalf("part %d: kind=%d length=%d n=%d err=%v bytes=%x", i, part.Kind, part.Length, n, err, buf)
+	}
+	return buf
+}
+
 func sourcePrepare(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte) *PreparedSourceV1 {
+	t.Helper()
+	return sourcePrepareResult(t, o, m, sourceProducer(m, parts), nil)
+}
+
+func sourcePrepareResult(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, producer SourceExporterV1, want error) *PreparedSourceV1 {
 	t.Helper()
 	var p *PreparedSourceV1
 	sourceAccount(t, func(a *mdbx.OperationAccount) error {
 		var err error
-		p, err = o.PrepareSourceV1(a, m, sourceProducer(m, parts))
-		return err
+		p, err = o.PrepareSourceV1(a, m, producer)
+		if err != want || (p == nil) != (want != nil) {
+			t.Fatalf("source preparation: %v/%v, want %v", p, err, want)
+		}
+		return nil
 	})
-	if p == nil {
-		t.Fatal("missing prepared owner")
-	}
 	return p
+}
+
+func sourceChild(t *testing.T, dir, shape string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSourceChildV1$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "RUBIN_SOURCE_CHILD="+dir, "RUBIN_SOURCE_SHAPE="+shape)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("source child: %s: %v", output, err)
+	}
+}
+
+func sourceReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	sourceMust(t, err)
+	return data
 }
 
 func TestSourceDurableRoundTrip(t *testing.T) {
 	for _, class := range []byte{1, 2, 3} {
 		for _, conditional := range []bool{false, true} {
 			t.Run(fmt.Sprintf("class%d/conditional%v", class, conditional), func(t *testing.T) {
-				s, o, dir := sourceScene(t, sourceLimits())
-				m, parts := sourceBundle(class, conditional)
-				var err error
-				var generations []string
-				for _, generation := range []string{"old", "replacement"} {
-					path := filepath.Join(t.TempDir(), generation)
-					sourceMust(t, os.Mkdir(path, 0o700))
+				s, o, dir, m, parts := sourceBundleScene(t, class, conditional)
+				generations := []string{t.TempDir(), t.TempDir()}
+				for _, path := range generations {
 					sourceMust(t, os.WriteFile(filepath.Join(path, "body"), parts[0], 0o600))
-					parts[0], err = os.ReadFile(filepath.Join(path, "body"))
-					sourceMust(t, err)
-					generations = append(generations, path)
 				}
-				p := sourcePrepare(t, o, m, parts)
-				original, err := os.ReadFile(filepath.Join(dir, sourceDirectory, p.name))
+				held, err := os.Open(filepath.Join(generations[0], "body"))
 				sourceMust(t, err)
-				sourcePrepare(t, o, m, parts)
-				after, err := os.ReadFile(filepath.Join(dir, sourceDirectory, p.name))
-				sourceMust(t, err)
-				if !bytes.Equal(after, original) {
+				defer held.Close()
+				producer := func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
+					return sourceExportParts(op, m, parts, func(part SourcePartV1) error {
+						if part.Kind == m.Parts[0].Kind {
+							part.ReadAt = held.ReadAt
+						}
+						return visit(part)
+					})
+				}
+				p := sourcePrepareResult(t, o, m, producer, nil)
+				file := filepath.Join(dir, sourceDirectory, p.name)
+				original := sourceReadFile(t, file)
+				sourcePrepareResult(t, o, m, producer, nil)
+				sourceMust(t, held.Close())
+				if !bytes.Equal(sourceReadFile(t, file), original) {
 					t.Fatal("identical preparation changed bytes")
 				}
 				for _, path := range generations {
@@ -173,11 +259,7 @@ func TestSourceDurableRoundTrip(t *testing.T) {
 				}
 				sourceRead(t, o, m, parts)
 				sourceMust(t, s.Close())
-				cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestSourceChildV1$", "-test.count=1")
-				cmd.Env = append(os.Environ(), "RUBIN_SOURCE_CHILD="+dir, fmt.Sprintf("RUBIN_SOURCE_SHAPE=%d/%v", class, conditional))
-				if output, err := cmd.CombinedOutput(); err != nil {
-					t.Fatalf("reopened child: %s: %v", output, err)
-				}
+				sourceChild(t, dir, fmt.Sprintf("%d/%v", class, conditional))
 			})
 		}
 	}
@@ -212,8 +294,9 @@ func (*sourceTypedError) Error() string { return "typed visitor result" }
 func TestSourceExportScope(t *testing.T) {
 	for _, mode := range []string{"success", "error", "wrapped", "typed-nil", "panic"} {
 		t.Run(mode, func(t *testing.T) {
-			s, o, dir := sourceScene(t, sourceLimits())
-			m, parts := sourceBundle(1, false)
+			s, o, dir, m, parts := sourceBundleScene(t, 1, false)
+			admitted := m
+			admitted.Parts = slices.Clone(m.Parts)
 			want := slices.Clone(parts[0])
 			cause := errors.New("visitor result")
 			if mode == "wrapped" {
@@ -224,6 +307,12 @@ func TestSourceExportScope(t *testing.T) {
 				cause = typed
 			}
 			var escaped SourcePartV1
+			var scope *SourceOperationV1
+			producer := func(op *SourceOperationV1, v func(SourcePartV1) error) error {
+				scope = op
+				m.Parts[0].Length++
+				return sourceExportParts(op, admitted, parts, v)
+			}
 			var copied []byte
 			var got error
 			var panicValue any
@@ -231,15 +320,17 @@ func TestSourceExportScope(t *testing.T) {
 			sourceAccount(t, func(a *mdbx.OperationAccount) error {
 				func() {
 					defer func() { panicValue = recover() }()
-					got = o.WithSourceExportV1(a, m, sourceProducer(m, parts), func(part SourcePartV1) error {
+					got = o.WithSourceExportV1(a, m, producer, func(part SourcePartV1) error {
+						buf := sourceCheckPart(t, part, calls, []byte{1, 2, 3, 4, 5, 6}, parts)
 						calls++
 						if calls != 1 {
 							return nil
 						}
 						escaped = part
-						copied = make([]byte, part.Length)
-						_, err := part.ReadAt(copied, 0)
-						sourceMust(t, err)
+						if limits, err := scope.LimitsV1(); err != nil || limits != o.limits {
+							t.Fatalf("live source limits: %+v/%v", limits, err)
+						}
+						copied = buf
 						if n, err := part.ReadAt(make([]byte, 1), -1); n != 0 || any(err) != any(ErrIntegrityV1) {
 							t.Fatal("negative range was read")
 						}
@@ -253,11 +344,7 @@ func TestSourceExportScope(t *testing.T) {
 						sourceMust(t, err)
 						_, err = tx.Abort()
 						sourceMust(t, err)
-						cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestSourceChildV1$", "-test.count=1")
-						cmd.Env = append(os.Environ(), "RUBIN_SOURCE_CHILD="+dir, "RUBIN_SOURCE_SHAPE=busy")
-						if output, err := cmd.CombinedOutput(); err != nil {
-							t.Fatalf("child exclusion: %s: %v", output, err)
-						}
+						sourceChild(t, dir, "busy")
 						switch mode {
 						case "error", "typed-nil", "wrapped":
 							return cause
@@ -281,6 +368,11 @@ func TestSourceExportScope(t *testing.T) {
 				if n, err := escaped.ReadAt(make([]byte, 1), 0); n != 0 || any(err) != any(ErrUnavailableV1) {
 					t.Fatalf("escaped read: %d/%v", n, err)
 				}
+				for _, expired := range []*SourceOperationV1{nil, {}, scope} {
+					if err := expired.WithBackingV1(nil, nil, nil); err != ErrUnavailableV1 {
+						t.Fatalf("expired source operation: %v", err)
+					}
+				}
 				parts[0][0] ^= 0x80
 				if !bytes.Equal(copied, want) {
 					t.Fatal("visitor copy aliases original backing")
@@ -293,47 +385,116 @@ func TestSourceExportScope(t *testing.T) {
 }
 
 func TestSourceBackingUnion(t *testing.T) {
-	backing := make([]byte, 20)
-	for _, row := range []struct {
-		parts [][]byte
-		bytes uint64
-	}{{[][]byte{backing[:10], backing[5:15], backing[15:20]}, 20}, {[][]byte{backing[:10], slices.Clone(backing[:10])}, 20}, {[][]byte{nil, {}, backing[:0]}, 0}} {
-		got, err := SourceBackingBytesV1(row.parts)
-		if err != nil || got != row.bytes {
-			t.Fatalf("backing bytes=%d/%v, want %d", got, err, row.bytes)
-		}
+	for _, mode := range []string{"shared", "equal-copies", "live-empty", "planned", "invalid-index", "invalid-offset", "missing-origin", "length", "overlap", "overflow"} {
+		t.Run(mode, func(t *testing.T) { testSourceOriginAdmission(t, mode) })
 	}
+}
+
+func testSourceOriginAdmission(t *testing.T, mode string) {
+	_, o, _, m, _ := sourceBundleScene(t, 1, false)
+	origins := []SourceOriginV1{{Bytes: make([]byte, 256)}}
+	var views []SourceViewV1
+	for i, part := range m.Parts {
+		views = append(views, SourceViewV1{Origin: 0, Offset: uint64(i * 32), Length: part.Length})
+	}
+	charge, refusal := sourceOriginFixture(mode, &origins, views)
+	for shortage := uint64(0); shortage <= 1; shortage++ {
+		sourceAccount(t, func(a *mdbx.OperationAccount) error {
+			return a.WithReservation(mdbx.TreeLaneMaxBytes-o.limits.WorkingBytesV1()-charge+shortage, func() error {
+				entered := false
+				err := o.WithSourceExportV1(a, m, func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
+					return op.WithBackingV1(origins, views, func() error {
+						entered = true
+						if mode == "planned" {
+							origins[0].Bytes = make([]byte, origins[0].PlannedBytes)
+						}
+						for i, part := range m.Parts {
+							view := views[i]
+							backing := origins[view.Origin].Bytes[view.Offset : view.Offset+view.Length]
+							if err := visit(sourceMemoryPart(part.Kind, backing)); err != nil {
+								return err
+							}
+						}
+						return nil
+					})
+				}, func(SourcePartV1) error { return nil })
+				if refusal != nil && (entered || err != refusal) || refusal == nil && shortage == 1 && (entered || !mdbx.IsOperationReservationCapacity(err)) ||
+					refusal == nil && shortage == 0 && (!entered || err != nil) {
+					t.Fatalf("origin admission, shortage=%d: entered=%t error=%v", shortage, entered, err)
+				}
+				if mode == "planned" {
+					origins[0].Bytes = nil
+				}
+				return nil
+			})
+		})
+	}
+}
+
+func sourceOriginFixture(mode string, origins *[]SourceOriginV1, views []SourceViewV1) (uint64, error) {
+	switch mode {
+	case "equal-copies", "live-empty":
+		*origins = append(*origins, SourceOriginV1{Bytes: make([]byte, 256)})
+		index := 1
+		if mode == "live-empty" {
+			index = len(views) - 1
+		}
+		views[index].Origin = 1
+		return 512, nil
+	case "planned":
+		(*origins)[0] = SourceOriginV1{PlannedBytes: 256}
+	case "invalid-index":
+		views[0].Origin = -2
+	case "invalid-offset":
+		views[0].Offset = 256
+	case "missing-origin":
+		*origins = nil
+	case "length":
+		views[0].Length++
+	case "overlap":
+		*origins = append(*origins, (*origins)[0])
+	case "overflow":
+		(*origins)[0] = SourceOriginV1{PlannedBytes: math.MaxUint64}
+	}
+	if mode == "shared" || mode == "planned" {
+		return 256, nil
+	}
+	return 256, ErrIntegrityV1
 }
 
 func TestSourcePreparedManifestOwnership(t *testing.T) {
-	_, o, _ := sourceScene(t, sourceLimits())
-	m, parts := sourceBundle(1, false)
+	_, o, _, m, parts := sourceBundleScene(t, 1, false)
+	admitted := slices.Clone(m.Parts)
 	p := sourcePrepare(t, o, m, parts)
-	want := slices.Clone(p.manifest.Parts)
 	m.Parts[0].Length++
-	if !reflect.DeepEqual(p.manifest.Parts, want) {
+	if !slices.Equal(p.manifest.Parts, admitted) {
 		t.Fatal("prepared manifest aliases caller metadata")
 	}
+	m.Parts[0] = admitted[0]
+	sourceRead(t, o, m, parts, func() { m.Parts[1].Length++ })
 }
 
 func TestSourceExpiryWaitsForAdmittedRead(t *testing.T) {
-	s, o, _ := sourceScene(t, sourceLimits())
-	m, parts := sourceBundle(1, false)
+	s, o, dir, m, parts := sourceBundleScene(t, 1, false)
 	entered, allow, visitorLeft, done := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	release := sync.OnceFunc(func() { close(allow) })
+	wait := func(signal <-chan struct{}, message string) {
+		t.Helper()
+		select {
+		case <-signal:
+		case <-time.After(5 * time.Second):
+			t.Fatal(message)
+		}
+	}
 	t.Cleanup(func() {
 		release()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("source operation did not finish")
-		}
+		wait(done, "source operation did not finish")
 	})
 	readDone := make(chan error, 1)
 	var escaped SourcePartV1
 	buf := make([]byte, len(parts[0]))
-	producer := func(visit func(SourcePartV1) error) error {
-		return ExportSourceBytesV1(m, parts, func(part SourcePartV1) error {
+	producer := func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
+		return sourceExportParts(op, m, parts, func(part SourcePartV1) error {
 			if byte(part.Kind) == 1 {
 				read := part.ReadAt
 				part.ReadAt = func(dst []byte, off int64) (int, error) { close(entered); <-allow; return read(dst, off) }
@@ -357,11 +518,8 @@ func TestSourceExpiryWaitsForAdmittedRead(t *testing.T) {
 			return nil
 		})
 	}()
-	select {
-	case <-visitorLeft:
-	case <-time.After(5 * time.Second):
-		t.Fatal("visitor did not enter")
-	}
+	wait(visitorLeft, "visitor did not enter")
+	sourceChild(t, dir, "busy")
 	select {
 	case <-done:
 		t.Fatal("export ended before an admitted read")
@@ -371,11 +529,7 @@ func TestSourceExpiryWaitsForAdmittedRead(t *testing.T) {
 		t.Fatalf("read lifetime lost source authority: %v", err)
 	}
 	release()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("read expiry did not finish")
-	}
+	wait(done, "read expiry did not finish")
 	if err := <-readDone; err != nil || !bytes.Equal(buf, parts[0]) {
 		t.Fatalf("admitted copy: %v/%x", err, buf)
 	}

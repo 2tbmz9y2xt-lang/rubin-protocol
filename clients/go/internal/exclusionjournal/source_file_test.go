@@ -3,6 +3,7 @@ package exclusionjournal
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -29,79 +30,60 @@ func sourceEntries(t *testing.T, dir string) []string {
 	return names
 }
 
+func sourceFileCount(t *testing.T, dir string, want int, message string) {
+	t.Helper()
+	if count := len(sourceEntries(t, dir)); count != want {
+		t.Fatalf("%s: got %d files, want %d", message, count, want)
+	}
+}
+
 func sourcePrepareRefusal(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte, want error) {
 	t.Helper()
 	calls := 0
-	sourceAccount(t, func(a *mdbx.OperationAccount) error {
-		p, err := o.PrepareSourceV1(a, m, func(v func(SourcePartV1) error) error { calls++; return ExportSourceBytesV1(m, parts, v) })
-		if p != nil || any(err) != any(want) || calls != 0 {
-			t.Fatalf("preparation refusal: %v/%v want=%v calls=%d", p, err, want, calls)
-		}
-		return nil
-	})
+	sourcePrepareResult(t, o, m, func(op *SourceOperationV1, v func(SourcePartV1) error) error {
+		calls++
+		return sourceExportParts(op, m, parts, v)
+	}, want)
+	if calls != 0 {
+		t.Fatalf("refused source preparation entered producer %d times", calls)
+	}
 }
 
 func sourceFault(o *SourceOwnerV1, stage string, cause error, failed *bool, observe func()) {
-	once := func() error {
+	fail := func() error {
 		if observe != nil {
 			observe()
 		}
-		if !*failed {
-			*failed = true
-			return cause
-		}
-		return nil
+		*failed = true
+		o.ops = realSourceFS
+		return cause
 	}
-	run := func(action func() error) error {
-		if err := once(); err != nil {
-			return err
-		}
-		return action()
-	}
+	fileOp := func(*os.File) error { return fail() }
 	switch stage {
 	case "write":
-		o.ops.write = func(f *os.File, b []byte) (int, error) {
-			if err := once(); err != nil {
-				return 0, err
-			}
-			return realSourceFS.write(f, b)
-		}
+		o.ops.write = func(*os.File, []byte) (int, error) { return 0, fail() }
 	case "file-sync":
-		o.ops.fileSync = func(f *os.File) error {
-			return run(f.Sync)
-		}
+		o.ops.fileSync = fileOp
 	case "close":
-		o.ops.close = func(f *os.File) error {
-			return run(f.Close)
-		}
+		o.ops.close = fileOp
 	case "rename":
-		o.ops.rename = func(r *os.Root, a, b string) error {
-			return run(func() error { return r.Rename(a, b) })
-		}
+		o.ops.rename = func(*os.Root, string, string) error { return fail() }
 	case "parent-sync":
-		o.ops.dirSync = func(r *sourceRoot) error {
-			return run(r.pin.Sync)
-		}
+		o.ops.dirSync = func(*sourceRoot) error { return fail() }
 	case "unlink":
-		o.ops.remove = func(r *os.Root, n string) error {
-			return run(func() error { return r.Remove(n) })
-		}
+		o.ops.remove = func(*os.Root, string) error { return fail() }
 	case "statfs":
-		o.ops.statfs = func(fd int, s *syscall.Statfs_t) error {
-			return run(func() error { return syscall.Fstatfs(fd, s) })
-		}
+		o.ops.statfs = func(int, *syscall.Statfs_t) error { return fail() }
 	}
 }
 
 func TestSourceCodecCorpus(t *testing.T) {
 	for _, class := range []byte{1, 3} {
 		t.Run(fmt.Sprint(class), func(t *testing.T) {
-			_, o, dir := sourceScene(t, sourceLimits())
-			m, parts := sourceBundle(class, true)
+			_, o, dir, m, parts := sourceBundleScene(t, class, true)
 			p := sourcePrepare(t, o, m, parts)
 			path := filepath.Join(dir, sourceDirectory, p.name)
-			image, err := os.ReadFile(path)
-			sourceMust(t, err)
+			image := sourceReadFile(t, path)
 			refuse := func(b []byte) {
 				sourceMust(t, os.WriteFile(path, b, 0o600))
 				calls := 0
@@ -115,8 +97,6 @@ func TestSourceCodecCorpus(t *testing.T) {
 			}
 			for n := range image {
 				refuse(image[:n])
-			}
-			for n := range image {
 				changed := slices.Clone(image)
 				changed[n] ^= 1
 				refuse(changed)
@@ -153,26 +133,22 @@ func TestSourceManifestRefusals(t *testing.T) {
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			_, o, dir := sourceScene(t, sourceLimits())
-			m, parts := sourceBundle(row.class, false)
+			_, o, dir, m, parts := sourceBundleScene(t, row.class, false)
 			row.edit(&m)
 			sourcePrepareRefusal(t, o, m, parts, ErrIntegrityV1)
-			if len(sourceEntries(t, dir)) != 0 {
-				t.Fatal("manifest refusal published bytes")
-			}
+			sourceFileCount(t, dir, 0, "manifest refusal published bytes")
 		})
 	}
 }
 
 func TestSourcePartAndAssuranceRefusals(t *testing.T) {
-	for _, mode := range []string{"short", "extra", "reorder", "length", "unreadable", "full-extra", "conditional-short", "conditional-zero", "unknown-assurance", "digest-substitution", "nil-producer", "missing-callback", "nil-reader", "ignored-refusal"} {
+	for _, mode := range []string{"short", "extra", "reorder", "length", "unreadable", "full-extra", "conditional-short", "conditional-zero", "unknown-assurance", "digest-substitution", "nil-producer", "missing-callback", "nil-reader", "ignored-refusal", "nested-delivery"} {
 		t.Run(mode, func(t *testing.T) {
-			_, o, dir := sourceScene(t, sourceLimits())
 			class := byte(3)
 			if mode == "short" || mode == "unreadable" || mode == "length" {
 				class = 1
 			}
-			m, parts := sourceBundle(class, false)
+			_, o, dir, m, parts := sourceBundleScene(t, class, false)
 			switch mode {
 			case "full-extra":
 				parts[3] = []byte{1, 1}
@@ -189,60 +165,32 @@ func TestSourcePartAndAssuranceRefusals(t *testing.T) {
 			for i := range parts {
 				m.Parts[i].Length = uint64(len(parts[i]))
 			}
-			producer := sourceProducer(m, parts)
 			var late func(SourcePartV1) error
+			nested := false
+			producer := SourceExporterV1(func(op *SourceOperationV1, v func(SourcePartV1) error) error {
+				if mode == "ignored-refusal" {
+					late = v
+				}
+				return sourceExportParts(op, m, parts, func(p SourcePartV1) error {
+					if mode == "nested-delivery" && p.Kind == AcquiredBlockBytesV1 {
+						read := p.ReadAt
+						p.ReadAt = func(dst []byte, off int64) (int, error) {
+							if err := v(sourceMemoryPart(ExpectedHeaderPathV1, parts[1])); err != ErrIntegrityV1 {
+								t.Fatalf("nested source delivery: %v", err)
+							}
+							n, err := read(dst, off)
+							nested = err == nil && n == len(dst)
+							return n, err
+						}
+					}
+					return sourceAlteredPart(mode, p, v)
+				})
+			})
 			switch mode {
 			case "nil-producer":
 				producer = nil
 			case "missing-callback":
-				producer = func(func(SourcePartV1) error) error { return nil }
-			case "nil-reader":
-				producer = func(v func(SourcePartV1) error) error {
-					return v(SourcePartV1{Kind: m.Parts[0].Kind, Length: m.Parts[0].Length})
-				}
-			case "ignored-refusal":
-				producer = func(v func(SourcePartV1) error) error {
-					late = v
-					_ = v(SourcePartV1{})
-					return ExportSourceBytesV1(m, parts, v)
-				}
-			}
-			if mode == "short" || mode == "unreadable" {
-				producer = func(v func(SourcePartV1) error) error {
-					return ExportSourceBytesV1(m, parts, func(p SourcePartV1) error {
-						if p.Kind == BoundBodyV1 {
-							read := p.ReadAt
-							p.ReadAt = func(dst []byte, off int64) (int, error) {
-								n, err := read(dst, off)
-								if mode == "short" {
-									return n - 1, err
-								}
-								return n, io.ErrUnexpectedEOF
-							}
-						}
-						return v(p)
-					})
-				}
-			}
-			if mode == "extra" {
-				producer = func(v func(SourcePartV1) error) error {
-					if err := ExportSourceBytesV1(m, parts, v); err != nil {
-						return err
-					}
-					return ExportSourceBytesV1(m, parts, v)
-				}
-			}
-			if mode == "reorder" || mode == "length" {
-				producer = func(v func(SourcePartV1) error) error {
-					return ExportSourceBytesV1(m, parts, func(p SourcePartV1) error {
-						if mode == "reorder" {
-							p.Kind = 1
-						} else {
-							p.Length++
-						}
-						return v(p)
-					})
-				}
+				producer = func(*SourceOperationV1, func(SourcePartV1) error) error { return nil }
 			}
 			sourceAccount(t, func(a *mdbx.OperationAccount) error {
 				if mode == "length" || mode == "nil-reader" || mode == "missing-callback" {
@@ -258,6 +206,9 @@ func TestSourcePartAndAssuranceRefusals(t *testing.T) {
 				}
 				return nil
 			})
+			if mode == "nested-delivery" && !nested {
+				t.Fatal("admitted read did not finish after nested refusal")
+			}
 			if late != nil {
 				if err := late(SourcePartV1{}); any(err) != any(ErrUnavailableV1) {
 					t.Fatalf("expired callback: %v", err)
@@ -270,14 +221,42 @@ func TestSourcePartAndAssuranceRefusals(t *testing.T) {
 	}
 }
 
+func sourceAlteredPart(mode string, p SourcePartV1, visit func(SourcePartV1) error) error {
+	switch mode {
+	case "nil-reader":
+		p.ReadAt = nil
+	case "ignored-refusal":
+		_ = visit(SourcePartV1{})
+	case "reorder":
+		p.Kind = BoundBodyV1
+	case "length":
+		p.Length++
+	case "short", "unreadable":
+		if p.Kind == BoundBodyV1 {
+			read := p.ReadAt
+			p.ReadAt = func(dst []byte, off int64) (int, error) {
+				n, err := read(dst, off)
+				if mode == "short" {
+					return n - 1, err
+				}
+				return n, io.ErrUnexpectedEOF
+			}
+		}
+	case "extra":
+		if err := visit(p); err != nil || p.Kind != AcquisitionPositionV1 {
+			return err
+		}
+	}
+	return visit(p)
+}
+
 func TestSourceDurabilityFailures(t *testing.T) {
 	for _, stage := range []string{"write", "file-sync", "close", "rename", "parent-sync", "statfs"} {
 		for _, reopen := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/reopen%v", stage, reopen), func(t *testing.T) {
-				s, o, dir := sourceScene(t, sourceLimits())
-				m, parts := sourceBundle(1, false)
-				original, err := os.ReadFile(filepath.Join(dir, "policy-control"))
-				sourceMust(t, err)
+				s, o, dir, m, parts := sourceBundleScene(t, 1, false)
+				path := filepath.Join(dir, "policy-control")
+				original := sourceReadFile(t, path)
 				cause := errors.New("filesystem refusal")
 				failed := false
 				sourceFault(o, stage, cause, &failed, func() {
@@ -285,17 +264,14 @@ func TestSourceDurabilityFailures(t *testing.T) {
 						t.Fatalf("close in source I/O: %v", err)
 					}
 				})
-				sourceAccount(t, func(a *mdbx.OperationAccount) error {
-					p, err := o.PrepareSourceV1(a, m, sourceProducer(m, parts))
-					matches := errors.Is(err, cause)
-					if stage == "statfs" {
-						matches = any(err) == any(ErrCapacityV1)
-					}
-					if p != nil || !matches || !failed {
-						t.Fatalf("durability refusal: %v/%v stage=%s", p, err, stage)
-					}
-					return nil
-				})
+				want := cause
+				if stage == "statfs" {
+					want = ErrCapacityV1
+				}
+				sourcePrepareResult(t, o, m, sourceProducer(m, parts), want)
+				if !failed {
+					t.Fatalf("durability operation did not reach %s", stage)
+				}
 				if stage == "parent-sync" {
 					if o.debt == nil || o.debt.staging || len(sourceEntries(t, dir)) != 1 {
 						t.Fatal("renamed backing lost its owner")
@@ -303,15 +279,12 @@ func TestSourceDurabilityFailures(t *testing.T) {
 				} else if o.debt != nil || len(sourceEntries(t, dir)) != 0 {
 					t.Fatal("unpublished cleanup was not completed")
 				}
-				o.ops = realSourceFS
 				if reopen {
 					o = sourceReopen(t, s, dir, sourceLimits())
 				}
 				sourcePrepare(t, o, m, parts)
 				sourceRead(t, o, m, parts)
-				after, err := os.ReadFile(filepath.Join(dir, "policy-control"))
-				sourceMust(t, err)
-				if !bytes.Equal(original, after) {
+				if !bytes.Equal(original, sourceReadFile(t, path)) {
 					t.Fatal("source operation changed control bytes")
 				}
 			})
@@ -320,30 +293,28 @@ func TestSourceDurabilityFailures(t *testing.T) {
 }
 
 func TestSourcePartialCleanupRetry(t *testing.T) {
-	_, o, dir := sourceScene(t, sourceLimits())
-	m, parts := sourceBundle(1, false)
+	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 	parts[0] = bytes.Repeat([]byte{42}, 70000)
 	m.Parts[0].Length = 70000
-	cause := errors.New("partial read")
+	cause := errors.New("partial write")
 	cleanup := errors.New("unlink refusal")
 	o.ops.remove = func(*os.Root, string) error { return cleanup }
-	producer := func(v func(SourcePartV1) error) error {
-		return ExportSourceBytesV1(m, parts, func(p SourcePartV1) error {
-			if p.Kind == 1 {
-				read := p.ReadAt
-				p.ReadAt = func(dst []byte, off int64) (int, error) {
-					if off != 0 {
-						return 0, cause
-					}
-					return read(dst, off)
-				}
-			}
-			return v(p)
-		})
+	writes := 0
+	o.ops.write = func(f *os.File, data []byte) (int, error) {
+		writes++
+		if writes == 3 {
+			return 0, cause
+		}
+		return f.Write(data)
+	}
+	later := errors.New("later producer error")
+	producer := func(op *SourceOperationV1, v func(SourcePartV1) error) error {
+		_ = sourceExportParts(op, m, parts, v)
+		return fmt.Errorf("producer result: %w", later)
 	}
 	sourceAccount(t, func(a *mdbx.OperationAccount) error {
 		p, err := o.PrepareSourceV1(a, m, producer)
-		if p != nil || !errors.Is(err, cleanup) || o.debt == nil || !o.debt.staging {
+		if p != nil || !errors.Is(err, cause) || !errors.Is(err, cleanup) || errors.Is(err, later) || o.debt == nil || !o.debt.staging {
 			t.Fatalf("partial owner: %v/%v %+v", p, err, o.debt)
 		}
 		return nil
@@ -354,102 +325,195 @@ func TestSourcePartialCleanupRetry(t *testing.T) {
 	if info.Size() <= 0 || info.Size() >= 70000 {
 		t.Fatalf("partial size=%d", info.Size())
 	}
+	testSourceUnfundedBacking(t, o, m, parts, staging)
 	foreign := m
 	foreign.Identity[0]++
-	calls := 0
-	sourceAccount(t, func(a *mdbx.OperationAccount) error {
-		p, err := o.PrepareSourceV1(a, foreign, func(func(SourcePartV1) error) error { calls++; return nil })
-		if p != nil || any(err) != any(ErrBusyV1) || calls != 0 {
-			t.Fatal("unreconciled owner allowed another preparation")
-		}
-		return nil
-	})
+	sourcePrepareRefusal(t, o, foreign, parts, ErrBusyV1)
 	o.ops = realSourceFS
 	sourcePrepare(t, o, m, parts)
 	sourceRead(t, o, m, parts)
-	if _, err = os.Stat(staging); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("partial staging was resumed or retained")
+	sourcePresence(t, filepath.Dir(staging), filepath.Base(staging), false)
+}
+
+func sourceBackingCharge(parts [][]byte) uint64 {
+	var total uint64
+	for _, part := range parts {
+		total += uint64(cap(part))
+	}
+	return total
+}
+
+func testSourceUnfundedBacking(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte, staging string) {
+	t.Helper()
+	before, beforeErr := os.ReadFile(staging)
+	entries, delivered := 0, 0
+	producer := func(op *SourceOperationV1, v func(SourcePartV1) error) error {
+		entries++
+		sourcePresence(t, filepath.Dir(staging), filepath.Base(staging), beforeErr == nil)
+		return sourceExportParts(op, m, parts, func(p SourcePartV1) error { delivered++; return v(p) })
+	}
+	sourceAccount(t, func(a *mdbx.OperationAccount) error {
+		return a.WithReservation(mdbx.TreeLaneMaxBytes-o.limits.WorkingBytesV1()-sourceBackingCharge(parts)+1, func() error {
+			p, err := o.PrepareSourceV1(a, m, producer)
+			if p != nil || !mdbx.IsOperationReservationCapacity(err) || entries != 1 || delivered != 0 {
+				t.Fatalf("unfunded source: %v/%v producer=%d delivered=%d", p, err, entries, delivered)
+			}
+			return nil
+		})
+	})
+	after, afterErr := os.ReadFile(staging)
+	if (beforeErr == nil) != (afterErr == nil) || !bytes.Equal(before, after) {
+		t.Fatal("unfunded source changed staged bytes")
 	}
 }
 
 func TestSourceReleaseOnlyRetry(t *testing.T) {
-	for _, stage := range []string{"unlink", "parent-sync"} {
-		for _, reopen := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/reopen%v", stage, reopen), func(t *testing.T) {
-				m, parts := sourceBundle(1, false)
-				size, err := m.SizeV1()
-				sourceMust(t, err)
-				limits := sourceLimits()
-				limits.Files = 1
-				limits.Bytes = size
-				s, o, dir := sourceScene(t, limits)
-				p := sourcePrepare(t, o, m, parts)
-				sourceAccount(t, func(a *mdbx.OperationAccount) error {
-					if err := o.ReleaseUnpublishedSourceV1(a, p, false); any(err) != any(ErrIntegrityV1) {
-						t.Fatalf("unreconciled release: %v", err)
-					}
-					return o.WithCapturedSourceV1(a, m, func(SourcePartV1) error {
-						if err := o.ReleaseUnpublishedSourceV1(a, p, true); any(err) != any(ErrBusyV1) {
-							t.Fatalf("live export release: %v", err)
-						}
-						return nil
-					})
-				})
-				cause := errors.New("release refusal")
-				failed := false
-				sourceFault(o, stage, cause, &failed, nil)
-				sourceAccount(t, func(a *mdbx.OperationAccount) error {
-					if err := o.ReleaseUnpublishedSourceV1(a, p, true); !errors.Is(err, cause) || p.released || o.debt == nil || !o.debt.release {
-						t.Fatalf("release owner: %v %+v", err, o.debt)
-					}
-					return nil
-				})
-				foreign := m
-				foreign.Identity[0]++
-				sourceAccount(t, func(a *mdbx.OperationAccount) error {
-					prepared, err := o.PrepareSourceV1(a, foreign, sourceProducer(foreign, parts))
-					if prepared != nil || any(err) != any(ErrBusyV1) {
-						t.Fatal("release-only owner allowed preparation")
-					}
-					return nil
-				})
-				o.ops = realSourceFS
-				if reopen {
-					o = sourceReopen(t, s, dir, limits)
-					if stage == "parent-sync" {
-						if len(sourceEntries(t, dir)) != 0 {
-							t.Fatal("unlinked source reappeared")
-						}
-						sourcePrepare(t, o, foreign, parts)
-						return
-					}
-					p = sourcePrepare(t, o, m, parts)
-				}
-				sourceAccount(t, func(a *mdbx.OperationAccount) error { return o.ReleaseUnpublishedSourceV1(a, p, true) })
-				if !p.released || o.debt != nil || len(sourceEntries(t, dir)) != 0 {
-					t.Fatal("successful release retained charge")
-				}
-				sourcePrepare(t, o, foreign, parts)
-			})
+	for _, stage := range []string{"write", "file-sync", "close", "rename", "intent-sync", "unlink", "unlink-reopen-competing-prepare", "unlink-sync", "marker-clear", "final-sync"} {
+		t.Run(stage, func(t *testing.T) { testSourceReleaseStage(t, stage) })
+	}
+	t.Run("changed-content", func(t *testing.T) { testSourceReleaseIncarnation(t, false) })
+	t.Run("changed-inode", func(t *testing.T) { testSourceReleaseIncarnation(t, true) })
+}
+
+func testSourceReleaseIncarnation(t *testing.T, replacement bool) {
+	s, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	p := sourcePrepare(t, o, m, parts)
+	cause := errors.New("source unlink refusal")
+	injectReleaseFault(o, "unlink", cause)
+	sourceReleaseResult(t, o, p, true, cause)
+	o = sourceReopen(t, s, dir, sourceLimits())
+	root := filepath.Join(dir, sourceDirectory)
+	path, marker := filepath.Join(root, p.name), filepath.Join(root, releaseFile)
+	changed := sourceReadFile(t, path)
+	record := sourceReadFile(t, marker)
+	want := ErrIntegrityV1
+	if replacement {
+		original := filepath.Join(t.TempDir(), "original")
+		o.ops.dirSync = func(r *sourceRoot) error {
+			o.ops.dirSync = syncSourceRoot
+			sourceMust(t, syncSourceRoot(r))
+			sourceMust(t, os.Rename(path, original))
+			return os.WriteFile(path, changed, 0o600)
 		}
+		want = ErrIdentityV1
+	} else {
+		changed[len(changed)-33] ^= 1
+		footer := sha256.Sum256(changed[:len(changed)-32])
+		copy(changed[len(changed)-32:], footer[:])
+		sourceMust(t, os.WriteFile(path, changed, 0o600))
+	}
+	sourceReleaseResult(t, o, nil, true, want)
+	if !bytes.Equal(sourceReadFile(t, path), changed) || !bytes.Equal(sourceReadFile(t, marker), record) {
+		t.Fatal("refused release changed backing or intent")
 	}
 }
 
-func TestSourceReopenRequiresDirectorySync(t *testing.T) {
-	s, o, dir := sourceScene(t, sourceLimits())
+func testSourceReleaseStage(t *testing.T, stage string) {
 	m, parts := sourceBundle(1, false)
+	size, err := m.SizeV1()
+	sourceMust(t, err)
+	limits := sourceLimits()
+	limits.Files, limits.Bytes = 1, size
+	spare := stage == "unlink-reopen-competing-prepare"
+	if spare {
+		limits.Files, limits.Bytes = 2, 2*size
+	}
+	s, o, dir := sourceScene(t, limits)
 	p := sourcePrepare(t, o, m, parts)
-	cause := errors.New("source directory sync")
-	o.ops.dirSync = func(*sourceRoot) error { return cause }
+	foreign := m
+	foreign.Identity[0]++
+	sourceReleaseResult(t, o, p, false, ErrIntegrityV1)
+	sourceReleaseResult(t, o, nil, true, ErrIntegrityV1)
 	sourceAccount(t, func(a *mdbx.OperationAccount) error {
-		if err := o.ReleaseUnpublishedSourceV1(a, p, true); any(err) != any(cause) || p.released || o.debt == nil || !o.debt.removed {
-			t.Fatalf("release sync refusal: %v %+v", err, o.debt)
+		return o.WithCapturedSourceV1(a, m, func(SourcePartV1) error {
+			if err := o.ReleaseUnpublishedSourceV1(a, p, true); err != ErrBusyV1 {
+				t.Fatalf("live export release: %v", err)
+			}
+			return nil
+		})
+	})
+	cause := errors.New("release refusal")
+	visible, backing := injectReleaseFault(o, stage, cause)
+	sourceReleaseResult(t, o, p, true, cause)
+	if visible {
+		sourcePrepareRefusal(t, o, foreign, parts, ErrBusyV1)
+	}
+	fresh := sourceReopen(t, s, dir, limits)
+	if spare {
+		sourcePrepareRefusal(t, fresh, foreign, parts, ErrBusyV1)
+	}
+	root := filepath.Join(dir, sourceDirectory)
+	sourcePresence(t, root, p.name, backing)
+	sourcePresence(t, root, releaseFile, visible && stage != "final-sync")
+	sourcePresence(t, root, releaseScratch, false)
+	switch {
+	case !visible:
+		sourceReleaseResult(t, fresh, nil, true, ErrIntegrityV1)
+		sourceRead(t, fresh, m, parts)
+		sourceReleaseResult(t, fresh, sourcePrepare(t, fresh, m, parts), true, nil)
+	case stage == "final-sync":
+		sourceReleaseResult(t, fresh, nil, true, ErrIntegrityV1)
+	default:
+		sourcePrepareRefusal(t, fresh, foreign, parts, ErrBusyV1)
+		sourceReleaseResult(t, fresh, nil, true, nil)
+	}
+	sourceFileCount(t, dir, 0, "released backing or record remained")
+	sourcePrepare(t, fresh, foreign, parts)
+	if spare {
+		sourcePrepare(t, fresh, m, parts)
+	}
+}
+
+func injectReleaseFault(o *SourceOwnerV1, stage string, cause error) (visible, backing bool) {
+	failed := false
+	switch stage {
+	case "write", "file-sync", "close", "rename":
+		sourceFault(o, stage, cause, &failed, nil)
+		return false, true
+	case "unlink", "unlink-reopen-competing-prepare":
+		sourceFault(o, "unlink", cause, &failed, nil)
+		return true, true
+	case "marker-clear":
+		o.ops.remove = func(r *os.Root, name string) error {
+			if name == releaseFile {
+				return cause
+			}
+			return r.Remove(name)
+		}
+		return true, false
+	}
+	calls, failAt := 0, map[string]int{"intent-sync": 1, "unlink-sync": 2, "final-sync": 3}[stage]
+	o.ops.dirSync = func(r *sourceRoot) error {
+		calls++
+		if calls == failAt {
+			return cause
+		}
+		return r.pin.Sync()
+	}
+	return true, stage == "intent-sync"
+}
+
+func sourcePresence(t *testing.T, root, name string, present bool) {
+	t.Helper()
+	_, err := os.Lstat(filepath.Join(root, name))
+	if present && err != nil || !present && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source path %q present=%t: %v", name, present, err)
+	}
+}
+
+func sourceReleaseResult(t *testing.T, o *SourceOwnerV1, p *PreparedSourceV1, proof bool, want error) {
+	t.Helper()
+	sourceAccount(t, func(a *mdbx.OperationAccount) error {
+		if err := o.ReleaseUnpublishedSourceV1(a, p, proof); err != want {
+			t.Fatalf("source release: %v, want %v", err, want)
 		}
 		return nil
 	})
-	if len(sourceEntries(t, dir)) != 0 {
-		t.Fatal("source unlink did not complete")
-	}
+}
+
+func TestSourceReopenRequiresDirectorySync(t *testing.T) {
+	s, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	sourcePrepare(t, o, m, parts)
 	sourceMust(t, s.Close())
 	opened, err := policycontrol.Open(dir, sourceID())
 	sourceMust(t, err)
@@ -459,6 +523,7 @@ func TestSourceReopenRequiresDirectorySync(t *testing.T) {
 	saved := realSourceFS
 	defer func() { realSourceFS = saved }()
 	calls := 0
+	cause := errors.New("source directory sync")
 	realSourceFS.dirSync = func(r *sourceRoot) error {
 		calls++
 		info, err := r.pin.Stat()
@@ -467,46 +532,34 @@ func TestSourceReopenRequiresDirectorySync(t *testing.T) {
 		}
 		return cause
 	}
-	sourceAccount(t, func(a *mdbx.OperationAccount) error {
-		fresh, err := NewSourceOwnerV1(opened, sourceID(), sourceLimits(), a)
-		if fresh != nil || any(err) != any(cause) || calls != 1 {
-			t.Fatalf("reopened directory sync refusal: %v/%v calls=%d", fresh, err, calls)
-		}
-		return nil
-	})
+	sourceOpen(t, opened, sourceID(), sourceLimits(), cause)
+	if calls != 1 {
+		t.Fatalf("reopened directory sync calls=%d", calls)
+	}
 	realSourceFS = saved
-	fresh := sourceReopen(t, opened, dir, sourceLimits())
+	fresh := sourceOpen(t, opened, sourceID(), sourceLimits(), nil)
 	sourcePrepare(t, fresh, m, parts)
 	sourceRead(t, fresh, m, parts)
 }
 
 func TestSourceNoOverwriteAndDistinctCopies(t *testing.T) {
-	_, o, dir := sourceScene(t, sourceLimits())
-	m, parts := sourceBundle(1, false)
+	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 	p := sourcePrepare(t, o, m, parts)
 	path := filepath.Join(dir, sourceDirectory, p.name)
-	original, err := os.ReadFile(path)
-	sourceMust(t, err)
+	original := sourceReadFile(t, path)
+	changed := slices.Clone(parts)
+	changed[0] = slices.Clone(parts[0])
+	changed[0][0] ^= 1
 	for _, length := range []bool{false, true} {
-		changed := append([][]byte(nil), parts...)
-		changed[0] = slices.Clone(parts[0])
-		changed[0][0] ^= 1
+		incoming := slices.Clone(changed)
 		manifest := m
-		manifest.Parts = slices.Clone(m.Parts)
 		if length {
-			changed[0] = append(changed[0], 1)
+			incoming[0] = append(incoming[0], 1)
+			manifest.Parts = slices.Clone(m.Parts)
 			manifest.Parts[0].Length++
 		}
-		sourceAccount(t, func(a *mdbx.OperationAccount) error {
-			p, err := o.PrepareSourceV1(a, manifest, sourceProducer(manifest, changed))
-			if p != nil || any(err) != any(ErrIntegrityV1) {
-				t.Fatalf("same identity overwrite: %v/%v", p, err)
-			}
-			return nil
-		})
-		after, err := os.ReadFile(path)
-		sourceMust(t, err)
-		if !bytes.Equal(after, original) || len(sourceEntries(t, dir)) != 1 {
+		sourcePrepareResult(t, o, manifest, sourceProducer(manifest, incoming), ErrIntegrityV1)
+		if !bytes.Equal(sourceReadFile(t, path), original) || len(sourceEntries(t, dir)) != 1 {
 			t.Fatal("same identity changed bytes or created another file")
 		}
 	}
@@ -517,17 +570,67 @@ func TestSourceNoOverwriteAndDistinctCopies(t *testing.T) {
 	}
 	sourceRead(t, o, m, parts)
 	sourceRead(t, o, accepted, acceptedParts)
-	first, one := sourceBundle(3, false)
-	second, two := sourceBundle(3, false)
-	two[0] = slices.Clone(two[0])
-	two[0][0] ^= 1
-	second.AcquiredDigest = sha256.Sum256(two[0])
-	a, b := sourcePrepare(t, o, first, one), sourcePrepare(t, o, second, two)
-	if a.name == b.name {
-		t.Fatal("distinct acquired copies share identity")
+	t.Run("acquired-copy", testSourceAcquiredCopies)
+	t.Run("name-occupied-during-export", func(t *testing.T) {
+		_, owner, dir := sourceScene(t, sourceLimits())
+		root := filepath.Join(dir, sourceDirectory)
+		path := filepath.Join(root, p.name)
+		producer := sourceAfterFirstPart(m, changed, func() error {
+			sourcePresence(t, root, ".staging-"+p.name, true)
+			return os.WriteFile(path, original, 0o600)
+		})
+		sourcePrepareResult(t, owner, m, producer, ErrIntegrityV1)
+		if !bytes.Equal(sourceReadFile(t, path), original) || len(sourceEntries(t, dir)) != 1 || owner.debt != nil {
+			t.Fatal("name collision changed existing bytes or retained staging")
+		}
+	})
+	t.Run("stale-prepared", func(t *testing.T) {
+		_, owner, dir := sourceScene(t, sourceLimits())
+		a, b := sourcePrepare(t, owner, m, parts), sourcePrepare(t, owner, m, parts)
+		copied := *b
+		sourceReleaseResult(t, owner, a, true, nil)
+		replacement := sourcePrepare(t, owner, m, parts)
+		for _, old := range []*PreparedSourceV1{b, &copied} {
+			sourceReleaseResult(t, owner, old, true, ErrIntegrityV1)
+			sourceRead(t, owner, m, parts)
+		}
+		sourceReleaseResult(t, owner, replacement, true, nil)
+		sourcePresence(t, filepath.Join(dir, sourceDirectory), replacement.name, false)
+	})
+}
+
+func testSourceAcquiredCopies(t *testing.T) {
+	const common = "0100000000000000000000000000000000000000000000000000000000000000" +
+		"00000000dc6c2a3fd574b0f69ddd16d999b2ed94cdc20a399ef12b0d84eb8cd6" +
+		"7d5a22021b04000000000000ffffffffffffffffffffffffffffffffffffffff" +
+		"ffffffffffffffffffffffff0000000000000000000000000000000000000000" +
+		"0000000000000000000000000000000000000000010100000002010000000000" +
+		"0000000000000000010000000000000000000000000000000000000000000000" +
+		"00000000000000000000521ec18851e17bbba961bc46c70baf03ee67ebdea11a" +
+		"8306de39c15a90e9d2e500"
+	s, o, dir := sourceScene(t, sourceLimits())
+	one, first := acquiredSourceFrame(t, common+"0142", 237, "115b308a43ffbe3e33feef20751954bbe327086396dfc5ffb3804674af89a30c")
+	two, second := acquiredSourceFrame(t, common+"024243", 238, "5be9beac7d666b77658007d0cb47c6ed4c7adc3183ea51e563587bd85b5d662e")
+	a, b := sourcePrepare(t, o, one, first), sourcePrepare(t, o, two, second)
+	if a.name == b.name || !bytes.Equal(first[0][:235], second[0][:235]) {
+		t.Fatal("acquired copies did not retain distinct suffixes and a common frame prefix")
 	}
-	sourceRead(t, o, first, one)
-	sourceRead(t, o, second, two)
+	o = sourceReopen(t, s, dir, sourceLimits())
+	sourceRead(t, o, one, first)
+	sourceRead(t, o, two, second)
+}
+
+func acquiredSourceFrame(t *testing.T, encoded string, size int, want string) (SourceManifestV1, [][]byte) {
+	t.Helper()
+	raw, err := hex.DecodeString(encoded)
+	sourceMust(t, err)
+	digest := sha256.Sum256(raw)
+	if len(raw) != size || hex.EncodeToString(digest[:]) != want {
+		t.Fatalf("acquired frame length or digest: %d/%x", len(raw), digest)
+	}
+	m, parts := sourceBundle(3, false)
+	parts[0], m.Parts[0].Length, m.AcquiredDigest = raw, uint64(size), digest
+	return m, parts
 }
 
 func TestSourceCapacityBeforeCopy(t *testing.T) {
@@ -570,12 +673,10 @@ func TestSourceCapacityBeforeCopy(t *testing.T) {
 						sourceMust(t, os.Truncate(path, int64(limits.Bytes)+1))
 					}
 				}
-			}
-			if mode == "files" {
+			case "files":
 				sourcePrepare(t, o, m, parts)
 				m.Identity[1]++
-			}
-			if len(mode) > 6 && mode[:6] == "statfs" {
+			case "statfs-error", "statfs-zero", "statfs-overflow", "statfs-space":
 				o.ops.statfs = func(fd int, s *syscall.Statfs_t) error {
 					if mode == "statfs-error" {
 						return io.ErrUnexpectedEOF
@@ -622,9 +723,7 @@ func TestSourceLimitsAndIdentity(t *testing.T) {
 		}
 		sourceOpen(t, s, wrong, sourceLimits(), ErrIdentityV1)
 	}
-	if len(sourceEntries(t, dir)) != 0 {
-		t.Fatal("invalid admission created backing")
-	}
+	sourceFileCount(t, dir, 0, "invalid admission created backing")
 }
 
 func TestSourceSharedCaptureBudget(t *testing.T) {
@@ -666,13 +765,10 @@ func TestSourceSharedCaptureBudget(t *testing.T) {
 
 func TestSourcePositiveInsufficientLimits(t *testing.T) {
 	s, _, _ := sourceScene(t, sourceLimits())
-	for _, mode := range []string{"ram", "descriptors"} {
-		limits := sourceLimits()
-		if mode == "ram" {
-			limits.RAM = limits.WorkingBytesV1() - 1
-		} else {
-			limits.Descriptors = 3
-		}
+	ram, descriptors := sourceLimits(), sourceLimits()
+	ram.RAM = ram.WorkingBytesV1() - 1
+	descriptors.Descriptors = 3
+	for _, limits := range []SourceLimitsV1{ram, descriptors} {
 		sourceOpen(t, s, sourceID(), limits, ErrCapacityV1)
 	}
 }
@@ -685,25 +781,27 @@ func TestSourceBoundedMaximumCopy(t *testing.T) {
 	sourceMust(t, err)
 	limits := sourceLimits()
 	limits.Bytes = size
-	_, o, _ := sourceScene(t, limits)
+	_, o, dir := sourceScene(t, limits)
+	testSourceUnfundedBacking(t, o, m, parts, filepath.Join(dir, sourceDirectory, ".staging-"+m.name(o.id)))
 	maximum := 0
-	producer := func(v func(SourcePartV1) error) error {
-		return ExportSourceBytesV1(m, parts, func(part SourcePartV1) error {
+	funded := mdbx.TreeLaneMaxBytes - (65536 + 4096 + 64*512) - sourceBackingCharge(parts)
+	producer := func(op *SourceOperationV1, v func(SourcePartV1) error) error {
+		return sourceExportParts(op, m, parts, func(part SourcePartV1) error {
 			read := part.ReadAt
 			part.ReadAt = func(dst []byte, off int64) (int, error) { maximum = max(maximum, len(dst)); return read(dst, off) }
 			return v(part)
 		})
 	}
 	sourceAccount(t, func(a *mdbx.OperationAccount) error {
-		return a.WithReservation(4096, func() error {
+		return a.WithReservation(funded, func() error {
 			p, err := o.PrepareSourceV1(a, m, producer)
 			if err != nil || p == nil {
 				t.Fatalf("maximum capture: %v/%v", p, err)
 			}
-			if err := a.WithReservation(mdbx.TreeLaneMaxBytes-4096+1, func() error { t.Fatal("caller funding was released"); return nil }); !mdbx.IsOperationReservationCapacity(err) {
+			if err := a.WithReservation(mdbx.TreeLaneMaxBytes-funded+1, func() error { t.Fatal("caller funding was released"); return nil }); !mdbx.IsOperationReservationCapacity(err) {
 				t.Fatalf("caller charge: %v", err)
 			}
-			return a.WithReservation(mdbx.TreeLaneMaxBytes-4096, func() error { return nil })
+			return a.WithReservation(mdbx.TreeLaneMaxBytes-funded, func() error { return nil })
 		})
 	})
 	if maximum == 0 || maximum > 65536 {
@@ -715,8 +813,7 @@ func TestSourceBoundedMaximumCopy(t *testing.T) {
 func TestSourceStagingRestartAndAmbiguousRename(t *testing.T) {
 	for _, mode := range []string{"staging", "renamed", "unobserved-renamed", "unobserved-staged"} {
 		t.Run(mode, func(t *testing.T) {
-			s, o, dir := sourceScene(t, sourceLimits())
-			m, parts := sourceBundle(1, false)
+			s, o, dir, m, parts := sourceBundleScene(t, 1, false)
 			cause := errors.New("rename observation")
 			if mode != "staging" {
 				o.ops.rename = func(r *os.Root, from, to string) error {
@@ -736,9 +833,7 @@ func TestSourceStagingRestartAndAmbiguousRename(t *testing.T) {
 					if p != nil || !errors.Is(err, cause) || o.debt == nil || o.debt.staging {
 						t.Fatalf("ambiguous publication: %v/%v %+v", p, err, o.debt)
 					}
-					if len(sourceEntries(t, dir)) != 1 {
-						t.Fatal("ambiguous publication lost backing")
-					}
+					sourceFileCount(t, dir, 1, "ambiguous publication lost backing")
 					return nil
 				})
 			} else {
@@ -748,9 +843,7 @@ func TestSourceStagingRestartAndAmbiguousRename(t *testing.T) {
 				o.ops = realSourceFS
 				sourcePrepare(t, o, m, parts)
 				sourceRead(t, o, m, parts)
-				if len(sourceEntries(t, dir)) != 1 {
-					t.Fatal("same identity retry retained staging")
-				}
+				sourceFileCount(t, dir, 1, "same identity retry retained staging")
 			}
 			fresh := sourceReopen(t, s, dir, sourceLimits())
 			if mode == "staging" {
@@ -769,8 +862,11 @@ func TestSourceStagingRestartAndAmbiguousRename(t *testing.T) {
 }
 
 func TestSourceDirectoryChangeBeforeCopy(t *testing.T) {
-	_, o, dir := sourceScene(t, sourceLimits())
-	m, parts := sourceBundle(1, false)
+	t.Run("moved-during-export", func(t *testing.T) {
+		t.Run("publish", func(t *testing.T) { testSourceMovedDuringExport(t, false) })
+		t.Run("reuse", func(t *testing.T) { testSourceMovedDuringExport(t, true) })
+	})
+	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 	sourcePath := filepath.Join(dir, sourceDirectory)
 	retained := filepath.Join(dir, "retained")
 	o.ops.statfs = func(fd int, stat *syscall.Statfs_t) error {
@@ -791,44 +887,95 @@ func TestSourceDirectoryChangeBeforeCopy(t *testing.T) {
 	sourcePrepare(t, o, m, parts)
 }
 
+func testSourceMovedDuringExport(t *testing.T, reuse bool) {
+	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	if reuse {
+		sourcePrepare(t, o, m, parts)
+	}
+	root, moved := filepath.Join(dir, sourceDirectory), filepath.Join(dir, "moved")
+	shifted := false
+	producer := sourceAfterFirstPart(m, parts, func() error {
+		shifted = true
+		sourceMust(t, os.Rename(root, moved))
+		return os.Mkdir(root, 0o700)
+	})
+	sourcePrepareResult(t, o, m, producer, ErrIdentityV1)
+	if !shifted {
+		t.Fatal("export did not move the source directory")
+	}
+	sourcePresence(t, moved, m.name(o.id), true)
+	sourceFileCount(t, dir, 0, "replacement directory acquired backing")
+	sourceMust(t, os.Remove(root))
+	sourceMust(t, os.Rename(moved, root))
+	sourcePrepare(t, o, m, parts)
+	sourceRead(t, o, m, parts)
+}
+
 func TestSourceOperationAuthorityAdmission(t *testing.T) {
-	s, o, dir := sourceScene(t, sourceLimits())
-	m, parts := sourceBundle(1, false)
+	t.Run("second-owner-in-export", testSourceSecondOwner)
+	s, o, dir, m, parts := sourceBundleScene(t, 1, false)
 	p := sourcePrepare(t, o, m, parts)
 	before := sourceEntries(t, dir)
-	check := func(want error) {
+	check := func(a *mdbx.OperationAccount, want error) {
 		calls := 0
-		sourceAccount(t, func(a *mdbx.OperationAccount) error {
-			producer := func(v func(SourcePartV1) error) error { calls++; return ExportSourceBytesV1(m, parts, v) }
-			visitor := func(SourcePartV1) error { calls++; return nil }
-			errorsSeen := []error{o.WithSourceExportV1(a, m, producer, visitor), o.WithCapturedSourceV1(a, m, visitor), o.ReleaseUnpublishedSourceV1(a, p, true)}
-			prepared, err := o.PrepareSourceV1(a, m, producer)
-			errorsSeen = append(errorsSeen, err)
-			for _, err := range errorsSeen {
-				if any(err) != any(want) {
-					t.Fatalf("authority admission=%v, want %v", err, want)
-				}
+		producer := func(op *SourceOperationV1, v func(SourcePartV1) error) error { calls++; return sourceExportParts(op, m, parts, v) }
+		visitor := func(SourcePartV1) error { calls++; return nil }
+		prepared, err := o.PrepareSourceV1(a, m, producer)
+		for _, err := range []error{err, o.WithSourceExportV1(a, m, producer, visitor), o.WithCapturedSourceV1(a, m, visitor), o.ReleaseUnpublishedSourceV1(a, p, true)} {
+			if err != want {
+				t.Fatalf("authority admission=%v, want %v", err, want)
 			}
-			if prepared != nil || p.released || calls != 0 || !reflect.DeepEqual(before, sourceEntries(t, dir)) {
-				t.Fatal("refused authority changed source owners")
-			}
+		}
+		if prepared != nil || calls != 0 || !reflect.DeepEqual(before, sourceEntries(t, dir)) {
+			t.Fatal("refused authority changed source owners")
+		}
+	}
+	check(nil, ErrCapacityV1)
+	var closed *mdbx.OperationAccount
+	unexpected := func() error { t.Fatal("unfunded reservation ran"); return nil }
+	sourceAccount(t, func(a *mdbx.OperationAccount) error {
+		closed = a
+		return a.WithReservation(mdbx.TreeLaneMaxBytes-o.limits.WorkingBytesV1()+1, func() error {
+			check(a, a.WithReservation(o.limits.WorkingBytesV1(), unexpected))
 			return nil
 		})
+	})
+	for _, a := range []*mdbx.OperationAccount{{}, closed} {
+		check(a, a.WithReservation(0, unexpected))
 	}
-	tx, err := s.Begin()
-	sourceMust(t, err)
-	check(policycontrol.ErrBusy)
-	_, err = tx.Abort()
-	sourceMust(t, err)
-	sourceMust(t, s.Close())
-	check(policycontrol.ErrClosed)
-	o = nil
-	check(ErrIdentityV1)
+	sourceAccount(t, func(a *mdbx.OperationAccount) error {
+		tx, err := s.Begin()
+		sourceMust(t, err)
+		check(a, policycontrol.ErrBusy)
+		_, err = tx.Abort()
+		sourceMust(t, err)
+		sourceMust(t, s.Close())
+		check(a, policycontrol.ErrClosed)
+		o = nil
+		check(a, ErrIdentityV1)
+		return nil
+	})
+}
+
+func testSourceSecondOwner(t *testing.T) {
+	s, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	alias := s
+	producer := sourceAfterFirstPart(m, parts, func() error {
+		root, stage := filepath.Join(dir, sourceDirectory), ".staging-"+m.name(o.id)
+		sourcePresence(t, root, stage, true)
+		sourceOpen(t, alias, sourceID(), sourceLimits(), ErrBusyV1)
+		sourcePresence(t, root, stage, true)
+		copied := reflect.New(reflect.TypeFor[SourceOwnerV1]())
+		copied.Elem().Set(reflect.ValueOf(o).Elem())
+		sourcePrepareRefusal(t, copied.Interface().(*SourceOwnerV1), m, parts, ErrIdentityV1)
+		return nil
+	})
+	sourcePrepareResult(t, o, m, producer, nil)
+	sourceRead(t, o, m, parts)
 }
 
 func TestSourcePreparationPanicRetainsCleanup(t *testing.T) {
-	s, o, _ := sourceScene(t, sourceLimits())
-	m, parts := sourceBundle(1, false)
+	s, o, _, m, parts := sourceBundleScene(t, 1, false)
 	original := slices.Clone(parts[0])
 	cause := errors.New("export panic")
 	cleanup := errors.New("cleanup refusal")
@@ -838,14 +985,7 @@ func TestSourcePreparationPanicRetainsCleanup(t *testing.T) {
 		}
 		return cleanup
 	}
-	producer := func(v func(SourcePartV1) error) error {
-		return ExportSourceBytesV1(m, parts, func(part SourcePartV1) error {
-			if err := v(part); err != nil {
-				return err
-			}
-			panic(cause)
-		})
-	}
+	producer := sourceAfterFirstPart(m, parts, func() error { panic(cause) })
 	var caught any
 	sourceAccount(t, func(a *mdbx.OperationAccount) error {
 		func() { defer func() { caught = recover() }(); _, _ = o.PrepareSourceV1(a, m, producer) }()
