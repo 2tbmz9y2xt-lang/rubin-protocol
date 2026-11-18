@@ -5026,21 +5026,25 @@ func psShape(t *testing.T) {
 // error from the native preflight and consumes the Store.
 func psOrdinaryFirst(t *testing.T) {
 	s, _, o := psStore(t)
-	rank8 := tsTarget(5)
-	rank8.DBI = TreeSchemaV1DBIs()[8]
-	authority := Mutation{DBI: TreeSchemaV1DBIs()[0], Key: []byte{2}, BeforePresent: true, AfterKind: 2, Literal: []byte{1}}
+	// The listed rows' Mutations are created inside the callback, under the caller grant.
 	for _, row := range []struct {
 		name      string
-		mutations []Mutation
+		mutations func() []Mutation
 	}{
-		{"order", []Mutation{tsTarget(6), tsTarget(5)}},
-		{"rank8", []Mutation{rank8}},
-		{"authority", []Mutation{authority}},
+		{"order", func() []Mutation { return []Mutation{tsTarget(6), tsTarget(5)} }},
+		{"rank8", func() []Mutation {
+			rank8 := tsTarget(5)
+			rank8.DBI = TreeSchemaV1DBIs()[8]
+			return []Mutation{rank8}
+		}},
+		{"authority", func() []Mutation {
+			return []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: []byte{2}, BeforePresent: true, AfterKind: 2, Literal: []byte{1}}}
+		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			r := psRunG(t, s, o, LaneOperation, psPageGrant+33*2882, func(reader *Reader) TreeOperationV1 {
 				op := psRawDelete(t, 9)(reader)
-				op.Pair.Mutations = row.mutations
+				op.Pair.Mutations = row.mutations()
 				op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881)
 				return op
 			})
@@ -5050,10 +5054,9 @@ func psOrdinaryFirst(t *testing.T) {
 			psRefused(t, s, r, false, row.name)
 		})
 	}
-	forward := canonicalForwardLiteral(1, 5, [32]byte{0x41}, [40]byte{39: 1})
 	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
 		op := psRawDelete(t, 9)(reader)
-		op.Pair.Mutations = []Mutation{forward}
+		op.Pair.Mutations = []Mutation{canonicalForwardLiteral(1, 5, [32]byte{0x41}, [40]byte{39: 1})}
 		return op
 	})
 	treeNativeError(t, r.err, "update", "InvalidInput", 22, "unpaired canonical owner mutation", nil)
@@ -5205,16 +5208,15 @@ func psDuplicates(t *testing.T) {
 // Ordinary-target and Consulted overlap with a raw delete refuse.
 func psOverlap(t *testing.T) {
 	s, _, o := psStore(t)
-	key := tsCounterKey(9)
 	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
 		op := psRawDelete(t, 9)(reader)
-		op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 2, Literal: tsCounterLiteral(9, 2)}}
+		op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(9), BeforePresent: true, AfterKind: 2, Literal: tsCounterLiteral(9, 2)}}
 		return op
 	})
 	psRefused(t, s, r, false, "target overlap")
 	r = psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
 		op := psRawDelete(t, 9)(reader)
-		op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: key}}
+		op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(9)}}
 		return op
 	})
 	psRefused(t, s, r, false, "consulted overlap")

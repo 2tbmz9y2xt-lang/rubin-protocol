@@ -7669,7 +7669,6 @@ func psfClosedBeforeHold(t *testing.T) {
 // Every physical-scope admission refusal, before and after the metadata charge, aborts ORIGINAL OLD
 // exactly once, reaches no commit and leaves the Store OPEN with its rows unchanged.
 func psfAdmissionAborts(t *testing.T) {
-	key := tsCounterKey(9)
 	rows := []struct {
 		name     string
 		capacity bool
@@ -7704,12 +7703,12 @@ func psfAdmissionAborts(t *testing.T) {
 		}},
 		{"target overlap", false, func(r *Reader) TreeOperationV1 {
 			op := psRawDelete(t, 9)(r)
-			op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: key, BeforePresent: true, AfterKind: 2, Literal: tsCounterLiteral(9, 2)}}
+			op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(9), BeforePresent: true, AfterKind: 2, Literal: tsCounterLiteral(9, 2)}}
 			return op
 		}},
 		{"consulted overlap", false, func(r *Reader) TreeOperationV1 {
 			op := psRawDelete(t, 9)(r)
-			op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: key}}
+			op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(9)}}
 			return op
 		}},
 		{"selector order", false, func(r *Reader) TreeOperationV1 {
@@ -8085,6 +8084,69 @@ func psfDormant(t *testing.T) {
 	tsRead(t, reopened, TreeSchemaV1DBIs()[0], []byte{2}, psfAuthority(t).Literal)
 }
 
+// psfOldOnlyRun commits build's operation on a fresh scene under large-image mode (3 rewrites key to 0x7f, 4
+// deletes it, after the commit, which then reports ENOSPC) and returns the result and the native payload
+// comparison count of the whole operation; the readback is UNKNOWN in both modes.
+func psfOldOnlyRun(t *testing.T, mode uint32, rank uint8, seed func(*psfScene) []byte, build func() func(*Reader) TreeOperationV1) uint64 {
+	t.Helper()
+	sc := psfNew(t)
+	key := seed(sc)
+	var r tsResult
+	var observed PairReadObservation
+	evidence := ctxTreeFault(t, sc.s, mode, rank, key, func() {
+		var err error
+		observed, err = FixturePairReadObservation(sc.s, func(uint32) {}, func() { r = psRun(t, sc.s, sc.o, LaneOperation, build()) })
+		mustEnvironment(t, err)
+	})
+	if evidence.commits != 1 || evidence.drift != 1 || r.truth != CommitTruthUnknown || r.stage != 3 || r.err == nil {
+		t.Fatalf("scope strict truth differs: mode %d %+v (%d,%d) %v", mode, evidence, r.truth, r.stage, r.err)
+	}
+	return observed.Comparisons
+}
+
+// A residual key present only in ORIGINAL OLD at the possibly crossed readback is an inequality without
+// payload use; the next key, present on both sides, still gets its payload comparison, so the deleted-key
+// run compares exactly as the rewritten-key run less the rewritten key's own equal-length comparison.
+func psfOldOnlyResidual(t *testing.T) {
+	t.Run("undo-family", func(t *testing.T) {
+		var hash [32]byte
+		seed := func(sc *psfScene) []byte {
+			h, undo := psfUndo(t, sc.s)
+			hash = h
+			return undo[1]
+		}
+		build := func() func(*Reader) TreeOperationV1 {
+			return func(*Reader) TreeOperationV1 {
+				return TreeOperationV1{Pair: TreePairV1{
+					Mutations:      []Mutation{psfAuthority(t)},
+					LargeConsulted: []LargeImageSelectorV1{{Kind: LargeImageUndoFamilyV1, Hash: hash}},
+				}}
+			}
+		}
+		rewritten := psfOldOnlyRun(t, 3, 5, seed, build)
+		if deleted := psfOldOnlyRun(t, 4, 5, seed, build); deleted+1 != rewritten {
+			t.Fatalf("later scope comparison lost: undo family deleted-key comparisons %d, rewritten-key %d", deleted, rewritten)
+		}
+	})
+	t.Run("raw-domain", func(t *testing.T) {
+		seed := func(*psfScene) []byte { return obsoleteTreeFamily(8)[1].key }
+		build := func() func(*Reader) TreeOperationV1 {
+			return func(reader *Reader) TreeOperationV1 {
+				nodes, err := reader.ObsoleteGenerationPageV1(8, ObsoleteNodeV1, nil, 1440)
+				mustEnvironment(t, err)
+				return TreeOperationV1{Pair: TreePairV1{
+					Mutations:         []Mutation{psfAuthority(t)},
+					ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness},
+				}}
+			}
+		}
+		rewritten := psfOldOnlyRun(t, 3, 8, seed, build)
+		if deleted := psfOldOnlyRun(t, 4, 8, seed, build); deleted != rewritten {
+			t.Fatalf("later scope comparison lost: raw domain deleted-key comparisons %d, rewritten-key %d", deleted, rewritten)
+		}
+	})
+}
+
 func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("pre-hold-close-window", psfClosedBeforeHold)
 	t.Run("admission-aborts", psfAdmissionAborts)
@@ -8093,6 +8155,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("large-domains", psfLargeDomains)
 	t.Run("target-in-family", psfTargetInFamily)
 	t.Run("both-identical-OLD-first", psfBothIdentical)
+	t.Run("old-only-residual", psfOldOnlyResidual)
 	t.Run("dormant", psfDormant)
 	t.Run("classes-1-4", psfClassDeletes)
 	t.Run("page-bounds", psfPageBounds)
