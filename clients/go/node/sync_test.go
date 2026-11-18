@@ -189,16 +189,12 @@ func TestSyncEffectiveDAMempoolSize(t *testing.T) {
 	}
 	// A later claim succeeds either way, so the observation is pinned by the hook: the
 	// first claim after it must install its own detached-reorg hook.
-	if engine.daRelayClaimed || engine.reorgDAAdmission != nil {
-		t.Fatalf("observation recorded a Service claim: claimed=%v hook=%v", engine.daRelayClaimed, engine.reorgDAAdmission != nil)
-	}
+	require(t, !engine.daRelayClaimed && engine.reorgDAAdmission == nil, "observation recorded a Service claim: claimed=%v hook=%v", engine.daRelayClaimed, engine.reorgDAAdmission != nil)
 	hookCalls := 0
 	if claimed, err := engine.ClaimDARelayState(relay, func([]byte) (func(bool), error) { hookCalls++; return func(bool) {}, nil }); err != nil || claimed != relay {
 		t.Fatalf("claim after observation: claimed=%p err=%v", claimed, err)
 	}
-	if engine.reorgDAAdmission == nil {
-		t.Fatal("claim after observation installed no detached-reorg hook")
-	}
+	require(t, engine.reorgDAAdmission != nil, "claim after observation installed no detached-reorg hook")
 	if _, err := engine.reorgDAAdmission(nil); err != nil || hookCalls != 1 {
 		t.Fatalf("installed hook is not the claim's own: hook err=%v calls=%d, want nil and 1", err, hookCalls)
 	}

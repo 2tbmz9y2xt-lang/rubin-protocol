@@ -64,9 +64,7 @@ func TestNewServiceAfterCloseBindsFreshService(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	fresh, err := NewService(h.service.cfg)
-	if err != nil || fresh.daRelay != want || h.syncEngine.DATTLBindingService() != node.DATTLMutationService(fresh) {
-		t.Fatalf("NewService after Close: service=%p err=%v", fresh, err)
-	}
+	require(t, err == nil && fresh.daRelay == want && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(fresh), "NewService after Close: service=%p err=%v", fresh, err)
 	if err := fresh.Close(); err != nil {
 		t.Fatalf("Close(fresh): %v", err)
 	}
@@ -1894,15 +1892,31 @@ func TestServiceHasBlockLocalStoreRows(t *testing.T) {
 	}
 }
 
+// lockedBuffer is an io.Writer safe for the engine's concurrent diagnostic writes.
+type lockedBuffer struct {
+	sync.Mutex
+	strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.Lock()
+	defer b.Unlock()
+	return b.Builder.Write(p)
+}
+
+func (b *lockedBuffer) String() string { b.Lock(); defer b.Unlock(); return b.Builder.String() }
+
 // requireFirstClaimant observes through a real reorganization that the engine's detached-reorg
-// hook is service's own admitDetachedReorgDA: with service OPEN and a later Service constructed,
-// bound and then CLOSED, the disconnected DA commit is retained. A hook replaced by the later
-// claim reaches that CLOSED Service and an absent or empty hook admits nothing, so neither retains.
+// hook is service's own admitDetachedReorgDA: with service CLOSED and a later Service bound and
+// OPEN, the disconnected DA commit is not retained and the engine's diagnostics carry the closed
+// Service's refusal. A hook held by the later Service or any open Service retains the commit, and
+// an absent hook reports an uninitialized admission instead.
 func requireFirstClaimant(t *testing.T, sink *testHarness, cfg ServiceConfig, service *Service) {
 	t.Helper()
+	diag := &lockedBuffer{}
+	cfg.SyncEngine.SetStderr(diag)
 	later := newBoundService(t, cfg)
-	require(t, cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(later) && later.Close() == nil, "later binding and close")
+	require(t, cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(later) && service.Close() == nil, "later binding and close of the first claimant")
 	retained := detachedReorgHookRetains(t, newTestHarness(t, 1, "127.0.0.1:0", nil), sink)
-	require(t, retained, "detached commit not retained: the hook is not the first claimant's")
-	require(t, service.Close() == nil, "close first claimant")
+	require(t, !retained && strings.Contains(diag.String(), errServiceClosed.Error()), "retained=%v diagnostics=%q: the hook is not the closed first claimant's", retained, diag.String())
 }
