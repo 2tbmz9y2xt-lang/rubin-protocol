@@ -1526,16 +1526,25 @@ func (f *daNonReplayFixture) begin(tx daNonReplayTx) *DAAdmission {
 }
 
 func (f *daNonReplayFixture) admit(tx daNonReplayTx, provenance daProvenance) daRelayAdmissionOutcome {
-	admission := f.begin(tx)
-	defer admission.Close()
-	outcome, err := f.relay.admitDANonReplay(admission, provenance)
+	outcome, err := f.tryAdmit(tx, provenance)
 	if err != nil {
-		f.t.Fatalf("admitDANonReplay: %v", err)
-	}
-	if outcome.daID != tx.spec.daID || outcome.disposition != daRelayAdmissionDisposition(1) || outcome.sameDAIDCommitConflict {
-		f.t.Fatalf("outcome=%+v, want retained da_id=%x", outcome, tx.spec.daID)
+		f.t.Fatal(err)
 	}
 	return outcome
+}
+
+// tryAdmit is admit returning the failure, for use off the test goroutine.
+func (f *daNonReplayFixture) tryAdmit(tx daNonReplayTx, provenance daProvenance) (daRelayAdmissionOutcome, error) {
+	admission, err := f.mp.BeginDAAdmission(tx.raw)
+	if err != nil {
+		return daRelayAdmissionOutcome{}, err
+	}
+	defer admission.Close()
+	outcome, err := f.relay.admitDANonReplay(admission, provenance)
+	if err == nil && (outcome.daID != tx.spec.daID || outcome.disposition != daRelayAdmissionDisposition(1) || outcome.sameDAIDCommitConflict) {
+		err = fmt.Errorf("outcome=%+v, want retained da_id=%x", outcome, tx.spec.daID)
+	}
+	return outcome, err
 }
 
 func (f *daNonReplayFixture) completeReplay(daID [32]byte, kind uint8, payload ...byte) daNonReplayTx {

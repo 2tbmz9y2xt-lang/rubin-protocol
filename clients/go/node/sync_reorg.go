@@ -103,13 +103,16 @@ func (s *SyncEngine) ApplyBlockWithReorgDeferred(blockBytes []byte, prevTimestam
 }
 
 // ApplyBlockWithReorgDeferredUnderLease is ApplyBlockWithReorgDeferred for a
-// caller that holds a Service call lease. lease is that lease-owning
-// Service's own nested DA TTL entry: an ACCEPTED/NEW publication of this apply
-// invokes it once as a nested callee that registers and releases nothing and
-// never reads the binding (RUBIN_L1_P2P_AUX.md Section 5). It runs while the
-// transition holds the ChainState admission guard exclusively, never reacquires
-// that guard and takes no lock that any path holds while waiting for it. A nil
-// lease is ApplyBlockWithReorgDeferred, which selects from the current binding.
+// caller that holds a Service call lease. lease is that lease-owning Service's
+// own nested DA TTL entry; the Service is already associated with the
+// publication's exact retained DA owner, and a foreign-owner association is
+// neither repaired by a binding lookup nor remapped to a new public apply error
+// (RUBIN_COMPACT_BLOCKS.md Section 5). An ACCEPTED/NEW publication of this apply
+// invokes lease once as a nested callee that registers and releases nothing and
+// never reads the binding (RUBIN_L1_P2P_AUX.md Section 5), while the transition
+// holds the ChainState admission guard exclusively; it never reacquires that
+// guard and takes no lock that any path holds while waiting for it. A nil lease
+// is ApplyBlockWithReorgDeferred, which selects from the current binding.
 func (s *SyncEngine) ApplyBlockWithReorgDeferredUnderLease(blockBytes []byte, prevTimestamps []uint64, lease func(decrease func() error) error) (*ChainStateConnectSummary, func(), error) {
 	completions := &reorgDACompletions{}
 	transferred := false

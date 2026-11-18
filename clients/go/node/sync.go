@@ -707,7 +707,8 @@ func (s *SyncEngine) ClaimDARelayState(expectedRelay *DARelayState, admitDetache
 // OPEN; when DRAINING or CLOSED it returns the Service's stable closed error
 // without calling decrease. Once admitted it calls decrease exactly once, returns
 // its result unchanged, and releases the lease exactly once on every exit,
-// unwind included. It never consults the binding, retries or falls back.
+// unwind included. It never consults the binding; a refusal causes no retry,
+// fallback, other Service or deferred decrease.
 type DATTLMutationService interface {
 	EnterDATTLMutation(decrease func() error) error
 }
@@ -728,7 +729,7 @@ func (s *SyncEngine) PublishDATTLBinding(service DATTLMutationService) {
 
 // DATTLBindingService returns the current TTL binding's Service, or nil while
 // the binding is absent, in the same order as publications and selections. It
-// takes no DA or owner lock and changes nothing.
+// takes no DA or owner lock, waits for nothing, spans no Close and changes nothing.
 func (s *SyncEngine) DATTLBindingService() DATTLMutationService {
 	if s == nil {
 		return nil

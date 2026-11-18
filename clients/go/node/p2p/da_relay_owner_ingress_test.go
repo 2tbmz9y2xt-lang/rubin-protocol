@@ -170,10 +170,20 @@ func requireInvFrame(t *testing.T, frames <-chan message, txid [32]byte, label s
 // admit retains raw through the production entry with PEER provenance for peer.
 func (f *daIngressFixture) admit(raw []byte, peer string) {
 	f.t.Helper()
+	must(f.t, f.tryAdmit(raw, peer), "AdmitDA RETAINED")
+}
+
+// tryAdmit is admit returning the failure, for use off the test goroutine.
+func (f *daIngressFixture) tryAdmit(raw []byte, peer string) error {
 	provenance, err := node.NewPeerDAProvenance(peer, peerQuotaKey(peer))
-	must(f.t, err, "NewPeerDAProvenance")
+	if err != nil {
+		return err
+	}
 	got, err := f.h.service.daRelay.AdmitDA(raw, provenance)
-	require(f.t, err == nil && got.Disposition == node.DAAdmissionRetained, "AdmitDA=(%+v,%v), want RETAINED", got, err)
+	if err == nil && got.Disposition != node.DAAdmissionRetained {
+		err = fmt.Errorf("AdmitDA=%+v, want RETAINED", got)
+	}
+	return err
 }
 
 func mustTxID(t *testing.T, raw []byte) [32]byte {

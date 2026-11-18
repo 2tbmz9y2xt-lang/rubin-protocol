@@ -20,9 +20,9 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
-// selectionProbe observes the production no-lease selection: each step is one ACCEPTED/NEW
-// SyncEngine.ApplyBlock publication, and the commit retained at count 3 counts the admitted
-// selections through its presence (count 1 after two, removed at the third).
+// selectionProbe observes the production no-lease selection: each step is one ACCEPTED/NEW SyncEngine.ApplyBlock
+// publication, and the commit retained at count 3 counts the admitted selections through its presence (count 1 after
+// two, removed at the third).
 type selectionProbe struct {
 	t      *testing.T
 	h      *testHarness
@@ -38,6 +38,14 @@ func newSelectionProbe(t *testing.T, h *testHarness, source *testHarness, id byt
 	commit := f.commit(daRelayTestID(id), 2)
 	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
 	return &selectionProbe{t: t, h: h, source: source, f: f, commit: commit, next: h.chainState.Height + 1}
+}
+
+// newSourceAndProbe builds a source chain of the given height, a one-block sink and its probe.
+func newSourceAndProbe(t *testing.T, blocks int, id byte) (*testHarness, *testHarness, *selectionProbe) {
+	t.Helper()
+	source := newTestHarness(t, blocks, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	return source, h, newSelectionProbe(t, h, source, id)
 }
 
 // apply publishes the next source block through SyncEngine.ApplyBlock and requires ACCEPTED/NEW.
@@ -66,15 +74,12 @@ func holdWorkLease(t *testing.T, s *Service) func() {
 	return release
 }
 
-// TestDATTLCallbackServiceBinding drives the production no-lease selection through
-// SyncEngine.ApplyBlock over real Services sharing one SyncEngine: with S1 and S2 OPEN the latest
-// construction S2 admits the decrease; a CLOSED current binding S3 refuses with zero DA effects
-// and nothing falls back to the OPEN S1 or S2; S4 after Close(S1) admits; and the identity read
-// follows constructions and survives Close.
+// TestDATTLCallbackServiceBinding drives the production no-lease selection through SyncEngine.ApplyBlock over real
+// Services sharing one SyncEngine: with S1 and S2 OPEN the latest construction S2 admits the decrease; a CLOSED current
+// binding S3 refuses with zero DA effects and nothing falls back to the OPEN S1 or S2; S4 after Close(S1) admits; and
+// the identity read follows constructions and survives Close.
 func TestDATTLCallbackServiceBinding(t *testing.T) {
-	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	probe := newSelectionProbe(t, h, source, 0xe1)
+	_, h, probe := newSourceAndProbe(t, 6, 0xe1)
 	engine, s1 := h.syncEngine, h.service
 	require(t, engine.DATTLBindingService() == node.DATTLMutationService(s1), "identity read after S1 construction")
 	w1 := &wrappedTTLEntry{inner: s1}
@@ -94,15 +99,12 @@ func TestDATTLCallbackServiceBinding(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the fourth publication's admitted decrease expired the record")
 }
 
-// TestDATTLCallbackServiceConstructionFailure drives the production selection: a
-// construction failing at config validation or at the inbound budget leaves the binding naming S1,
-// whose registration then admits the decrease of the next ACCEPTED/NEW publication. On an engine
-// with no claim yet, every such refusal claims nothing, so the next successful construction is the
-// first claimant: its admitDetachedReorgDA is the engine's detached-reorg hook.
+// TestDATTLCallbackServiceConstructionFailure drives the production selection: a construction failing at config
+// validation or at the inbound budget leaves the binding naming S1, whose registration then admits the decrease of the
+// next ACCEPTED/NEW publication. On an engine with no claim yet, every such refusal claims nothing, so the next
+// successful construction is the first claimant: its admitDetachedReorgDA is the engine's detached-reorg hook.
 func TestDATTLCallbackServiceConstructionFailure(t *testing.T) {
-	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	probe := newSelectionProbe(t, h, source, 0xe2)
+	_, h, probe := newSourceAndProbe(t, 6, 0xe2)
 	probe.apply()
 	probe.apply()
 	probe.f.requireRetained(probe.commit, "count 1 after two decreases admitted by S1")
@@ -146,14 +148,11 @@ func TestDATTLCallbackServiceConstructionFailure(t *testing.T) {
 	}
 }
 
-// TestDATTLCallbackServiceConcurrentConstruction drives the production selection
-// under -race: two constructions race three ACCEPTED/NEW SyncEngine.ApplyBlock publications; every
-// selection registers with one whole OPEN constructed Service, so all three decreases are admitted,
-// and the final binding is one of the racing constructions.
+// TestDATTLCallbackServiceConcurrentConstruction drives the production selection under -race: two constructions race
+// three ACCEPTED/NEW SyncEngine.ApplyBlock publications; every selection registers with one whole OPEN constructed
+// Service, so all three decreases are admitted, and the final binding is one of the racing constructions.
 func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
-	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	probe := newSelectionProbe(t, h, source, 0xe3)
+	_, h, probe := newSourceAndProbe(t, 6, 0xe3)
 	built := make(chan *Service, 2)
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -186,9 +185,9 @@ func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
 	require(t, len(services) == 2 && services[h.syncEngine.DATTLBindingService()], "final binding outside the racing constructions")
 }
 
-// TestDATTLCallbackServiceCloseRace pins Close(S1) racing the registration of a
-// selection that snapshotted S1 while S2 binds. The outcome is either admitted before DRAINING
-// with Close waiting for the decrease, or refused with zero effects; never S2.
+// TestDATTLCallbackServiceCloseRace pins Close(S1) racing the registration of a selection that snapshotted S1 while S2
+// binds. The outcome is either admitted before DRAINING with Close waiting for the decrease, or refused with zero
+// effects; never S2.
 func TestDATTLCallbackServiceCloseRace(t *testing.T) {
 	for i := range 20 {
 		h := newTestHarness(t, 0, "127.0.0.1:0", nil)
@@ -214,10 +213,9 @@ func TestDATTLCallbackServiceCloseRace(t *testing.T) {
 	}
 }
 
-// TestDATTLCallbackEndToEndCloseRace drives the production selection: Close(S1) and the
-// construction of S2 race one ACCEPTED/NEW SyncEngine.ApplyBlock publication whose selection
-// snapshots S1 or S2. The apply returns ACCEPTED/NEW, Close returns, the record at count 1 is
-// either expired by one admitted decrease or kept by a refusal, and the binding names S2.
+// TestDATTLCallbackEndToEndCloseRace drives the production selection: Close(S1) and the construction of S2 race one
+// ACCEPTED/NEW SyncEngine.ApplyBlock publication whose selection snapshots S1 or S2. The apply returns ACCEPTED/NEW,
+// Close returns, a probe of the commit reports DAAdmissionDuplicate or DAAdmissionRetained, and the binding names S2.
 func TestDATTLCallbackEndToEndCloseRace(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	for i := range 5 {
@@ -244,18 +242,18 @@ func TestDATTLCallbackEndToEndCloseRace(t *testing.T) {
 	}
 }
 
-// detachedReorgFixture is a sink tip block carrying one DA commit and chunk, plus a longer
-// source branch from their common parent that a peer or local apply reorganizes onto.
+// detachedReorgFixture is a sink tip block carrying one DA commit and chunk, plus a longer source branch from their
+// common parent that a peer or local apply reorganizes onto.
 type detachedReorgFixture struct {
 	commitRaw, chunkRaw []byte
 	oldTip              [32]byte
 	branch              [][]byte
 }
 
-// mineDetachedReorgFixture mines the common chain on source and applies it to sink, mines the
-// sink DA block, and mines branchLen source blocks on the common chain without applying them.
-// When spendChunkInput is set, the first branch block spends the chunk's input, so the requeue
-// refuses the chunk and retains only the commit, which is then a counted State B record.
+// mineDetachedReorgFixture mines the common chain on source and applies it to sink, mines the sink DA block, and mines
+// branchLen source blocks on the common chain without applying them. When spendChunkInput is set, the first branch
+// block spends the chunk's input, so the requeue refuses the chunk and retains only the commit, which is then a counted
+// State B record.
 func mineDetachedReorgFixture(t *testing.T, source, sink *testHarness, branchLen int, spendChunkInput bool) detachedReorgFixture {
 	t.Helper()
 	signer := mustP2PMLDSA87Keypair(t)
@@ -348,9 +346,9 @@ func mineDetachedReorgFixture(t *testing.T, source, sink *testHarness, branchLen
 	return fixture
 }
 
-// detachedReorgHookRetains reorganizes the sink DA block away with a two-block source branch;
-// the engine's detached-reorg hook admits the commit only if its Service is OPEN. It reports
-// whether the disconnected commit is retained afterwards.
+// detachedReorgHookRetains reorganizes the sink DA block away with a two-block source branch; the engine's
+// detached-reorg hook admits the commit only if its Service is OPEN. It reports whether the disconnected commit is
+// retained afterwards.
 func detachedReorgHookRetains(t *testing.T, source, sink *testHarness) bool {
 	t.Helper()
 	fixture := mineDetachedReorgFixture(t, source, sink, 2, false)
@@ -364,8 +362,8 @@ func detachedReorgHookRetains(t *testing.T, source, sink *testHarness) bool {
 	return result.Disposition == node.DAAdmissionDuplicate
 }
 
-// requireCommitRetained reports through LookupRetainedTx, which changes nothing, whether the
-// requeued commit is retained, and fails unless that equals want.
+// requireCommitRetained reports through LookupRetainedTx, which changes nothing, whether the requeued commit is
+// retained, and fails unless that equals want.
 func requireCommitRetained(t *testing.T, h *testHarness, fixture detachedReorgFixture, want bool, step string) {
 	t.Helper()
 	_, txid, _, _, err := consensus.ParseTx(fixture.commitRaw)
@@ -374,11 +372,10 @@ func requireCommitRetained(t *testing.T, h *testHarness, fixture detachedReorgFi
 	require(t, err == nil && present == want, "%s: commit present=%v err=%v, want present=%v", step, present, err, want)
 }
 
-// TestDATTLCallbackEndToEndReorgRequeueNotDecreased pins that the requeue is not decreased, through a peer's
-// lease path: a winning reorganization disconnects the sink block carrying one DA commit and
-// chunk while its first block spends the chunk's input, so the requeue retains the commit alone
-// at count 3. The publication that requeued it does not decrease it: it survives the next two
-// counted publications and expires at the third.
+// TestDATTLCallbackEndToEndReorgRequeueNotDecreased pins that the requeue is not decreased, through a peer's lease
+// path: a winning reorganization disconnects the sink block carrying one DA commit and chunk while its first block
+// spends the chunk's input, so the requeue retains the commit alone at count 3. The publication that requeued it does
+// not decrease it: it survives the next two counted publications and expires at the third.
 func TestDATTLCallbackEndToEndReorgRequeueNotDecreased(t *testing.T) {
 	source := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -411,10 +408,9 @@ func TestDATTLCallbackEndToEndReorgRequeueNotDecreased(t *testing.T) {
 }
 
 // TestDATTLCallbackLaterConstructionKeepsFirstHook pins the later-construction claim end to end through a real
-// reorganization: S2 over the same SyncEngine succeeds with the same relay and becomes the
-// binding, while the detached-reorg hook stays with the first claimant S1. With S1 CLOSED and
-// S2 OPEN the disconnected commit is refused (S1's closed path) and not retained; the control
-// with S1 OPEN retains it.
+// reorganization: S2 over the same SyncEngine succeeds with the same relay and becomes the binding, while the
+// detached-reorg hook stays with the first claimant S1. With S1 CLOSED and S2 OPEN the disconnected commit is refused
+// (S1's closed path) and not retained; the control with S1 OPEN retains it.
 func TestDATTLCallbackLaterConstructionKeepsFirstHook(t *testing.T) {
 	for _, closeFirst := range []bool{true, false} {
 		t.Run(fmt.Sprintf("first claimant closed=%v", closeFirst), func(t *testing.T) {
@@ -431,9 +427,8 @@ func TestDATTLCallbackLaterConstructionKeepsFirstHook(t *testing.T) {
 	}
 }
 
-// daRelayPublicImage is the DA relay image observable through the exported surface: the A/B/C
-// member identities in txid order (the exported order is unspecified), each member's retained
-// bytes and the complete-set candidates.
+// daRelayPublicImage is the DA relay image observable through the exported surface: the A/B/C member identities in txid
+// order (the exported order is unspecified), each member's retained bytes and the complete-set candidates.
 type daRelayPublicImage struct {
 	identities []node.CompactCandidateIdentity
 	members    map[[32]byte][]byte
@@ -455,11 +450,10 @@ func observeDARelayPublicImage(t *testing.T, h *testHarness) daRelayPublicImage 
 	return image
 }
 
-// TestDATTLCallbackLaterConstructionChangesNoDAState pins that a later construction changes nothing:
-// over a relay populated with a State A chunk and a State B commit, a later NewService S2 (and so
-// its ClaimDARelayState and binding publication) leaves the exported relay image unchanged. Counts
-// and owner tokens are not exported; the node test TestDATTLCallbackBindingChangesNoDAState
-// compares them around the same claim and binding steps.
+// TestDATTLCallbackLaterConstructionChangesNoDAState pins that a later construction changes nothing: over a relay
+// populated with a State A chunk and a State B commit, a later NewService S2 (and so its ClaimDARelayState and binding
+// publication) leaves the exported relay image unchanged. Counts and owner tokens are not exported; the node test
+// TestDATTLCallbackBindingChangesNoDAState compares them around the same claim and binding steps.
 func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
@@ -472,15 +466,13 @@ func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
 	require(t, reflect.DeepEqual(before, observeDARelayPublicImage(t, h)), "later construction changed the DA relay image")
 }
 
-// TestDATTLCallbackEndToEndSelection drives the no-lease selection through real ACCEPTED/NEW
-// applies (SyncEngine.ApplyBlock) over the real DA owner and Services: the bound OPEN Service
-// admits one decrease per publication, AnnounceBlock decreases nothing, a CLOSED current binding
-// changes no count while the apply still returns ACCEPTED/NEW, the closed Service's retained
-// AnnounceBlock returns "service already closed", and a fresh Service binds and decreases.
+// TestDATTLCallbackEndToEndSelection drives the no-lease selection through real ACCEPTED/NEW applies
+// (SyncEngine.ApplyBlock) over the real DA owner and Services: the bound OPEN Service admits one decrease per
+// publication, AnnounceBlock decreases nothing, a CLOSED current binding changes no count while the apply still returns
+// ACCEPTED/NEW, the closed Service's retained AnnounceBlock returns "service already closed", and a fresh Service binds
+// and decreases.
 func TestDATTLCallbackEndToEndSelection(t *testing.T) {
-	source := newTestHarness(t, 7, "127.0.0.1:0", nil)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	probe := newSelectionProbe(t, h, source, 0xd1)
+	source, h, probe := newSourceAndProbe(t, 7, 0xd1)
 	require(t, probe.next == 1, "first applied height=%d, want 1", probe.next)
 	probe.apply()
 	probe.apply()
@@ -505,14 +497,11 @@ func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 	probe.f.requireAbsent(fresh, "the third decrease expired the record")
 }
 
-// TestDATTLCallbackEndToEndLeasePath pins the lease path end to end through the peer's
-// applyBlockWithReorg: with State A X at 2, State B Y at 1 and a State C set Z retained, one
-// relayed block leaves X at 1, removes Y and keeps Z; the binding names another OPEN Service S2
-// that records zero entry attempts, so the lease path never reads the binding.
+// TestDATTLCallbackEndToEndLeasePath pins the lease path end to end through the peer's applyBlockWithReorg: with State
+// A X at 2, State B Y at 1 and a State C set Z retained, one relayed block leaves X at 1, removes Y and keeps Z; the
+// binding names another OPEN Service S2 that records zero entry attempts, so the lease path never reads the binding.
 func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
-	source := newTestHarness(t, 5, "127.0.0.1:0", nil)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	probe := newSelectionProbe(t, h, source, 0xd2)
+	source, h, probe := newSourceAndProbe(t, 5, 0xd2)
 	s2 := &wrappedTTLEntry{inner: newBoundService(t, h.service.cfg)}
 	h.syncEngine.PublishDATTLBinding(s2)
 	p := testPeerForService(h.service, "remote", 3)
@@ -559,9 +548,9 @@ func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
 	require(t, s2.attempts.Load() == 0, "the OPEN bound S2 recorded %d entry attempts, want 0", s2.attempts.Load())
 }
 
-// TestDATTLCallbackEndToEndPanicReleasesLease pins the entry under a panic: a panic inside the decrease
-// passed to the bound Service's registered entry propagates unrecovered, the lease is released
-// exactly once before propagation, and Close then returns.
+// TestDATTLCallbackEndToEndPanicReleasesLease pins the entry under a panic: a panic inside the decrease passed to the
+// bound Service's registered entry propagates unrecovered, the lease is released exactly once before propagation, and
+// Close then returns.
 func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	recovered := func() (value any) {
@@ -573,9 +562,9 @@ func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
 	requireReturned(t, lifecycleClose(h.service), "Close after the panicking entry")
 }
 
-// TestDATTLCallbackEndToEndErrorReleasesLease pins the entry on a decrease that returns an error:
-// the decrease runs once under one registered lease, on which a Close started inside it waits,
-// the entry returns that error unchanged, and the lease is released once so Close returns.
+// TestDATTLCallbackEndToEndErrorReleasesLease pins the entry on a decrease that returns an error: the decrease runs
+// once under one registered lease, on which a Close started inside it waits, the entry returns that error unchanged,
+// and the lease is released once so Close returns.
 func TestDATTLCallbackEndToEndErrorReleasesLease(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	refusal := errors.New("ttl body refusal")
@@ -592,10 +581,9 @@ func TestDATTLCallbackEndToEndErrorReleasesLease(t *testing.T) {
 	requireReturned(t, closed, "Close after the entry released its lease")
 }
 
-// TestDATTLCallbackEndToEndPanicWhileCloseWaits pins the panic while Close waits
-// (RUBIN_L1_P2P_AUX.md Section 5): Close starts while the registered entry runs, reaches
-// DRAINING and waits on the entry's lease; the decrease then panics, the panic propagates
-// unrecovered, the lease is released once, and the waiting Close returns.
+// TestDATTLCallbackEndToEndPanicWhileCloseWaits pins the panic while Close waits (RUBIN_L1_P2P_AUX.md Section 5): Close
+// starts while the registered entry runs, reaches DRAINING and waits on the entry's lease; the decrease then panics,
+// the panic propagates unrecovered, the lease is released once, and the waiting Close returns.
 func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	entered, unwind := make(chan struct{}), make(chan struct{})
@@ -619,9 +607,9 @@ func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
 	requireReturned(t, closed, "the waiting Close after the panicking entry")
 }
 
-// mineSideBlock mines a height-1 block on a fresh chain paying a fresh key, so its hash differs
-// from every block of the shared deterministic test chain: relayed to a node whose tip is at
-// height 2, it is a valid side-branch block with less work, stored non-canonical.
+// mineSideBlock mines a height-1 block on a fresh chain paying a fresh key, so its hash differs from every block of the
+// shared deterministic test chain: relayed to a node whose tip is at height 2, it is a valid side-branch block with
+// less work, stored non-canonical.
 func mineSideBlock(t *testing.T) []byte {
 	t.Helper()
 	fork := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -643,12 +631,11 @@ func relayAccepted(t *testing.T, p *peer, source *testHarness, height uint64) {
 	require(t, err == nil && summary != nil, "processRelayedBlock(%d)=(%+v,%v)", height, summary, err)
 }
 
-// TestDATTLCallbackEndToEndNonAcceptedResults pins the non-accepted results end to end over the real
-// SyncEngine, DA owner and Service, counting through the retained image: a valid side-branch block
-// stored non-canonical, a KNOWN_BLOCK_NOOP replay, a MISSING_PARENT block retained as an orphan,
-// a CONSENSUS_INVALID block and a DisconnectTip decrease nothing, so the record retained at count 3
-// survives the next two counted publications and expires only at the third. The side block and
-// DisconnectTip run under no Service lease and make zero attempts on the bound entry.
+// TestDATTLCallbackEndToEndNonAcceptedResults pins the non-accepted results end to end over the real SyncEngine, DA
+// owner and Service, counting through the retained image: a valid side-branch block stored non-canonical, a
+// KNOWN_BLOCK_NOOP replay, a MISSING_PARENT block retained as an orphan, a CONSENSUS_INVALID block and a DisconnectTip
+// decrease nothing, so the record retained at count 3 survives the next two counted publications and expires only at
+// the third. The side block and DisconnectTip run under no Service lease and make zero attempts on the bound entry.
 func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	sideBlock := mineSideBlock(t)
@@ -685,10 +672,9 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the record the third counted publication expired")
 }
 
-// TestDATTLCallbackEndToEndStoredSideBlockThroughPeer pins the stored non-canonical result on the
-// peer's lease path: a valid side-branch block relayed by a peer is stored non-canonical and
-// decreases nothing, so the commit retained at count 3 survives the next two counted
-// publications and expires only at the third.
+// TestDATTLCallbackEndToEndStoredSideBlockThroughPeer pins the stored non-canonical result on the peer's lease path: a
+// valid side-branch block relayed by a peer is stored non-canonical and decreases nothing, so the commit retained at
+// count 3 survives the next two counted publications and expires only at the third.
 func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	sideBlock := mineSideBlock(t)
@@ -712,15 +698,12 @@ func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the record the third counted publication expired")
 }
 
-// TestDATTLCallbackEndToEndDrainingBindingRefused drives the production no-lease selection
-// through SyncEngine.ApplyBlock while the current binding's Service S2 is DRAINING and the
-// earlier S1 is OPEN: the publication still returns ACCEPTED/NEW, the registration is refused
-// with zero DA effects and nothing falls back to S1, Close(S2) returns only after the held lease
-// is released, and a fresh Service then binds and decreases.
+// TestDATTLCallbackEndToEndDrainingBindingRefused drives the production no-lease selection through
+// SyncEngine.ApplyBlock while the current binding's Service S2 is DRAINING and the earlier S1 is OPEN: the publication
+// still returns ACCEPTED/NEW, the registration is refused with zero DA effects and nothing falls back to S1, Close(S2)
+// returns only after the held lease is released, and a fresh Service then binds and decreases.
 func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
-	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	probe := newSelectionProbe(t, h, source, 0xd5)
+	_, h, probe := newSourceAndProbe(t, 6, 0xd5)
 	probe.apply()
 	probe.apply()
 	s2 := newBoundService(t, h.service.cfg)
@@ -738,8 +721,8 @@ func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the fresh binding's admitted decrease expired the record at count 1")
 }
 
-// wrappedTTLEntry is a binding over a real Service's own entry that runs before ahead of each
-// attempt, counts the attempts and, when refuse is set, returns it instead of entering.
+// wrappedTTLEntry is a binding over a real Service's own entry that runs before ahead of each attempt, counts the
+// attempts and, when refuse is set, returns it instead of entering.
 type wrappedTTLEntry struct {
 	inner    *Service
 	before   func()
@@ -758,8 +741,8 @@ func (w *wrappedTTLEntry) EnterDATTLMutation(decrease func() error) error {
 	return w.inner.EnterDATTLMutation(decrease)
 }
 
-// awaitParkedOnAdmissionGuard waits until a goroutine whose stack names caller is parked in the
-// ChainState admission guard's wait.
+// awaitParkedOnAdmissionGuard waits until a goroutine whose stack names caller is parked in the ChainState admission
+// guard's wait.
 func awaitParkedOnAdmissionGuard(t *testing.T, caller string) {
 	t.Helper()
 	stack := make([]byte, 1<<22)
@@ -773,30 +756,28 @@ func awaitParkedOnAdmissionGuard(t *testing.T, caller string) {
 	t.Fatalf("no %s goroutine parked on the admission guard", caller)
 }
 
-// TestDATTLCallbackEndToEndEntryInsideTheHold drives SyncEngine.ApplyBlock through the production
-// selection and, inside the selected entry, starts a ReleasePeerQuotaKey and a DA admission: both
-// park on the admission guard before the entry proceeds and both complete, so the entry runs
-// inside the exclusive hold (RUBIN_COMPACT_BLOCKS.md Section 5);
+// TestDATTLCallbackEndToEndEntryInsideTheHold drives SyncEngine.ApplyBlock through the production selection and, inside
+// the selected entry, starts a ReleasePeerQuotaKey and a DA admission: both park on the admission guard before the
+// entry proceeds and both complete, so the entry runs inside the exclusive hold (RUBIN_COMPACT_BLOCKS.md Section 5);
 // the admitted record is created after the decrease, so it is still retained after two more.
 func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
-	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	probe := newSelectionProbe(t, h, source, 0xe5)
+	_, h, probe := newSourceAndProbe(t, 6, 0xe5)
 	fresh := probe.f.chunk(daRelayTestID(0xe7), 0, []byte("in-hold"))
-	done := make(chan struct{}, 2)
+	done := make(chan error, 2)
 	entry := &wrappedTTLEntry{inner: h.service}
 	entry.before = func() {
 		entry.before = nil
-		go func() { _ = h.syncEngine.DARelayState().ReleasePeerQuotaKey("unrelated-peer"); done <- struct{}{} }()
+		go func() { _ = h.syncEngine.DARelayState().ReleasePeerQuotaKey("unrelated-peer"); done <- nil }()
 		awaitParkedOnAdmissionGuard(t, "ReleasePeerQuotaKey")
-		go func() { probe.f.admit(fresh, "in-hold-peer"); done <- struct{}{} }()
+		go func() { done <- probe.f.tryAdmit(fresh, "in-hold-peer") }()
 		awaitParkedOnAdmissionGuard(t, "AdmitDA")
 	}
 	h.syncEngine.PublishDATTLBinding(entry)
 	probe.apply()
 	for range 2 {
 		select {
-		case <-done:
+		case err := <-done:
+			must(t, err, "parked writer after the guard release")
 		case <-time.After(lifecycleWatchdog):
 			t.Fatalf("a parked writer never proceeded after the guard release")
 		}
@@ -808,13 +789,11 @@ func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 	probe.f.requireRetained(fresh, "the record admitted after the first decrease at count 1")
 }
 
-// TestDATTLCallbackEndToEndEntryErrorConsumed pins that the transition consumes the entry result:
-// an entry returning an error leaves SyncEngine.ApplyBlock's ACCEPTED/NEW summary and nil error,
-// decreases nothing, and the next admitted publications decrease as usual.
+// TestDATTLCallbackEndToEndEntryErrorConsumed pins that the transition consumes the entry result: an entry returning an
+// error leaves SyncEngine.ApplyBlock's ACCEPTED/NEW summary and nil error, decreases nothing, and the next admitted
+// publications decrease as usual.
 func TestDATTLCallbackEndToEndEntryErrorConsumed(t *testing.T) {
-	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	probe := newSelectionProbe(t, h, source, 0xe6)
+	_, h, probe := newSourceAndProbe(t, 6, 0xe6)
 	failing := &wrappedTTLEntry{inner: h.service, refuse: errors.New("ttl entry failure")}
 	h.syncEngine.PublishDATTLBinding(failing)
 	probe.apply()
@@ -827,9 +806,8 @@ func TestDATTLCallbackEndToEndEntryErrorConsumed(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the third admitted decrease expired the record")
 }
 
-// TestDATTLCallbackEndToEndPreCommitLatchInvokesNothing pins that a transition latching before the
-// durable commit invokes no entry: the bound entry records zero attempts across the latching
-// SyncEngine.ApplyBlock.
+// TestDATTLCallbackEndToEndPreCommitLatchInvokesNothing pins that a transition latching before the durable commit
+// invokes no entry: the bound entry records zero attempts across the latching SyncEngine.ApplyBlock.
 func TestDATTLCallbackEndToEndPreCommitLatchInvokesNothing(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -839,14 +817,11 @@ func TestDATTLCallbackEndToEndPreCommitLatchInvokesNothing(t *testing.T) {
 	require(t, entry.attempts.Load() == 0, "pre-commit latch entry attempts=%d, want 0", entry.attempts.Load())
 }
 
-// TestDATTLCallbackEndToEndDrainingLease pins the lease path while the lease-owning Service is
-// DRAINING: with the worker lease held and Close waiting on it, the peer's applies still run the
-// nested entry, which registers nothing, so three ACCEPTED/NEW publications expire the record; Close
-// returns only after the lease is released.
+// TestDATTLCallbackEndToEndDrainingLease pins the lease path while the lease-owning Service is DRAINING: with the
+// worker lease held and Close waiting on it, the peer's applies still run the nested entry, which registers nothing, so
+// three ACCEPTED/NEW publications expire the record; Close returns only after the lease is released.
 func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
-	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	probe := newSelectionProbe(t, h, source, 0xe7)
+	source, h, probe := newSourceAndProbe(t, 6, 0xe7)
 	p := testPeerForService(h.service, "remote", 5)
 	release := holdWorkLease(t, h.service)
 	closeDone := lifecycleClose(h.service)
@@ -863,10 +838,9 @@ func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the third nested decrease expired the record")
 }
 
-// TestDATTLCallbackEndToEndAbsentBinding drives SyncEngine.ApplyBlock on an engine with no
-// constructed Service: the binding is absent, so three ACCEPTED/NEW publications invoke nothing
-// and the commit retained at count 3 survives them. A Service constructed afterwards binds, and
-// its three admitted decreases then expire the same record.
+// TestDATTLCallbackEndToEndAbsentBinding drives SyncEngine.ApplyBlock on an engine with no constructed Service: the
+// binding is absent, so three ACCEPTED/NEW publications invoke nothing and the commit retained at count 3 survives
+// them. A Service constructed afterwards binds, and its three admitted decreases then expire the same record.
 func TestDATTLCallbackEndToEndAbsentBinding(t *testing.T) {
 	source := newTestHarness(t, 7, "127.0.0.1:0", nil)
 	sink, cfg := unclaimedServiceSink(t)
@@ -895,9 +869,9 @@ func TestDATTLCallbackEndToEndAbsentBinding(t *testing.T) {
 	f.requireAbsent(commit, "the bound Service's third admitted decrease expired the record")
 }
 
-// requireAbsentBindingDecreasesNothing retains a commit at count 3 in sink's DA relay and applies
-// three ACCEPTED/NEW SyncEngine.ApplyBlock publications: with no binding the record survives.
-// DisconnectTip then returns the chain to its starting tip.
+// requireAbsentBindingDecreasesNothing retains a commit at count 3 in sink's DA relay and applies three ACCEPTED/NEW
+// SyncEngine.ApplyBlock publications: with no binding the record survives. DisconnectTip then returns the chain to its
+// starting tip.
 func requireAbsentBindingDecreasesNothing(t *testing.T, sink *testHarness) {
 	t.Helper()
 	source := newTestHarness(t, int(sink.chainState.Height)+4, "127.0.0.1:0", nil)
@@ -918,14 +892,12 @@ func requireAbsentBindingDecreasesNothing(t *testing.T, sink *testHarness) {
 	require(t, sink.chainState.Height+1 == start, "tip height=%d after the disconnects, want %d", sink.chainState.Height, start-1)
 }
 
-// TestDATTLCallbackEndToEndSnapshotBeforePublication drives SyncEngine.ApplyBlock through the
-// production selection while a publication of S2 lands after the selection snapshotted S1 and
-// before its registration: the registration goes to S1 exactly once, S2 records no attempt, and
-// the decrease is admitted; the next two publications select S2 and expire the record.
+// TestDATTLCallbackEndToEndSnapshotBeforePublication drives SyncEngine.ApplyBlock through the production selection
+// while a publication of S2 lands after the selection snapshotted S1 and before its registration: the registration goes
+// to S1 exactly once, S2 records no attempt, and the decrease is admitted; the next two publications select S2 and
+// expire the record.
 func TestDATTLCallbackEndToEndSnapshotBeforePublication(t *testing.T) {
-	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	probe := newSelectionProbe(t, h, source, 0xea)
+	_, h, probe := newSourceAndProbe(t, 6, 0xea)
 	s2 := &wrappedTTLEntry{inner: newBoundService(t, h.service.cfg)}
 	var once sync.Once
 	s1 := &wrappedTTLEntry{inner: h.service}
@@ -941,13 +913,11 @@ func TestDATTLCallbackEndToEndSnapshotBeforePublication(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the third admitted decrease expired the record")
 }
 
-// TestDATTLCallbackEndToEndNoGuardReacquisition drives one ACCEPTED/NEW publication through the
-// production selection: the entry is attempted once, ApplyBlock returns within the watchdog and
-// the record's count shows the body ran, so the body never waits for the held guard.
+// TestDATTLCallbackEndToEndNoGuardReacquisition drives one ACCEPTED/NEW publication through the production selection:
+// the entry is attempted once, ApplyBlock returns within the watchdog and the record's count shows the body ran, so the
+// body never waits for the held guard.
 func TestDATTLCallbackEndToEndNoGuardReacquisition(t *testing.T) {
-	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	probe := newSelectionProbe(t, h, source, 0xeb)
+	source, h, probe := newSourceAndProbe(t, 4, 0xeb)
 	entry := &wrappedTTLEntry{inner: h.service}
 	h.syncEngine.PublishDATTLBinding(entry)
 	var summary *node.ChainStateConnectSummary
@@ -971,8 +941,8 @@ func TestDATTLCallbackEndToEndNoGuardReacquisition(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the third counted publication expired the record")
 }
 
-// closeRaceEntry is a binding over S1's own entry that, on its one attempt, starts the race and
-// records whether S1 admitted the decrease and whether Close(S1) had returned when it ran.
+// closeRaceEntry is a binding over S1's own entry that, on its one attempt, starts the race and records whether S1
+// admitted the decrease and whether Close(S1) had returned when it ran.
 type closeRaceEntry struct {
 	inner          *Service
 	start          func()
@@ -990,13 +960,12 @@ func (c *closeRaceEntry) EnterDATTLMutation(decrease func() error) error {
 	})
 }
 
-// TestDATTLCallbackEndToEndCloseRaceOutcomes drives SyncEngine.ApplyBlock through the production
-// selection with S1 snapshotted, and starts Close(S1) and the construction of S2 between the
-// snapshot and S1's registration: the one registration goes to S1; either S1 admitted it before
-// Close returned and the record at count 2 is at 1, or S1 refused it and the record is unchanged;
-// nothing reaches S2, which is the binding afterwards and whose next decreases expire the record
-// exactly when the S1 outcome predicts. Even rounds let Close(S1) and S2's binding finish before
-// the registration, so S1 refuses.
+// TestDATTLCallbackEndToEndCloseRaceOutcomes drives SyncEngine.ApplyBlock through the production selection with S1
+// snapshotted, and starts Close(S1) and the construction of S2 between the snapshot and S1's registration: the one
+// registration goes to S1; either S1 admitted it before Close returned and the record at count 2 is at 1, or S1 refused
+// it and the record is unchanged; nothing reaches S2, which is the binding afterwards and whose next decreases expire
+// the record exactly when the S1 outcome predicts. Even rounds let Close(S1) and S2's binding finish before the
+// registration, so S1 refuses.
 func TestDATTLCallbackEndToEndCloseRaceOutcomes(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	for i := range 8 {
