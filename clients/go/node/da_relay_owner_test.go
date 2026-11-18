@@ -6436,7 +6436,7 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 				row.chunkIndex++                                // still one row, no longer the one the record implies
 				s.relations.putLocator(indexedTx.txid, row)
 			})
-			if selector.name == ownerReadyTTLSelector { // record-major: 0x21's own per-da_id entry refuses first
+			if selector.name == ownerReadyTTLSelector { // the TTL body refuses the two-defect image and changes nothing
 				before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 				require(t, errors.Is(selector.run(f.relay), errDARelayImageIncompatible), "a two-defect image on the ttl tick was not refused")
 				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
