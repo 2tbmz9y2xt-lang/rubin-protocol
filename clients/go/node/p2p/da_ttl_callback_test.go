@@ -763,8 +763,8 @@ func awaitParkedOnAdmissionGuard(t *testing.T, caller string) {
 
 // TestDATTLCallbackEndToEndEntryInsideTheHold drives SyncEngine.ApplyBlock through the production
 // selection and, inside the selected entry, starts a ReleasePeerQuotaKey and a DA admission: both
-// park on the admission guard before the entry proceeds and proceed after the apply returns, so
-// the entry runs inside the exclusive hold (RUBIN_COMPACT_BLOCKS.md Section 5);
+// park on the admission guard before the entry proceeds and both complete after the apply
+// returns, so the entry runs inside the exclusive hold (RUBIN_COMPACT_BLOCKS.md Section 5);
 // the admitted record is created after the decrease, so it is still retained after two more.
 func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)

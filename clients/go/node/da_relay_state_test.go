@@ -687,7 +687,7 @@ func TestDARelayDuplicateCommitAfterOrphanChunksKeepsFirstSeenState(t *testing.T
 	}
 }
 
-func TestDATTLCallbackLegacyAdvanceOrphanTTLExpiresOrphanChunksAtomically(t *testing.T) {
+func TestDARelayAdvanceOrphanTTLExpiresOrphanChunksAtomically(t *testing.T) {
 	caps := defaultDARelayCaps()
 	caps.orphanTTLBlocks = 1
 	state := newDARelayStateForTest(t, caps)
@@ -727,7 +727,7 @@ func TestDATTLCallbackLegacyAdvanceOrphanTTLExpiresOrphanChunksAtomically(t *tes
 	}
 }
 
-func TestDATTLCallbackLegacyAdvanceOrphanTTLExpiresStagedCommitAccounting(t *testing.T) {
+func TestDARelayAdvanceOrphanTTLExpiresStagedCommitAccounting(t *testing.T) {
 	caps := defaultDARelayCaps()
 	caps.orphanTTLBlocks = 1
 	state := newDARelayStateForTest(t, caps)
@@ -765,7 +765,7 @@ func TestDATTLCallbackLegacyAdvanceOrphanTTLExpiresStagedCommitAccounting(t *tes
 	}
 }
 
-func TestDATTLCallbackLegacyAdvanceOrphanTTLDecrementsAndPreservesCompleteSets(t *testing.T) {
+func TestDARelayAdvanceOrphanTTLDecrementsAndPreservesCompleteSets(t *testing.T) {
 	caps := defaultDARelayCaps()
 	caps.orphanTTLBlocks = 2
 	state := newDARelayStateForTest(t, caps)
@@ -810,7 +810,7 @@ func TestDATTLCallbackLegacyAdvanceOrphanTTLDecrementsAndPreservesCompleteSets(t
 	}
 }
 
-func TestDATTLCallbackLegacyAdvanceOrphanTTLReturnsProjectionErrorsWithoutMutation(t *testing.T) {
+func TestDARelayAdvanceOrphanTTLReturnsProjectionErrorsWithoutMutation(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	decrementID := daRelayTestID(97)
 	expireID := daRelayTestID(98)
@@ -843,7 +843,7 @@ func TestDATTLCallbackLegacyAdvanceOrphanTTLReturnsProjectionErrorsWithoutMutati
 	}
 }
 
-func TestDATTLCallbackLegacyAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T) {
+func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T) {
 	t.Run("empty no-op", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		before := daRelayStateSnapshot(state)
