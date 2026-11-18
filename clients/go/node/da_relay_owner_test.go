@@ -6416,14 +6416,14 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 			requireOwnerReadyTerminal(t, f, ownerReadyDropRelease, row.detail, row.name)
 		})
 	}
-	// FIRST-ERROR ORDER over an image carrying TWO defects on different axes. The closure is
+	// FIRST-ERROR ORDER over an image carrying TWO defects on different axes. The ttl selector refuses it with errDARelayImageIncompatible and changes nothing; on the peer release the closure is
 	// canonicalDARetainedImageClosed, which is RECORD-major: it decides the lower da_id's locator
 	// bijection AND its accounting before reading the higher one, so the accounting refusal is the
 	// sole result. A closure that walked every record's locators first and every record's
 	// accounting second would report the higher da_id's locator refusal instead, and this row's
-	// evidence string is what separates the two orders — the earlier two-record row (0xdb, 0xdd)
+	// evidence string, asserted on the peer release, is what separates the two orders — the earlier two-record row (0xdb, 0xdd)
 	// carries one defect, so both orders answer it identically. Both records are provenance "keep",
-	// leaving the preflight as the only arm either selector can refuse on.
+	// leaving the preflight as the only arm the peer release can refuse on.
 	for _, selector := range ownerReadyRemovalSelectors {
 		t.Run("a two-defect image refuses record-major on the "+selector.name, func(t *testing.T) {
 			f := newDANonReplayFixture(t, 2)
