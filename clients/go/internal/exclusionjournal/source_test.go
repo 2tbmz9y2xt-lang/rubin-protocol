@@ -108,7 +108,9 @@ func sourceBundleScene(t *testing.T, class byte, conditional bool) (*policycontr
 }
 
 func sourceProducer(m SourceManifestV1, parts [][]byte) SourceExporterV1 {
-	return func(op *SourceOperationV1, visit func(SourcePartV1) error) error { return sourceExportParts(op, m, parts, visit) }
+	return func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
+		return sourceExportParts(op, m, parts, visit)
+	}
 }
 
 func sourceOrigins(parts [][]byte) ([]SourceOriginV1, []SourceViewV1) {
@@ -200,7 +202,7 @@ func sourcePrepareResult(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, pro
 	sourceAccount(t, func(a *mdbx.OperationAccount) error {
 		var err error
 		p, err = o.PrepareSourceV1(a, m, producer)
-		if err != want || (p == nil) != (want != nil) {
+		if any(err) != any(want) || (p == nil) != (want != nil) {
 			t.Fatalf("source preparation: %v/%v, want %v", p, err, want)
 		}
 		return nil
@@ -369,7 +371,7 @@ func TestSourceExportScope(t *testing.T) {
 					t.Fatalf("escaped read: %d/%v", n, err)
 				}
 				for _, expired := range []*SourceOperationV1{nil, {}, scope} {
-					if err := expired.WithBackingV1(nil, nil, nil); err != ErrUnavailableV1 {
+					if err := expired.WithBackingV1(nil, nil, nil); any(err) != any(ErrUnavailableV1) {
 						t.Fatalf("expired source operation: %v", err)
 					}
 				}
@@ -418,7 +420,7 @@ func testSourceOriginAdmission(t *testing.T, mode string) {
 						return nil
 					})
 				}, func(SourcePartV1) error { return nil })
-				if refusal != nil && (entered || err != refusal) || refusal == nil && shortage == 1 && (entered || !mdbx.IsOperationReservationCapacity(err)) ||
+				if refusal != nil && (entered || any(err) != any(refusal)) || refusal == nil && shortage == 1 && (entered || !mdbx.IsOperationReservationCapacity(err)) ||
 					refusal == nil && shortage == 0 && (!entered || err != nil) {
 					t.Fatalf("origin admission, shortage=%d: entered=%t error=%v", shortage, entered, err)
 				}

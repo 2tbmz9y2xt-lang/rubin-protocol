@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"syscall"
 
@@ -21,14 +22,14 @@ const (
 )
 
 type sourceRelease struct {
-	name      string
-	size      uint64
-	file      filelock.IdentityV1
-	footer    [32]byte
-	manifest  SourceManifestV1
-	record    []byte
-	reopened  bool
-	cleared   bool
+	name     string
+	size     uint64
+	file     filelock.IdentityV1
+	footer   [32]byte
+	manifest SourceManifestV1
+	record   []byte
+	reopened bool
+	cleared  bool
 }
 
 // ReleaseUnpublishedSourceV1 removes an unpublished incarnation and holds its charge through directory sync.
@@ -53,22 +54,20 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 }
 
 func (o *SourceOwnerV1) releaseAdmission(p *PreparedSourceV1, proof bool) error {
-	if !proof {
+	if !proof || !o.hasReleaseAuthority(p) {
 		return ErrIntegrityV1
 	}
-	if p == nil {
-		if o.release == nil || !o.release.reopened {
-			return ErrIntegrityV1
-		}
-		return nil
-	}
-	if p.owner != o || p.incarnation == nil || o.live[p.name] != p.incarnation {
-		return ErrIntegrityV1
-	}
-	if o.debt != nil || o.release != nil && o.release.name != p.name {
+	if p != nil && (o.debt != nil || o.release != nil && o.release.name != p.name) {
 		return ErrBusyV1
 	}
 	return nil
+}
+
+func (o *SourceOwnerV1) hasReleaseAuthority(p *PreparedSourceV1) bool {
+	if p == nil {
+		return o.release != nil && o.release.reopened
+	}
+	return p.owner == o && p.incarnation != nil && o.live[p.name] == p.incarnation
 }
 
 func (o *SourceOwnerV1) beginRelease(r *sourceRoot, p *PreparedSourceV1, scratch []byte) error {
@@ -181,7 +180,7 @@ func (o *SourceOwnerV1) releaseDigest(r *sourceRoot, d *sourceRelease, scratch [
 	}
 	defer f.Close()
 	info, err := f.Stat()
-	if err != nil || filelock.FileIdentityV1(info) != d.file || uint64(info.Size()) != d.size {
+	if err != nil || filelock.FileIdentityV1(info) != d.file || info.Size() != int64(min(d.size, math.MaxInt64)) {
 		return zero, false, ErrIdentityV1
 	}
 	footer, err := o.qualify(f, d.manifest, scratch)

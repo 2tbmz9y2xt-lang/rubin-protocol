@@ -5,6 +5,7 @@ package filelock
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"syscall"
 )
@@ -36,25 +37,45 @@ type IdentityV1 [2]uint64
 func FileIdentityV1(info os.FileInfo) IdentityV1 {
 	if info != nil {
 		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-			return IdentityV1{uint64(stat.Dev), uint64(stat.Ino)}
+			return statIdentity(stat)
 		}
 	}
 	return IdentityV1{}
 }
 
-// DirectoryIdentityV1 obtains the identity of the actual held directory.
-func (h *Handle) DirectoryIdentityV1() (IdentityV1, error) {
-	var stat syscall.Stat_t
+func statIdentity(stat *syscall.Stat_t) IdentityV1 {
+	switch dev := any(stat.Dev).(type) {
+	case int32:
+		low := uint64(dev & math.MaxInt32)
+		sign := uint64((dev >> 31) & 1)
+		return IdentityV1{low | sign*^uint64(math.MaxInt32), stat.Ino}
+	case uint32:
+		return IdentityV1{uint64(dev), stat.Ino}
+	case uint64:
+		return IdentityV1{dev, stat.Ino}
+	}
+	return IdentityV1{}
+}
+
+// DirectoryIdentityV1 returns the held directory identity if path still names that directory without following its final component.
+func (h *Handle) DirectoryIdentityV1(path string) (IdentityV1, error) {
+	var held, named syscall.Stat_t
 	if h == nil || h.fd < 0 {
 		return IdentityV1{}, syscall.EBADF
 	}
-	if err := syscall.Fstat(h.fd, &stat); err != nil {
+	heldErr := syscall.Fstat(h.fd, &held)
+	statErr := syscall.Lstat(path, &named)
+	for errors.Is(statErr, syscall.EINTR) {
+		statErr = syscall.Lstat(path, &named)
+	}
+	if err := errors.Join(heldErr, statErr); err != nil {
 		return IdentityV1{}, err
 	}
-	if stat.Mode&syscall.S_IFMT != syscall.S_IFDIR {
-		return IdentityV1{}, syscall.ENOTDIR
+	id := statIdentity(&held)
+	if held.Mode&syscall.S_IFMT != syscall.S_IFDIR || named.Mode&syscall.S_IFMT != syscall.S_IFDIR || statIdentity(&named) != id {
+		return IdentityV1{}, syscall.EXDEV
 	}
-	return IdentityV1{uint64(stat.Dev), uint64(stat.Ino)}, nil
+	return id, nil
 }
 
 func acquire(path string, flags int) (*Handle, Result, error) {

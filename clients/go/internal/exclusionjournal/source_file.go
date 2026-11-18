@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"strings"
 	"syscall"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
@@ -158,14 +159,21 @@ func (o *SourceOwnerV1) census(r *sourceRoot) (uint64, uint64, error) {
 	if err != nil {
 		return 0, 0, err
 	}
+	return o.censusFiles(r, entries)
+}
+
+func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry) (uint64, uint64, error) {
 	var count, size uint64
 	releasePresent := false
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == releaseFile || name == releaseScratch {
-			if name == releaseFile && o.release == nil {
+		switch name {
+		case releaseFile:
+			if o.release == nil {
 				return 0, 0, ErrIntegrityV1
 			}
+			continue
+		case releaseScratch:
 			continue
 		}
 		n, err := o.censusFile(r, name, size)
@@ -176,29 +184,28 @@ func (o *SourceOwnerV1) census(r *sourceRoot) (uint64, uint64, error) {
 		count++
 		releasePresent = releasePresent || o.release != nil && name == o.release.name
 	}
-	count, size = o.includeAbsent(count, size, releasePresent)
-	if count > o.limits.Files || size > o.limits.Bytes {
-		return 0, 0, ErrCapacityV1
-	}
-	return count, size, nil
+	return o.includeAbsent(count, size, releasePresent)
 }
 
-func (o *SourceOwnerV1) includeAbsent(count, size uint64, releasePresent bool) (uint64, uint64) {
+func (o *SourceOwnerV1) includeAbsent(count, size uint64, releasePresent bool) (uint64, uint64, error) {
 	if o.debt != nil && o.debt.removed {
 		if o.debt.size > o.limits.Bytes-size {
-			return count, math.MaxUint64
+			return 0, 0, ErrCapacityV1
 		}
 		count++
 		size += o.debt.size
 	}
 	if o.release != nil && !releasePresent {
 		if o.release.size > o.limits.Bytes-size {
-			return count, math.MaxUint64
+			return 0, 0, ErrCapacityV1
 		}
 		count++
 		size += o.release.size
 	}
-	return count, size
+	if count > o.limits.Files {
+		return 0, 0, ErrCapacityV1
+	}
+	return count, size, nil
 }
 
 func (o *SourceOwnerV1) censusEntries(r *sourceRoot) ([]os.DirEntry, error) {
@@ -207,7 +214,7 @@ func (o *SourceOwnerV1) censusEntries(r *sourceRoot) ([]os.DirEntry, error) {
 		return nil, err
 	}
 	defer f.Close()
-	entries, err := f.ReadDir(int(o.limits.Scans))
+	entries, err := f.ReadDir(int(min(o.limits.Scans, math.MaxInt)))
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
@@ -222,7 +229,7 @@ func (o *SourceOwnerV1) censusFile(r *sourceRoot, name string, retained uint64) 
 	if err != nil || !info.Mode().IsRegular() || info.Size() < 0 {
 		return 0, ErrIntegrityV1
 	}
-	size := uint64(info.Size())
+	size := uint64(max(info.Size(), 0))
 	if err := o.censusEntry(name, size); err != nil {
 		return 0, err
 	}
@@ -233,10 +240,7 @@ func (o *SourceOwnerV1) censusFile(r *sourceRoot, name string, retained uint64) 
 }
 
 func (o *SourceOwnerV1) censusEntry(name string, size uint64) error {
-	staging := len(name) == 73 && name[:9] == ".staging-"
-	if staging {
-		name = name[9:]
-	}
+	name, staging := strings.CutPrefix(name, ".staging-")
 	decoded, err := hex.DecodeString(name)
 	if err != nil || len(decoded) != 32 {
 		return ErrIntegrityV1
@@ -278,19 +282,18 @@ func assurance(part SourcePartV1) error {
 	if n, err := part.ReadAt(field[:1], 0); n != 1 || err != nil {
 		return ErrIntegrityV1
 	}
-	if field[0] == 1 && part.Length == 1 {
-		return nil
-	}
-	if field[0] != 2 {
-		return ErrIntegrityV1
-	}
 	offset := uint64(1)
-	for range 4 {
-		next, err := assuranceField(part, offset)
-		if err != nil {
-			return err
+	if field[0] != 1 {
+		if field[0] != 2 {
+			return ErrIntegrityV1
 		}
-		offset = next
+		for range 4 {
+			next, err := assuranceField(part, offset)
+			if err != nil {
+				return err
+			}
+			offset = next
+		}
 	}
 	if offset != part.Length {
 		return ErrIntegrityV1
@@ -358,8 +361,9 @@ func (o *SourceOwnerV1) sourceFileHeader(f *os.File, m SourceManifestV1) ([]byte
 	if err != nil {
 		return nil, 0, ErrIntegrityV1
 	}
+	length := int64(min(size, math.MaxInt64))
 	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() != int64(size) {
+	if err != nil || !info.Mode().IsRegular() || info.Size() != length {
 		return nil, 0, ErrIntegrityV1
 	}
 	header := m.header(o.id)
@@ -367,7 +371,7 @@ func (o *SourceOwnerV1) sourceFileHeader(f *os.File, m SourceManifestV1) ([]byte
 	if _, err = f.ReadAt(actual, 0); err != nil || !bytes.Equal(actual, header) {
 		return nil, 0, ErrIntegrityV1
 	}
-	return actual, int64(size), nil
+	return actual, length, nil
 }
 
 func fileExporter(f *os.File, m SourceManifestV1, header int) func(func(SourcePartV1) error) error {
@@ -379,7 +383,7 @@ func fileExporter(f *os.File, m SourceManifestV1, header int) func(func(SourcePa
 			if err := visitPart(part, visit); err != nil {
 				return err
 			}
-			offset += int64(spec.Length)
+			offset += int64(min(spec.Length, math.MaxInt64))
 		}
 		return nil
 	}
@@ -426,7 +430,8 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 	if !d.removed {
 		name := ".staging-" + d.name
 		if info, err := r.Lstat(name); err == nil && info.Mode().IsRegular() {
-			d.size = uint64(info.Size())
+			size := info.Size()
+			d.size = uint64(size&math.MaxInt64) | uint64((size>>63)&1)<<63
 		}
 		if err := o.ops.remove(r.Root, name); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -465,17 +470,21 @@ func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, count, retain
 		return nil, ErrIntegrityV1
 	}
 	size, _ := m.SizeV1()
+	if err := o.admitPublication(r, name, size, count, retained); err != nil {
+		return nil, err
+	}
+	return o.publish(r, m, produce, size)
+}
+
+func (o *SourceOwnerV1) admitPublication(r *sourceRoot, name string, size, count, retained uint64) error {
 	if d := o.debt; d != nil && (d.removed || d.staging && stagingExists(r, name)) {
 		count--
 		retained -= d.size
 	}
 	if count >= o.limits.Files || size > o.limits.Bytes-retained {
-		return nil, ErrCapacityV1
+		return ErrCapacityV1
 	}
-	if err := o.space(r, size); err != nil {
-		return nil, err
-	}
-	return o.publish(r, m, produce, size)
+	return o.space(r, size)
 }
 
 func stagingExists(r *sourceRoot, name string) bool {

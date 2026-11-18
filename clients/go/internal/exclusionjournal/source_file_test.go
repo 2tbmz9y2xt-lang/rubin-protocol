@@ -175,7 +175,7 @@ func TestSourcePartAndAssuranceRefusals(t *testing.T) {
 					if mode == "nested-delivery" && p.Kind == AcquiredBlockBytesV1 {
 						read := p.ReadAt
 						p.ReadAt = func(dst []byte, off int64) (int, error) {
-							if err := v(sourceMemoryPart(ExpectedHeaderPathV1, parts[1])); err != ErrIntegrityV1 {
+							if err := v(sourceMemoryPart(ExpectedHeaderPathV1, parts[1])); any(err) != any(ErrIntegrityV1) {
 								t.Fatalf("nested source delivery: %v", err)
 							}
 							n, err := read(dst, off)
@@ -426,7 +426,7 @@ func testSourceReleaseStage(t *testing.T, stage string) {
 	sourceReleaseResult(t, o, nil, true, ErrIntegrityV1)
 	sourceAccount(t, func(a *mdbx.OperationAccount) error {
 		return o.WithCapturedSourceV1(a, m, func(SourcePartV1) error {
-			if err := o.ReleaseUnpublishedSourceV1(a, p, true); err != ErrBusyV1 {
+			if err := o.ReleaseUnpublishedSourceV1(a, p, true); any(err) != any(ErrBusyV1) {
 				t.Fatalf("live export release: %v", err)
 			}
 			return nil
@@ -504,7 +504,7 @@ func sourcePresence(t *testing.T, root, name string, present bool) {
 func sourceReleaseResult(t *testing.T, o *SourceOwnerV1, p *PreparedSourceV1, proof bool, want error) {
 	t.Helper()
 	sourceAccount(t, func(a *mdbx.OperationAccount) error {
-		if err := o.ReleaseUnpublishedSourceV1(a, p, proof); err != want {
+		if err := o.ReleaseUnpublishedSourceV1(a, p, proof); any(err) != any(want) {
 			t.Fatalf("source release: %v, want %v", err, want)
 		}
 		return nil
@@ -918,11 +918,14 @@ func TestSourceOperationAuthorityAdmission(t *testing.T) {
 	before := sourceEntries(t, dir)
 	check := func(a *mdbx.OperationAccount, want error) {
 		calls := 0
-		producer := func(op *SourceOperationV1, v func(SourcePartV1) error) error { calls++; return sourceExportParts(op, m, parts, v) }
+		producer := func(op *SourceOperationV1, v func(SourcePartV1) error) error {
+			calls++
+			return sourceExportParts(op, m, parts, v)
+		}
 		visitor := func(SourcePartV1) error { calls++; return nil }
 		prepared, err := o.PrepareSourceV1(a, m, producer)
 		for _, err := range []error{err, o.WithSourceExportV1(a, m, producer, visitor), o.WithCapturedSourceV1(a, m, visitor), o.ReleaseUnpublishedSourceV1(a, p, true)} {
-			if err != want {
+			if any(err) != any(want) {
 				t.Fatalf("authority admission=%v, want %v", err, want)
 			}
 		}

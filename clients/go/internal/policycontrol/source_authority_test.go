@@ -29,7 +29,7 @@ func TestSourceAuthorityBorrowAdmission(t *testing.T) {
 	s := mustCreate(t, storeDir(t), testIdentity(1))
 	copied := reflect.New(reflect.TypeFor[Store]())
 	copied.Elem().Set(reflect.ValueOf(s).Elem())
-	if b, err := copied.Interface().(*Store).BorrowSourceAuthorityV1(); b != nil || err != ErrClosed {
+	if b, err := copied.Interface().(*Store).BorrowSourceAuthorityV1(); b != nil || !sameDependentValue(err, ErrClosed) {
 		t.Fatalf("copied store borrow: %v/%v", b, err)
 	}
 	tx := mustBegin(t, s)
@@ -80,7 +80,7 @@ func TestSourceAuthorityCloseOnly(t *testing.T) {
 	wantErr(t, nil)(s.Recover())
 	one.ReleaseV1()
 	one.ReleaseV1()
-	if dir, id, physical, err := copied.BindingV1(); dir != "" || id != (Identity{}) || physical != (filelock.IdentityV1{}) || err != ErrClosed {
+	if dir, id, physical, err := copied.BindingV1(); dir != "" || id != (Identity{}) || physical != (filelock.IdentityV1{}) || !sameDependentValue(err, ErrClosed) {
 		t.Fatalf("copied expired binding: %q %+v %v", dir, id, err)
 	}
 	copied.ReleaseV1()
@@ -100,7 +100,7 @@ func TestSourceAuthorityCloseOnly(t *testing.T) {
 	}
 	for _, b := range []*SourceAuthorityBorrowV1{nil, {}, one, two} {
 		dir, id, physical, err := b.BindingV1()
-		if dir != "" || id != (Identity{}) || physical != (filelock.IdentityV1{}) || err != ErrClosed {
+		if dir != "" || id != (Identity{}) || physical != (filelock.IdentityV1{}) || !sameDependentValue(err, ErrClosed) {
 			t.Fatalf("expired binding: %q %+v %v", dir, id, err)
 		}
 		b.ReleaseV1()
@@ -139,7 +139,7 @@ func TestSourceAuthorityDirectoryReplacement(t *testing.T) {
 	old := filepath.Join(t.TempDir(), "old")
 	must(t, os.Rename(s.dir, old))
 	must(t, os.Mkdir(s.dir, 0o700))
-	if _, _, _, err := b.BindingV1(); err != ErrRefused {
+	if _, _, _, err := b.BindingV1(); !sameDependentValue(err, ErrRefused) {
 		t.Fatalf("replaced directory binding: %v", err)
 	}
 	b.ReleaseV1()

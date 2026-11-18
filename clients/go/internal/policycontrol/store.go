@@ -135,14 +135,17 @@ func start(dir string, id Identity, proof *NewInstallationProof, h hooks) (*Stor
 	if lock == nil || res != "" || err != nil {
 		return nil, refuseLock(lock, res, err, proof != nil)
 	}
-	held, identityErr := lock.DirectoryIdentityV1()
-	current, statErr := os.Lstat(sourceDir)
-	if pathErr != nil || identityErr != nil || statErr != nil || !current.IsDir() || held != filelock.FileIdentityV1(current) {
+	return startLocked(sourceDir, id, proof != nil, h, lock, pathErr)
+}
+
+func startLocked(sourceDir string, id Identity, creating bool, h hooks, lock *filelock.Handle, pathErr error) (*Store, error) {
+	held, err := lock.DirectoryIdentityV1(sourceDir)
+	if pathErr != nil || err != nil {
 		return nil, errors.Join(ErrRefused, lock.Release())
 	}
 	s := &Store{dir: sourceDir, directory: held, lock: lock, fault: h.fault, ops: h.ops}
 	s.self = s
-	if err = s.load(id, proof != nil); err != nil {
+	if err = s.load(id, creating); err != nil {
 		return nil, errors.Join(err, lock.Release())
 	}
 	return s, nil

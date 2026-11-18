@@ -115,7 +115,7 @@ func NewSourceOwnerV1(store *policycontrol.Store, expected policycontrol.Identit
 	err = b.WithSourceOwnerClaimV1(func() error {
 		return account.WithReservation(limits.WorkingBytesV1(), o.openSourceRoot)
 	})
-	if err == policycontrol.ErrBusy {
+	if any(err) == any(policycontrol.ErrBusy) {
 		return nil, ErrBusyV1
 	}
 	if err != nil {
@@ -130,10 +130,8 @@ func (l SourceLimitsV1) valid() bool {
 			return false
 		}
 	}
-	if l.Scans > uint64(math.MaxInt-scratchBytes-4096)/512 {
-		return false
-	}
-	return l.Descriptors >= 4 && l.Files < l.Scans && l.RAM >= l.WorkingBytesV1()+l.retainedRAM()
+	return l.Scans <= uint64(math.MaxInt-scratchBytes-4096)/512 &&
+		l.Descriptors >= 4 && l.Files < l.Scans && l.RAM >= l.WorkingBytesV1()+l.retainedRAM()
 }
 
 // WorkingBytesV1 bounds copy scratch, directory metadata and constant operation/borrow state.
@@ -150,8 +148,7 @@ func (o *SourceOwnerV1) operation(account *mdbx.OperationAccount, use func() err
 		return err
 	}
 	defer b.ReleaseV1()
-	dir, id, parent, err := b.BindingV1()
-	if err != nil || id != o.id || dir != o.dir || parent != o.parent {
+	if !o.matchesBinding(b) {
 		return ErrIdentityV1
 	}
 	if account == nil || !o.limits.valid() {
@@ -162,6 +159,11 @@ func (o *SourceOwnerV1) operation(account *mdbx.OperationAccount, use func() err
 	}
 	defer o.busy.Store(false)
 	return account.WithReservation(o.limits.WorkingBytesV1(), use)
+}
+
+func (o *SourceOwnerV1) matchesBinding(b *policycontrol.SourceAuthorityBorrowV1) bool {
+	dir, id, parent, err := b.BindingV1()
+	return err == nil && id == o.id && dir == o.dir && parent == o.parent
 }
 
 func (m SourceManifestV1) kinds() []PartKindV1 {
@@ -209,7 +211,7 @@ func (m SourceManifestV1) header(id policycontrol.Identity) []byte {
 	b = append(b, byte(id.Profile))
 	b = append(b, m.Identity[:]...)
 	b = append(b, m.AcquiredDigest[:]...)
-	b = append(b, byte(m.Class), byte(len(m.Parts)))
+	b = append(b, byte(m.Class), byte(len(m.Parts)&math.MaxUint8))
 	for _, part := range m.Parts {
 		b = append(b, byte(part.Kind))
 		b = binary.LittleEndian.AppendUint64(b, part.Length)

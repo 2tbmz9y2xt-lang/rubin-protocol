@@ -25,7 +25,7 @@ type IdentityV1 [2]uint64
 func FileIdentityV1(_ os.FileInfo) IdentityV1 { return IdentityV1{} }
 
 // DirectoryIdentityV1 refuses on hosts without native directory identity.
-func (*Handle) DirectoryIdentityV1() (IdentityV1, error) {
+func (*Handle) DirectoryIdentityV1(string) (IdentityV1, error) {
 	return IdentityV1{}, errors.New("datadir writer lock is unsupported on this host")
 }
 
