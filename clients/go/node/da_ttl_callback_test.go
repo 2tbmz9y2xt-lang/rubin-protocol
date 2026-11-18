@@ -846,9 +846,9 @@ func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
 	requireDATTLCount(t, after, freshID, 7) // the fixture's orphan TTL: created after the decrease
 }
 
-// TestDATTLCallbackDecrementReachability pins that every production function that lowers a TTL count is reached only
-// from advanceOwnerReadyTTLInGuard, and the in-guard body only from the canonical transition's enterDATTL; the legacy
-// advanceOrphanTTLLocked keeps its one legacy caller.
+// TestDATTLCallbackDecrementReachability pins the callers of the listed TTL functions: the count-lowering helpers are
+// reached only from advanceOwnerReadyTTLInGuard, and the in-guard body only from the canonical transition's enterDATTL;
+// the legacy advanceOrphanTTLLocked keeps its one legacy caller.
 func TestDATTLCallbackDecrementReachability(t *testing.T) {
 	want := map[string][]string{
 		"addOwnerReadyTTLSurvivor":         {"planOwnerReadyTTLRecordLocked"},

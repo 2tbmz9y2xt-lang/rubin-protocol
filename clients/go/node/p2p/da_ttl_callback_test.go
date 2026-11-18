@@ -187,7 +187,7 @@ func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
 
 // TestDATTLCallbackServiceCloseRace pins Close(S1) racing the registration of a selection that snapshotted S1 while S2
 // binds. The outcome is either admitted before DRAINING with Close waiting for the decrease, or refused with zero
-// effects; never S2.
+// effects.
 func TestDATTLCallbackServiceCloseRace(t *testing.T) {
 	for i := range 20 {
 		h := newTestHarness(t, 0, "127.0.0.1:0", nil)
