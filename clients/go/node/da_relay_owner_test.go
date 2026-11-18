@@ -358,7 +358,7 @@ func TestDAPreparedCommitStructure(t *testing.T) {
 
 func requireDAAdmissionStructure(t *testing.T) {
 	for path, want := range map[string]string{
-		"da_relay_state.go":          "86cfa46df2c52de420265d8aae433d886bf832d9c934cd12aed01ada48f3e87c",
+		"da_relay_state.go":          "8d5fce107b55aaaecd8c5ab095204a2f2420d77ccf051e0f4ef0a5c7bd506090",
 		"da_relay_record.go":         "2706ab0b65ee400056f6d29e6807d509e937d8d778de5aae5ee36d2a05c8eb11",
 		"da_relay_mutation.go":       "cf4fc1cc345d04569165bdf4a2e8ba72213e18bac732270ea8dca67559596039",
 		"da_complete_commit.go":      "3fb456f5668dff7bc089b0472ccc61c2c263d5c7d3917cd512a20182e45709f5",
