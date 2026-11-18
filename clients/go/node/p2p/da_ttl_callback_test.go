@@ -468,8 +468,8 @@ func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
 // TestDATTLCallbackEndToEndSelection drives the no-lease selection through real ACCEPTED/NEW
 // applies (SyncEngine.ApplyBlock) over the real DA owner and Services: the
 // bound OPEN Service admits one decrease per publication, AnnounceBlock decreases
-// nothing, a CLOSED current binding refuses with zero DA effects and no fallback while
-// the apply still returns ACCEPTED/NEW, the closed Service's retained
+// nothing, a CLOSED current binding changes no count while the apply still returns
+// ACCEPTED/NEW, the closed Service's retained
 // AnnounceBlock returns "service already closed", and a fresh Service binds and decreases.
 func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 	source := newTestHarness(t, 7, "127.0.0.1:0", nil)
@@ -763,8 +763,8 @@ func awaitParkedOnAdmissionGuard(t *testing.T, caller string) {
 
 // TestDATTLCallbackEndToEndEntryInsideTheHold drives SyncEngine.ApplyBlock through the production
 // selection and, inside the selected entry, starts a ReleasePeerQuotaKey and a DA admission: both
-// park on the admission guard before the entry proceeds and return only after the transition
-// releases it, so the entry runs inside the exclusive hold (RUBIN_COMPACT_BLOCKS.md Section 5);
+// park on the admission guard before the entry proceeds and proceed after the apply returns, so
+// the entry runs inside the exclusive hold (RUBIN_COMPACT_BLOCKS.md Section 5);
 // the admitted record is created after the decrease, so it is still retained after two more.
 func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
@@ -930,12 +930,14 @@ func TestDATTLCallbackEndToEndSnapshotBeforePublication(t *testing.T) {
 }
 
 // TestDATTLCallbackEndToEndNoGuardReacquisition drives one ACCEPTED/NEW publication through the
-// production selection and the real in-guard body: SyncEngine.ApplyBlock returns within the
-// watchdog, so the body never waits for the admission guard the transition holds exclusively.
+// production selection and the real in-guard body: the entry is attempted once and ApplyBlock
+// returns within the watchdog, so the body never waits for the guard the transition holds.
 func TestDATTLCallbackEndToEndNoGuardReacquisition(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	probe := newSelectionProbe(t, h, source, 0xeb)
+	entry := &wrappedTTLEntry{inner: h.service}
+	h.syncEngine.PublishDATTLBinding(entry)
 	type result struct {
 		summary *node.ChainStateConnectSummary
 		err     error
@@ -951,6 +953,7 @@ func TestDATTLCallbackEndToEndNoGuardReacquisition(t *testing.T) {
 	case <-time.After(lifecycleWatchdog):
 		t.Fatalf("ApplyBlock did not return within %s: the TTL body waited for the held admission guard", lifecycleWatchdog)
 	}
+	require(t, entry.attempts.Load() == 1, "entry attempts=%d, want 1", entry.attempts.Load())
 }
 
 // closeRaceEntry is a binding over S1's own entry that, on its one attempt, starts the race and

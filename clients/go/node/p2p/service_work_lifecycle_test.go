@@ -1155,8 +1155,8 @@ func primeDATTLToOne(t *testing.T, source, h *testHarness, p *peer, daID [32]byt
 }
 
 // TestRelayedBlockPostReturnMakesNoTTLDecrease pins that the relayed-block post-return effects
-// decrease no TTL count, for an ordinary and a terminal-shaped result: the record primed to
-// count 1 survives both, and the seen-set effect still lands.
+// decrease no TTL count, for an ordinary and a terminal-shaped result: the record primed to count
+// 1 survives both, the next accepted block expires it, and the seen-set effect lands.
 func TestRelayedBlockPostReturnMakesNoTTLDecrease(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -1166,6 +1166,8 @@ func TestRelayedBlockPostReturnMakesNoTTLDecrease(t *testing.T) {
 	_, _ = p.acceptRelayedBlockResult(summary.BlockHash, summary, errors.New("storage persistence fault"))
 	f.requireRetained(commit, "the record no post-return effect decreased")
 	requireEqual(t, h.service.blockSeen.Has(summary.BlockHash), true, "the seen-set entry the post-return effects added")
+	relayAccepted(t, p, source, 3)
+	f.requireAbsent(commit, "count 1: the next accepted block's in-guard decrease expired the record")
 }
 
 // latchDAHarness GENUINELY latches h's engine, which then RETAINS ChainState.admissionMu
@@ -1231,8 +1233,8 @@ func TestLocalDATerminalWorkDrains(t *testing.T) {
 	requireReturned(t, lifecycleClose(retained.service), "Service.Close after retained terminal prefetch")
 }
 
-// TestLatchedEngineAnnounceBlockReturns pins that AnnounceBlock on a latched engine returns (it
-// reaches no admission fence or TTL work) and still adds the seen-set entry.
+// TestLatchedEngineAnnounceBlockReturns pins that AnnounceBlock on a latched engine returns
+// without waiting on the held admission guard and still adds the seen-set entry.
 func TestLatchedEngineAnnounceBlockReturns(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -1262,9 +1264,9 @@ func TestLatchedEngineSkipsThePeerQuotaRelease(t *testing.T) {
 	requireEqual(t, h.service.PeerLifecycleExits(), exits+1, "the lifecycle exit the completed teardown recorded")
 }
 
-// TestResolvedOrphanPostReturnMakesNoTTLDecrease pins the resolved-orphan entry: its
-// call site of noteAcceptedBlock decreases no TTL count for an ordinary or a terminal-shaped
-// result, and a terminal result still stops the walk.
+// TestResolvedOrphanPostReturnMakesNoTTLDecrease pins that the resolved-orphan entry decreases no
+// TTL count for an ordinary or a terminal-shaped result (the next accepted block then expires
+// the record) and that a terminal result still stops the walk.
 func TestResolvedOrphanPostReturnMakesNoTTLDecrease(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -1273,6 +1275,8 @@ func TestResolvedOrphanPostReturnMakesNoTTLDecrease(t *testing.T) {
 	requireEqual(t, h.service.acceptResolvedOrphanResult(p, summary.BlockHash, summary.BlockHash, summary, nil), false, "the ordinary resolved-orphan result")
 	requireEqual(t, h.service.acceptResolvedOrphanResult(p, summary.BlockHash, summary.BlockHash, summary, errors.New("storage persistence fault")), true, "the resolved-orphan walk stop a terminal result forces")
 	f.requireRetained(commit, "the record no post-return effect decreased")
+	relayAccepted(t, p, source, 3)
+	f.requireAbsent(commit, "count 1: the next accepted block's in-guard decrease expired the record")
 }
 
 // TestAnnounceTxLocalDAWorkLifecycle: the DA arm runs entirely inside AnnounceTx's original

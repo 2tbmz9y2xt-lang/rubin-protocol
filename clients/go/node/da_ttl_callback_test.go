@@ -321,10 +321,9 @@ func daTTLIndexMismatch(relay *DARelayState) string {
 	return ""
 }
 
-// TestDATTLCallbackBodyRefusalArms pins one refusal per check arm: each case corrupts
-// one stored value, asserts the body's returned error, and asserts that the DA image, the owner
-// and the State A/B index are unchanged after the refusal (the index also exact whenever the
-// row's corruption left it exact before the body).
+// TestDATTLCallbackBodyRefusalArms pins one refusal per check arm: each case corrupts one stored
+// value, asserts the body's returned error, and asserts that the DA image, the owner and the
+// State A/B index are unchanged (the index also exact whenever the corruption left it exact).
 func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 	for _, row := range []struct {
 		name    string
@@ -497,8 +496,8 @@ func TestDATTLCallbackBodyUnboundRelay(t *testing.T) {
 	}
 }
 
-// TestDATTLCallbackBodyWalksOnlyStateAB pins the walk bound: a State C record that would fail every
-// owner-ready check is never visited, and the State A/B index stays exact across admission,
+// TestDATTLCallbackBodyWalksOnlyStateAB pins the walk bound: a State C record whose stored value
+// the owner-ready check refuses is never visited, and the State A/B index stays exact across admission,
 // decrease, expiry and the whole-clone ReleasePeerQuotaKey swap.
 func TestDATTLCallbackBodyWalksOnlyStateAB(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
@@ -584,11 +583,10 @@ func requireDATTLIndexStep(t *testing.T, f *daNonReplayFixture, step string) {
 	requireDATTLIndexExact(t, f.relay)
 }
 
-// TestDATTLCallbackIndexProductionPaths pins the index on these production paths that
-// publish a record row: orphan-chunk staging (State A created and grown), commit staging
-// (State A to State B), DA completion (State B to State C), the PEER quota cleanup removal and
-// the D1 projection publication (TestDATTLCallbackIndexD1Projection). It does not run the
-// capacity-victim removal of a DA complete commit (da_complete_commit.go).
+// TestDATTLCallbackIndexProductionPaths pins the index across orphan-chunk staging (State A
+// created and grown), commit staging (State A to State B), DA completion (State B to State C)
+// and the PEER quota cleanup removal; the D1 projection is TestDATTLCallbackIndexD1Projection.
+// It does not run the capacity-victim removal of a DA complete commit (da_complete_commit.go).
 func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
 	f := newDANonReplayFixture(t, 8)
 	grown, staged, completed, released := [32]byte{0xd1}, [32]byte{0xd2}, [32]byte{0xd3}, [32]byte{0xd4}
@@ -618,9 +616,8 @@ func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
 // TestDATTLCallbackIndexD1Projection pins the index on the D1 projection: one
 // buildCanonicalDAOwnerCandidates pass over a snapshot taken as capture() takes it re-puts the
 // State A survivor, removes the included State C record and removes the State B record whose
-// input the final chain spent, and D1 publishes that clone. The O1 half is not published, so the
-// live owner keeps the removed members' claims; the body reads only the State A record's claims.
-// State C is completed through the real admission, which releases its admission reader.
+// input the final chain spent, and D1 publishes that clone. The O1 half is not published. State C
+// is completed through the real admission, which releases its admission reader.
 func TestDATTLCallbackIndexD1Projection(t *testing.T) {
 	x := canonicalDAOwnerFixtureOver(t, newDANonReplayFixture(t, 10))
 	x.stateC = daRelayTestID(0x33)
@@ -659,8 +656,8 @@ func requireDATTLState(t *testing.T, f *daNonReplayFixture, daID [32]byte, want 
 	}
 }
 
-// TestDATTLCallbackEmptiedBucketDropped pins that removing the last State A/B record leaves
-// no empty State A/B bucket behind, like every member bucket.
+// TestDATTLCallbackEmptiedBucketDropped pins that removing the last State A/B record leaves no
+// empty State A/B bucket behind.
 func TestDATTLCallbackEmptiedBucketDropped(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	f.setOwnerReadyTTL(r.stateAID, 1)
@@ -755,12 +752,11 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	require(t, nilEngine.DATTLBindingService() == nil && nilEngine.enterSelectedDATTL(decrease) == nil && decreases == 0, "nil engine binding")
 }
 
-// TestDATTLCallbackBindingChangesNoDAState pins that binding and selection change nothing over a populated relay
-// (State A and B at nonzero counts with owner tokens and a prefetch reservation, State C): the
-// first and a later ClaimDARelayState, publication, the identity read and an absent, refused or
-// admitted selection whose decrease does nothing change no DA record, count, locator, accounting
-// value, prefetch reservation or pending-outpoint owner claim, and the later claim keeps the
-// first claimant's hook.
+// TestDATTLCallbackBindingChangesNoDAState pins that binding and selection change nothing over a
+// populated relay (State A and B at nonzero counts with owner tokens and a prefetch reservation,
+// State C): the first and a later ClaimDARelayState, publication, the identity read and an absent,
+// refused or admitted selection whose decrease does nothing change no DA record, count, locator,
+// accounting value, prefetch reservation or owner claim, and the later claim keeps the first hook.
 func TestDATTLCallbackBindingChangesNoDAState(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	engine := &SyncEngine{chainState: f.state, daRelay: f.relay}
@@ -796,8 +792,6 @@ func TestDATTLCallbackBindingChangesNoDAState(t *testing.T) {
 // stores S_i in increasing i and then records i, while selections run concurrently. A selection
 // reads the recorded index before and after it and must select an S_j with before <= j <=
 // after+1 (S_after+1 may be published and not yet recorded), so a cached or stale binding fails.
-// A torn Service/entry pair is structurally impossible: the binding is one interface value
-// behind one atomic pointer, and the entry is that Service's own method.
 func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	const publications = 400
@@ -1151,7 +1145,7 @@ func TestDATTLCallbackBodyPanicKeepsWholeImage(t *testing.T) {
 }
 
 // TestDATTLCallbackEndToEndBodyPanic drives one ACCEPTED/NEW SyncEngine.ApplyBlock through the
-// production selection into a registered no-lease entry and the real body, with a panic injected
+// production selection into a package-test entry holding one registered lease and the real body, with a panic injected
 // at each of the two body points: the panic reaches the apply caller unrecovered, the lease is
 // released exactly once so a wait on that lease returns, the DA relay and owner mutexes are
 // free, the image is the complete old or applied one, and the admission guard stays held by the
