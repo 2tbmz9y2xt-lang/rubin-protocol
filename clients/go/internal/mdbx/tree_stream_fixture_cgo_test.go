@@ -6985,17 +6985,18 @@ func psfCombinedUTXOCap(t *testing.T) {
 		s, _, o := psStore(t)
 		raw := append(obsoleteGenerationLiteral(9), 0x44)
 		treeNativeSeed(t, s, 1, raw, []byte{0xde})
-		backing := make([]byte, 44*n)
-		mutations := make([]Mutation, n)
-		for i := range mutations {
-			k := backing[44*i : 44*(i+1) : 44*(i+1)]
-			binary.BigEndian.PutUint64(k, 1000+uint64(i))
-			mutations[i] = Mutation{DBI: TreeSchemaV1DBIs()[1], Key: k, BeforePresent: true, AfterKind: AfterAbsent}
-		}
 		grant := psPageGrant + uint64(n)*(uint64(unsafe.Sizeof(Mutation{}))+44)
 		var r tsResult
 		evidence := ctxTreeFault(t, s, 12, 0, []byte{9}, func() {
 			r = psRunG(t, s, o, LaneOperation, grant, func(reader *Reader) TreeOperationV1 {
+				// The key backing and Mutations are created under the grant held for them.
+				backing := make([]byte, 44*n)
+				mutations := make([]Mutation, n)
+				for i := range mutations {
+					k := backing[44*i : 44*(i+1) : 44*(i+1)]
+					binary.BigEndian.PutUint64(k, 1000+uint64(i))
+					mutations[i] = Mutation{DBI: TreeSchemaV1DBIs()[1], Key: k, BeforePresent: true, AfterKind: AfterAbsent}
+				}
 				page, err := reader.ObsoleteGenerationPageV1(9, ObsoleteUTXOV1, nil, 1)
 				mustEnvironment(t, err)
 				if len(page.Rows) != 1 {
@@ -7439,6 +7440,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("domain-mismatch-then-read-error", psfDomainMismatchThenError)
 	t.Run("point-mismatch-then-capacity", psfPointMismatchThenCapacity)
 	t.Run("retained", psfRetained)
+	t.Run("witness-bytes", psfWitnessBytes)
 	t.Run("callback-cleanup", psfCallbackCleanup)
 	t.Run("selector-alias", func(t *testing.T) {
 		// At the first write observation the caller rewrites its own LargeConsulted value to an absent body; the body then
@@ -7769,6 +7771,49 @@ func psfUndoScopeF(t *testing.T) uint64 {
 	return psF(1, 0, 3, 2, 2, 0, k, u)
 }
 
+// psfWitnessBytes repeats the second one-row undo page's witness, whose domain has a prefix, an after
+// bound, a last key and two points. One byte below the metadata envelope counting every one of those
+// bytes refuses with the capacity singleton before the duplicate-witness check; at the envelope that
+// check refuses with "invalid Update Batch".
+func psfWitnessBytes(t *testing.T) {
+	build := func(reader *Reader) TreeOperationV1 {
+		index, err := reader.ObsoleteGenerationPageV1(9, 2, nil, 1440)
+		mustEnvironment(t, err)
+		first, err := reader.ObsoleteUndoPageV1(index.Rows[0], nil, 1)
+		mustEnvironment(t, err)
+		page, err := reader.ObsoleteUndoPageV1(index.Rows[0], first.Next, 1)
+		mustEnvironment(t, err)
+		if len(page.Rows) != 1 || len(first.Next) != 32 {
+			t.Fatalf("scene undo page rows %d after %d", len(page.Rows), len(first.Next))
+		}
+		return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: page.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness, page.Witness}}}
+	}
+	// Per witness: prefix 32 (entry hash), after 32 (first family key), last 34 (third family key),
+	// index point key 16 and header point key 32. The deleted row is the 33-byte second family key.
+	const prefix, after, last, indexKey, headerKey = 32, 32, 34, 16, 32
+	f := psF(0, 0, 1, 2, 4, 0, 33, 2*(prefix+after+last+indexKey+headerKey))
+	for _, capacity := range []bool{true, false} {
+		sc := psfNew(t)
+		_, undo := psfUndo(t, sc.s)
+		grant := f
+		if capacity {
+			grant--
+		}
+		r := psRun(t, sc.s, reservationFilled(t, psPageGrant+grant), LaneOperation, build)
+		if sc.s.state != storeOPEN {
+			t.Fatalf("scope metadata high-water differs: capacity %v Store %s", capacity, sc.s.state)
+		}
+		r.tuple(t, 1, 1, -1)
+		if capacity && any(r.err) != any(errOperationReservationCapacity) {
+			t.Fatalf("scope metadata high-water differs: one byte below the envelope %v", r.err)
+		}
+		if !capacity {
+			treeNativeError(t, r.err, "update", "InvalidInput", 22, "invalid Update Batch", nil)
+		}
+		psfRaw(t, sc.s, 5, undo[1], []byte{1})
+	}
+}
+
 // Mode 15 retains the readback abort (thread mismatch); the scope operation keeps that retained
 // ownership, releases its grant and the next operation reuses the terminal refusal without a callback.
 func psfRetained(t *testing.T) {
@@ -7779,6 +7824,9 @@ func psfRetained(t *testing.T) {
 	if sc.s.state != storePOISONEDTHREAD || sc.s.txn == nil || any(sc.s.terminal) != any(r.err) || r.err == nil {
 		t.Fatalf("scope next operation differs: retained %s %v", sc.s.state, r.err)
 	}
+	// The commit crossed and readback selected NEW before its abort failed; the readback cause is that abort.
+	r.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	tcPoisonedCause(t, r.err)
 	if reservationLive(sc.o) != 0 {
 		t.Fatalf("scope grant leaked: retained live%d", reservationLive(sc.o))
 	}
@@ -7790,6 +7838,9 @@ func psfRetained(t *testing.T) {
 		}
 		return nil
 	}))
+	// Releasing the retained thread frees the writer lock; the reopened Store shows the committed image.
+	mustEnvironment(t, fixtureLargeRelease(sc.s))
+	sc.image(t, tsReopen(t, sc.s, sc.path), true)
 }
 
 // psfCallbackCleanup crosses each callback application error (plain, wrapped, typed-nil) with a consumed

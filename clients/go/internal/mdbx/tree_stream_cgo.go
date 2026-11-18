@@ -40,9 +40,9 @@ type TreePairV1 struct {
 	// on the caller's own charges. The engine copies the descriptor at step 5 and never reads the caller's value
 	// after; the caller must keep *ContextConsulted unchanged from the callback's return until that copy.
 	ContextConsulted *CanonicalContextWindowV1
-	// ObsoleteDeletes, ObsoleteConsulted and LargeConsulted hold tokens and selectors read from this
-	// operation's ORIGINAL OLD Reader only (nil and empty are equivalent) and are read only after the
-	// callback. Any nonempty field makes the operation a physical-scope Pair, which needs a
+	// ObsoleteDeletes and ObsoleteConsulted hold tokens read from this operation's ORIGINAL OLD Reader
+	// only; LargeConsulted holds plain (Kind, Hash) selector values. For all three nil and empty are
+	// equivalent, and they are read only after the callback. Any nonempty field makes the operation a physical-scope Pair, which needs a
 	// LaneOperation account, no primitives, Proof, HeaderSlot, EntryInventory or ContextConsulted,
 	// zero PrepaidReadBytes and at least one Mutation or ObsoleteDeletes row. After the ordinary Pair checks, which keep their own refusals,
 	// the refusals are, in order: any other shape is "invalid Update Batch"; more than 2391106
