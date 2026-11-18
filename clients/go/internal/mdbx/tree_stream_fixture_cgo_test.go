@@ -7769,6 +7769,32 @@ func psfCombinedUTXOCap(t *testing.T) {
 	}
 }
 
+// psfCollectUndo pages generation 9's first undo family into arrays created once with capacity rows and
+// pages; a family that needs more fails instead of growing them.
+func psfCollectUndo(t *testing.T, reader *Reader, rows, pages int) ([]ObsoleteRowV1, []ObsoletePageWitnessV1) {
+	t.Helper()
+	index := obsoleteIndexPage(t, reader, 9).Rows[0]
+	deletes := make([]ObsoleteRowV1, 0, rows)
+	witnesses := make([]ObsoletePageWitnessV1, 0, pages)
+	var next []byte
+	for {
+		page, err := reader.ObsoleteUndoPageV1(index, next, 1440)
+		mustEnvironment(t, err)
+		if uint8(page.Projection) != 3 || page.Witness == (ObsoletePageWitnessV1{}) {
+			t.Fatal("own projection lost during sequential pages")
+		}
+		if len(page.Rows) > cap(deletes)-len(deletes) || len(witnesses) == cap(witnesses) {
+			t.Fatalf("undo family exceeds %d rows or %d pages", rows, pages)
+		}
+		deletes = append(deletes, page.Rows...)
+		witnesses = append(witnesses, page.Witness)
+		if uint8(page.Stop) == 1 {
+			return deletes, witnesses
+		}
+		next = page.Next
+	}
+}
+
 // Raw undo rows outside the 33-byte manifest form share the undo entry delete cap 414634: one
 // generation-9 family with 414635 such rows exceeds it after the metadata charge and aborts ORIGINAL
 // OLD; 414634 such rows pass the cap.
@@ -7786,11 +7812,11 @@ func psfUndoEntryCap(t *testing.T) {
 			var r tsResult
 			evidence := ctxTreeFault(t, s, 12, 0, []byte{9}, func() {
 				r = psRunG(t, s, o, LaneOperation, grant, func(reader *Reader) TreeOperationV1 {
-					batch := obsoleteCollectUndo(t, reader, obsoleteIndexPage(t, reader, 9).Rows[0])
-					if len(batch.ObsoleteDeletes) != n+1 {
-						t.Fatalf("undo family rows%d, want%d", len(batch.ObsoleteDeletes), n+1)
+					deletes, witnesses := psfCollectUndo(t, reader, n+1, int(pages))
+					if len(deletes) != n+1 {
+						t.Fatalf("undo family rows%d, want%d", len(deletes), n+1)
 					}
-					return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: batch.ObsoleteDeletes, ObsoleteConsulted: batch.ObsoleteConsulted}}
+					return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: deletes, ObsoleteConsulted: witnesses}}
 				})
 			})
 			if n == 414_635 {
@@ -7952,8 +7978,21 @@ func psfLargeDomains(t *testing.T) {
 	for i, k := range undo {
 		psfRaw(t, reopened, 5, k, []byte{byte(i)})
 	}
-	psfRaw(t, reopened, 4, []byte{0xb0, 2}, nil)
-	psfRaw(t, reopened, 5, empty[:], nil)
+	absent := selectors[1].Hash
+	psfRaw(t, reopened, 4, absent[:], nil)
+	psfEmptyFamily(t, reopened, empty)
+}
+
+// psfEmptyFamily reads the whole undo prefix hash and requires no row under it.
+func psfEmptyFamily(t *testing.T, s *Store, hash [32]byte) {
+	t.Helper()
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		page, err := r.PrefixPage(TreeSchemaV1DBIs()[5], bytes.Clone(hash[:]), nil, 1, 65637)
+		if err != nil || len(page.Rows) != 0 {
+			t.Fatalf("scope persisted image differs: undo family %x rows %d: %v", hash, len(page.Rows), err)
+		}
+		return nil
+	}))
 }
 
 // A raw undo target inside the selected family disappears once; every nontarget member stays equal.
@@ -8629,6 +8668,7 @@ func psfCallbackCleanup(t *testing.T) {
 				}
 				return nil
 			}))
+			mustEnvironment(t, fixtureLargeRelease(sc.s))
 		}
 		psfCallbackPanic(t, mode, marker)
 		psfCallbackGoexit(t, mode)
@@ -8656,6 +8696,7 @@ func psfCleanupTerminal(t *testing.T, sc *psfScene, mode uint32, kind string, ev
 		}
 		return nil
 	}))
+	mustEnvironment(t, fixtureLargeRelease(sc.s))
 }
 
 // psfAbortCause finds the OLD abort cause each cleanup mode injects: mode 9 consumes with EIO,

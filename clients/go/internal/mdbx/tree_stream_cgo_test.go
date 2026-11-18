@@ -4988,14 +4988,14 @@ func psShape(t *testing.T) {
 		{"large-only-tree", TreeOperation, func(op *TreeOperationV1) {
 			op.Pair.ObsoleteDeletes, op.Pair.ObsoleteConsulted = nil, nil
 			op.Pair.Mutations = []Mutation{tsTarget(5)}
-			op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: LargeImageBlockBodyV1}}
+			op.Pair.LargeConsulted = append(op.Pair.LargeConsulted, LargeImageSelectorV1{Kind: LargeImageBlockBodyV1})
 		}},
 	}
 	for _, row := range edits {
 		r := psRunG(t, s, o, row.kind, psPageGrant+33*2882, func(reader *Reader) TreeOperationV1 {
 			op := psRawDelete(t, 9)(reader)
+			op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881, 2882)
 			row.edit(&op)
-			op.Pair.LargeConsulted = append(op.Pair.LargeConsulted, make([]LargeImageSelectorV1, 2881)...)
 			return op
 		})
 		if s.state != storeOPEN || !treeNativeIsInvalid(r.err) {
@@ -5173,6 +5173,14 @@ func psOverlap(t *testing.T) {
 	psRefused(t, s, r, false, "consulted overlap")
 }
 
+// psSelectorRun fills run with selectors of kind whose hashes are 0..len(run)-1.
+func psSelectorRun(run []LargeImageSelectorV1, kind LargeImageKindV1) {
+	for i := range run {
+		run[i].Kind = kind
+		binary.BigEndian.PutUint32(run[i].Hash[:], uint32(i))
+	}
+}
+
 // Count capacity precedes unknown-kind/order and token content; zero hash is legal.
 func psCounts(t *testing.T) {
 	s, _, o := psStore(t)
@@ -5184,21 +5192,23 @@ func psCounts(t *testing.T) {
 		})
 		psRefused(t, s, r, capacity, label)
 	}
-	selectors := func(kind LargeImageKindV1, n int) []LargeImageSelectorV1 {
-		out := make([]LargeImageSelectorV1, n)
-		for i := range out {
-			out[i] = LargeImageSelectorV1{Kind: kind}
-			binary.BigEndian.PutUint32(out[i].Hash[:], uint32(i))
+	// selectors builds one exactly sized array: the lead kinds, then bodies and families with hashes 0..n-1.
+	selectors := func(bodies, families int, lead ...LargeImageKindV1) []LargeImageSelectorV1 {
+		out := make([]LargeImageSelectorV1, len(lead)+bodies+families)
+		for i, kind := range lead {
+			out[i].Kind = kind
 		}
+		psSelectorRun(out[len(lead):len(lead)+bodies], LargeImageBlockBodyV1)
+		psSelectorRun(out[len(lead)+bodies:], LargeImageUndoFamilyV1)
 		return out
 	}
 	run("2881", true, 33*2881, func(op *TreeOperationV1) {
-		op.Pair.LargeConsulted = append(append([]LargeImageSelectorV1{{Kind: 0}}, selectors(1, 1440)...), selectors(2, 1440)...)
+		op.Pair.LargeConsulted = selectors(1440, 1440, 0)
 	})
 	run("1441 bodies", true, 33*1442, func(op *TreeOperationV1) {
-		op.Pair.LargeConsulted = append([]LargeImageSelectorV1{{Kind: 255}}, selectors(1, 1441)...)
+		op.Pair.LargeConsulted = selectors(1441, 0, 255)
 	})
-	run("1441 families", true, 33*1441, func(op *TreeOperationV1) { op.Pair.LargeConsulted = selectors(2, 1441) })
+	run("1441 families", true, 33*1441, func(op *TreeOperationV1) { op.Pair.LargeConsulted = selectors(0, 1441) })
 	for _, kind := range []LargeImageKindV1{0, 3, 255} {
 		run(fmt.Sprint("kind", kind), false, 0, func(op *TreeOperationV1) {
 			op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: kind}}
@@ -5222,7 +5232,7 @@ func psCounts(t *testing.T) {
 	}
 	run("order", false, 0, func(op *TreeOperationV1) { op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 2}, {Kind: 1}} })
 	run("duplicate", false, 0, func(op *TreeOperationV1) {
-		op.Pair.LargeConsulted = selectors(1, 1)[:1:1]
+		op.Pair.LargeConsulted = selectors(1, 0)[:1:1]
 		op.Pair.LargeConsulted = append(op.Pair.LargeConsulted, op.Pair.LargeConsulted[0])
 	})
 	run("deletes plus witnesses", true, 8*maxUpdateMutations, func(op *TreeOperationV1) {
@@ -5233,20 +5243,20 @@ func psCounts(t *testing.T) {
 		op.Pair.ObsoleteDeletes = make([]ObsoleteRowV1, maxUpdateMutations-1)
 	})
 	run("2880", false, 33*2880, func(op *TreeOperationV1) {
-		op.Pair.LargeConsulted = append(append([]LargeImageSelectorV1{{Kind: 0}}, selectors(1, 1440)...), selectors(2, 1439)...)
+		op.Pair.LargeConsulted = selectors(1440, 1439, 0)
 	})
 	run("1440 bodies", false, 33*1441, func(op *TreeOperationV1) {
-		op.Pair.LargeConsulted = append([]LargeImageSelectorV1{{Kind: 255}}, selectors(1, 1440)...)
+		op.Pair.LargeConsulted = selectors(1440, 0, 255)
 	})
 	run("1440 families", false, 33*1441, func(op *TreeOperationV1) {
-		op.Pair.LargeConsulted = append([]LargeImageSelectorV1{{Kind: 3}}, selectors(2, 1440)...)
+		op.Pair.LargeConsulted = selectors(0, 1440, 3)
 	})
 	// Counts 1 and 1440 of one known kind commit; the first selector's hash is zero.
 	for _, n := range []int{1, 1440} {
 		s2, _, o2 := psStore(t)
 		r := psRunG(t, s2, o2, LaneOperation, psPageGrant+33*uint64(n), func(reader *Reader) TreeOperationV1 {
 			op := psRawDelete(t, 9)(reader)
-			op.Pair.LargeConsulted = selectors(1, n)
+			op.Pair.LargeConsulted = selectors(n, 0)
 			return op
 		})
 		r.tuple(t, 2, 3, -1)
@@ -5311,11 +5321,18 @@ func psCombinedCap(t *testing.T) {
 			n = 16384
 		}
 		s, _, o := psStore(t)
+		// The Mutations and one key/literal backing are each created once at their final size.
 		mutations := func() []Mutation {
 			out := make([]Mutation, n)
+			backing := make([]byte, 25*n)
 			for i := range out {
 				g := 1000 + uint64(i)
-				out[i] = Mutation{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(g), AfterKind: 2, Literal: tsCounterLiteral(g, 1)}
+				row := backing[25*i : 25*(i+1) : 25*(i+1)]
+				row[0] = 0x10
+				binary.BigEndian.PutUint64(row[1:9], g)
+				binary.BigEndian.PutUint64(row[9:17], g)
+				binary.BigEndian.PutUint64(row[17:25], 1)
+				out[i] = Mutation{DBI: TreeSchemaV1DBIs()[0], Key: row[:9:9], AfterKind: 2, Literal: row[9:25:25]}
 			}
 			return out
 		}
