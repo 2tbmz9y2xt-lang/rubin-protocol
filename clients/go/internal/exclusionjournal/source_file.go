@@ -198,27 +198,26 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry) (sourc
 }
 
 func (o *SourceOwnerV1) includeAbsent(used sourceUsage, missing int, absentRelease *sourceRelease) (sourceUsage, error) {
-	var debtBytes, releaseBytes uint64
+	var absentBytes uint64
 	if o.debt != nil && o.debt.removed {
 		used.files++
-		debtBytes = o.debt.size
+		absentBytes = o.debt.size
 		used.stage = o.debt
 	}
 	if absentRelease != nil {
 		used.files++
-		releaseBytes = absentRelease.size
+		absentBytes += absentRelease.size
 		if o.live[absentRelease.name] != nil {
 			missing--
 		}
 	}
-	remaining := o.limits.Bytes - used.bytes
-	if debtBytes > remaining || releaseBytes > remaining-debtBytes || used.files > o.limits.Files {
+	if absentBytes > o.limits.Bytes-used.bytes || used.files > o.limits.Files {
 		return sourceUsage{}, ErrCapacityV1
 	}
 	if missing != 0 {
 		return sourceUsage{}, ErrIntegrityV1
 	}
-	used.bytes += debtBytes + releaseBytes
+	used.bytes += absentBytes
 	return used, nil
 }
 

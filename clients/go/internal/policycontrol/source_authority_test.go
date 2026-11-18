@@ -94,7 +94,7 @@ func TestSourceAuthorityCloseOnly(t *testing.T) {
 	func() {
 		defer func() {
 			caught := recover()
-			sourceAuthorityFailIf(t, caught != cause, "owner claim panic: %v", caught)
+			sourceAuthorityFailIf(t, !sameDependentValue(caught, cause), "owner claim panic: %v", caught)
 		}()
 		claim(one, func() error { releaseDuringClaim(); panic(cause) }, nil)
 	}()

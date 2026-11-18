@@ -500,7 +500,7 @@ func TestSourceExpiryWaitsForAdmittedRead(t *testing.T) {
 				case <-entered:
 				case <-allow:
 				case err := <-readDone:
-					return fmt.Errorf("read ended before entering its backing: %v", err)
+					return fmt.Errorf("read ended before entering its backing: %w", err)
 				}
 				close(visitorLeft)
 				return io.EOF
