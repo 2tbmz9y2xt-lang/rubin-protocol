@@ -4984,6 +4984,7 @@ func psShape(t *testing.T) {
 		{"entry", LaneOperation, func(op *TreeOperationV1) { op.Pair.EntryInventory = &EntryInventoryV1{} }},
 		{"proof", LaneOperation, func(op *TreeOperationV1) { op.Proof = tsProofNil }},
 		{"slot", LaneOperation, func(op *TreeOperationV1) { op.HeaderSlot = &TreeHeaderSlotV1{} }},
+		{"preserve-replay", LaneOperation, func(op *TreeOperationV1) { op.Pair.PreserveReplayObservations = true }},
 		{"large-only-tree", TreeOperation, func(op *TreeOperationV1) {
 			op.Pair.ObsoleteDeletes, op.Pair.ObsoleteConsulted = nil, nil
 			op.Pair.Mutations = []Mutation{tsTarget(5)}

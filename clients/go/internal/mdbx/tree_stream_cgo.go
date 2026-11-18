@@ -48,7 +48,7 @@ type TreePairV1 struct {
 	// only; LargeConsulted holds plain (Kind, Hash) selector values. For all three nil and empty are
 	// equivalent, and they are read only after the callback. Any nonempty field makes the operation a physical-scope Pair, which needs a
 	// LaneOperation account, no primitives, Proof, HeaderSlot, EntryInventory or ContextConsulted,
-	// zero PrepaidReadBytes and at least one Mutation or ObsoleteDeletes row. After the ordinary Pair checks, which keep their own refusals,
+	// zero PrepaidReadBytes, PreserveReplayObservations false and at least one Mutation or ObsoleteDeletes row. After the ordinary Pair checks, which keep their own refusals,
 	// the refusals are, in order: any other shape is "invalid Update Batch"; more than 2391106
 	// deletes plus witnesses, more than 2880 selectors or more than 1440 of one kind is "Update Batch
 	// exceeds bound"; a token not from this operation's Reader is "invalid Update Batch"; after the
@@ -612,7 +612,7 @@ func treeScopeShapeV1(op TreeOperationV1, account *OperationAccount) bool {
 		return false
 	}
 	p := &op.Pair
-	if p.EntryInventory != nil || p.ContextConsulted != nil || p.PrepaidReadBytes != 0 {
+	if p.EntryInventory != nil || p.ContextConsulted != nil || p.PrepaidReadBytes != 0 || p.PreserveReplayObservations {
 		return false
 	}
 	return account.shared.ceiling == LaneMaxBytes
