@@ -702,7 +702,8 @@ func (r *daTTLRecordingService) EnterDATTLMutation(decrease func() error) error 
 
 // TestDATTLCallbackBindingSelection pins the binding API: absent invokes nothing,
 // the latest publication wins, a snapshot taken before a later publication keeps its Service,
-// the identity read follows publications, a refusal is returned unchanged with no fallback,
+// the identity read follows publications and returns while the DA relay and owner mutexes are
+// held, a refusal is returned unchanged with no fallback,
 // and a nil publication leaves the binding unchanged.
 func TestDATTLCallbackBindingSelection(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
@@ -721,6 +722,18 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	require(t, f.engine.DATTLBindingService() == DATTLMutationService(s1), "nil publication replaced S1")
 	f.engine.PublishDATTLBinding(s2)
 	require(t, f.engine.DATTLBindingService() == DATTLMutationService(s2), "identity read after S2 publication")
+	f.engine.daRelay.mu.Lock()
+	f.owner.mu.Lock()
+	read := make(chan DATTLMutationService, 1)
+	go func() { read <- f.engine.DATTLBindingService() }()
+	select {
+	case got := <-read:
+		require(t, got == DATTLMutationService(s2), "identity read under held DA locks=%v, want S2", got)
+	case <-time.After(5 * time.Second):
+		t.Fatal("identity read waited on the DA relay or owner mutex")
+	}
+	f.owner.mu.Unlock()
+	f.engine.daRelay.mu.Unlock()
 	require(t, f.engine.enterSelectedDATTL(decrease) == nil && slices.Equal(attempts, []string{"S2"}) && decreases == 1, "latest binding: attempts=%v decreases=%d", attempts, decreases)
 
 	// S2 binds after the selection snapshot and before the registration attempt.
