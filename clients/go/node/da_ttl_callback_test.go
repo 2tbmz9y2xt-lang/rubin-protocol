@@ -102,8 +102,9 @@ func newDATTLCallbackRecords(t *testing.T) (*daNonReplayFixture, daTTLCallbackRe
 	return f, r
 }
 
-// requireDATTLOutsideSelectedUnchanged checks, outside the selected records: every other record, every locator of another record, and every owner claim and
-// outpoint row whose token no selected member holds are unchanged.
+// requireDATTLOutsideSelectedUnchanged checks, outside the selected records: every other
+// record, every locator of another record, and every owner claim and outpoint row whose token
+// no selected member holds are unchanged.
 func requireDATTLOutsideSelectedUnchanged(t *testing.T, before, after daRelayStateView, ownerBefore, ownerAfter *PendingOutpointOwner, selected ...[32]byte) {
 	t.Helper()
 	isSelected := map[[32]byte]bool{}
@@ -834,9 +835,10 @@ func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 }
 
 // TestDATTLCallbackRunsInsideTheTransitionHold pins the TTL path's guard order: with the
-// admission guard held exclusively, a ReleasePeerQuotaKey started first parks on the guard, the
-// in-guard TTL body completes under that same hold, the writer does not run before the release,
-// and after it the writer runs against the decreased image without losing it.
+// admission guard held exclusively, a ReleasePeerQuotaKey and a DA admission started first park
+// on the guard, the in-guard TTL body completes under that same hold, neither writer runs before
+// the release, and after it both run against the decreased image without losing it: the admitted
+// record is created at the full orphan TTL and the decreased records keep count 2.
 func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	f.state.admissionMu.Lock()
@@ -846,9 +848,13 @@ func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
 			f.state.admissionMu.Unlock()
 		}
 	}()
-	done := make(chan string, 1)
+	done := make(chan string, 2)
 	go func() { _ = f.relay.ReleasePeerQuotaKey("unrelated-peer"); done <- "release" }()
 	awaitCanonicalMOAdmissionRLock(t, "ReleasePeerQuotaKey", 1)
+	freshID := [32]byte{0xa8}
+	fresh := f.signed(daNonReplayTxSpec{kind: 0x02, daID: freshID, payload: []byte("ttl-fresh")})
+	go func() { f.admit(fresh, daNonReplayPeer("fresh-peer")); done <- "admission" }()
+	awaitCanonicalMOAdmissionRLock(t, "mustDAAdmission", 1)
 	body := make(chan error, 1)
 	go func() { body <- f.relay.advanceOwnerReadyTTLInGuard() }()
 	select {
@@ -864,14 +870,17 @@ func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
 	}
 	f.state.admissionMu.Unlock()
 	released = true
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the writer never proceeded after the guard release")
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a writer never proceeded after the guard release")
+		}
 	}
 	after := daRelayStateSnapshot(f.relay)
 	requireDATTLCount(t, after, r.stateAID, 2)
 	requireDATTLCount(t, after, r.stateBID, 2)
+	requireDATTLCount(t, after, freshID, 7) // the fixture's orphan TTL: created after the decrease
 }
 
 // TestDATTLCallbackDecrementReachability pins that every production function that lowers a TTL
