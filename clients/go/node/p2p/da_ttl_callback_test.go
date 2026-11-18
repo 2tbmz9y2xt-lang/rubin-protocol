@@ -778,6 +778,7 @@ func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 	}
 	h.syncEngine.PublishDATTLBinding(entry)
 	probe.apply()
+	require(t, entry.attempts.Load() == 1, "entry attempts=%d, want 1", entry.attempts.Load())
 	for range 2 {
 		select {
 		case err := <-done:
@@ -786,7 +787,6 @@ func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 			t.Fatalf("a parked writer never proceeded after the guard release")
 		}
 	}
-	require(t, entry.attempts.Load() == 1, "entry attempts=%d, want 1", entry.attempts.Load())
 	probe.apply()
 	probe.f.requireRetained(probe.commit, "count 1 after two in-hold decreases")
 	probe.apply()
@@ -1007,7 +1007,7 @@ func TestDATTLCallbackEndToEndCloseRaceOutcomes(t *testing.T) {
 		probe.apply()
 		waitWithin(t, &wg, "the racing goroutines")
 		require(t, entry.attempts == 1 && !entry.afterExit, "round %d: attempts=%d decrease after Close returned=%v", i, entry.attempts, entry.afterExit)
-		require(t, i%2 != 0 || !entry.ran, "round %d: S1 admitted a registration after Close returned", i)
+		require(t, entry.ran == (i == 1) || i > 1 && i%2 == 1, "round %d: S1 admitted=%v, want admitted in round 1, where Close(S1) and S2 start inside the held decrease, and refused in even rounds, where both finish before the registration", i, entry.ran)
 		probe.f.requireRetained(probe.commit, fmt.Sprintf("round %d: one decrease at most from count 2", i))
 		service := s2.Load()
 		require(t, service != nil && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(service), "round %d: S2 construction and binding", i)
