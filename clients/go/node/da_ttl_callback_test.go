@@ -219,6 +219,8 @@ func TestDATTLCallbackBodySurvivorRevisions(t *testing.T) {
 			}
 		}
 	}
+	requireDATTLOK(t, runDATTLBodyInGuard(t, f), "body call 3")
+	require(t, len(daRelayStateSnapshot(f.relay).sets) == 1, "the third body call left %d sets, want only State C", len(daRelayStateSnapshot(f.relay).sets))
 }
 
 // TestDATTLCallbackBodyRefusalChangesNothing pins that a refused check on one selected record, or a selected member
@@ -407,8 +409,7 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 				s.relations.scalarRecord(r.stateAID, record)
 			})
 		}, func(err error) bool { return errors.Is(err, errDARelayTTLRecordKeyMismatch) }},
-		// The next four rows corrupt a member token or input set and assert
-		// errDARelayImageIncompatible.
+		// The next four rows corrupt a member token or input set and assert errDARelayImageIncompatible.
 		{"zero member token", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
 			editDATTLChunkMember(f, r.stateAID, func(m *daRelayMemberIdentity) { m.token = PendingOutpointToken{} })
 		}, func(err error) bool { return errors.Is(err, errDARelayImageIncompatible) }},
@@ -433,8 +434,7 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			var terminal *canonicalDATerminalError
 			return errors.As(err, &terminal) && strings.Contains(err.Error(), "contradicts its parsed identity")
 		}},
-		// A count of zero is an inconsistent stored value (underflow invalidates the plan
-		// before mutation); the rows assert the bare errDARelayImageIncompatible.
+		// A zero count is an inconsistent stored value (underflow invalidates the plan); the rows assert the bare error.
 		{"State A count zero", func(f *daNonReplayFixture, r daTTLCallbackRecords) { f.setOwnerReadyTTL(r.stateAID, 0) }, daTTLBareIncompatible},
 		{"State B count zero", func(f *daNonReplayFixture, r daTTLCallbackRecords) { f.setOwnerReadyTTL(r.stateBID, 0) }, daTTLBareIncompatible},
 		{"nil chainstate", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
@@ -473,6 +473,9 @@ func TestDATTLCallbackBodyUnboundRelay(t *testing.T) {
 	if !reflect.DeepEqual(cloneDAAdmissionOwner(owner), ownerBefore) {
 		t.Fatal("unbound body changed an owner it cannot reach")
 	}
+	mustAtomic(t, runDATTLBodyInGuard(t, f))
+	mustAtomic(t, runDATTLBodyInGuard(t, f))
+	require(t, len(daRelayStateSnapshot(f.relay).sets) == 1, "the third unbound body call left %d sets, want only State C", len(daRelayStateSnapshot(f.relay).sets))
 }
 
 // TestDATTLCallbackBodyWalksOnlyStateAB pins the walk bound: a State C record whose stored value the owner-ready check
@@ -862,8 +865,7 @@ func TestDATTLCallbackDecrementReachability(t *testing.T) {
 }
 
 // TestDATTLCallbackAcceptedMarkerCensus pins every use of the transition's ACCEPTED marker: only the direct connect and
-// preferred branch applies set it, to true, and only publishCanonicalTransition reads it, so no other initiator invokes
-// an entry.
+// preferred branch applies set it, to true, and only publishCanonicalTransition reads it.
 func TestDATTLCallbackAcceptedMarkerCensus(t *testing.T) {
 	var uses []string
 	walkProductionGoFiles(t, "accepted marker census", func(path string, file *ast.File) {
@@ -970,9 +972,8 @@ func daTTLEngineRecords(t *testing.T, f *pendingOutpointSyncFixture) (*daNonRepl
 // TestDATTLCallbackEndToEndBodyRefusalConsumed drives one ACCEPTED/NEW publication through the real SyncEngine and DA
 // relay, by the no-lease selection and by the lease entry; the entry gives one State B record an inconsistent stored
 // value, or unbinds the exact owner token of the State A member, before it runs the in-guard body, which refuses with
-// its own error. The apply still returns its ACCEPTED/NEW summary and a nil error, the engine is not latched, the
-// no-lease lease is registered and released once, and the image and owner are unchanged (RUBIN_COMPACT_BLOCKS.md
-// Section 5).
+// its own error. The apply returns ACCEPTED/NEW with a nil error, the engine is not latched, one no-lease lease is
+// registered and released, and the image and owner are unchanged (RUBIN_COMPACT_BLOCKS.md Section 5).
 func TestDATTLCallbackEndToEndBodyRefusalConsumed(t *testing.T) {
 	corruptions := map[string]func(*daNonReplayFixture, [32]byte, [32]byte){
 		"inconsistent stored value": func(x *daNonReplayFixture, _, stateB [32]byte) {
@@ -1117,8 +1118,7 @@ func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
 		t.Run(fmt.Sprintf("stage=%d", stage), func(t *testing.T) {
 			f := newPendingOutpointSyncFixture(t)
 			x, stateA, stateB := daTTLEngineRecords(t, f)
-			// The entry mirrors the Service entry under no Service lease: one registered lease,
-			// decrease run once, the lease released by defer, unwind included.
+			// The entry mirrors the Service entry under no lease: one registered lease, one decrease, released by defer.
 			var leases sync.WaitGroup
 			var acquired, released atomic.Int32
 			var before daRelayStateView
@@ -1204,8 +1204,8 @@ func TestDATTLCallbackEndToEndGenesisBootstrap(t *testing.T) {
 	}
 }
 
-// daTTLHoldRecord is one signed DA transaction of a guard-hold shape, admitted with PEER provenance under quota, and
-// the charge the DA relay books for it.
+// daTTLHoldRecord is one signed DA transaction of a guard-hold shape, admitted with PEER provenance, and its booked
+// charge.
 type daTTLHoldRecord struct {
 	raw    []byte
 	quota  string
@@ -1213,7 +1213,7 @@ type daTTLHoldRecord struct {
 }
 
 // daTTLHoldShape is one retained DA image: records admitted in order, then next, which the default caps refuse with
-// capErr. E has neither.
+// capErr (E has neither).
 type daTTLHoldShape struct {
 	name    string
 	records []daTTLHoldRecord
@@ -1425,8 +1425,8 @@ func (in *daTTLHoldInputs) preState(b testing.TB, shape daTTLHoldShape, ttl uint
 	return f
 }
 
-// requireDATTLHoldEffect checks the timed block's DA effect: with the binding every record is decreased once (removed
-// at TTL 1); without it no record changes.
+// requireDATTLHoldEffect checks the timed block's DA effect: with the binding every record decreases once (removed at
+// TTL 1), without it none changes.
 func requireDATTLHoldEffect(b testing.TB, before, after daRelayStateView, ttl uint64, bound bool) {
 	b.Helper()
 	switch {

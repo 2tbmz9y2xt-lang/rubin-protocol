@@ -21,8 +21,7 @@ import (
 )
 
 // selectionProbe observes the production no-lease selection: each step is one ACCEPTED/NEW SyncEngine.ApplyBlock
-// publication, and the commit retained at count 3 counts admitted selections by its presence (count 1 after two, gone
-// at the third).
+// publication, and the commit retained at count 3 counts admitted selections (count 1 after two, gone at third).
 type selectionProbe struct {
 	t      *testing.T
 	h      *testHarness
@@ -250,8 +249,8 @@ func TestDATTLCallbackEndToEndCloseRace(t *testing.T) {
 	}
 }
 
-// detachedReorgFixture is a sink tip block carrying one DA commit and chunk, plus a longer source branch from their
-// common parent that a peer or local apply reorganizes onto.
+// detachedReorgFixture is a sink tip block carrying one DA commit and chunk, plus a longer source branch that a peer or
+// local apply reorganizes onto.
 type detachedReorgFixture struct {
 	commitRaw, chunkRaw []byte
 	oldTip              [32]byte
@@ -369,7 +368,7 @@ func detachedReorgHookRetains(t *testing.T, source, sink *testHarness) bool {
 }
 
 // requireCommitRetained reports through LookupRetainedTx, which changes nothing, whether the requeued commit is
-// retained, and fails unless that equals want.
+// retained and fails unless it equals want.
 func requireCommitRetained(t *testing.T, h *testHarness, fixture detachedReorgFixture, want bool, step string) {
 	t.Helper()
 	_, txid, _, _, err := consensus.ParseTx(fixture.commitRaw)
@@ -387,13 +386,13 @@ func TestDATTLCallbackEndToEndReorgRequeueNotDecreased(t *testing.T) {
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	fixture := mineDetachedReorgFixture(t, source, sink, 5, true)
 	p := testPeerForService(sink.service, "remote", 3)
+	holdWorkLease(t, sink.service)
 	relay := func(i int) {
 		t.Helper()
 		_, err := p.processRelayedBlock(fixture.branch[i])
 		must(t, err, fmt.Sprintf("processRelayedBlock(branch %d)", i))
 	}
-	// Fork choice may prefer the equal-work first branch block by its lower hash, so the
-	// reorganization happens at the first relay that moves the tip off the sink DA block.
+	// Equal-work branch blocks may tie by hash, so the reorganization happens at the first relay that moves the tip.
 	next := 0
 	for sink.chainState.TipHash == fixture.oldTip {
 		require(t, next < 2, "the branch did not win the reorganization")
@@ -569,8 +568,8 @@ func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
 }
 
 // TestDATTLCallbackEndToEndErrorReleasesLease pins the entry on a decrease that returns an error: the decrease runs
-// once under one registered lease, on which a Close started inside it waits, it returns that error unchanged, the lease
-// is released once, so Close returns.
+// once under one registered lease, on which a Close started inside it waits; it returns that error unchanged and
+// releases the lease, so Close returns.
 func TestDATTLCallbackEndToEndErrorReleasesLease(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	refusal := errors.New("ttl body refusal")
@@ -690,6 +689,7 @@ func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 	sideBlock := mineSideBlock(t)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	p := testPeerForService(h.service, "remote", 5)
+	holdWorkLease(t, h.service)
 	relayAccepted(t, p, source, 1)
 	relayAccepted(t, p, source, 2)
 	probe := newSelectionProbe(t, h, source, 0xd4)
@@ -731,8 +731,8 @@ func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the fresh binding's admitted decrease expired the record at count 1")
 }
 
-// wrappedTTLEntry is a binding over a real Service's own entry that runs before ahead of each attempt, counts the
-// attempts and, when refuse is set, returns it instead of entering.
+// wrappedTTLEntry is a binding over a real Service's own entry that runs before ahead of each attempt, counts attempts
+// and returns refuse, when set, instead of entering.
 type wrappedTTLEntry struct {
 	inner    *Service
 	before   func()
@@ -800,8 +800,7 @@ func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 }
 
 // TestDATTLCallbackEndToEndEntryErrorConsumed pins that the transition consumes the entry result: an entry returning an
-// error leaves SyncEngine.ApplyBlock's ACCEPTED/NEW summary and nil error, decreases nothing, and later ones decrease
-// as usual.
+// error leaves ApplyBlock's ACCEPTED/NEW summary and nil error, decreases nothing, and later ones decrease.
 func TestDATTLCallbackEndToEndEntryErrorConsumed(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xe6)
 	failing := &wrappedTTLEntry{inner: h.service, refuse: errors.New("ttl entry failure")}
@@ -951,7 +950,7 @@ func TestDATTLCallbackEndToEndNoGuardReacquisition(t *testing.T) {
 }
 
 // closeRaceEntry is a binding over S1's own entry that, on its one attempt, starts the race and records whether S1
-// admitted the decrease and whether Close(S1) had returned when it ran.
+// admitted the decrease and Close(S1) had returned.
 type closeRaceEntry struct {
 	inner          *Service
 	start          func(inside bool)
