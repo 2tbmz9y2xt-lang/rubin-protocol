@@ -156,7 +156,8 @@ func advanceDATTLChecked(relay *DARelayState, owner *PendingOutpointOwner) error
 }
 
 // daTTLOutsideErr requires after to equal before outside before's State A and B records, less the removed records'
-// locator rows, charges, entries, claims and outpoint rows, with equal owner counts and one revision per survivor.
+// locator rows, charges, entries, claims and outpoint rows, with equal owner counts and one revision per survivor,
+// and then requires daTTLSelectedErr of those records.
 func daTTLOutsideErr(before, after daTTLImage) error {
 	selected, removed := daTTLSelection(before.view, after.view)
 	wantView, isView := daTTLExpectedView(before.view, selected, removed), daTTLWithoutSelected(after.view, selected)
@@ -173,6 +174,39 @@ func daTTLOutsideErr(before, after daTTLImage) error {
 		return fmt.Errorf("DA image outside the selected set changed: want %+v, got %+v", wantView, isView)
 	case !reflect.DeepEqual(wantOwner, after.owner) || before.counts != after.counts:
 		return fmt.Errorf("owner outside the selected set changed: want %+v %+v, got %+v %+v", wantOwner, before.counts, after.owner, after.counts)
+	}
+	return daTTLSelectedErr(before.view, after.view, selected)
+}
+
+// daTTLSelectedErr requires a selected record absent from after to have been at count 1, and a present one to equal
+// its before record one count lower with a revision minted above before's high-water (RUBIN_COMPACT_BLOCKS.md Section 5).
+func daTTLSelectedErr(before, after daRelayStateView, selected map[[32]byte]daRelaySetRecord) error {
+	for daID, was := range selected {
+		var err error
+		if got, present := after.sets[daID]; present {
+			err = daTTLSurvivorErr(was, got, before.records, after.records)
+		} else if was.ttlBlocksRemaining != 1 {
+			err = fmt.Errorf("record %x removed at count %d, want removal at count 1", daID[:1], was.ttlBlocksRemaining)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// daTTLSurvivorErr requires got to equal was with the count one lower and a revision in (low, high].
+func daTTLSurvivorErr(was, got daRelaySetRecord, low, high uint64) error {
+	switch {
+	case was.ttlBlocksRemaining < 2:
+		return fmt.Errorf("record %x kept at count %d, want removal at count 1", was.daID[:1], was.ttlBlocksRemaining)
+	case got.revision <= low || got.revision > high:
+		return fmt.Errorf("surviving record %x revision %d, want one minted in (%d, %d]", was.daID[:1], got.revision, low, high)
+	}
+	want := was
+	want.ttlBlocksRemaining, want.revision = was.ttlBlocksRemaining-1, got.revision
+	if !reflect.DeepEqual(want, got) {
+		return fmt.Errorf("surviving record %x: want %+v, got %+v", was.daID[:1], want, got)
 	}
 	return nil
 }
