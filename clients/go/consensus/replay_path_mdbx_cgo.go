@@ -62,13 +62,16 @@ type replayPathSlot struct {
 
 // replayPathOwner owns mu, the one completed slot, the retention limit, the view and the invocation guard release.
 type replayPathOwner struct {
-	mu      sync.Mutex
-	view    ReplayHeaderCandidateViewV1
-	limit   uint64
-	slot    *replayPathSlot
-	guarded bool
-	release func()
-	dst     [116]byte
+	mu         sync.Mutex
+	view       ReplayHeaderCandidateViewV1
+	view148    ReplayHeaderCandidateView148V1
+	initial148 bool
+	limit      uint64
+	slot       *replayPathSlot
+	guarded    bool
+	release    func()
+	dst        [116]byte
+	dst148     [148]byte
 }
 
 func newReplayPathOwner(view ReplayHeaderCandidateViewV1, retentionLimit uint64) *replayPathOwner {
@@ -85,6 +88,7 @@ type replayPathCall struct {
 	genesis    PublishedGenesisContextV1
 	supplied   []byte
 	h          uint64
+	n          uint64
 	out        replayPathOwn
 	sameEntry  []byte
 	sameHeader []byte
@@ -100,9 +104,6 @@ func (p *replayPathOwner) ownLocked(reader *mdbx.Reader, authority mdbx.StorageA
 	c, err := p.newCall(reader, authority, oldActive, genesis, supplied)
 	if err != nil {
 		return replayPathOwn{}, err
-	}
-	if err := c.establish(); err != nil {
-		return c.out, err
 	}
 	return c.own()
 }
@@ -120,6 +121,13 @@ func (p *replayPathOwner) newCall(reader *mdbx.Reader, a mdbx.StorageAuthorityV1
 	if rp.Cursor.Kind == mdbx.ReplayCursorAppliedV1 {
 		c.h = rp.Cursor.Height + 1
 	}
+	if p.slot == nil {
+		var ok bool
+		c.n, ok = replayPathAdmit(rp.Target.TipHeight, c.h, p.limit)
+		if !ok {
+			return nil, replayRecoveryRefusal(selectedSideCapacity, "replay path retention exceeds its limit")
+		}
+	}
 	return c, nil
 }
 
@@ -136,21 +144,17 @@ func replayPathAdmit(tip, lo, limit uint64) (uint64, bool) {
 	return n, n <= math.MaxInt && n <= limit/32
 }
 
-// establish admits and allocates N hashes, walks from the target tip, and publishes the slot only on success. The
+// establish allocates the admitted N hashes, walks from the target tip, and publishes the slot only on success. The
 // target/genesis contradiction is checked on every invocation, before a completed slot is reused.
 func (c *replayPathCall) establish() error {
 	if c.p.slot != nil {
 		return c.genesisBound()
 	}
 	target := c.rp.Target
-	n, ok := replayPathAdmit(target.TipHeight, c.h, c.p.limit)
-	if !ok {
-		return replayRecoveryRefusal(selectedSideCapacity, "replay path retention exceeds its limit")
-	}
 	if err := c.genesisBound(); err != nil {
 		return err
 	}
-	s := &replayPathSlot{key: replayPathKey{c.rp.TargetGenerationID, target}, lo: c.h, hashes: make([][32]byte, n)}
+	s := &replayPathSlot{key: replayPathKey{c.rp.TargetGenerationID, target}, lo: c.h, hashes: make([][32]byte, c.n)}
 	if err := c.walk(s); err != nil {
 		return err
 	}
@@ -263,7 +267,7 @@ func (c *replayPathCall) storedHeader(x [32]byte, resource string) ([]byte, bool
 		return nil, false, nil
 	}
 	c.out.header, c.out.headerSource = raw, replayPathStored
-	if !replayPathBinds(raw, x) {
+	if !c.p.bindsV1(raw, x) {
 		return nil, true, selectedSideDefect("replay path stored header misnamed")
 	}
 	return raw, true, nil
@@ -277,6 +281,22 @@ func replayPathBinds(raw []byte, x [32]byte) bool {
 	return err == nil && hash == x
 }
 
+// bindsV1 selects the constructor's grammar, independently of the source width.
+func (p *replayPathOwner) bindsV1(raw []byte, x [32]byte) bool {
+	if p.initial148 {
+		_, ok := replayHeaderBind148(raw, x)
+		return ok
+	}
+	return replayPathBinds(raw, x)
+}
+
+func (p *replayPathOwner) headerBytesV1() int {
+	if p.initial148 {
+		return Initial148HeaderBytes
+	}
+	return BLOCK_HEADER_BYTES
+}
+
 // ancestryHeader is the stored row, then on definitive absence the guarded point, then the supplied artifact.
 func (c *replayPathCall) ancestryHeader(k uint64, x [32]byte) ([]byte, error) {
 	raw, present, err := c.storedHeader(x, replayEntryRecovery)
@@ -287,8 +307,9 @@ func (c *replayPathCall) ancestryHeader(k uint64, x [32]byte) ([]byte, error) {
 	if err != nil || raw != nil {
 		return raw, err
 	}
-	if len(c.supplied) >= BLOCK_HEADER_BYTES && replayPathBinds(c.supplied[:BLOCK_HEADER_BYTES], x) {
-		c.out.header, c.out.headerSource = c.supplied[:BLOCK_HEADER_BYTES:BLOCK_HEADER_BYTES], replayPathSupplied
+	n := c.p.headerBytesV1()
+	if len(c.supplied) >= n && c.p.bindsV1(c.supplied[:n], x) {
+		c.out.header, c.out.headerSource = c.supplied[:n:n], replayPathSupplied
 		return c.out.header, nil
 	}
 	return nil, c.missingHeader(k, x)
@@ -303,20 +324,28 @@ func (c *replayPathCall) missingHeader(k uint64, x [32]byte) error {
 // discarded and end the visit as the missing header; only an absent point falls through to the supplied artifact.
 func (c *replayPathCall) point(k uint64, x [32]byte) ([]byte, error) {
 	p := c.p
-	if p.view == nil {
+	if p.view == nil && p.view148 == nil {
 		return nil, nil
 	}
 	if err := p.guard(); err != nil {
 		return nil, err
 	}
-	if !p.view.HeaderV1(x, &p.dst) {
+	raw, present := p.pointBytesV1(x)
+	if !present {
 		return nil, nil
 	}
-	if !replayPathBinds(p.dst[:], x) {
+	if !p.bindsV1(raw, x) {
 		return nil, c.missingHeader(k, x)
 	}
-	c.out.header, c.out.headerSource = p.dst[:], replayPathPoint
+	c.out.header, c.out.headerSource = raw, replayPathPoint
 	return c.out.header, nil
+}
+
+func (p *replayPathOwner) pointBytesV1(x [32]byte) ([]byte, bool) {
+	if p.initial148 {
+		return p.dst148[:], p.view148.Header148V1(x, &p.dst148)
+	}
+	return p.dst[:], p.view.HeaderV1(x, &p.dst)
 }
 
 // guard calls ProtectV1 once per invocation before the first point access and holds it for either boolean result.
@@ -325,17 +354,27 @@ func (p *replayPathOwner) guard() error {
 		return nil
 	}
 	p.guarded = true
-	_, release := p.view.ProtectV1(p.view.VersionV1())
+	var view interface {
+		VersionV1() uint64
+		ProtectV1(uint64) (bool, func())
+	} = p.view
+	if p.initial148 {
+		view = p.view148
+	}
+	_, release := view.ProtectV1(view.VersionV1())
 	if release == nil {
 		return replayRecoveryRefusal(selectedSideInvariant, "replay path producer returned no release")
 	}
 	p.release = release
-	p.view.VersionV1()
+	view.VersionV1()
 	return nil
 }
 
-// own reads the own height h from the completed slot, reusing the walk's same-attempt reads.
+// own establishes or reuses the slot and reads height h with the walk's same-attempt reads.
 func (c *replayPathCall) own() (replayPathOwn, error) {
+	if err := c.establish(); err != nil {
+		return c.out, err
+	}
 	s := c.p.slot
 	if s.attached && c.h <= s.a {
 		return c.ownCanonical()
@@ -403,6 +442,7 @@ func (p *replayPathOwner) finishLocked() {
 		release()
 	}
 	p.dst = [116]byte{}
+	p.dst148 = [148]byte{}
 }
 
 // discardLocked clears the completed slot under the held mutex; true exactly when a slot was present.
