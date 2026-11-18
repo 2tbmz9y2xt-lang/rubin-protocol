@@ -76,6 +76,39 @@ func withInitial148CompleteBlockV1(account *mdbx.OperationAccount, input initial
 	return withInitial148CompleteBlockBodyV1(account, input, run, false, 0)
 }
 
+// withInitial148ReplayCompleteBlockV1 admits delayed immutable input inside
+// the sole replay callback. Gross replay funding covers both W and retained M.
+func withInitial148ReplayCompleteBlockV1(account *mdbx.OperationAccount, run func(func(*mdbx.Reader, initial148CompleteBlockInputV1) (*initial148CompleteBlockResultV1, error)) error) (initial148CompleteBlockOutcomeV1, error) {
+	if account == nil || run == nil {
+		return initial148CompleteBlockOutcomeV1{}, localLogicalStateFailure("invalid complete initial148 request")
+	}
+	f := &initial148CompleteBlockFrameV1{account: account, reduce: func() error { return nil }}
+	used := false
+	err := f.runV1(func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+		err := run(func(reader *mdbx.Reader, input initial148CompleteBlockInputV1) (*initial148CompleteBlockResultV1, error) {
+			if !f.active || used {
+				return nil, localLogicalStateFailure("complete initial148 validate is not available")
+			}
+			used = true
+			_, admission := initial148CompleteAdmitV1(account, input, func(func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error { return nil })
+			if admission != nil {
+				f.outcome.validationErr = admission
+				return nil, admission
+			}
+			f.input = input
+			return validate(reader)
+		})
+		if err != nil {
+			return err
+		}
+		return f.outcome.validationErr
+	})
+	if err == nil {
+		err = f.outcome.validationErr
+	}
+	return f.outcome, err
+}
+
 // withInitial148CompleteBlockParallelV1 is the queued entry; workers <= 0 uses
 // the NewSigCheckQueue default (GOMAXPROCS).
 func withInitial148CompleteBlockParallelV1(account *mdbx.OperationAccount, input initial148CompleteBlockInputV1, workers int, run initial148CompleteRunV1) (initial148CompleteBlockOutcomeV1, error) {

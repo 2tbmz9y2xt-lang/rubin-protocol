@@ -40,6 +40,10 @@ type TreePairV1 struct {
 	// on the caller's own charges. The engine copies the descriptor at step 5 and never reads the caller's value
 	// after; the caller must keep *ContextConsulted unchanged from the callback's return until that copy.
 	ContextConsulted *CanonicalContextWindowV1
+	// PreserveReplayObservations retains the callback endpoint and declares absent
+	// undo for a selected CURRENT Transient replay through final and strict equality.
+	// Deletion requires a successful callback endpoint; every other shape refuses.
+	PreserveReplayObservations bool
 	// ObsoleteDeletes and ObsoleteConsulted hold tokens read from this operation's ORIGINAL OLD Reader
 	// only; LargeConsulted holds plain (Kind, Hash) selector values. For all three nil and empty are
 	// equivalent, and they are read only after the callback. Any nonempty field makes the operation a physical-scope Pair, which needs a
@@ -318,6 +322,7 @@ type treePublicEntryV1 struct {
 	reader    *Reader
 	hold      *operationHold
 	inventory *entryInventoryStateV1
+	tip       *canonicalTipCell
 }
 
 // callbackV1 expires public borrows while retaining successful ENTRY recipes for admission.
@@ -333,9 +338,14 @@ func (e *treePublicEntryV1) callbackV1(callback func(*Reader) (TreeOperationV1, 
 	}()
 	op, value, panicked, err := invokeUpdate(callback, e.reader)
 	returned = true
-	e.reader.expire().retire()
+	tip := e.reader.expire()
 	e.expireEntryV1()
 	primary, infrastructure := readPrimary(err, e.reader.failure)
+	if !panicked && primary == nil && op.Pair.PreserveReplayObservations {
+		e.tip = tip
+	} else {
+		tip.retire()
+	}
 	if panicked {
 		e.retireEntryV1()
 		return TreeOperationV1{}, treeUnwindV1{kind: 1, value: value}, e.store.abortReadLocked(e.old, primary, infrastructure)
@@ -377,6 +387,8 @@ func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(
 	}
 	err = e.prewriteV1(account, op, saved)
 	if err != nil {
+		e.tip.retire()
+		e.tip = nil
 		e.retireEntryV1()
 		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, e.prewriteAbortV1(err)
 	}
@@ -390,7 +402,50 @@ func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(
 		plan.inventory = e.inventory
 		plan.inventory.ownV1(&plan)
 	}
+	err = e.replayAdmitV1(&plan)
+	if err != nil {
+		e.tip.retire()
+		e.tip = nil
+		e.retireEntryV1()
+		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, e.prewriteAbortV1(err)
+	}
 	return e.store.updateTreeLockedV1(e.old, treeAccountLedgerV1{e.hold}, &plan)
+}
+
+// replayAdmitV1 binds the selected owned plan before charging and transferring its witness.
+func (e *treePublicEntryV1) replayAdmitV1(plan *treePlanV1) error {
+	if !plan.preserveReplay {
+		return nil
+	}
+	if !treeReplayBoundedPlanV1(plan) {
+		return updateInvalidBatch()
+	}
+	if e.tip == nil && treeReplayDeletesV1(plan) {
+		return updateInvalidBatch()
+	}
+	err := canonicalTipAdmit(plan.pair, e.tip)
+	if err != nil {
+		return err
+	}
+	err = e.hold.grow(512)
+	if err != nil {
+		return err
+	}
+	plan.tip, e.tip = e.tip, nil
+	return nil
+}
+
+// treeReplayDeletesV1 identifies the selected deletions requiring a callback endpoint.
+func treeReplayDeletesV1(plan *treePlanV1) bool {
+	if plan.primitives[0].Undo == UndoCompareDeleteV1 {
+		return true
+	}
+	for _, m := range plan.pair {
+		if m.dbi.Rank == 4 && m.after == AfterAbsent {
+			return true
+		}
+	}
+	return false
 }
 
 // prewriteV1 preserves ordinary/ENTRY/Proof/refusal priority before the owned-plan charge.
@@ -1001,7 +1056,7 @@ func treePlanCopyBytesV1(pair TreePairV1) uint64 {
 
 func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
 	extra := treeHeaderSlotRowsV1(op.HeaderSlot)
-	plan := treePlanV1{primitives: op.Primitives, slot: treeOwnHeaderSlotV1(op.HeaderSlot), prepaidReadBytes: op.Pair.PrepaidReadBytes}
+	plan := treePlanV1{primitives: op.Primitives, slot: treeOwnHeaderSlotV1(op.HeaderSlot), prepaidReadBytes: op.Pair.PrepaidReadBytes, preserveReplay: op.Pair.PreserveReplayObservations}
 	plan.pair = make([]ownedMutation, len(op.Pair.Mutations), len(op.Pair.Mutations)+extra+len(op.Pair.ObsoleteDeletes))
 	plan.consulted = make([]ownedConsulted, len(op.Pair.Consulted), len(op.Pair.Consulted)+extra)
 	for j, m := range op.Pair.Mutations {

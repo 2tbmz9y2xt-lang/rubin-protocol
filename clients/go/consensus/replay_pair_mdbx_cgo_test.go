@@ -91,16 +91,16 @@ func rpNew(t *testing.T, target uint64, body uint8, undo mdbx.TreeUndoEffectV1) 
 // prepare owns only real validation then the caller's already-decided rows.
 func (c *rpCase) prepare(t *testing.T, validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) replayPairPrepareCurrentV1 {
 	t.Helper()
-	return func(r *mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+	return func(r *mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) {
 		c.current++
 		result, err := validate(r)
 		if err != nil {
-			return nil, replayPairRowsV1{}, err
+			return replayPairRequestV1{}, nil, replayPairRowsV1{}, err
 		}
 		c.result = result
 		rows := c.rows
 		rows.Pair = rpPair(t, c.request.Authority, c.in)
-		return result, rows, nil
+		return c.request, result, rows, nil
 	}
 }
 
@@ -133,7 +133,7 @@ func (c *rpCase) run(t *testing.T, alter func(replayPairPrepareCurrentV1) replay
 				if alter != nil {
 					prepare = alter(prepare)
 				}
-				got = applyReplayPairV1(&c.store, a, c.request, prepare, inputs)
+				got = applyReplayPairV1(&c.store, a, prepare, inputs)
 				logicalMDBXAssert(t, c.store.account == a && c.store.calls == 1, "exactly one native call on one account")
 				logicalMDBXAssert(t, got.Truth == c.store.native.truth && got.Stage == c.store.native.stage && got.Index == c.store.native.index && any(got.Err) == any(c.store.native.err), "composer preserves exact captured native product")
 				return got.Err
@@ -195,16 +195,35 @@ func TestReplayPairGenesis(t *testing.T) {
 func rpStoredRows(t *testing.T, c *rpCase, remove bool) func(replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
 	t.Helper()
 	return func(prepare replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
-		return func(r *mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
-			result, rows, err := prepare(r)
+		return func(r *mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+			request, result, rows, err := prepare(r)
 			if c.rows.BodyKind == 2 {
 				rows.Pair.Mutations = rows.Pair.Mutations[:1] // Existing header remains unchanged.
 			}
 			if remove {
 				rows.Pair.Mutations = append(rows.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: c.in.Endpoint.BlockHash[:], BeforePresent: true, AfterKind: mdbx.AfterAbsent})
 			}
-			return result, rows, err
+			return request, result, rows, err
 		}
+	}
+}
+
+// TestReplayPairRequestFreezeV1 distinguishes the returned by-value request
+// from incomplete pre-validation fields and later caller descriptor changes.
+func TestReplayPairRequestFreezeV1(t *testing.T) {
+	c := rpNew(t, 15840, 1, mdbx.UndoTransientV1)
+	got := c.run(t, func(prepare replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
+		return func(reader *mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+			request, result, rows, err := prepare(reader)
+			c.request = replayPairRequestV1{}
+			return request, result, rows, err
+		}
+	}, c.inputs)
+	logicalMDBXAssert(t, got.Truth == 2 && got.Stage == 3 && got.Err == nil && c.current == 1 && c.lag == 1 && c.store.calls == 1, "returned request not frozen after one preparation: %+v", got)
+	c.w.reopen(t)
+	for _, generation := range []uint64{1, 2} {
+		key, _ := mdbx.HeightKey(generation, 0)
+		c.w.read(t, 2, key, mdbx.ChainValue(c.in.Endpoint.BlockHash, [32]byte{}, c.in.Endpoint.CumulativeChainwork))
 	}
 }
 
@@ -321,26 +340,26 @@ func TestReplayPairCurrentRefusal(t *testing.T) {
 				if name == "nil-callback" {
 					return nil
 				}
-				return func(r *mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+				return func(r *mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) {
 					switch name {
 					case "nil-result":
-						return nil, replayPairRowsV1{}, nil
+						return replayPairRequestV1{}, nil, replayPairRowsV1{}, nil
 					case "direct":
 						want = primary
-						return nil, replayPairRowsV1{}, want
+						return replayPairRequestV1{}, nil, replayPairRowsV1{}, want
 					case "wrapped":
 						want = wrapped
-						return nil, replayPairRowsV1{}, want
+						return replayPairRequestV1{}, nil, replayPairRowsV1{}, want
 					case "typed-nil":
 						var typed *rpTypedError
 						want = typed
-						return nil, replayPairRowsV1{}, want
+						return replayPairRequestV1{}, nil, replayPairRowsV1{}, want
 					}
-					result, rows, err := prepare(r)
+					request, result, rows, err := prepare(r)
 					if name == "F2-source" {
 						rows.BodyKind = 0
 					}
-					return result, rows, err
+					return request, result, rows, err
 				}
 			}
 			got := c.run(t, alter, c.inputs)
@@ -473,7 +492,7 @@ func TestReplayPairPreEntry(t *testing.T) {
 	err := c.w.s.Close()
 	logicalMDBXAssert(t, err == nil, "close before entry: %v", err)
 	err = c.w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
-		got := applyReplayPairV1(&c.store, a, c.request, nil, nil)
+		got := applyReplayPairV1(&c.store, a, nil, nil)
 		logicalMDBXAssert(t, got.Role == "" && got.Truth == 1 && got.Stage == 1 && got.Index == -1 && got.Err != nil && c.store.reader == nil, "pre-entry role/raw tuple: %+v", got)
 		return nil
 	})
