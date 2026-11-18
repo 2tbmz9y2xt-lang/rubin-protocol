@@ -196,7 +196,8 @@ func TestDATTLCallbackServiceCloseRace(t *testing.T) {
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); _ = h.service.Close(); closeReturned.Store(true) }()
-		go func() { defer wg.Done(); _, _ = NewService(h.service.cfg) }()
+		var s2Err error
+		go func() { defer wg.Done(); _, s2Err = NewService(h.service.cfg) }()
 		decreases, closedDuring := 0, false
 		err := snapshot.EnterDATTLMutation(func() error {
 			decreases++
@@ -204,6 +205,7 @@ func TestDATTLCallbackServiceCloseRace(t *testing.T) {
 			return nil
 		})
 		wg.Wait()
+		require(t, s2Err == nil, "round %d: NewService(S2)=%v", i, s2Err)
 		admitted := err == nil && decreases == 1 && !closedDuring
 		refused := errors.Is(err, errServiceClosed) && decreases == 0
 		require(t, snapshot == node.DATTLMutationService(h.service) && (admitted || refused), "round %d: err=%v decreases=%d closedDuring=%v", i, err, decreases, closedDuring)
@@ -587,6 +589,9 @@ func TestDATTLCallbackEndToEndErrorReleasesLease(t *testing.T) {
 func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	entered, unwind := make(chan struct{}), make(chan struct{})
+	var unwindOnce sync.Once
+	release := func() { unwindOnce.Do(func() { close(unwind) }) }
+	t.Cleanup(release)
 	recovered := make(chan any, 1)
 	go func() {
 		defer func() { recovered <- recover() }()
@@ -602,7 +607,7 @@ func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
 	closed := lifecycleClose(h.service)
 	waitDraining(t, h.service)
 	requireStillBlocked(t, closed, "Close")
-	close(unwind)
+	release()
 	require(t, <-recovered == "ttl body panic", "panic value, want the original propagated unrecovered")
 	requireReturned(t, closed, "the waiting Close after the panicking entry")
 }
@@ -767,7 +772,7 @@ func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 	entry := &wrappedTTLEntry{inner: h.service}
 	entry.before = func() {
 		entry.before = nil
-		go func() { _ = h.syncEngine.DARelayState().ReleasePeerQuotaKey("unrelated-peer"); done <- nil }()
+		go func() { done <- h.syncEngine.DARelayState().ReleasePeerQuotaKey("unrelated-peer") }()
 		awaitParkedOnAdmissionGuard(t, "ReleasePeerQuotaKey")
 		go func() { done <- probe.f.tryAdmit(fresh, "in-hold-peer") }()
 		awaitParkedOnAdmissionGuard(t, "AdmitDA")
@@ -913,31 +918,32 @@ func TestDATTLCallbackEndToEndSnapshotBeforePublication(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the third admitted decrease expired the record")
 }
 
-// TestDATTLCallbackEndToEndNoGuardReacquisition drives one ACCEPTED/NEW publication through the production selection:
-// the entry is attempted once, ApplyBlock returns within the watchdog and the record's count shows the body ran, so the
-// body never waits for the held guard.
+// TestDATTLCallbackEndToEndNoGuardReacquisition drives three ACCEPTED/NEW publications through the production
+// selection, each ApplyBlock bounded by the watchdog: the entry is attempted once for the first, and the record's
+// count shows each body ran (retained at count 1 after the second, expired by the third).
 func TestDATTLCallbackEndToEndNoGuardReacquisition(t *testing.T) {
 	source, h, probe := newSourceAndProbe(t, 4, 0xeb)
 	entry := &wrappedTTLEntry{inner: h.service}
 	h.syncEngine.PublishDATTLBinding(entry)
-	var summary *node.ChainStateConnectSummary
-	var err error
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		summary, err = h.syncEngine.ApplyBlock(blockAtHeight(t, source, probe.next), nil)
-	}()
-	select {
-	case <-done:
-		require(t, err == nil && summary != nil && summary.BlockHeight == probe.next, "ApplyBlock=(%+v,%v), want ACCEPTED/NEW", summary, err)
-	case <-time.After(lifecycleWatchdog):
-		t.Fatalf("ApplyBlock did not return within %s: the TTL body waited for the held admission guard", lifecycleWatchdog)
+	apply := func(height uint64, block []byte) {
+		t.Helper()
+		var summary *node.ChainStateConnectSummary
+		var err error
+		done := make(chan struct{})
+		go func() { defer close(done); summary, err = h.syncEngine.ApplyBlock(block, nil) }()
+		select {
+		case <-done:
+			require(t, err == nil && summary != nil && summary.BlockHeight == height, "ApplyBlock=(%+v,%v), want ACCEPTED/NEW at %d", summary, err, height)
+		case <-time.After(lifecycleWatchdog):
+			t.Fatalf("ApplyBlock(%d) did not return within %s: the TTL body waited for the held admission guard", height, lifecycleWatchdog)
+		}
 	}
+	blocks := [][]byte{blockAtHeight(t, source, probe.next), blockAtHeight(t, source, probe.next+1), blockAtHeight(t, source, probe.next+2)}
+	apply(probe.next, blocks[0])
 	require(t, entry.attempts.Load() == 1, "entry attempts=%d, want 1", entry.attempts.Load())
-	probe.next++
-	probe.apply()
+	apply(probe.next+1, blocks[1])
 	probe.f.requireRetained(probe.commit, "count 1: the first publication's body decreased it")
-	probe.apply()
+	apply(probe.next+2, blocks[2])
 	probe.f.requireAbsent(probe.commit, "the third counted publication expired the record")
 }
 

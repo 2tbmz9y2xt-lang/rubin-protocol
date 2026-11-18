@@ -811,7 +811,7 @@ func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
 		}
 	}()
 	done := make(chan error, 2)
-	go func() { _ = f.relay.ReleasePeerQuotaKey("unrelated-peer"); done <- nil }()
+	go func() { done <- f.relay.ReleasePeerQuotaKey("unrelated-peer") }()
 	awaitCanonicalMOAdmissionRLock(t, "ReleasePeerQuotaKey", 1)
 	freshID := [32]byte{0xa8}
 	fresh := f.signed(daNonReplayTxSpec{kind: 0x02, daID: freshID, payload: []byte("ttl-fresh")})
