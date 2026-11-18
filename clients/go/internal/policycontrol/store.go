@@ -86,6 +86,9 @@ type Store struct {
 	pending                      *attempt // unresolved UNKNOWN attempt
 	closed                       bool
 	dependentView                bool // one synchronous consumer of committed P
+	sourceBorrows                uint64
+	sourceDir                    string
+	sourceInfo                   os.FileInfo
 	latchRequested, latchRenewed bool // the one coalesced RAM latch request; one recorded since the latest latch decision
 }
 
@@ -126,15 +129,33 @@ func start(dir string, id Identity, proof *NewInstallationProof, h hooks) (*Stor
 	if !id.valid() || (proof != nil && proof.Identity != id) {
 		return nil, refused("invalid identity or new-installation proof")
 	}
+	sourceDir, pathErr := filepath.Abs(dir)
+	before, beforeErr := sourceDirectoryInfo(sourceDir)
 	lock, res, err := h.acquire(dir)
-	if lock == nil || res != "" || err != nil {
+	switch {
+	case lock == nil, res != "", err != nil:
 		return nil, refuseLock(lock, res, err, proof != nil)
 	}
-	s := &Store{dir: dir, lock: lock, fault: h.fault, ops: h.ops}
+	after, afterErr := sourceDirectoryInfo(sourceDir)
+	switch {
+	case pathErr != nil, beforeErr != nil, afterErr != nil, !os.SameFile(before, after):
+		return nil, errors.Join(ErrRefused, lock.Release())
+	}
+	s := &Store{dir: dir, sourceDir: sourceDir, sourceInfo: after, lock: lock, fault: h.fault, ops: h.ops}
 	if err = s.load(id, proof != nil); err != nil {
 		return nil, errors.Join(err, lock.Release())
 	}
 	return s, nil
+}
+
+// sourceDirectoryInfo observes the configured name without following its final component.
+func sourceDirectoryInfo(dir string) (os.FileInfo, error) {
+	parent, err := os.OpenRoot(filepath.Dir(dir))
+	if err != nil {
+		return nil, err
+	}
+	defer parent.Close()
+	return parent.Lstat(filepath.Join(".", filepath.Base(dir)))
 }
 
 func (s *Store) load(id Identity, creating bool) (err error) {
@@ -376,7 +397,7 @@ func (s *Store) readableLocked() error {
 }
 
 // Close ends a held transaction as OLD, disposes a retained crossing handle and releases the directory lock, returning
-// any release failure. It refuses with ErrBusy during a crossing or dependent callback;
+// any release failure. It refuses with ErrBusy during a crossing, dependent callback or source borrow;
 // a second Close returns nil and does nothing.
 func (s *Store) Close() error {
 	s.mu.Lock()
@@ -384,7 +405,7 @@ func (s *Store) Close() error {
 	if s.closed {
 		return nil
 	}
-	if s.crossing || s.dependentView {
+	if s.crossing || s.dependentView || s.sourceBorrows != 0 {
 		return ErrBusy
 	}
 	if s.tx != nil {

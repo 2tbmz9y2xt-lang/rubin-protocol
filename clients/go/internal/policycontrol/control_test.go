@@ -385,7 +385,7 @@ func TestAPICensus(t *testing.T) {
 		return out
 	}
 	want := map[string][]string{
-		"Store":  {"Begin", "Close", "Gate", "Latch", "Membership", "PersistLatch", "Recover", "RequestLatch", "View", "WithDependentViewV1"},
+		"Store":  {"Begin", "BorrowSourceAuthorityV1", "Close", "Gate", "Latch", "Membership", "PersistLatch", "Recover", "RequestLatch", "View", "WithDependentViewV1"},
 		"Tx":     {"Abort", "AdmitOwner", "AutoBlock", "Batch", "Commit", "ConsumeIntent", "DeleteRow", "ObserveIncident", "Operation", "Ownerless", "PutRow", "RemoveOnSuccess", "ReplaceObserved", "Require", "RetainOwner"},
 		"Result": {"Sequence"},
 	}

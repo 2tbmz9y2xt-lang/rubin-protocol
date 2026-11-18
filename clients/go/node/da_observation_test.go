@@ -488,14 +488,17 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 	}
 	// The cgo-only dormant selected-side qualifier, retention, rolling and header-candidate inventory files are the four
 	// default files a no-cgo build does not select.
-	wantGoFiles := 71
+	wantGoFiles := 72
 	if build.Default.CgoEnabled {
-		wantGoFiles = 75
+		wantGoFiles = 76
 	}
 	if len(defaultPkg.GoFiles) != wantGoFiles || slices.Contains(defaultPkg.GoFiles, tagged) || !slices.Contains(defaultPkg.IgnoredGoFiles, tagged) {
 		t.Fatalf("default build selects %d files, tagged file selected=%v", len(defaultPkg.GoFiles), slices.Contains(defaultPkg.GoFiles, tagged))
 	}
 	context := build.Default
+	if !slices.Contains(defaultPkg.GoFiles, "journal_source_export148.go") || !slices.Contains(defaultPkg.TestGoFiles, "journal_source_export148_test.go") {
+		t.Fatal("journal source build membership")
+	}
 	context.BuildTags = []string{"rubin_da_observer"}
 	if taggedPkg, err := context.ImportDir(".", 0); err != nil || !slices.Contains(taggedPkg.GoFiles, tagged) {
 		t.Fatalf("tagged build omits %s (err=%v)", tagged, err)
@@ -506,7 +509,7 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 	cgoEnabled := build.Default.CgoEnabled
 	owned := map[string][]string{
 		".":                {"selected_side_qualification_mdbx_cgo.go", "selected_side_retention_mdbx_cgo.go", "selected_side_retention_mdbx_cgo_test.go", "selected_side_retention_mdbx_fixture_cgo_test.go", "selected_side_rolling_mdbx_cgo.go", "selected_side_rolling_mdbx_cgo_test.go", "selected_side_rolling_mdbx_fixture_cgo_test.go"},
-		"../consensus":     {"selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "selected_side_damage_mdbx_fixture_cgo_test.go", "logical_state_mdbx_cgo_test.go", "archive_profile_mdbx_cgo.go", "archive_profile_mdbx_cgo_test.go", "archive_profile_mdbx_fixture_cgo_test.go"},
+		"../consensus":     {"journal_source_export_mdbx_cgo.go", "journal_source_export_mdbx_cgo_test.go", "selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "selected_side_damage_mdbx_fixture_cgo_test.go", "logical_state_mdbx_cgo_test.go", "archive_profile_mdbx_cgo.go", "archive_profile_mdbx_cgo_test.go", "archive_profile_mdbx_fixture_cgo_test.go"},
 		"../internal/mdbx": {"mdbx_cgo.go", "mdbx_fixture_cgo.go", "mdbx_cgo_test.go", "mdbx_fixture_cgo_test.go"},
 	}
 	ownedAPI := map[string]bool{"RetainSelectedSideMDBX": true, "SelectedSideMutationOutcome": true, "RecheckSelectedSideMDBX": true, "SelectedSideDamageOutcome": true, "ClassifySelectedSideFailureMDBX": true, "ReplaceSelectedSideMDBX": true, "SelectedSidePlanV1": true, "PlanSelectedSideClearMDBX": true, "PrepareSelectedSideRollingMDBX": true, "PlanSelectedSideRollingMDBX": true, "RefillSelectedSideMDBX": true, "SelectArchiveSelectedSideMDBX": true}
@@ -519,6 +522,9 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 				t.Fatalf("no-cgo %s tags=%v: %v", dir, tags, err)
 			}
 			selected := slices.Concat(pkg.GoFiles, pkg.CgoFiles, pkg.TestGoFiles, pkg.XTestGoFiles)
+			if dir == "." && (!slices.Contains(pkg.GoFiles, "journal_source_export148.go") || !slices.Contains(pkg.TestGoFiles, "journal_source_export148_test.go")) {
+				t.Fatal("journal source no-cgo membership")
+			}
 			for _, name := range names {
 				if slices.Contains(selected, name) || !slices.Contains(pkg.IgnoredGoFiles, name) {
 					t.Fatalf("no-cgo %s tags=%v selects cgo-only %s", dir, tags, name)
@@ -555,7 +561,7 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 					}
 				}
 			}
-			if dir == "." && tags == nil && (len(pkg.GoFiles) != 71 || len(pkg.CgoFiles) != 0 || slices.Contains(pkg.GoFiles, tagged) || !slices.Contains(pkg.IgnoredGoFiles, tagged)) {
+			if dir == "." && tags == nil && (len(pkg.GoFiles) != 72 || len(pkg.CgoFiles) != 0 || slices.Contains(pkg.GoFiles, tagged) || !slices.Contains(pkg.IgnoredGoFiles, tagged)) {
 				t.Fatalf("no-cgo node selects Go:%d Cgo:%d, observer selected=%v", len(pkg.GoFiles), len(pkg.CgoFiles), slices.Contains(pkg.GoFiles, tagged))
 			}
 		}
