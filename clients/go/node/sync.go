@@ -715,9 +715,9 @@ func (s *SyncEngine) ClaimDARelayState(expectedRelay *DARelayState, admitDetache
 // exactly one call lease with that Service, admitted only while it is OPEN; when
 // DRAINING or CLOSED it returns the Service's stable closed error without calling
 // decrease. Once admitted it calls decrease exactly once, returns its result
-// unchanged and releases the lease exactly once; a panic in decrease propagates
-// unrecovered after that release. It never consults the binding; a refusal causes
-// no retry, fallback, other Service or deferred decrease.
+// unchanged and releases the lease exactly once on every exit, unwind included,
+// before a panic in decrease propagates unrecovered. It never consults the
+// binding; a refusal causes no retry, fallback, other Service or deferred decrease.
 type DATTLMutationService interface {
 	EnterDATTLMutation(decrease func() error) error
 }

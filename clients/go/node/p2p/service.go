@@ -309,8 +309,8 @@ func (s *Service) enterDATTLMutationLeased(decrease func() error) error {
 // no lock any path holds while waiting for it. It registers one call lease, or
 // returns "service already closed" with zero effects once Close published the
 // non-OPEN state; otherwise it runs decrease once, returns its result unchanged and
-// releases the lease once; a panic in decrease propagates unrecovered after that
-// release. It never reads the binding, retries or falls back.
+// releases the lease once on every exit, unwind included, before a panic in
+// decrease propagates unrecovered. It never reads the binding, retries or falls back.
 func (s *Service) EnterDATTLMutation(decrease func() error) error {
 	if !s.acquireWork() {
 		return errServiceClosed

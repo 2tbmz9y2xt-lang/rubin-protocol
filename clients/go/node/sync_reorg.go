@@ -115,8 +115,10 @@ func (s *SyncEngine) ApplyBlockWithReorgDeferred(blockBytes []byte, prevTimestam
 
 // ApplyBlockWithReorgDeferredUnderLease is ApplyBlockWithReorgDeferred for a
 // caller holding a Service call lease. Precondition: lease is that Service's own
-// nested DA TTL entry, associated with this engine's DA relay; no binding lookup
-// repairs or remaps a foreign association (RUBIN_COMPACT_BLOCKS.md Section 5).
+// nested DA TTL entry, and that Service is already associated with the
+// publication's exact retained DA owner; a foreign-owner association is neither
+// repaired by a binding lookup nor remapped to a new public apply error
+// (RUBIN_COMPACT_BLOCKS.md Section 5).
 // Only an ACCEPTED/NEW publication invokes lease, once, inside the exclusive
 // admission guard, as a nested callee that registers and releases nothing and
 // never reads the binding (RUBIN_L1_P2P_AUX.md Section 5); lease does not reacquire
