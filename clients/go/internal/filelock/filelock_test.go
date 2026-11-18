@@ -143,6 +143,76 @@ func TestValidateReportsFstatFailure(t *testing.T) {
 	}
 }
 
+func TestDirectoryIdentityV1(t *testing.T) {
+	parent := t.TempDir()
+	path, moved := filepath.Join(parent, "held"), filepath.Join(parent, "moved")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	handle, result, err := AcquireDirectory(path)
+	if handle == nil || result != "" || err != nil {
+		t.Fatalf("AcquireDirectory handle=%v result=%q err=%v", handle, result, err)
+	}
+	t.Cleanup(func() { _ = handle.Release() })
+	want := wantNativeFileIdentity(t, path)
+	if got, err := handle.DirectoryIdentityV1(path); got != want || err != nil {
+		t.Fatalf("held directory identity %v/%v, want %v", got, err, want)
+	}
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	wantDirectoryIdentityError(t, handle, path, syscall.ENOENT)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wantDirectoryIdentityError(t, handle, path, syscall.EXDEV)
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(moved, link); err != nil {
+		t.Fatal(err)
+	}
+	wantDirectoryIdentityError(t, handle, link, syscall.EXDEV)
+	wantDirectoryIdentityError(t, nil, moved, syscall.EBADF)
+	if err := handle.Release(); err != nil {
+		t.Fatal(err)
+	}
+	wantDirectoryIdentityError(t, handle, moved, syscall.EBADF)
+}
+
+func TestFileIdentityV1(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "regular")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantNativeFileIdentity(t, path)
+	if got := FileIdentityV1(nil); got != (IdentityV1{}) {
+		t.Fatalf("missing native stat identity %v", got)
+	}
+}
+
+func wantNativeFileIdentity(t *testing.T, path string) IdentityV1 {
+	t.Helper()
+	var native syscall.Stat_t
+	if err := syscall.Lstat(path, &native); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := IdentityV1{uint64(native.Dev), native.Ino}
+	if got := FileIdentityV1(info); got != want {
+		t.Fatalf("file identity %v, want %v", got, want)
+	}
+	return want
+}
+
+func wantDirectoryIdentityError(t *testing.T, handle *Handle, path string, want error) {
+	t.Helper()
+	if got, err := handle.DirectoryIdentityV1(path); got != (IdentityV1{}) || !errors.Is(err, want) {
+		t.Fatalf("refused directory identity %v/%v, want %v", got, err, want)
+	}
+}
+
 func TestAcquireRejectsUnsafeLeaves(t *testing.T) {
 	cases := []struct {
 		name  string
