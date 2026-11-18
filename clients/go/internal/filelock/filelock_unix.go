@@ -5,6 +5,8 @@ package filelock
 import (
 	"errors"
 	"fmt"
+	"math"
+	"os"
 	"syscall"
 )
 
@@ -26,6 +28,55 @@ func AcquireDirectory(path string) (*Handle, Result, error) {
 		return nil, ResultInvalidOrUnopenable, err
 	}
 	return lock(fd)
+}
+
+// IdentityV1 identifies an inode on its device.
+type IdentityV1 [2]uint64
+
+// FileIdentityV1 obtains the device and inode of a stat observation.
+func FileIdentityV1(info os.FileInfo) IdentityV1 {
+	if info != nil {
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat != nil {
+			return statIdentity(stat)
+		}
+	}
+	return IdentityV1{}
+}
+
+// statIdentity preserves the native device and inode values.
+func statIdentity(stat *syscall.Stat_t) IdentityV1 {
+	switch dev := any(stat.Dev).(type) {
+	case int32:
+		low := uint64(dev & math.MaxInt32)
+		sign := uint64((dev >> 31) & 1)
+		return IdentityV1{low | sign*^uint64(math.MaxInt32), stat.Ino}
+	case uint32:
+		return IdentityV1{uint64(dev), stat.Ino}
+	case uint64:
+		return IdentityV1{dev, stat.Ino}
+	}
+	return IdentityV1{}
+}
+
+// DirectoryIdentityV1 returns the held directory identity if path still names that directory without following its final component.
+func (h *Handle) DirectoryIdentityV1(path string) (IdentityV1, error) {
+	var held, named syscall.Stat_t
+	if h == nil || h.fd < 0 {
+		return IdentityV1{}, syscall.EBADF
+	}
+	heldErr := syscall.Fstat(h.fd, &held)
+	statErr := syscall.Lstat(path, &named)
+	for errors.Is(statErr, syscall.EINTR) {
+		statErr = syscall.Lstat(path, &named)
+	}
+	if err := errors.Join(heldErr, statErr); err != nil {
+		return IdentityV1{}, err
+	}
+	id := statIdentity(&held)
+	if held.Mode&syscall.S_IFMT != syscall.S_IFDIR || named.Mode&syscall.S_IFMT != syscall.S_IFDIR || statIdentity(&named) != id {
+		return IdentityV1{}, syscall.EXDEV
+	}
+	return id, nil
 }
 
 func acquire(path string, flags int) (*Handle, Result, error) {
