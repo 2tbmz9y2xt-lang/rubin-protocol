@@ -56,6 +56,16 @@ func newBoundService(t *testing.T, cfg ServiceConfig) *Service {
 	return service
 }
 
+// holdWorkLease registers a work lease on s and returns its release, which runs once, by the test or its cleanup.
+func holdWorkLease(t *testing.T, s *Service) func() {
+	t.Helper()
+	require(t, s.acquireWork(), "work lease")
+	var once sync.Once
+	release := func() { once.Do(s.releaseWork) }
+	t.Cleanup(release)
+	return release
+}
+
 // TestDATTLCallbackServiceBinding drives the production no-lease selection through
 // SyncEngine.ApplyBlock over real Services sharing one SyncEngine: with S1 and S2 OPEN the latest
 // construction S2 admits the decrease; a CLOSED current binding S3 refuses with zero DA effects
@@ -207,7 +217,7 @@ func TestDATTLCallbackServiceCloseRace(t *testing.T) {
 // TestDATTLCallbackEndToEndCloseRace drives the production selection: Close(S1) and the
 // construction of S2 race one ACCEPTED/NEW SyncEngine.ApplyBlock publication whose selection
 // snapshots S1 or S2. The apply returns ACCEPTED/NEW, Close returns, the record at count 1 is
-// either expired by one admitted decrease or kept by a refusal, and the binding names S1 or S2.
+// either expired by one admitted decrease or kept by a refusal, and the binding names S2.
 func TestDATTLCallbackEndToEndCloseRace(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	for i := range 5 {
@@ -216,24 +226,21 @@ func TestDATTLCallbackEndToEndCloseRace(t *testing.T) {
 		probe.apply()
 		probe.apply()
 		var wg sync.WaitGroup
-		var s2 atomic.Pointer[Service]
+		var s2 *Service
+		var s2Err error
 		wg.Add(2)
 		go func() { defer wg.Done(); _ = h.service.Close() }()
 		go func() {
 			defer wg.Done()
-			if service, err := NewService(h.service.cfg); err == nil {
-				s2.Store(service)
-			}
+			s2, s2Err = NewService(h.service.cfg)
 		}()
 		probe.apply()
 		wg.Wait()
 		got, err := probe.f.probe(probe.commit)
 		require(t, err == nil && (got.Disposition == node.DAAdmissionDuplicate || got.Disposition == node.DAAdmissionRetained), "round %d: probe=(%+v,%v), want kept by a refusal or expired by one decrease", i, got, err)
-		bound := h.syncEngine.DATTLBindingService()
-		require(t, bound == node.DATTLMutationService(h.service) || (s2.Load() != nil && bound == node.DATTLMutationService(s2.Load())), "round %d: binding outside S1 and S2", i)
-		if service := s2.Load(); service != nil {
-			requireReturned(t, lifecycleClose(service), fmt.Sprintf("round %d: Close(S2)", i))
-		}
+		require(t, s2Err == nil && s2 != nil, "round %d: NewService(S2)=%v", i, s2Err)
+		require(t, h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "round %d: binding is not S2", i)
+		requireReturned(t, lifecycleClose(s2), fmt.Sprintf("round %d: Close(S2)", i))
 	}
 }
 
@@ -395,8 +402,9 @@ func TestDATTLCallbackEndToEndReorgRequeueNotDecreased(t *testing.T) {
 	must(t, err, "ParseTx(chunk)")
 	_, chunkPresent, err := sink.syncEngine.DARelayState().LookupRetainedTx(chunkTxid)
 	require(t, err == nil && !chunkPresent, "the chunk whose input the branch spent was retained: err=%v", err)
-	relay(next)
-	relay(next + 1)
+	for i := range 2 {
+		relay(next + i)
+	}
 	requireCommitRetained(t, sink, fixture, true, "count 1 after two counted publications following the requeue")
 	relay(next + 2)
 	requireCommitRetained(t, sink, fixture, false, "expired at the third counted publication following the requeue")
@@ -596,7 +604,13 @@ func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
 		defer func() { recovered <- recover() }()
 		_ = h.service.EnterDATTLMutation(func() error { close(entered); <-unwind; panic("ttl body panic") })
 	}()
-	<-entered
+	select {
+	case <-entered:
+	case early := <-recovered:
+		t.Fatalf("EnterDATTLMutation returned (%v) without invoking the decrease", early)
+	case <-time.After(lifecycleWatchdog):
+		t.Fatalf("the decrease was not invoked within %s", lifecycleWatchdog)
+	}
 	closed := lifecycleClose(h.service)
 	waitDraining(t, h.service)
 	requireStillBlocked(t, closed, "Close")
@@ -710,13 +724,13 @@ func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	probe.apply()
 	probe.apply()
 	s2 := newBoundService(t, h.service.cfg)
-	require(t, s2.acquireWork(), "lease on S2")
+	release := holdWorkLease(t, s2)
 	closeDone := lifecycleClose(s2)
 	waitDraining(t, s2)
 	probe.apply()
 	probe.f.requireRetained(probe.commit, "the DRAINING binding refused the decrease and nothing fell back to the OPEN S1")
 	requireStillBlocked(t, closeDone, "Close(S2)")
-	s2.releaseWork()
+	release()
 	requireReturned(t, closeDone, "Close(S2) after the release")
 	require(t, h.service.workAuthorized() && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S1 left OPEN and the binding kept naming S2")
 	newBoundService(t, h.service.cfg)
@@ -834,7 +848,7 @@ func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	probe := newSelectionProbe(t, h, source, 0xe7)
 	p := testPeerForService(h.service, "remote", 5)
-	require(t, h.service.acquireWork(), "worker lease")
+	release := holdWorkLease(t, h.service)
 	closeDone := lifecycleClose(h.service)
 	waitDraining(t, h.service)
 	for height := uint64(1); height <= 3; height++ {
@@ -844,7 +858,7 @@ func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 		}
 	}
 	requireStillBlocked(t, closeDone, "Close")
-	h.service.releaseWork()
+	release()
 	requireReturned(t, closeDone, "Close after the release")
 	probe.f.requireAbsent(probe.commit, "the third nested decrease expired the record")
 }

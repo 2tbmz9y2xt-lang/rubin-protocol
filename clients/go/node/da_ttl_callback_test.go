@@ -38,6 +38,14 @@ func runDATTLBodyInGuard(t *testing.T, f *daNonReplayFixture) error {
 	return nil
 }
 
+// requireDATTLOK fails the test unless err is nil.
+func requireDATTLOK(t *testing.T, err error, format string, args ...any) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf(format+": %v", append(args, err)...)
+	}
+}
+
 // advanceDATTLInGuard runs the in-guard TTL body as the canonical transition does: with the bound
 // ChainState admission guard held exclusively, or bare on an unbound relay, which has no guard.
 func advanceDATTLInGuard(s *DARelayState) error {
@@ -123,26 +131,18 @@ func requireDATTLOutsideSelectedUnchanged(t *testing.T, before, after daRelaySta
 		}
 	}
 	for daID := range mergedKeys(before.sets, after.sets) {
-		if !isSelected[daID] && !reflect.DeepEqual(before.sets[daID], after.sets[daID]) {
-			t.Fatalf("record %x outside the selected set changed", daID[:1])
-		}
+		require(t, isSelected[daID] || reflect.DeepEqual(before.sets[daID], after.sets[daID]), "record %x outside the selected set changed", daID[:1])
 	}
 	for txid := range mergedKeys(before.locators, after.locators) {
 		was, is := before.locators[txid], after.locators[txid]
-		if !isSelected[was.daID] && !isSelected[is.daID] && was != is {
-			t.Fatalf("locator %x outside the selected set changed: %+v -> %+v", txid[:1], was, is)
-		}
+		require(t, isSelected[was.daID] || was == is, "locator %x outside the selected set changed: %+v -> %+v", txid[:1], was, is)
 	}
 	for token := range mergedKeys(ownerBefore.byToken, ownerAfter.byToken) {
-		if !tokens[token] && !reflect.DeepEqual(ownerBefore.byToken[token], ownerAfter.byToken[token]) {
-			t.Fatalf("owner claim %+v outside the selected set changed", token)
-		}
+		require(t, tokens[token] || reflect.DeepEqual(ownerBefore.byToken[token], ownerAfter.byToken[token]), "owner claim %+v outside the selected set changed", token)
 	}
 	for op := range mergedKeys(ownerBefore.byOutpoint, ownerAfter.byOutpoint) {
 		was, is := ownerBefore.byOutpoint[op], ownerAfter.byOutpoint[op]
-		if !tokens[was.token] && !tokens[is.token] && was != is {
-			t.Fatalf("owner row %+v outside the selected set changed: %+v -> %+v", op, was, is)
-		}
+		require(t, tokens[was.token] || was == is, "owner row %+v outside the selected set changed: %+v -> %+v", op, was, is)
 	}
 }
 
@@ -160,9 +160,7 @@ func mergedKeys[K comparable, V any](a, b map[K]V) map[K]struct{} {
 func requireDATTLCount(t *testing.T, view daRelayStateView, daID [32]byte, want uint64) {
 	t.Helper()
 	record, present := view.sets[daID]
-	if !present || record.ttlBlocksRemaining != want {
-		t.Fatalf("record %x: present=%v ttl=%d, want ttl %d", daID[:1], present, record.ttlBlocksRemaining, want)
-	}
+	require(t, present && record.ttlBlocksRemaining == want, "record %x: present=%v ttl=%d, want ttl %d", daID[:1], present, record.ttlBlocksRemaining, want)
 }
 
 // TestDATTLCallbackBodyThreeCountedPublications decreases over repeated body calls: one State A and one
@@ -173,9 +171,7 @@ func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
 	tokenA, tokenB := r.setup.sets[r.stateAID].chunks[0].member.token, r.setup.sets[r.stateBID].commit.member.token
 	for call, want := range []uint64{2, 1} {
 		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-		if err := runDATTLBodyInGuard(t, f); err != nil {
-			t.Fatalf("body call %d: %v", call+1, err)
-		}
+		requireDATTLOK(t, runDATTLBodyInGuard(t, f), "body call %d", call+1)
 		view := daRelayStateSnapshot(f.relay)
 		requireDATTLOutsideSelectedUnchanged(t, before, view, ownerBefore, cloneDAAdmissionOwner(f.mp.pendingOutpoints), r.stateAID, r.stateBID)
 		requireDATTLCount(t, view, r.stateAID, want)
@@ -188,27 +184,21 @@ func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
 		}
 	}
 	before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-	if err := runDATTLBodyInGuard(t, f); err != nil {
-		t.Fatalf("body call 3: %v", err)
-	}
+	requireDATTLOK(t, runDATTLBodyInGuard(t, f), "body call 3")
 	after := daRelayStateSnapshot(f.relay)
 	requireDATTLOutsideSelectedUnchanged(t, before, after, ownerBefore, cloneDAAdmissionOwner(f.mp.pendingOutpoints), r.stateAID, r.stateBID)
 	ownerReadyRecordAbsent(t, after, r.stateAID, r.stateA.txid)
 	ownerReadyRecordAbsent(t, after, r.stateBID, r.stateB.txid)
 	ownerReadyClaimGone(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), tokenA, r.stateA.inputs)
 	ownerReadyClaimGone(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), tokenB, r.stateB.inputs)
-	if after.records != r.setup.records+4 {
-		t.Fatalf("expiry minted a revision: records=%d, want %d", after.records, r.setup.records+4)
-	}
+	require(t, after.records == r.setup.records+4, "expiry minted a revision: records=%d, want %d", after.records, r.setup.records+4)
 	if !reflect.DeepEqual(after.sets[r.stateCID], r.base.sets[r.stateCID]) || !reflect.DeepEqual(after.locators, r.base.locators) {
 		t.Fatal("State C record or the locator image changed")
 	}
 	type counters struct{ staged, orphan, commit, complete, pinned uint64 }
 	got := counters{after.stagedBytes, after.orphanBytes, after.commitBytes, after.completeBytes, after.pinnedPayloadBytes}
 	want := counters{r.base.stagedBytes, r.base.orphanBytes, r.base.commitBytes, r.base.completeBytes, r.base.pinnedPayloadBytes}
-	if got != want || !reflect.DeepEqual(after.peerBytes, r.base.peerBytes) || !reflect.DeepEqual(after.daIDBytes, r.base.daIDBytes) {
-		t.Fatalf("accounting after expiry: got=%+v peer=%v da=%v, want=%+v peer=%v da=%v", got, after.peerBytes, after.daIDBytes, want, r.base.peerBytes, r.base.daIDBytes)
-	}
+	require(t, got == want && reflect.DeepEqual(after.peerBytes, r.base.peerBytes) && reflect.DeepEqual(after.daIDBytes, r.base.daIDBytes), "accounting after expiry: got=%+v peer=%v da=%v, want=%+v peer=%v da=%v", got, after.peerBytes, after.daIDBytes, want, r.base.peerBytes, r.base.daIDBytes)
 }
 
 // TestDATTLCallbackBodySurvivorRevisions pins revisions over repeated body calls: each body call
@@ -223,9 +213,7 @@ func TestDATTLCallbackBodySurvivorRevisions(t *testing.T) {
 	ascending := [][32]byte{late, r.stateAID, r.stateBID}
 	for call := range 2 {
 		high := daRelayStateSnapshot(f.relay).records
-		if err := runDATTLBodyInGuard(t, f); err != nil {
-			t.Fatalf("body call %d: %v", call+1, err)
-		}
+		requireDATTLOK(t, runDATTLBodyInGuard(t, f), "body call %d", call+1)
 		view := daRelayStateSnapshot(f.relay)
 		for rank, daID := range ascending {
 			if got, want := view.sets[daID].revision, high+uint64(rank)+1; got != want {
@@ -450,12 +438,8 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 		}},
 		// A count of zero is an inconsistent stored value (underflow invalidates the plan
 		// before mutation); the rows assert the bare errDARelayImageIncompatible.
-		{"State A count zero", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			f.setOwnerReadyTTL(r.stateAID, 0)
-		}, daTTLBareIncompatible},
-		{"State B count zero", func(f *daNonReplayFixture, r daTTLCallbackRecords) {
-			f.setOwnerReadyTTL(r.stateBID, 0)
-		}, daTTLBareIncompatible},
+		{"State A count zero", func(f *daNonReplayFixture, r daTTLCallbackRecords) { f.setOwnerReadyTTL(r.stateAID, 0) }, daTTLBareIncompatible},
+		{"State B count zero", func(f *daNonReplayFixture, r daTTLCallbackRecords) { f.setOwnerReadyTTL(r.stateBID, 0) }, daTTLBareIncompatible},
 		{"nil chainstate", func(f *daNonReplayFixture, _ daTTLCallbackRecords) {
 			f.mutateRelay(func(s *DARelayState) { s.mempool.chainState = nil })
 		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "nil chainstate") }},
@@ -471,9 +455,7 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			indexBefore, exactBefore := daTTLIndexKeys(f.relay), daTTLIndexMismatch(f.relay) == ""
 			err := runDATTLBodyInGuard(t, f)
 			t.Logf("refusal: %v (index exact before the body: %v)", err, exactBefore)
-			if !row.want(err) {
-				t.Fatalf("body: err=%v, want this arm's refusal", err)
-			}
+			require(t, row.want(err), "body: err=%v, want this arm's refusal", err)
 			requireDANonReplayUnchanged(t, f.relay, owner, before, ownerBefore)
 			requireDATTLIndexUnchanged(t, f.relay, indexBefore, exactBefore)
 		})
@@ -508,15 +490,11 @@ func TestDATTLCallbackBodyWalksOnlyStateAB(t *testing.T) {
 		mutateOwnerReadyRecord(s, r.stateCID, func(record *daRelaySetRecord) { record.wireBytes = 1 })
 	})
 	requireDATTLIndexExact(t, f.relay)
-	if err := runDATTLBodyInGuard(t, f); err != nil {
-		t.Fatalf("body visited State C: %v", err)
-	}
+	requireDATTLOK(t, runDATTLBodyInGuard(t, f), "body visited State C")
 	requireDATTLCount(t, daRelayStateSnapshot(f.relay), r.stateAID, 2)
 	requireDATTLIndexExact(t, f.relay)
 	for _, want := range []uint64{1, 0} {
-		if err := runDATTLBodyInGuard(t, f); err != nil {
-			t.Fatalf("body with a corrupt State C record: %v", err)
-		}
+		requireDATTLOK(t, runDATTLBodyInGuard(t, f), "body with a corrupt State C record")
 		view := daRelayStateSnapshot(f.relay)
 		if want != 0 {
 			requireDATTLCount(t, view, r.stateAID, want)
@@ -577,9 +555,7 @@ func reuseDATTLInputInStateB(f *daNonReplayFixture, r daTTLCallbackRecords) {
 func requireDATTLIndexStep(t *testing.T, f *daNonReplayFixture, step string) {
 	t.Helper()
 	requireDATTLIndexExact(t, f.relay)
-	if err := runDATTLBodyInGuard(t, f); err != nil {
-		t.Fatalf("%s: body after the publication: %v", step, err)
-	}
+	requireDATTLOK(t, runDATTLBodyInGuard(t, f), "%s: body after the publication", step)
 	requireDATTLIndexExact(t, f.relay)
 }
 
@@ -621,9 +597,9 @@ func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
 
 // TestDATTLCallbackIndexD1Projection pins the index on the D1 projection: one
 // buildCanonicalDAOwnerCandidates pass over a snapshot taken as capture() takes it re-puts the
-// State A survivor, removes the included State C record and removes the State B record whose
-// input the final chain spent, and D1 publishes that clone. The O1 half is not published. State C
-// is completed through the real admission, which releases its admission reader.
+// State A survivor, removes the included State C record and the State B record whose input the
+// final chain spent, and D1 publishes that clone; the O1 half is not published. State C is
+// completed through the real admission, which releases its admission reader.
 func TestDATTLCallbackIndexD1Projection(t *testing.T) {
 	x := canonicalDAOwnerFixtureOver(t, newDANonReplayFixture(t, 10))
 	x.stateC = daRelayTestID(0x33)
@@ -650,9 +626,7 @@ func requireDATTLD1Records(t *testing.T, x *canonicalDAOwnerFixture, want map[[3
 	for daID, record := range daRelayStateSnapshot(x.f.relay).sets {
 		got[daID] = record.state
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("records=%v, want %v", got, want)
-	}
+	require(t, reflect.DeepEqual(got, want), "records=%v, want %v", got, want)
 }
 
 func requireDATTLState(t *testing.T, f *daNonReplayFixture, daID [32]byte, want daRelaySetState) {
@@ -760,8 +734,8 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 // TestDATTLCallbackBindingChangesNoDAState pins that binding and selection change nothing over a
 // populated relay (State A and B at nonzero counts with owner tokens and a prefetch reservation,
 // State C): the first and a later ClaimDARelayState, publication, the identity read and an absent,
-// refused or admitted selection whose decrease does nothing change no DA record, count, locator,
-// accounting value, prefetch reservation or owner claim, and the later claim keeps the first hook.
+// refused or admitted selection whose decrease does nothing change no DA state, and the later
+// claim keeps the first hook.
 func TestDATTLCallbackBindingChangesNoDAState(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	engine := &SyncEngine{chainState: f.state, daRelay: f.relay}
@@ -819,6 +793,7 @@ func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 	}()
 	for range 2 * publications {
 		before := recorded.Load()
+		selected.Store(-1)
 		require(t, f.engine.enterSelectedDATTL(func() error { return nil }) == nil, "selection error")
 		after, got := recorded.Load(), selected.Load()
 		require(t, before <= got && got <= after+1, "selected S_%d outside [S_%d, S_%d]", got, before, after+1)
@@ -830,8 +805,8 @@ func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 // TestDATTLCallbackRunsInsideTheTransitionHold pins the TTL path's guard order: with the
 // admission guard held exclusively, a ReleasePeerQuotaKey and a DA admission started first park
 // on the guard, the in-guard TTL body completes under that same hold, neither writer runs before
-// the release, and after it both run against the decreased image without losing it: the admitted
-// record is created at the full orphan TTL and the decreased records keep count 2.
+// the release, and after it both run against the decreased image: the admitted record is created
+// at the full orphan TTL and the decreased records keep count 2.
 func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	f.state.admissionMu.Lock()
@@ -895,9 +870,7 @@ func TestDATTLCallbackDecrementReachability(t *testing.T) {
 		names = append(names, name)
 	}
 	got := productionReferenceCensus(t, names...)
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("TTL decrement reachability=%v, want %v", got, want)
-	}
+	require(t, reflect.DeepEqual(got, want), "TTL decrement reachability=%v, want %v", got, want)
 }
 
 // TestDATTLCallbackAcceptedMarkerCensus pins every production use of the transition's ACCEPTED
@@ -1012,9 +985,9 @@ func daTTLEngineRecords(t *testing.T, f *pendingOutpointSyncFixture) (*daNonRepl
 // real SyncEngine and DA relay, by the no-lease selection and by the lease entry; the entry gives
 // one State B record an inconsistent stored value, or unbinds the exact owner token of the State
 // A member, before it runs the in-guard body, which refuses with its own error. The apply still
-// returns its ACCEPTED/NEW summary reporting the block for relay and a nil error, the engine is
-// not latched, the no-lease lease is registered and released once, and the whole DA image and
-// owner are unchanged (RUBIN_COMPACT_BLOCKS.md Section 5).
+// returns its ACCEPTED/NEW summary and a nil error, the engine is not latched, the no-lease lease
+// is registered and released once, and the DA image and owner are unchanged
+// (RUBIN_COMPACT_BLOCKS.md Section 5).
 func TestDATTLCallbackEndToEndBodyRefusalConsumed(t *testing.T) {
 	corruptions := map[string]func(*daNonReplayFixture, [32]byte, [32]byte){
 		"inconsistent stored value": func(x *daNonReplayFixture, _, stateB [32]byte) {

@@ -1162,10 +1162,12 @@ func TestRelayedBlockPostReturnMakesNoTTLDecrease(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	p := testPeerForService(h.service, "remote", 3)
 	f, commit, summary := primeDATTLToOne(t, source, h, p, daRelayTestID(109))
-	_, _ = p.acceptRelayedBlockResult(summary.BlockHash, summary, nil)
-	_, _ = p.acceptRelayedBlockResult(summary.BlockHash, summary, errors.New("storage persistence fault"))
+	for _, applyErr := range []error{nil, errors.New("storage persistence fault")} {
+		requireEqual(t, h.service.blockSeen.Remove(summary.BlockHash), true, "the primed seen-set entry removed before the call")
+		_, _ = p.acceptRelayedBlockResult(summary.BlockHash, summary, applyErr)
+		requireEqual(t, h.service.blockSeen.Has(summary.BlockHash), true, "the seen-set entry the post-return effects added")
+	}
 	f.requireRetained(commit, "the record no post-return effect decreased")
-	requireEqual(t, h.service.blockSeen.Has(summary.BlockHash), true, "the seen-set entry the post-return effects added")
 	relayAccepted(t, p, source, 3)
 	f.requireAbsent(commit, "count 1: the next accepted block's in-guard decrease expired the record")
 }

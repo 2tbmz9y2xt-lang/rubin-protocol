@@ -5003,9 +5003,7 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, view, owner)
 		f.setOwnerReadyTTL(keepID, 1)
-		if err := advanceDATTLInGuard(f.relay); err != nil {
-			t.Fatal(err)
-		}
+		requireDATTLOK(t, advanceDATTLInGuard(f.relay), "in-guard TTL body")
 		view = daRelayStateSnapshot(f.relay)
 		if view.stagedBytes != 0 || view.commitBytes != 0 || len(view.sets) != 0 || len(view.locators) != 0 {
 			t.Fatalf("TTL staged residue: %+v", view)
@@ -5014,9 +5012,7 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		if len(owner.byToken) != 0 || len(owner.byOutpoint) != 0 {
 			t.Fatal("TTL claims survived")
 		}
-		if err := advanceDATTLInGuard(f.relay); err != nil {
-			t.Fatal(err)
-		}
+		requireDATTLOK(t, advanceDATTLInGuard(f.relay), "in-guard TTL body")
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, view, owner)
 	})
 	t.Run("peer state A whole record", func(t *testing.T) {
@@ -5234,9 +5230,7 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		}
 		for ttl := uint64(4); ttl > 1; ttl-- {
 			before := daRelayStateSnapshot(f.relay)
-			if err := advanceDATTLInGuard(f.relay); err != nil {
-				t.Fatalf("tick at ttl %d: %v", ttl, err)
-			}
+			requireDATTLOK(t, advanceDATTLInGuard(f.relay), "tick at ttl %d", ttl)
 			after := daRelayStateSnapshot(f.relay)
 			for i, daID := range ids {
 				if got := after.sets[daID]; got.ttlBlocksRemaining != ttl-1 || got.revision != before.records+uint64(i)+1 {
@@ -5283,9 +5277,7 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		})
 		before := daRelayStateSnapshot(f.relay)
 		commitToken, chunkToken := before.sets[daID].commit.member.token, before.sets[daID].chunks[0].member.token
-		if err := advanceDATTLInGuard(f.relay); err != nil {
-			t.Fatalf("ttl tick: %v", err)
-		}
+		requireDATTLOK(t, advanceDATTLInGuard(f.relay), "ttl tick")
 		after := daRelayStateSnapshot(f.relay)
 		f.mutateRelay(func(s *DARelayState) { liveAfter = s.relations.recordValue(daID) })
 		record := after.sets[daID]
@@ -5314,9 +5306,7 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		f.setOwnerReadyTTL(daID, 1)
 		before := daRelayStateSnapshot(f.relay)
 		token := before.sets[daID].chunks[0].member.token
-		if err := advanceDATTLInGuard(f.relay); err != nil {
-			t.Fatalf("ttl tick: %v", err)
-		}
+		requireDATTLOK(t, advanceDATTLInGuard(f.relay), "ttl tick")
 		after := daRelayStateSnapshot(f.relay)
 		ownerReadyRecordAbsent(t, after, daID, tx.txid)
 		if after.records != before.records {
@@ -5387,9 +5377,7 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		f.setOwnerReadyTTL(decrementID, 3)
 		before := daRelayStateSnapshot(f.relay)
 		expiringToken, survivingToken := before.sets[expireID].chunks[0].member.token, before.sets[decrementID].chunks[0].member.token
-		if err := advanceDATTLInGuard(f.relay); err != nil {
-			t.Fatalf("mixed tick: %v", err)
-		}
+		requireDATTLOK(t, advanceDATTLInGuard(f.relay), "mixed tick")
 		after, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 		ownerReadyRecordAbsent(t, after, expireID, expiring.txid)
 		record := after.sets[decrementID]
@@ -5444,9 +5432,7 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 			*capBound = live - 1
 			f.relay.mu.Unlock()
 			before := daRelayStateSnapshot(f.relay)
-			if err := advanceDATTLInGuard(f.relay); err != nil {
-				t.Fatalf("over-cap ttl tick: %v", err)
-			}
+			requireDATTLOK(t, advanceDATTLInGuard(f.relay), "over-cap ttl tick")
 			after := daRelayStateSnapshot(f.relay)
 			record := after.sets[daID]
 			if record.ttlBlocksRemaining != 1 || record.revision <= before.sets[daID].revision {
@@ -6320,9 +6306,10 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 			before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			err := selector.run(f.relay)
 			var terminal *canonicalDATerminalError
-			// The in-guard TTL body checks the stored totals against the selected State A/B sums
-			// and refuses with its own image-incompatible class, not the clone path's terminal.
-			refused := errors.As(err, &terminal) || (selector.name == ownerReadyTTLSelector && errors.Is(err, errDARelayImageIncompatible))
+			// The in-guard TTL body refuses with its image-incompatible class; the peer-release
+			// selectors refuse with the clone path's terminal class.
+			isTerminal := errors.As(err, &terminal)
+			refused := isTerminal != (selector.name == ownerReadyTTLSelector) && (isTerminal || errors.Is(err, errDARelayImageIncompatible))
 			if !refused || !strings.Contains(err.Error(), "staged retained bytes") {
 				t.Fatalf("staged underflow=%v", err)
 			}
@@ -6479,9 +6466,7 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 		requireOwnerReadySentinel(t, f, advanceDATTLInGuard, errDARelayArithmeticOverflow, "a tick at the revision ceiling")
 		// R5: whole-record deletion requests no revision, so the same ceiling does not block it.
 		f.setOwnerReadyTTL(daID, 1)
-		if err := advanceDATTLInGuard(f.relay); err != nil {
-			t.Fatalf("expiry at the ceiling: %v", err)
-		}
+		requireDATTLOK(t, advanceDATTLInGuard(f.relay), "expiry at the ceiling")
 		after := daRelayStateSnapshot(f.relay)
 		require(t, len(after.sets) == 0 && after.records == ^uint64(0) && after.nextReceivedTime == sequence, "expiry at the ceiling left sets=%d high-water=%d sequence=%d (want %d)", len(after.sets), after.records, after.nextReceivedTime, sequence)
 	})
