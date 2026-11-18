@@ -621,6 +621,15 @@ func FixtureBodySecondGetEIO(store *Store, rank uint8, key []byte, run func()) (
 	return evidence.gets, err
 }
 
+// FixtureBodyThirdGetEIO fails the third matching OLD body Get with EIO.
+func FixtureBodyThirdGetEIO(store *Store, key []byte, run func()) (uint32, error) {
+	if store == nil || run == nil || len(key) != 32 {
+		return 0, errors.New("invalid body read fixture")
+	}
+	evidence, err := fixtureLargeFault(store, 30, 4, key, run)
+	return evidence.gets, err
+}
+
 // FixtureWriteSnapshotDrift drifts one armed row to 0x7f before the write-transaction begin (large-image mode 14)
 // while run executes, and returns the drift count.
 func FixtureWriteSnapshotDrift(store *Store, rank uint8, key []byte, run func()) (uint32, error) {

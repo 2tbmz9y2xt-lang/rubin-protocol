@@ -985,6 +985,11 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 			checker := &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{native: native, consensus: consensusPackage}}
 			_, _ = checker.Check(name, fset, parsed, uses)
 			public := consensusPackage.Scope().Lookup("VerifyPersistedReplayStartupMDBX")
+			step := consensusPackage.Scope().Lookup("NewReplayStepOwner148V1")
+			stepOwner := consensusPackage.Scope().Lookup("ReplayStepOwnerV1")
+			logicalMDBXAssert(t, step != nil && stepOwner != nil, "STEP consumer census unresolved producer")
+			stepMethod := types.NewMethodSet(types.NewPointer(stepOwner.Type())).Lookup(consensusPackage, "StepReplayMDBX").Obj()
+			logicalMDBXAssert(t, stepMethod != nil, "STEP consumer census unresolved entry")
 			nativeMethod := types.NewMethodSet(types.NewPointer(native.Scope().Lookup("Store").Type())).Lookup(native, "StartupVerifyCanonicalV1").Obj()
 			logicalMDBXAssert(t, public != nil, "startup consumer census unresolved producer")
 			for _, file := range parsed {
@@ -995,6 +1000,10 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 					}
 					if uses.Uses[id] == public {
 						t.Fatalf("startup lost dormancy: node/cmd public consumer at %s", fset.Position(id.Pos()))
+					}
+					logicalMDBXAssert(t, uses.Uses[id] != step && uses.Uses[id] != stepMethod, "STEP lost dormancy: node/cmd consumer at %s", fset.Position(id.Pos()))
+					if id.Name == "NewReplayStepOwner148V1" || id.Name == "StepReplayMDBX" {
+						logicalMDBXAssert(t, uses.Defs[id] != nil || uses.Uses[id] != nil, "STEP census unresolved use at %s", fset.Position(id.Pos()))
 					}
 					logicalMDBXAssert(t, uses.Uses[id] != nativeMethod && uses.Uses[id] != native.Scope().Lookup("StartupCanonicalActiveAndReplayCompleteV1"), "unapproved external startup owner at %s", fset.Position(id.Pos()))
 					if id.Name == "VerifyPersistedReplayStartupMDBX" || id.Name == "StartupVerifyCanonicalV1" || id.Name == "StartupCanonicalActiveAndReplayCompleteV1" {
@@ -1024,12 +1033,12 @@ func initial148CompleteCensusDefinitionsV1(t *testing.T, fset *token.FileSet, fi
 			}
 			logicalMDBXAssert(t, info.Defs[d.Name] != nil, "complete block unresolved helper %s", d.Name.Name)
 			definitions[info.Defs[d.Name]] = true
-			if d.Name.Name == "withInitial148CompleteBlockV1" || d.Name.Name == "withInitial148CompleteBlockParallelV1" {
+			if d.Name.Name == "withInitial148CompleteBlockV1" || d.Name.Name == "withInitial148CompleteBlockParallelV1" || d.Name.Name == "withInitial148ReplayCompleteBlockV1" {
 				entries++
 			}
 		}
 	}
-	logicalMDBXAssert(t, entries == 2, "complete block entrypoints resolved %d of 2", entries)
+	logicalMDBXAssert(t, entries == 3, "complete block entrypoints resolved %d of 3", entries)
 	return definitions
 }
 
@@ -1095,13 +1104,13 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 	for id, object := range info.Uses {
 		filename := fset.Position(id.Pos()).Filename
 		if definitions[object] {
-			logicalMDBXAssert(t, filename == owned || filename == required || filename == composer || filename == "replay_pair_mdbx_cgo.go" || filename == "initial148_first_genesis_mdbx_cgo.go", "block source lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
+			logicalMDBXAssert(t, filename == owned || filename == required || filename == composer || filename == "replay_pair_mdbx_cgo.go" || filename == "initial148_first_genesis_mdbx_cgo.go" || filename == "replay_step_mdbx_cgo.go", "block source lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
 		}
 		if composed[object] {
-			logicalMDBXAssert(t, filename == composer || filename == "replay_pair_mdbx_cgo.go" || filename == "initial148_first_genesis_mdbx_cgo.go", "complete block lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
+			logicalMDBXAssert(t, filename == composer || filename == "replay_pair_mdbx_cgo.go" || filename == "initial148_first_genesis_mdbx_cgo.go" || filename == "replay_step_mdbx_cgo.go", "complete block lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
 		}
 		if replayComposed[object] {
-			logicalMDBXAssert(t, filename == replayComposer, "replay pair lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
+			logicalMDBXAssert(t, filename == replayComposer || filename == "replay_step_mdbx_cgo.go", "replay pair lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
 		}
 		if (filename == owned || filename == required) && object.Pkg() == native {
 			nativeUses[id.Name]++

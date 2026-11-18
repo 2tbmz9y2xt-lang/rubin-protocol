@@ -90,7 +90,7 @@ func rpfRun(t *testing.T, c *rpCase, keys []mdbx.TreeOutpointV1, alter func(repl
 					if lag != nil {
 						inputs = lag(inputs)
 					}
-					got = applyReplayPairV1(&c.store, a, c.request, prepare, inputs)
+					got = applyReplayPairV1(&c.store, a, prepare, inputs)
 					logicalMDBXAssert(t, c.store.account == a && c.store.calls == 1, "exactly one native call on one account")
 					logicalMDBXAssert(t, got.Truth == c.store.native.truth && got.Stage == c.store.native.stage && got.Index == c.store.native.index && any(got.Err) == any(c.store.native.err), "composer preserves exact captured native product")
 					return got.Err
@@ -432,18 +432,18 @@ func TestReplayPairSourceOrder(t *testing.T) {
 				c.request.Raw = nil
 			}
 			alter := func(prepare replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
-				return func(r *mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
-					// The composer captured the refused source request; the
-					// caller's classified Pair still uses coherent authority.
+				return func(r *mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+					// Classify Pair with coherent authority, then return the
+					// one refused source request for the composer's freeze.
 					c.request.Authority.TargetLagGenerationID = lagGeneration
-					result, rows, err := rpStoredRows(t, c, false)(prepare)(r)
+					request, result, rows, err := rpStoredRows(t, c, false)(prepare)(r)
 					if name == "CURRENT-F2" {
 						rows.BodyKind = 0
 					}
 					if name == "LAG-source" {
-						c.request.Authority.TargetLagGenerationID = 0
+						request.Authority.TargetLagGenerationID = 0
 					}
-					return result, rows, err
+					return request, result, rows, err
 				}
 			}
 			later := errors.New("later LAG grant must not run")
@@ -460,6 +460,48 @@ func TestReplayPairSourceOrder(t *testing.T) {
 			rpFollowing(t, c.w)
 		})
 	}
+}
+
+// TestReplayPairStoredSourceReadV1 preserves the LAG stored read before later work.
+func TestReplayPairStoredSourceReadV1(t *testing.T) {
+	c := rpNew(t, 15840, 2, mdbx.UndoTransientV1)
+	authority := rtImageRow(t, c.w, []byte{2})
+	call := replayPairCallV1{request: c.request, lagInputs: c.inputs}
+	result := &initial148CompleteBlockResultV1{transition: &connectBlockInputViewResult{}}
+	req := call.currentRequestV1(result, c.rows)
+	var op mdbx.TreeOperationV1
+	var got replayPairOutcomeV1
+	var gets uint32
+	var readErr, operationErr error
+	counts, err := mdbx.FixturePairReadObservation(c.w.s, nil, func() {
+		gets, readErr = mdbx.FixtureBodySecondGetEIO(c.w.s, 4, c.in.Endpoint.BlockHash[:], func() {
+			operationErr = c.w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+				call.account = a
+				got.Truth, got.Stage, got.Index, got.Err = c.store.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+					// Start at LAG; CURRENT validation and preparation are skipped.
+					err := call.lagV1(r, result, c.rows, req, &op)
+					return op, err
+				})
+				got.sourceRead, got.Role = call.sourceRead, call.role
+				return nil
+			})
+		})
+	})
+	engine, ok := any(got.sourceRead).(*mdbx.EngineError)
+	logicalMDBXAssert(t, err == nil && readErr == nil && operationErr == nil && gets == 2 && counts.Writes == 0 && ok && any(got.Err) == any(got.sourceRead) && got.Truth == 1 && got.Stage == 1 && got.Index == -1 && got.Role == "LAG" && c.store.calls == 1 && c.current == 0 && c.lag == 0 && len(op.Primitives) == 0 && len(op.Pair.Mutations) == 0, "stored LAG read before key callback or writes: %+v/%+v/%d/%v/%v/%v", got, counts, gets, err, readErr, operationErr)
+	logicalMDBXAssert(t, engine.Operation == "get" && engine.Class == "IO" && engine.Code == 5 && engine.Diagnostic == "error 5" && engine.Cause == nil && !engine.ReopenRequired && engine.TreeObservation == nil, "stored LAG exact native read: %+v", engine)
+	i := &replayStepInvocation{out: ReplayStepOutcomeV1{NativeCalled: true, Truth: got.Truth, Stage: got.Stage, Index: got.Index, Err: got.Err, Role: got.Role}}
+	step := &replayStepCall{invocation: i, h: c.in.Height, x: c.in.Endpoint.BlockHash, sourceRead148: got.sourceRead}
+	step.project148V1(got.Err)
+	logicalMDBXAssert(t, i.out.Result == "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)" && any(i.out.Cause) == any(got.sourceRead) && any(i.out.Err) == any(got.Err) && i.out.Truth == got.Truth && i.out.Stage == got.Stage && i.out.Index == got.Index && i.out.Role == "LAG" && i.out.Height == c.in.Height && i.out.Block == c.in.Endpoint.BlockHash && i.out.Decision == "" && !i.out.HasObservation, "stored LAG selected source projection: %+v", i.out)
+	btfCached(t, c.w, btResult{truth: got.Truth, stage: got.Stage, index: got.Index, err: got.Err})
+	c.w.reopen(t)
+	c.w.read(t, 0, []byte{2}, authority)
+	for _, generation := range []uint64{1, 2} {
+		key, _ := mdbx.HeightKey(generation, c.in.Height)
+		c.w.read(t, 2, key, nil)
+	}
+	btReservationsReleased(t, c.w.owner)
 }
 
 // TestReplayPairRepeatUse counts the actual native F3 reads. Removing the
@@ -684,12 +726,12 @@ func TestReplayPairBorrowIsolation(t *testing.T) {
 	c, w := rpfCase(t, f, 1, true)
 	before := bytes.Clone(c.in.Raw)
 	alter := func(prepare replayPairPrepareCurrentV1) replayPairPrepareCurrentV1 {
-		return func(r *mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
-			result, rows, err := prepare(r)
+		return func(r *mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+			request, result, rows, err := prepare(r)
 			if err == nil {
 				clear(result.transition.createdUtxos)
 			}
-			return result, rows, err
+			return request, result, rows, err
 		}
 	}
 	var borrowed []mdbx.Mutation
@@ -745,8 +787,8 @@ func TestReplayPairCallbackUnwind(t *testing.T) {
 					if stage != "CURRENT" {
 						return prepare
 					}
-					return func(*mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
-						return nil, replayPairRowsV1{}, invoke()
+					return func(*mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+						return replayPairRequestV1{}, nil, replayPairRowsV1{}, invoke()
 					}
 				}
 				inputs := replayPairWithLagInputsV1(c.inputs)
@@ -834,7 +876,7 @@ func TestReplayPairNativeCapacity(t *testing.T) {
 						}()
 						logicalMDBXAssert(t, <-ready == nil, "pre-native test filler acquisition")
 					}
-					got = applyReplayPairV1(&c.store, a, c.request, c.prepare(t, validate), c.inputs)
+					got = applyReplayPairV1(&c.store, a, c.prepare(t, validate), c.inputs)
 					logicalMDBXAssert(t, c.store.calls == 1 && c.store.account == a && got.Truth == c.store.native.truth && got.Stage == c.store.native.stage && got.Index == c.store.native.index && any(got.Err) == any(c.store.native.err), "capacity preserves exact native product/account")
 					return got.Err
 				})
@@ -882,8 +924,8 @@ func TestReplayPairCallbackDisposition(t *testing.T) {
 					if stage != "CURRENT" {
 						return prepare
 					}
-					return func(*mdbx.Reader) (*initial148CompleteBlockResultV1, replayPairRowsV1, error) {
-						return nil, replayPairRowsV1{}, primary
+					return func(*mdbx.Reader) (replayPairRequestV1, *initial148CompleteBlockResultV1, replayPairRowsV1, error) {
+						return replayPairRequestV1{}, nil, replayPairRowsV1{}, primary
 					}
 				}
 				inputs := replayPairWithLagInputsV1(c.inputs)
