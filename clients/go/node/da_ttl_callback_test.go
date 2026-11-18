@@ -21,12 +21,16 @@ import (
 
 // runDATTLBodyInGuard runs advanceDATTLChecked under the exclusively held ChainState admission guard, as the canonical
 // transition does; completion within the timeout shows the body never reacquires the guard.
+// On return, a failed wait included, it releases the guard and then joins the body goroutine.
 func runDATTLBodyInGuard(t *testing.T, f *daNonReplayFixture) error {
 	t.Helper()
 	f.state.admissionMu.Lock()
-	defer f.state.admissionMu.Unlock()
 	done := make(chan error, 1)
-	go func() { done <- advanceDATTLChecked(f.relay, f.mp.pendingOutpoints) }()
+	body := goDone(func() { done <- advanceDATTLChecked(f.relay, f.mp.pendingOutpoints) })
+	defer func() {
+		f.state.admissionMu.Unlock()
+		joinWithin(t, "the TTL body after the guard release", body)
+	}()
 	select {
 	case err := <-done:
 		return err
@@ -34,6 +38,31 @@ func runDATTLBodyInGuard(t *testing.T, f *daNonReplayFixture) error {
 		t.Fatal("TTL body blocked under the held exclusive admission guard")
 	}
 	return nil
+}
+
+// goDone runs fn on a new goroutine and returns a channel closed after fn returns or unwinds.
+func goDone(fn func()) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	return done
+}
+
+// joinWithin waits up to ten seconds for the listed goroutine channels to close and reports one still running through
+// t.Errorf, so a deferred call does not stop an unwind.
+func joinWithin(t *testing.T, label string, done ...<-chan struct{}) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for _, d := range done {
+		select {
+		case <-d:
+		case <-deadline:
+			t.Errorf("%s did not return within 10s", label)
+			return
+		}
+	}
 }
 
 // requireDATTLOK fails the test unless err is nil.
@@ -685,15 +714,19 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	f.engine.daRelay.mu.Lock()
 	f.owner.mu.Lock()
 	read := make(chan DATTLMutationService, 1)
-	go func() { read <- f.engine.DATTLBindingService() }()
+	reader := goDone(func() { read <- f.engine.DATTLBindingService() })
+	var got DATTLMutationService
+	returned := false
 	select {
-	case got := <-read:
-		require(t, got == DATTLMutationService(s2), "identity read under held DA locks=%v, want S2", got)
+	case got = <-read:
+		returned = true
 	case <-time.After(5 * time.Second):
-		t.Fatal("identity read waited on the DA relay or owner mutex")
 	}
 	f.owner.mu.Unlock()
 	f.engine.daRelay.mu.Unlock()
+	joinWithin(t, "the identity read after the DA locks were released", reader)
+	require(t, returned, "identity read waited on the DA relay or owner mutex")
+	require(t, got == DATTLMutationService(s2), "identity read under held DA locks=%v, want S2", got)
 	require(t, f.engine.enterSelectedDATTL(decrease) == nil && slices.Equal(attempts, []string{"S2"}) && decreases == 1, "latest binding: attempts=%v decreases=%d", attempts, decreases)
 	// S2 binds after the selection snapshot and before the registration attempt.
 	attempts, decreases = nil, 0
@@ -766,14 +799,13 @@ func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 		}}
 	}
 	f.engine.PublishDATTLBinding(services[0])
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
+	done := goDone(func() {
 		for i := 1; i < publications; i++ {
 			f.engine.PublishDATTLBinding(services[i])
 			recorded.Store(int64(i))
 		}
-	}()
+	})
+	defer joinWithin(t, "the publisher goroutine", done)
 	for range 2 * publications {
 		before := recorded.Load()
 		selected.Store(-1)
@@ -796,20 +828,22 @@ func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	f.state.admissionMu.Lock()
 	released := false
+	var started []<-chan struct{}
 	defer func() {
 		if !released {
 			f.state.admissionMu.Unlock()
 		}
+		joinWithin(t, "the parked writers and the body", started...)
 	}()
 	done := make(chan error, 2)
-	go func() { done <- f.relay.ReleasePeerQuotaKey("unrelated-peer") }()
+	started = append(started, goDone(func() { done <- f.relay.ReleasePeerQuotaKey("unrelated-peer") }))
 	awaitCanonicalMOAdmissionRLock(t, "ReleasePeerQuotaKey", 1)
 	freshID := [32]byte{0xa8}
 	fresh := f.signed(daNonReplayTxSpec{kind: 0x02, daID: freshID, payload: []byte("ttl-fresh")})
-	go func() { _, err := f.tryAdmit(fresh, daNonReplayPeer("fresh-peer")); done <- err }()
+	started = append(started, goDone(func() { _, err := f.tryAdmit(fresh, daNonReplayPeer("fresh-peer")); done <- err }))
 	awaitCanonicalMOAdmissionRLock(t, "BeginDAAdmission", 1)
 	body := make(chan error, 1)
-	go func() { body <- advanceDATTLChecked(f.relay, f.mp.pendingOutpoints) }()
+	started = append(started, goDone(func() { body <- advanceDATTLChecked(f.relay, f.mp.pendingOutpoints) }))
 	select {
 	case err := <-body:
 		require(t, err == nil, "in-guard TTL body: %v", err)

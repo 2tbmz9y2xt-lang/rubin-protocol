@@ -63,12 +63,59 @@ func newBoundService(t *testing.T, cfg ServiceConfig) *Service {
 	return service
 }
 
-// waitWithin bounds wg.Wait by the lifecycle watchdog.
-func waitWithin(t *testing.T, wg *sync.WaitGroup, label string) {
+// goDone runs fn on a new goroutine and returns a channel closed after fn returns or unwinds.
+func goDone(fn func()) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	return done
+}
+
+// joinWithin waits up to the lifecycle watchdog for the listed goroutine channels to close, skipping a nil channel (a
+// goroutine not started), and reports whether they closed; a goroutine still running is reported through t.Errorf, so
+// a deferred call does not stop an unwind.
+func joinWithin(t *testing.T, label string, done ...<-chan struct{}) bool {
 	t.Helper()
-	done := make(chan error, 1)
-	go func() { wg.Wait(); done <- nil }()
-	requireReturned(t, done, label)
+	deadline := time.After(lifecycleWatchdog)
+	for _, d := range done {
+		if d == nil {
+			continue
+		}
+		select {
+		case <-d:
+		case <-deadline:
+			t.Errorf("%s did not return within %s", label, lifecycleWatchdog)
+			return false
+		}
+	}
+	return true
+}
+
+// requireJoined is joinWithin that stops the test while a listed goroutine is still running.
+func requireJoined(t *testing.T, label string, done ...<-chan struct{}) {
+	t.Helper()
+	if !joinWithin(t, label, done...) {
+		t.FailNow()
+	}
+}
+
+// startClose runs s.Close on a new goroutine and returns its result and the goroutine's completion channel.
+func startClose(s *Service) (<-chan error, <-chan struct{}) {
+	closed := make(chan error, 1)
+	return closed, goDone(func() { closed <- s.Close() })
+}
+
+// pollUntil polls cond until it holds or the lifecycle watchdog passes and reports whether it held; it does not stop
+// the test, so it can run inside the canonical transition's exclusive hold.
+func pollUntil(cond func() bool) bool {
+	for deadline := time.Now().Add(lifecycleWatchdog); !cond(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			return false
+		}
+	}
+	return true
 }
 
 // holdWorkLease registers a work lease on s and returns its release, which runs once, by the test or its cleanup.
@@ -136,34 +183,34 @@ func TestDATTLCallbackServiceConstructionFailure(t *testing.T) {
 // Service, so all three decreases are admitted, and the final binding is one of the racing constructions.
 func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xe3)
-	built := make(chan *Service, 2)
+	type construction struct {
+		service *Service
+		err     error
+	}
+	built := make(chan construction, 2)
 	start := make(chan struct{})
-	var wg sync.WaitGroup
+	var racing []<-chan struct{}
 	for range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		racing = append(racing, goDone(func() {
 			<-start
 			service, err := NewService(h.service.cfg)
-			if err != nil {
-				t.Errorf("NewService: %v", err)
-				return
-			}
-			built <- service
-		}()
+			built <- construction{service, err}
+		}))
 	}
+	defer joinWithin(t, "the racing constructions", racing...)
 	close(start)
 	probe.apply()
 	probe.apply()
 	probe.f.requireRetained(probe.commit, "count 1 after two racing selections")
 	probe.apply()
-	waitWithin(t, &wg, "the racing goroutines")
+	requireJoined(t, "the racing constructions", racing...)
 	close(built)
 	probe.f.requireAbsent(probe.commit, "every racing selection admitted its decrease")
 	services := map[node.DATTLMutationService]bool{}
-	for service := range built {
-		services[service] = true
-		t.Cleanup(func() { _ = service.Close() })
+	for c := range built {
+		require(t, c.err == nil && c.service != nil, "NewService: %v", c.err)
+		services[c.service] = true
+		t.Cleanup(func() { _ = c.service.Close() })
 	}
 	require(t, len(services) == 2 && services[h.syncEngine.DATTLBindingService()], "final binding outside the racing constructions")
 }
@@ -476,11 +523,13 @@ func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
 func TestDATTLCallbackEndToEndErrorReleasesLease(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	refusal := errors.New("ttl body refusal")
-	var closed chan error
+	var closed <-chan error
+	var closeDone <-chan struct{}
+	defer func() { joinWithin(t, "Close", closeDone) }()
 	calls := 0
 	got := h.service.EnterDATTLMutation(func() error {
 		calls++
-		closed = lifecycleClose(h.service)
+		closed, closeDone = startClose(h.service)
 		waitDraining(t, h.service)
 		requireStillBlocked(t, closed, "Close while the registered decrease runs")
 		return refusal
@@ -497,12 +546,16 @@ func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
 	entered, unwind := make(chan struct{}), make(chan struct{})
 	var unwindOnce sync.Once
 	release := func() { unwindOnce.Do(func() { close(unwind) }) }
-	t.Cleanup(release)
 	var got any
 	exited := make(chan error, 1)
-	go func() {
+	worker := goDone(func() {
 		defer func() { got = recover(); exited <- nil }()
 		_ = h.service.EnterDATTLMutation(func() error { close(entered); <-unwind; panic("ttl body panic") })
+	})
+	var closeDone <-chan struct{}
+	defer func() {
+		release()
+		joinWithin(t, "the panicking entry and the waiting Close", worker, closeDone)
 	}()
 	select {
 	case <-entered:
@@ -511,7 +564,8 @@ func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
 	case <-time.After(lifecycleWatchdog):
 		t.Fatalf("the decrease was not invoked within %s", lifecycleWatchdog)
 	}
-	closed := lifecycleClose(h.service)
+	var closed <-chan error
+	closed, closeDone = startClose(h.service)
 	waitDraining(t, h.service)
 	requireStillBlocked(t, closed, "Close")
 	release()
@@ -625,7 +679,8 @@ func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 		require(t, errors.Is(err, errServiceClosed) && reflect.TypeOf(err) == reflect.TypeOf(errServiceClosed), "%s: err=%v, want errServiceClosed", label, err)
 	}
 	release := holdWorkLease(t, s2)
-	closeDone := lifecycleClose(s2)
+	closeDone, closeExit := startClose(s2)
+	defer func() { release(); joinWithin(t, "Close(S2)", closeExit) }()
 	waitDraining(t, s2)
 	requireEntryRefused("EnterDATTLMutation(S2) while DRAINING")
 	probe.apply()
@@ -671,24 +726,28 @@ func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xe5)
 	fresh := probe.f.chunk(daRelayTestID(0xe7), 0, []byte("in-hold"))
 	done := make(chan error, 2)
+	var writers []<-chan struct{}
+	defer func() { joinWithin(t, "the parked writers", writers...) }()
+	var notParked []string
+	park := func(frame string, write func() error) {
+		writers = append(writers, goDone(func() { done <- write() }))
+		if !pollUntil(func() bool { return goroutineParked("RLockUnlessTerminal", "sync.(*Cond).Wait", frame) }) {
+			notParked = append(notParked, frame)
+		}
+	}
 	entry := &wrappedTTLEntry{inner: h.service}
 	entry.before = func() {
 		entry.before = nil
-		go func() { done <- h.syncEngine.DARelayState().ReleasePeerQuotaKey("unrelated-peer") }()
-		waitUntil(t, func() bool { return goroutineParked("RLockUnlessTerminal", "sync.(*Cond).Wait", "ReleasePeerQuotaKey") }, "ReleasePeerQuotaKey parked on the admission guard")
-		go func() { done <- probe.f.tryAdmit(fresh, "in-hold-peer") }()
-		waitUntil(t, func() bool { return goroutineParked("RLockUnlessTerminal", "sync.(*Cond).Wait", "AdmitDA") }, "AdmitDA parked on the admission guard")
+		park("ReleasePeerQuotaKey", func() error { return h.syncEngine.DARelayState().ReleasePeerQuotaKey("unrelated-peer") })
+		park("AdmitDA", func() error { return probe.f.tryAdmit(fresh, "in-hold-peer") })
 	}
 	h.syncEngine.PublishDATTLBinding(entry)
 	probe.apply()
 	require(t, entry.attempts.Load() == 1, "entry attempts=%d, want 1", entry.attempts.Load())
-	for range 2 {
-		select {
-		case err := <-done:
-			must(t, err, "parked writer after the guard release")
-		case <-time.After(lifecycleWatchdog):
-			t.Fatalf("a parked writer never proceeded after the guard release")
-		}
+	requireJoined(t, "the parked writers after the guard release", writers...)
+	require(t, len(notParked) == 0, "%v did not park on the admission guard before the watchdog", notParked)
+	for range writers {
+		must(t, <-done, "parked writer after the guard release")
 	}
 	probe.apply()
 	probe.f.requireRetained(probe.commit, "count 1 after two in-hold decreases")
@@ -715,7 +774,8 @@ func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 	source, h, probe := newSourceAndProbe(t, 6, 0xe7)
 	p := testPeerForService(h.service, "remote", 5)
 	release := holdWorkLease(t, h.service)
-	closeDone := lifecycleClose(h.service)
+	closeDone, closeExit := startClose(h.service)
+	defer func() { release(); joinWithin(t, "Close", closeExit) }()
 	waitDraining(t, h.service)
 	for height := uint64(1); height <= 3; height++ {
 		relayAccepted(t, p, source, height)
@@ -858,26 +918,24 @@ func (c *closeRaceEntry) EnterDATTLMutation(decrease func() error) error {
 // registration, so S1 refuses; round 1 starts both inside S1's held decrease, so S1 admits and Close waits.
 func TestDATTLCallbackEndToEndCloseRaceOutcomes(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
+	var racing []<-chan struct{}
+	defer func() { joinWithin(t, "the racing Close(S1) and S2 construction", racing...) }()
 	for i := range 8 {
 		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 		probe := newSelectionProbe(t, h, source, 0xec)
 		probe.apply()
 		var closeReturned atomic.Bool
 		var s2 atomic.Pointer[Service]
-		var wg sync.WaitGroup
 		entry := &closeRaceEntry{inner: h.service, closeReturned: &closeReturned}
 		entry.start = func(inside bool) {
 			if inside != (i == 1) {
 				return
 			}
-			wg.Add(2)
-			go func() { defer wg.Done(); _ = h.service.Close(); closeReturned.Store(true) }()
-			go func() {
-				defer wg.Done()
+			racing = append(racing, goDone(func() { _ = h.service.Close(); closeReturned.Store(true) }), goDone(func() {
 				if service, err := NewService(h.service.cfg); err == nil {
 					s2.Store(service)
 				}
-			}()
+			}))
 			if inside {
 				waitUntil(t, func() bool { return s2.Load() != nil }, "S2 bound while the decrease is held")
 				waitDraining(t, h.service)
@@ -886,12 +944,12 @@ func TestDATTLCallbackEndToEndCloseRaceOutcomes(t *testing.T) {
 				}, "Close(S1) parked on its work leases or returned")
 				require(t, !closeReturned.Load(), "Close(S1) returned while its registered decrease ran")
 			} else if i%2 == 0 {
-				waitWithin(t, &wg, "the racing goroutines")
+				requireJoined(t, "the racing goroutines", racing...)
 			}
 		}
 		h.syncEngine.PublishDATTLBinding(entry)
 		probe.apply()
-		waitWithin(t, &wg, "the racing goroutines")
+		requireJoined(t, "the racing goroutines", racing...)
 		require(t, entry.attempts == 1 && !entry.afterExit, "round %d: attempts=%d decrease after Close returned=%v", i, entry.attempts, entry.afterExit)
 		require(t, entry.ran == (i == 1) || i > 1 && i%2 == 1, "round %d: S1 admitted=%v, want admitted in round 1, where Close(S1) and S2 start inside the held decrease, and refused in even rounds, where both finish before the registration", i, entry.ran)
 		probe.f.requireRetained(probe.commit, fmt.Sprintf("round %d: one decrease at most from count 2", i))
