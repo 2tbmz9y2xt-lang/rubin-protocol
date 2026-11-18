@@ -86,6 +86,10 @@ type Store struct {
 	pending                      *attempt // unresolved UNKNOWN attempt
 	closed                       bool
 	dependentView                bool // one synchronous consumer of committed P
+	sourceBorrows                uint64
+	sourceClaimed                bool
+	directory                    filelock.IdentityV1
+	self                         *Store
 	latchRequested, latchRenewed bool // the one coalesced RAM latch request; one recorded since the latest latch decision
 }
 
@@ -130,8 +134,22 @@ func start(dir string, id Identity, proof *NewInstallationProof, h hooks) (*Stor
 	if lock == nil || res != "" || err != nil {
 		return nil, refuseLock(lock, res, err, proof != nil)
 	}
-	s := &Store{dir: dir, lock: lock, fault: h.fault, ops: h.ops}
-	if err = s.load(id, proof != nil); err != nil {
+	return startLocked(dir, id, proof != nil, h, lock)
+}
+
+// startLocked binds the held directory to the absolute path before loading P.
+func startLocked(dir string, id Identity, creating bool, h hooks, lock *filelock.Handle) (*Store, error) {
+	sourceDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, errors.Join(ErrRefused, lock.Release())
+	}
+	held, err := lock.DirectoryIdentityV1(sourceDir)
+	if err != nil {
+		return nil, errors.Join(ErrRefused, lock.Release())
+	}
+	s := &Store{dir: sourceDir, directory: held, lock: lock, fault: h.fault, ops: h.ops}
+	s.self = s
+	if err = s.load(id, creating); err != nil {
 		return nil, errors.Join(err, lock.Release())
 	}
 	return s, nil
@@ -376,17 +394,25 @@ func (s *Store) readableLocked() error {
 }
 
 // Close ends a held transaction as OLD, disposes a retained crossing handle and releases the directory lock, returning
-// any release failure. It refuses with ErrBusy during a crossing or dependent callback;
-// a second Close returns nil and does nothing.
+// a release failure. It refuses with ErrBusy during a crossing, dependent callback or source hold.
+// A copied Store refuses with ErrClosed. A second Close on the original Store returns nil.
 func (s *Store) Close() error {
+	if s.self != nil && s.self != s {
+		return ErrClosed
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil
 	}
-	if s.crossing || s.dependentView {
+	if s.crossing || s.dependentView || s.sourceBorrows != 0 {
 		return ErrBusy
 	}
+	return s.closeLocked()
+}
+
+// closeLocked disposes the transaction, pending file and latch request before releasing the lock.
+func (s *Store) closeLocked() error {
 	if s.tx != nil {
 		s.tx.done, s.tx = true, nil
 	}
