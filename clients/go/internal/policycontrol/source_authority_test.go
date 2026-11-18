@@ -303,7 +303,8 @@ func TestSourceAuthorityDirectoryAliases(t *testing.T) {
 	must(t, os.Chmod(right, 0o100))
 	t.Cleanup(func() { _ = os.Chmod(right, 0o700) })
 	_, err = os.ReadDir(right)
-	sourceAuthorityFailIf(t, !errors.Is(err, os.ErrPermission), "search-only parent read: %v", err)
+	privilegedRead := err == nil && os.Geteuid() == 0
+	sourceAuthorityFailIf(t, !privilegedRead && !errors.Is(err, os.ErrPermission), "search-only parent read: %v", err)
 	dir := filepath.Join(left, "alias", "leaf")
 	must(t, mustCreate(t, dir, id).Close())
 	must(t, mustOpen(t, dir, id).Close())
