@@ -1535,7 +1535,7 @@ func buildPendingOutpointTemplate(t testing.TB) {
 	for height := uint64(1); height <= 100; height++ {
 		subsidy := consensus.BlockSubsidy(height, f.alreadyGenerated)
 		coinbase := reorgTestCoinbaseForAddress(t, height, subsidy, f.sourceAddress)
-		summary, err := engine.ApplyBlock(buildSingleTxBlockTB(t, f.tipHash, target, height+1, coinbase), nil)
+		summary, err := engine.ApplyBlock(benchmarkBuildSingleTxBlock(t, f.tipHash, target, height+1, coinbase), nil)
 		if err != nil {
 			t.Fatalf("ApplyBlock(height=%d): %v", height, err)
 		}
@@ -1549,28 +1549,6 @@ func buildPendingOutpointTemplate(t testing.TB) {
 		f.tipHash, f.tipHeight, f.alreadyGenerated = summary.BlockHash, height, f.alreadyGenerated+subsidy
 	}
 	pendingOutpointTemplate.dir, pendingOutpointTemplate.destKP, pendingOutpointTemplate.f = dir, keys[1], f
-}
-
-// buildSingleTxBlockTB is buildSingleTxBlock for a test or a benchmark.
-func buildSingleTxBlockTB(t testing.TB, prevHash [32]byte, target [32]byte, timestamp uint64, tx []byte) []byte {
-	t.Helper()
-	_, txid, _, _, err := consensus.ParseTx(tx)
-	if err != nil {
-		t.Fatalf("parse tx: %v", err)
-	}
-	root, err := consensus.MerkleRootTxids([][32]byte{txid})
-	if err != nil {
-		t.Fatalf("merkle root: %v", err)
-	}
-	header := make([]byte, 0, consensus.BLOCK_HEADER_BYTES+len(tx)+1)
-	header = consensus.AppendU32le(header, 1)
-	header = append(header, prevHash[:]...)
-	header = append(header, root[:]...)
-	header = consensus.AppendU64le(header, timestamp)
-	header = append(header, target[:]...)
-	header = consensus.AppendU64le(header, 7)
-	header = consensus.AppendCompactSize(header, 1)
-	return append(header, tx...)
 }
 
 // newPendingOutpointSyncFixture gives the caller its own byte copy of the

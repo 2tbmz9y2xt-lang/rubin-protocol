@@ -1064,14 +1064,10 @@ func TestRemoteDACleanupCallerEffects(t *testing.T) {
 	announce := p2pFunction(t, "service.go", "AnnounceBlock")
 	final, ok := announce.Body.List[len(announce.Body.List)-1].(*ast.ReturnStmt)
 	require(t, ok && len(final.Results) == 1 && types.ExprString(final.Results[0]) == "s.broadcastAcceptedBlock(nil, blockHash)", "AnnounceBlock last statement %T; want `return s.broadcastAcceptedBlock(nil, blockHash)`", announce.Body.List[len(announce.Body.List)-1])
-	for _, name := range []string{"AnnounceBlock", "noteAcceptedBlock"} {
-		file := "service.go"
-		if name == "noteAcceptedBlock" {
-			file = "handlers_block.go"
-		}
-		ast.Inspect(p2pFunction(t, file, name).Body, func(node ast.Node) bool {
+	for _, fn := range []struct{ file, name string }{{"service.go", "AnnounceBlock"}, {"handlers_block.go", "noteAcceptedBlock"}} {
+		ast.Inspect(p2pFunction(t, fn.file, fn.name).Body, func(node ast.Node) bool {
 			if ident, ok := node.(*ast.Ident); ok {
-				require(t, !strings.Contains(strings.ToLower(ident.Name), "ttl") && ident.Name != "TerminalFaulted", "%s names %s", name, ident.Name)
+				require(t, !strings.Contains(strings.ToLower(ident.Name), "ttl") && ident.Name != "TerminalFaulted", "%s names %s", fn.name, ident.Name)
 			}
 			return true
 		})

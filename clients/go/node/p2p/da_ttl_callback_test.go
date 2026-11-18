@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"math"
 	"reflect"
-	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -78,19 +77,6 @@ func TestDATTLCallbackServiceBinding(t *testing.T) {
 	probe.f.requireRetained(probe.commit, "count 1: S2 and S4 admitted, the CLOSED S3 refused with no fallback")
 	probe.apply()
 	probe.f.requireAbsent(probe.commit, "the fourth publication's admitted decrease expired the record")
-}
-
-// closeReturnsWithin starts Close and reports whether it returned within d; a Close still
-// waiting is left to finish when the held lease is released.
-func (s *Service) closeReturnsWithin(d time.Duration) bool {
-	done := make(chan struct{})
-	go func() { _ = s.Close(); close(done) }()
-	select {
-	case <-done:
-		return true
-	case <-time.After(d):
-		return false
-	}
 }
 
 // TestDATTLCallbackServiceConstructionFailure drives the production selection: a
@@ -242,7 +228,7 @@ func TestDATTLCallbackEndToEndCloseRace(t *testing.T) {
 		bound := h.syncEngine.DATTLBindingService()
 		require(t, bound == node.DATTLMutationService(h.service) || (s2.Load() != nil && bound == node.DATTLMutationService(s2.Load())), "round %d: binding outside S1 and S2", i)
 		if service := s2.Load(); service != nil {
-			require(t, service.closeReturnsWithin(lifecycleWatchdog), "round %d: Close(S2) stranded", i)
+			requireReturned(t, lifecycleClose(service), fmt.Sprintf("round %d: Close(S2)", i))
 		}
 	}
 }
@@ -483,28 +469,22 @@ func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
 func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	f := newDAIngressFixture(t, h)
-	commit := f.commit(daRelayTestID(0xd1), 2)
-	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
-	apply := func(height uint64) {
-		t.Helper()
-		summary, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, height), nil)
-		require(t, err == nil && summary != nil && summary.BlockHeight == height, "ApplyBlock(%d)=(%+v,%v), want ACCEPTED/NEW", height, summary, err)
-	}
-	apply(1)
-	apply(2)
-	f.requireRetained(commit, "count 1 after two selected decreases")
+	probe := newSelectionProbe(t, h, source, 0xd1)
+	require(t, probe.next == 1, "first applied height=%d, want 1", probe.next)
+	probe.apply()
+	probe.apply()
+	probe.f.requireRetained(probe.commit, "count 1 after two selected decreases")
 	must(t, h.service.AnnounceBlock(blockAtHeight(t, source, 2)), "AnnounceBlock(2)")
 	must(t, h.service.AnnounceBlock(blockAtHeight(t, source, 3)), "AnnounceBlock(3)")
-	f.requireRetained(commit, "AnnounceBlock decreased nothing")
+	probe.f.requireRetained(probe.commit, "AnnounceBlock decreased nothing")
 	must(t, h.service.Close(), "Close(S1)")
-	apply(3)
-	f.requireRetained(commit, "the CLOSED binding refused the decrease")
+	probe.apply()
+	probe.f.requireRetained(probe.commit, "the CLOSED binding refused the decrease")
 	requireClosedRejection(t, h.service.AnnounceBlock(blockAtHeight(t, source, 4)), "the closed Service's retained AnnounceBlock")
 	s2 := newBoundService(t, h.service.cfg)
 	require(t, h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S2 binding")
-	apply(4)
-	f.requireAbsent(commit, "the record S2's admitted decrease expired at count 1")
+	probe.apply()
+	probe.f.requireAbsent(probe.commit, "the record S2's admitted decrease expired at count 1")
 }
 
 // TestDATTLCallbackEndToEndLeasePath pins the lease path end to end: the peer path runs
@@ -514,9 +494,7 @@ func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	f := newDAIngressFixture(t, h)
-	commit := f.commit(daRelayTestID(0xd2), 2)
-	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
+	probe := newSelectionProbe(t, h, source, 0xd2)
 	s2 := newBoundService(t, h.service.cfg)
 	must(t, s2.Close(), "Close(S2): the bound Service is CLOSED, so a selection would refuse")
 	p := testPeerForService(h.service, "remote", 3)
@@ -524,10 +502,10 @@ func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
 		_, err := p.processRelayedBlock(blockAtHeight(t, source, height))
 		must(t, err, "processRelayedBlock")
 	}
-	f.requireRetained(commit, "count 1 after two lease-path decreases")
+	probe.f.requireRetained(probe.commit, "count 1 after two lease-path decreases")
 	_, err := p.processRelayedBlock(blockAtHeight(t, source, 3))
 	must(t, err, "processRelayedBlock(3)")
-	f.requireAbsent(commit, "the lease path decreased although the binding names a CLOSED Service")
+	probe.f.requireAbsent(probe.commit, "the lease path decreased although the binding names a CLOSED Service")
 }
 
 // TestDATTLCallbackEndToEndPanicReleasesLease pins the entry under a panic: a panic inside the decrease
@@ -541,7 +519,7 @@ func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
 		return nil
 	}()
 	require(t, recovered == "ttl body panic", "panic value=%v, want the original propagated unrecovered", recovered)
-	require(t, h.service.closeReturnsWithin(lifecycleWatchdog), "Close stranded after the panicking entry")
+	requireReturned(t, lifecycleClose(h.service), "Close after the panicking entry")
 }
 
 // TestDATTLCallbackEndToEndPanicWhileCloseWaits pins the panic while Close waits
@@ -557,21 +535,12 @@ func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
 		_ = h.service.EnterDATTLMutation(func() error { close(entered); <-unwind; panic("ttl body panic") })
 	}()
 	<-entered
-	closed := make(chan struct{})
-	go func() { _ = h.service.Close(); close(closed) }()
+	closed := lifecycleClose(h.service)
 	waitDraining(t, h.service)
-	select {
-	case <-closed:
-		t.Fatal("Close returned while the registered entry still held its lease")
-	case <-time.After(20 * time.Millisecond):
-	}
+	requireStillBlocked(t, closed, "Close")
 	close(unwind)
 	require(t, <-recovered == "ttl body panic", "panic value, want the original propagated unrecovered")
-	select {
-	case <-closed:
-	case <-time.After(lifecycleWatchdog):
-		t.Fatal("the waiting Close stranded after the panicking entry")
-	}
+	requireReturned(t, closed, "the waiting Close after the panicking entry")
 }
 
 // mineSideBlock mines a height-1 block on a fresh chain paying a fresh key, so its hash differs
@@ -608,9 +577,7 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	}
 	relay(1)
 	relay(2)
-	f := newDAIngressFixture(t, h)
-	commit := f.commit(daRelayTestID(0xd3), 2)
-	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
+	probe := newSelectionProbe(t, h, source, 0xd3)
 	sideHash, err := consensus.BlockHash(sideBlock[:consensus.BLOCK_HEADER_BYTES])
 	must(t, err, "BlockHash(side block)")
 	known, err := h.service.hasBlock(sideHash)
@@ -624,9 +591,9 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	require(t, err == nil && disconnected != nil && h.chainState.Height == 2, "DisconnectTip=(%+v,%v)", disconnected, err)
 	reconnected, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, 3), nil)
 	require(t, err == nil && reconnected != nil, "reconnect(3)=(%+v,%v)", reconnected, err)
-	f.requireRetained(commit, "count 1: two counted publications after the side block, replay and disconnect")
+	probe.f.requireRetained(probe.commit, "count 1: two counted publications after the side block, replay and disconnect")
 	relay(4)
-	f.requireAbsent(commit, "the record the third counted publication expired")
+	probe.f.requireAbsent(probe.commit, "the record the third counted publication expired")
 }
 
 // TestDATTLCallbackEndToEndStoredSideBlockThroughPeer pins the stored non-canonical row on the
@@ -645,9 +612,7 @@ func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 	}
 	relay(1)
 	relay(2)
-	f := newDAIngressFixture(t, h)
-	commit := f.commit(daRelayTestID(0xd4), 2)
-	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
+	probe := newSelectionProbe(t, h, source, 0xd4)
 	sideHash, err := consensus.BlockHash(sideBlock[:consensus.BLOCK_HEADER_BYTES])
 	must(t, err, "BlockHash(side block)")
 	known, err := h.service.hasBlock(sideHash)
@@ -658,9 +623,9 @@ func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 	require(t, err == nil && bytes.Equal(stored, sideBlock) && h.chainState.Height == 2 && h.chainState.TipHash != sideHash, "side block stored=%v err=%v height=%d, want stored non-canonical", stored != nil, err, h.chainState.Height)
 	relay(3)
 	relay(4)
-	f.requireRetained(commit, "count 1: two counted publications after the stored side block")
+	probe.f.requireRetained(probe.commit, "count 1: two counted publications after the stored side block")
 	relay(5)
-	f.requireAbsent(commit, "the record the third counted publication expired")
+	probe.f.requireAbsent(probe.commit, "the record the third counted publication expired")
 }
 
 // TestDATTLCallbackEndToEndDrainingBindingRefused drives the production no-lease selection
@@ -671,42 +636,22 @@ func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	f := newDAIngressFixture(t, h)
-	commit := f.commit(daRelayTestID(0xd5), 2)
-	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
-	apply := func(height uint64) {
-		t.Helper()
-		summary, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, height), nil)
-		require(t, err == nil && summary != nil && summary.BlockHeight == height, "ApplyBlock(%d)=(%+v,%v), want ACCEPTED/NEW", height, summary, err)
-	}
-	apply(1)
-	apply(2)
+	probe := newSelectionProbe(t, h, source, 0xd5)
+	probe.apply()
+	probe.apply()
 	s2 := newBoundService(t, h.service.cfg)
 	require(t, s2.acquireWork(), "lease on S2")
-	closeDone := make(chan struct{})
-	go func() { _ = s2.Close(); close(closeDone) }()
-	deadline := time.Now().Add(lifecycleWatchdog)
-	for s2.workAuthorized() {
-		require(t, time.Now().Before(deadline), "S2 did not become DRAINING within %s", lifecycleWatchdog)
-		runtime.Gosched()
-	}
-	apply(3)
-	f.requireRetained(commit, "the DRAINING binding refused the decrease and nothing fell back to the OPEN S1")
-	select {
-	case <-closeDone:
-		t.Fatal("Close(S2) returned while its lease was held")
-	default:
-	}
+	closeDone := lifecycleClose(s2)
+	waitDraining(t, s2)
+	probe.apply()
+	probe.f.requireRetained(probe.commit, "the DRAINING binding refused the decrease and nothing fell back to the OPEN S1")
+	requireStillBlocked(t, closeDone, "Close(S2)")
 	s2.releaseWork()
-	select {
-	case <-closeDone:
-	case <-time.After(lifecycleWatchdog):
-		t.Fatalf("Close(S2) did not return within %s after the release", lifecycleWatchdog)
-	}
+	requireReturned(t, closeDone, "Close(S2) after the release")
 	require(t, h.service.workAuthorized() && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S1 left OPEN and the binding kept naming S2")
 	newBoundService(t, h.service.cfg)
-	apply(4)
-	f.requireAbsent(commit, "the fresh binding's admitted decrease expired the record at count 1")
+	probe.apply()
+	probe.f.requireAbsent(probe.commit, "the fresh binding's admitted decrease expired the record at count 1")
 }
 
 // wrappedTTLEntry is a binding over a real Service's own entry that runs before ahead of each
@@ -798,13 +743,8 @@ func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 	probe := newSelectionProbe(t, h, source, 0xe7)
 	p := testPeerForService(h.service, "remote", 5)
 	require(t, h.service.acquireWork(), "worker lease")
-	closeDone := make(chan struct{})
-	go func() { _ = h.service.Close(); close(closeDone) }()
-	deadline := time.Now().Add(lifecycleWatchdog)
-	for h.service.workAuthorized() {
-		require(t, time.Now().Before(deadline), "S1 did not become DRAINING within %s", lifecycleWatchdog)
-		runtime.Gosched()
-	}
+	closeDone := lifecycleClose(h.service)
+	waitDraining(t, h.service)
 	for height := uint64(1); height <= 3; height++ {
 		summary, err := p.processRelayedBlock(blockAtHeight(t, source, height))
 		require(t, err == nil && summary != nil, "processRelayedBlock(%d)=(%+v,%v)", height, summary, err)
@@ -812,17 +752,9 @@ func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 			probe.f.requireRetained(probe.commit, "count 1 after two nested decreases while DRAINING")
 		}
 	}
-	select {
-	case <-closeDone:
-		t.Fatal("Close returned while the worker lease was held")
-	default:
-	}
+	requireStillBlocked(t, closeDone, "Close")
 	h.service.releaseWork()
-	select {
-	case <-closeDone:
-	case <-time.After(lifecycleWatchdog):
-		t.Fatalf("Close did not return within %s after the release", lifecycleWatchdog)
-	}
+	requireReturned(t, closeDone, "Close after the release")
 	probe.f.requireAbsent(probe.commit, "the third nested decrease expired the record")
 }
 
@@ -988,6 +920,6 @@ func TestDATTLCallbackEndToEndCloseRaceOutcomes(t *testing.T) {
 		}
 		service := s2.Load()
 		require(t, service != nil && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(service), "round %d: S2 construction and binding", i)
-		require(t, service.closeReturnsWithin(lifecycleWatchdog), "round %d: Close(S2) stranded", i)
+		requireReturned(t, lifecycleClose(service), fmt.Sprintf("round %d: Close(S2)", i))
 	}
 }

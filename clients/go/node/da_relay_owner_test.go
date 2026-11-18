@@ -1411,7 +1411,7 @@ func TestDAAdmissionCandidateErrorOrder(t *testing.T) {
 }
 
 type daNonReplayFixture struct {
-	t         testing.TB
+	t         *testing.T
 	signer    *consensus.MLDSA87Keypair
 	address   []byte
 	state     *ChainState
@@ -1510,7 +1510,7 @@ func (f *daNonReplayFixture) signed(spec daNonReplayTxSpec) daNonReplayTx {
 	if err := consensus.SignTransaction(tx, f.state.Utxos, devnetGenesisChainID, f.signer); err != nil {
 		f.t.Fatalf("SignTransaction: %v", err)
 	}
-	raw := f.marshal(tx)
+	raw := mustMarshalTxForNodeTest(f.t, tx)
 	parsed, txid, wtxid, consumed, err := consensus.ParseTx(raw)
 	if err != nil || consumed != len(raw) {
 		f.t.Fatalf("ParseTx=(%d,%v), want %d,nil", consumed, err, len(raw))
@@ -1522,19 +1522,7 @@ func (f *daNonReplayFixture) signed(spec daNonReplayTxSpec) daNonReplayTx {
 }
 
 func (f *daNonReplayFixture) begin(tx daNonReplayTx) *DAAdmission {
-	admission, err := f.mp.BeginDAAdmission(tx.raw)
-	if err != nil {
-		f.t.Fatalf("BeginDAAdmission: %v", err)
-	}
-	return admission
-}
-
-func (f *daNonReplayFixture) marshal(tx *consensus.Tx) []byte {
-	raw, err := consensus.MarshalTx(tx)
-	if err != nil {
-		f.t.Fatalf("MarshalTx: %v", err)
-	}
-	return raw
+	return mustDAAdmission(f.t, f.mp, tx.raw)
 }
 
 func (f *daNonReplayFixture) admit(tx daNonReplayTx, provenance daProvenance) daRelayAdmissionOutcome {
@@ -1557,12 +1545,7 @@ func (f *daNonReplayFixture) completeReplay(daID [32]byte, kind uint8, payload .
 	chunk := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, payload: payload})
 	f.admit(chunk, daNonReplayPeer("chunk"))
 	commit := f.signed(daNonReplayTxSpec{kind: 0x01, daID: daID, chunkCount: 1, commitment: sha3.Sum256(chunk.spec.payload), commitmentOutputs: 1})
-	admission := f.begin(commit)
-	_ = admission.Snapshot()
-	staged, _ := admission.BeginCommit(nil)
-	token := staged.CandidateToken()
-	staged.Commit()
-	admission.Close()
+	_, token := mustFinalizeDAAdmission(f.t, f.mp, commit.raw)
 	f.mutateRelay(func(s *DARelayState) {
 		record := s.relations.recordValue(daID)
 		record.commit = daRelayCommit{daID: daID, payloadCommitment: commit.spec.commitment, member: &daRelayMemberIdentity{txid: commit.txid, wtxid: commit.wtxid, fee: commit.spec.fee, inputs: append([]consensus.Outpoint(nil), commit.inputs...), token: token, provenance: daNonReplayPeer("commit")}, chunkCount: 1, txBytes: append([]byte(nil), commit.raw...)}
@@ -4634,6 +4617,26 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 	}
 }
 
+// walkProductionGoFiles parses every non-test Go source under clients/go (no build tags: cgo and
+// platform-ignored files included) and passes each file to visit; a walk or parse error fails the
+// test under label.
+func walkProductionGoFiles(t *testing.T, label string, visit func(path string, file *ast.File)) {
+	t.Helper()
+	if err := filepath.Walk("..", func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		file, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		if parseErr != nil {
+			return parseErr
+		}
+		visit(path, file)
+		return nil
+	}); err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+}
+
 // productionReferenceCensus walks every non-test Go source under clients/go (no build tags: cgo
 // and platform-ignored files included) and returns, per tracked name, the sorted enclosing
 // declarations of every identifier use (call, method value, passed value, package-level
@@ -4654,14 +4657,7 @@ func productionReferenceCensus(t *testing.T, names ...string) map[string][]strin
 			return true
 		})
 	}
-	if err := filepath.Walk("..", func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return err
-		}
-		file, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
-		if parseErr != nil {
-			return parseErr
-		}
+	walkProductionGoFiles(t, "reference census", func(path string, file *ast.File) {
 		for _, decl := range file.Decls {
 			function, ok := decl.(*ast.FuncDecl)
 			if !ok {
@@ -4675,10 +4671,7 @@ func productionReferenceCensus(t *testing.T, names ...string) map[string][]strin
 				note(function.Body, function.Name.Name)
 			}
 		}
-		return nil
-	}); err != nil {
-		t.Fatalf("reference census: %v", err)
-	}
+	})
 	for _, name := range names {
 		require(t, declarations[name] == 1, "%s: %d declarations, want 1", name, declarations[name])
 		sort.Strings(refs[name])
@@ -7655,7 +7648,7 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 				f.t.Fatal(err)
 			}
 			parsed.TxKind, parsed.DaChunkCore, parsed.DaPayload = 0x00, nil, nil
-			raw := f.marshal(parsed)
+			raw := mustMarshalTxForNodeTest(f.t, parsed)
 			_, txid, wtxid, _, err := consensus.ParseTx(raw)
 			if err != nil {
 				f.t.Fatal(err)

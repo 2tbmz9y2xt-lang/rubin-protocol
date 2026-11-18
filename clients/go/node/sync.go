@@ -115,7 +115,9 @@ type SyncEngine struct {
 	reorgDAAdmission func([]byte) (func(bool), error)
 	// daTTLBinding is the retained DA owner's current Section 5 TTL binding, nil while absent;
 	// its atomic operations are the one order of publications, selections and identity reads.
-	daTTLBinding atomic.Pointer[daTTLBinding]
+	// It holds one Service whose own method is the entry, so no other Service's entry can
+	// populate it.
+	daTTLBinding atomic.Pointer[DATTLMutationService]
 	// daTTLLease is the lease-owning Service's nested DA TTL entry for the one
 	// apply running under mutationMu, nil under no Service lease; it is written
 	// and read only while mutationMu is held.
@@ -706,12 +708,6 @@ type DATTLMutationService interface {
 	EnterDATTLMutation(decrease func() error) error
 }
 
-// daTTLBinding is one indivisible Service/entry pair: the entry is the
-// Service's own method, so no other Service's entry can populate it.
-type daTTLBinding struct {
-	service DATTLMutationService
-}
-
 // PublishDATTLBinding replaces the current TTL binding with service
 // (RUBIN_COMPACT_BLOCKS.md Section 5). Precondition: the caller is NewService,
 // passing its own non-nil, fully initialized Service as its final construction
@@ -723,7 +719,7 @@ func (s *SyncEngine) PublishDATTLBinding(service DATTLMutationService) {
 	if s == nil || service == nil {
 		return
 	}
-	s.daTTLBinding.Store(&daTTLBinding{service: service})
+	s.daTTLBinding.Store(&service)
 }
 
 // DATTLBindingService returns the current TTL binding's Service, or nil while
@@ -737,7 +733,7 @@ func (s *SyncEngine) DATTLBindingService() DATTLMutationService {
 	if binding == nil {
 		return nil
 	}
-	return binding.service
+	return *binding
 }
 
 // enterSelectedDATTL is the no-lease selection, run once per unlatched ACCEPTED/NEW

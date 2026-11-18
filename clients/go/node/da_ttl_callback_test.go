@@ -5,12 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
-	"go/parser"
-	"go/token"
 	"maps"
 	"math"
 	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -68,25 +65,14 @@ func requireDATTLSkipsStateC(t *testing.T, f *daNonReplayFixture, run func(*DARe
 func productionDeclarations(t *testing.T, name string) []string {
 	t.Helper()
 	var hits []string
-	err := filepath.Walk("..", func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return err
-		}
-		file, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
-		if parseErr != nil {
-			return parseErr
-		}
+	walkProductionGoFiles(t, "declaration census", func(path string, file *ast.File) {
 		ast.Inspect(file, func(node ast.Node) bool {
 			if ident, ok := node.(*ast.Ident); ok && ident.Name == name {
 				hits = append(hits, path)
 			}
 			return true
 		})
-		return nil
 	})
-	if err != nil {
-		t.Fatalf("declaration census: %v", err)
-	}
 	return hits
 }
 
@@ -809,9 +795,12 @@ func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	const publications = 400
 	var recorded, selected atomic.Int64
-	services := make([]*daTTLOrderedService, publications)
+	services := make([]*daTTLFuncService, publications)
 	for i := range services {
-		services[i] = &daTTLOrderedService{id: int64(i), selected: &selected}
+		services[i] = &daTTLFuncService{enter: func(decrease func() error) error {
+			selected.Store(int64(i))
+			return decrease()
+		}}
 	}
 	f.engine.PublishDATTLBinding(services[0])
 	done := make(chan struct{})
@@ -830,17 +819,6 @@ func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 	}
 	<-done
 	require(t, f.engine.DATTLBindingService() == DATTLMutationService(services[publications-1]), "final binding is not the last publication")
-}
-
-// daTTLOrderedService stores its index into selected when its entry is entered.
-type daTTLOrderedService struct {
-	id       int64
-	selected *atomic.Int64
-}
-
-func (c *daTTLOrderedService) EnterDATTLMutation(decrease func() error) error {
-	c.selected.Store(c.id)
-	return decrease()
 }
 
 // TestDATTLCallbackRunsInsideTheTransitionHold replaces the retired fenced-writer row of
@@ -1082,20 +1060,6 @@ func TestDATTLCallbackBodyPanicKeepsWholeImage(t *testing.T) {
 	}
 }
 
-// daTTLLeaseService mirrors the Service entry for a transition under no Service lease: it
-// registers one lease, runs decrease once and releases the lease by defer, unwind included.
-type daTTLLeaseService struct {
-	leases           sync.WaitGroup
-	acquired, closed atomic.Int32
-}
-
-func (d *daTTLLeaseService) EnterDATTLMutation(decrease func() error) error {
-	d.leases.Add(1)
-	d.acquired.Add(1)
-	defer func() { d.closed.Add(1); d.leases.Done() }()
-	return decrease()
-}
-
 // TestDATTLCallbackEndToEndBodyPanic drives one ACCEPTED/NEW SyncEngine.ApplyBlock through the
 // production selection into a registered no-lease entry and the real body, with a panic injected
 // at each of the two body points: the panic reaches the apply caller unrecovered, the lease is
@@ -1107,12 +1071,18 @@ func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
 		t.Run(fmt.Sprintf("stage=%d", stage), func(t *testing.T) {
 			f := newPendingOutpointSyncFixture(t)
 			x, stateA, stateB := daTTLEngineRecords(t, f)
-			service := &daTTLLeaseService{}
+			// The entry mirrors the Service entry under no Service lease: one registered lease,
+			// decrease run once, the lease released by defer, unwind included.
+			var leases sync.WaitGroup
+			var acquired, released atomic.Int32
 			var before daRelayStateView
 			var ownerBefore *PendingOutpointOwner
 			f.engine.PublishDATTLBinding(&daTTLFuncService{enter: func(decrease func() error) error {
 				before, ownerBefore = daRelayStateSnapshot(x.relay), cloneDAAdmissionOwner(x.mp.pendingOutpoints)
-				return service.EnterDATTLMutation(decrease)
+				leases.Add(1)
+				acquired.Add(1)
+				defer func() { released.Add(1); leases.Done() }()
+				return decrease()
 			}})
 			want := fmt.Sprintf("e2e ttl panic at stage %d", stage)
 			x.relay.ttlHook = func(at daTTLStage) {
@@ -1130,9 +1100,9 @@ func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
 			}()
 			x.relay.ttlHook = nil
 			require(t, got == want, "recovered %v, want the injected panic", got)
-			require(t, service.acquired.Load() == 1 && service.closed.Load() == 1, "leases acquired=%d released=%d, want 1 and 1", service.acquired.Load(), service.closed.Load())
+			require(t, acquired.Load() == 1 && released.Load() == 1, "leases acquired=%d released=%d, want 1 and 1", acquired.Load(), released.Load())
 			waited := make(chan struct{})
-			go func() { service.leases.Wait(); close(waited) }()
+			go func() { leases.Wait(); close(waited) }()
 			select {
 			case <-waited:
 			case <-time.After(5 * time.Second):
@@ -1450,7 +1420,7 @@ func benchDATTLGuardHold(b *testing.B, in *daTTLHoldInputs, shape daTTLHoldShape
 		}
 		height := f.tipHeight + 1
 		coinbase := reorgTestCoinbaseForAddress(b, height, consensus.BlockSubsidy(height, f.alreadyGenerated), f.sourceAddress)
-		block := buildSingleTxBlockTB(b, f.tipHash, f.target, 500, coinbase)
+		block := benchmarkBuildSingleTxBlock(b, f.tipHash, f.target, 500, coinbase)
 		before := daRelayStateSnapshot(f.engine.DARelayState())
 		b.StartTimer()
 		summary, err := f.engine.ApplyBlock(block, nil)
