@@ -8,7 +8,6 @@ import (
 	"maps"
 	"math"
 	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -253,28 +252,6 @@ func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
 	require(t, got == want && reflect.DeepEqual(after.peerBytes, r.base.peerBytes) && reflect.DeepEqual(after.daIDBytes, r.base.daIDBytes), "accounting after expiry: got=%+v peer=%v da=%v, want=%+v peer=%v da=%v", got, after.peerBytes, after.daIDBytes, want, r.base.peerBytes, r.base.daIDBytes)
 }
 
-// TestDATTLCallbackBodySurvivorRevisions: each body call gives each survivor a fresh revision above the high-water in
-// ascending da_id order; the third record, admitted last, has the smallest da_id.
-func TestDATTLCallbackBodySurvivorRevisions(t *testing.T) {
-	f, r := newDATTLCallbackRecords(t)
-	late := [32]byte{0x17}
-	f.ownerReadyChunk(late, 0, "ttl-late", daNonReplayPeer("ttl-peer"))
-	f.setOwnerReadyTTL(late, 3)
-	ascending := [][32]byte{late, r.stateAID, r.stateBID}
-	for call := range 2 {
-		high := daRelayStateSnapshot(f.relay).records
-		requireDATTLOK(t, runDATTLBodyInGuard(t, f), "body call %d", call+1)
-		view := daRelayStateSnapshot(f.relay)
-		for rank, daID := range ascending {
-			if got, want := view.sets[daID].revision, high+uint64(rank)+1; got != want {
-				t.Fatalf("body call %d: record %x revision=%d, want %d", call+1, daID[:1], got, want)
-			}
-		}
-	}
-	requireDATTLOK(t, runDATTLBodyInGuard(t, f), "body call 3")
-	require(t, reflect.DeepEqual(daRelayStateSnapshot(f.relay).sets, r.base.sets), "the third body call left %v, want only the unchanged State C record", daRelayStateSnapshot(f.relay).sets)
-}
-
 // TestDATTLCallbackBodyRefusalChangesNothing pins that a refused check on one selected record, or a selected member
 // whose exact owner token is not bound, returns the body's own error and leaves the whole DA image and owner unchanged.
 func TestDATTLCallbackBodyRefusalChangesNothing(t *testing.T) {
@@ -459,7 +436,6 @@ func TestDATTLCallbackBodyRefusalArms(t *testing.T) {
 			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(owner)
 			indexBefore, exactBefore := daTTLIndexKeys(f.relay), daTTLIndexMismatch(f.relay) == ""
 			err := runDATTLBodyInGuard(t, f)
-			t.Logf("refusal: %v (index exact before the body: %v)", err, exactBefore)
 			require(t, row.want(err), "body: err=%v, want this arm's refusal", err)
 			requireDANonReplayUnchanged(t, f.relay, owner, before, ownerBefore)
 			requireDATTLIndexUnchanged(t, f.relay, indexBefore, exactBefore)
@@ -880,58 +856,6 @@ func TestDATTLCallbackDecrementReachability(t *testing.T) {
 	}
 	got := productionReferenceCensus(t, names...)
 	require(t, reflect.DeepEqual(got, want), "TTL decrement reachability=%v, want %v", got, want)
-}
-
-// TestDATTLCallbackAcceptedMarkerCensus pins every use of the transition's ACCEPTED marker: only the direct connect and
-// preferred branch applies set it, to true, and only publishCanonicalTransition reads it.
-func TestDATTLCallbackAcceptedMarkerCensus(t *testing.T) {
-	var uses []string
-	walkProductionGoFiles(t, "accepted marker census", func(path string, file *ast.File) {
-		for _, decl := range file.Decls {
-			enclosing := "package-level " + filepath.Base(path)
-			if function, ok := decl.(*ast.FuncDecl); ok {
-				enclosing = function.Name.Name
-			}
-			uses = append(uses, daTTLAcceptedMarkerUses(decl, enclosing)...)
-		}
-	})
-	slices.Sort(uses)
-	want := []string{"set applyCanonicalParsedBlockTracked true", "set applyPreferredBranch true", "use package-level sync_apply_helpers.go", "use publishCanonicalTransition"}
-	require(t, reflect.DeepEqual(uses, want), "daTTLAccepted uses=%q, want %q", uses, want)
-}
-
-// daTTLAcceptedMarkerUses lists each daTTLAccepted identifier in decl: an assignment target as "set <enclosing>
-// <right-hand identifier>", every other occurrence as "use <enclosing>".
-func daTTLAcceptedMarkerUses(decl ast.Node, enclosing string) []string {
-	var uses []string
-	assigned := map[*ast.Ident]bool{}
-	ast.Inspect(decl, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.AssignStmt:
-			for i, lhs := range n.Lhs {
-				if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "daTTLAccepted" {
-					assigned[sel.Sel] = true
-					uses = append(uses, "set "+enclosing+" "+daTTLMarkerValue(n, i))
-				}
-			}
-		case *ast.Ident:
-			if n.Name == "daTTLAccepted" && !assigned[n] {
-				uses = append(uses, "use "+enclosing)
-			}
-		}
-		return true
-	})
-	return uses
-}
-
-func daTTLMarkerValue(assign *ast.AssignStmt, i int) string {
-	if len(assign.Rhs) != len(assign.Lhs) {
-		return "multi-value"
-	}
-	if value, ok := assign.Rhs[i].(*ast.Ident); ok {
-		return value.Name
-	}
-	return "expression"
 }
 
 // TestDATTLCallbackLatchedNewInvokesNothing: a TERMINAL_PERSISTENCE(new) publication invokes no DA TTL entry

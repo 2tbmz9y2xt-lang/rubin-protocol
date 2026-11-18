@@ -1068,20 +1068,13 @@ type ownerReadyTTLPlan struct {
 // (RUBIN_COMPACT_BLOCKS.md Section 5); the canonical transition is its
 // only permitted caller. PRECONDITION: the caller holds ChainState admissionMu EXCLUSIVELY, after
 // the D1 publication; this body never acquires that guard (no lockAdmissionFence, no
-// RLockUnlessTerminal), because sync.RWMutex is not reentrant.
+// RLockUnlessTerminal).
 //
 // It plans over exactly the State A and State B records of the published image, walking the
 // relations' State A/B bucket, so no State C record is visited, the relay state is not cloned
-// and the standard owner domain is not scanned. Before any mutation it checks, with checked
-// arithmetic, every selected record (stored under its own da_id, State A or B, owner-ready, its
-// revision and received time at or below the stored high-waters), every locator row, the
-// record's per-da_id orphan byte entry against its own accounting, the stored staged, orphan,
-// commit-overhead and per-peer totals and the per-da_id entry count against the selected
-// records' sums (those records are their only contributors). On a bound relay it then checks
-// every selected member's token (non-zero, this owner's, held once, each input named once) and,
-// under the owner lock, every expiring member's victim claim and inputs and every selected
-// member's exact owner-token claim and the owner row of each of its inputs. On an unbound relay
-// (nil mempool) no claim domain is reachable, so that arm reads no owner token, claim or row.
+// and the standard owner domain is not scanned. It checks every selected record, locator,
+// accounting value and exact owner token with checked arithmetic before any mutation; on an
+// unbound relay (nil mempool) it reads no owner token, claim or row.
 // On success each selected record with a count above one decreases by one with one fresh
 // revision, and each record at count one is removed with the owner-ready expiry effect:
 // members, locator rows, accounting, prefetch reservation and, on a bound relay, finalized
@@ -1187,9 +1180,9 @@ func (s *DARelayState) checkOwnerReadyTTLRecordLocked(record daRelaySetRecord) (
 }
 
 // checkOwnerReadyTTLHighWaterLocked refuses a record above either stored high-water, the
-// precondition every survivor revision minted from s.records relies on (the minting sibling
-// nextDANonReplaySequenceLocked refuses the same two), and a count above the configured orphan
-// TTL, which every count starts at and never exceeds (RUBIN_COMPACT_BLOCKS.md Section 5).
+// precondition every survivor revision minted from s.records relies on, and a count above the
+// configured orphan TTL, which every count starts at and never exceeds (RUBIN_COMPACT_BLOCKS.md
+// Section 5).
 func (s *DARelayState) checkOwnerReadyTTLHighWaterLocked(record daRelaySetRecord) error {
 	if record.ttlBlocksRemaining > s.caps.orphanTTLBlocks {
 		return fmt.Errorf("%w: record %x count %d above the orphan TTL %d", errDARelayImageIncompatible, record.daID, record.ttlBlocksRemaining, s.caps.orphanTTLBlocks)

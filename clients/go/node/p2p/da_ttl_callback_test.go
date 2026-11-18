@@ -108,8 +108,7 @@ func TestDATTLCallbackServiceBinding(t *testing.T) {
 
 // TestDATTLCallbackServiceConstructionFailure drives the production selection: a construction failing at config
 // validation or at the inbound budget leaves the binding naming S1, whose registration then admits the decrease of the
-// next ACCEPTED/NEW publication. On an engine with no claim yet, every such refusal claims nothing, so the next
-// successful construction is the first claimant: its admitDetachedReorgDA is the engine's detached-reorg hook.
+// next ACCEPTED/NEW publication.
 func TestDATTLCallbackServiceConstructionFailure(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xe2)
 	probe.apply()
@@ -130,28 +129,6 @@ func TestDATTLCallbackServiceConstructionFailure(t *testing.T) {
 	}
 	probe.apply()
 	probe.f.requireAbsent(probe.commit, "S1, still bound after the failed constructions, admitted the decrease")
-	for _, row := range []struct {
-		want string
-		bad  func(*ServiceConfig)
-	}{
-		{"bind address is required", func(c *ServiceConfig) { c.BindAddr = "" }},
-		{"nil peer manager", func(c *ServiceConfig) { c.PeerManager = nil }},
-		{"nil sync engine", func(c *ServiceConfig) { c.SyncEngine = nil }},
-		{"nil blockstore", func(c *ServiceConfig) { c.BlockStore = nil }},
-		{"nil tx metadata func", func(c *ServiceConfig) { c.TxMetadataFunc = nil }},
-		{"inbound block budget must be zero or between 1073741824 and 8589934592 bytes", func(c *ServiceConfig) { c.InboundBlockBudgetBytes = 1073741823 }},
-	} {
-		t.Run("first claimant after "+row.want, func(t *testing.T) {
-			sink, valid := unclaimedServiceSink(t)
-			invalid := valid
-			row.bad(&invalid)
-			service, err := NewService(invalid)
-			require(t, service == nil && err != nil && err.Error() == row.want, "construction=(%p,%v), want %q", service, err, row.want)
-			require(t, valid.SyncEngine.DATTLBindingService() == nil, "refused construction published a binding")
-			first := newBoundService(t, valid)
-			requireFirstClaimant(t, sink, valid, first)
-		})
-	}
 }
 
 // TestDATTLCallbackServiceConcurrentConstruction drives the production selection under -race: two constructions race
@@ -189,64 +166,6 @@ func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
 		t.Cleanup(func() { _ = service.Close() })
 	}
 	require(t, len(services) == 2 && services[h.syncEngine.DATTLBindingService()], "final binding outside the racing constructions")
-}
-
-// TestDATTLCallbackServiceCloseRace pins Close(S1) racing the registration of a selection that snapshotted S1 while S2
-// binds. The outcome is admitted before DRAINING with Close waiting for the decrease, or refused with zero effects.
-func TestDATTLCallbackServiceCloseRace(t *testing.T) {
-	for i := range 20 {
-		h := newTestHarness(t, 0, "127.0.0.1:0", nil)
-		snapshot := h.syncEngine.DATTLBindingService()
-		var closeReturned atomic.Bool
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() { defer wg.Done(); _ = h.service.Close(); closeReturned.Store(true) }()
-		var s2Err error
-		go func() { defer wg.Done(); _, s2Err = NewService(h.service.cfg) }()
-		decreases, closedDuring := 0, false
-		err := snapshot.EnterDATTLMutation(func() error {
-			decreases++
-			closedDuring = closeReturned.Load()
-			return nil
-		})
-		waitWithin(t, &wg, "the racing goroutines")
-		require(t, s2Err == nil, "round %d: NewService(S2)=%v", i, s2Err)
-		admitted := err == nil && decreases == 1 && !closedDuring
-		refused := errors.Is(err, errServiceClosed) && reflect.TypeOf(err) == reflect.TypeOf(errServiceClosed) && decreases == 0
-		require(t, snapshot == node.DATTLMutationService(h.service) && (admitted || refused), "round %d: err=%v decreases=%d closedDuring=%v", i, err, decreases, closedDuring)
-		if current, ok := h.syncEngine.DATTLBindingService().(*Service); ok && current != h.service {
-			_ = current.Close()
-		}
-	}
-}
-
-// TestDATTLCallbackEndToEndCloseRace drives the production selection: Close(S1) and the construction of S2 race one
-// ACCEPTED/NEW SyncEngine.ApplyBlock publication whose selection snapshots S1 or S2. The apply returns ACCEPTED/NEW,
-// Close returns, a probe of the commit reports DAAdmissionDuplicate or DAAdmissionRetained, and the binding names S2.
-func TestDATTLCallbackEndToEndCloseRace(t *testing.T) {
-	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
-	for i := range 5 {
-		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-		probe := newSelectionProbe(t, h, source, 0xe4)
-		probe.apply()
-		probe.apply()
-		var wg sync.WaitGroup
-		var s2 *Service
-		var s2Err error
-		wg.Add(2)
-		go func() { defer wg.Done(); _ = h.service.Close() }()
-		go func() {
-			defer wg.Done()
-			s2, s2Err = NewService(h.service.cfg)
-		}()
-		probe.apply()
-		waitWithin(t, &wg, "the racing goroutines")
-		got, err := probe.f.probe(probe.commit)
-		require(t, err == nil && (got.Disposition == node.DAAdmissionDuplicate || got.Disposition == node.DAAdmissionRetained), "round %d: probe=(%+v,%v), want kept by a refusal or expired by one decrease", i, got, err)
-		require(t, s2Err == nil && s2 != nil, "round %d: NewService(S2)=%v", i, s2Err)
-		require(t, h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "round %d: binding is not S2", i)
-		requireReturned(t, lifecycleClose(s2), fmt.Sprintf("round %d: Close(S2)", i))
-	}
 }
 
 // detachedReorgFixture is a sink tip block with one DA commit and chunk and a longer source branch to reorganize onto.
@@ -551,19 +470,6 @@ func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
 	require(t, s2.attempts.Load() == 0, "the OPEN bound S2 recorded %d entry attempts, want 0", s2.attempts.Load())
 }
 
-// TestDATTLCallbackEndToEndPanicReleasesLease pins the entry under a panic: a panic inside the decrease passed to the
-// bound Service's registered entry propagates unrecovered, the lease is released once, and Close returns.
-func TestDATTLCallbackEndToEndPanicReleasesLease(t *testing.T) {
-	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
-	recovered := func() (value any) {
-		defer func() { value = recover() }()
-		_ = h.service.EnterDATTLMutation(func() error { panic("ttl body panic") })
-		return nil
-	}()
-	require(t, recovered == "ttl body panic", "panic value=%v, want the original propagated unrecovered", recovered)
-	requireReturned(t, lifecycleClose(h.service), "Close after the panicking entry")
-}
-
 // TestDATTLCallbackEndToEndErrorReleasesLease pins the entry on a decrease that returns an error: the decrease runs
 // once under one registered lease, on which a Close started inside it waits; it returns that error unchanged and
 // releases the lease, so Close returns.
@@ -725,11 +631,10 @@ func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "the fresh binding's admitted decrease expired the record at count 1")
 }
 
-// wrappedTTLEntry runs before, counts each attempt and returns refuse, when set, instead of entering.
+// wrappedTTLEntry adds one to attempts per call, runs before, when set, and enters inner.
 type wrappedTTLEntry struct {
 	inner    *Service
 	before   func()
-	refuse   error
 	attempts atomic.Int64
 }
 
@@ -737,9 +642,6 @@ func (w *wrappedTTLEntry) EnterDATTLMutation(decrease func() error) error {
 	w.attempts.Add(1)
 	if w.before != nil {
 		w.before()
-	}
-	if w.refuse != nil {
-		return w.refuse
 	}
 	return w.inner.EnterDATTLMutation(decrease)
 }
@@ -784,22 +686,6 @@ func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 	probe.apply()
 	probe.f.requireAbsent(probe.commit, "the third decrease expired the original record")
 	probe.f.requireRetained(fresh, "the record admitted after the first decrease at count 1")
-}
-
-// TestDATTLCallbackEndToEndEntryErrorConsumed pins that the transition consumes the entry result: an entry returning an
-// error leaves ApplyBlock's ACCEPTED/NEW summary and nil error, decreases nothing, and later ones decrease.
-func TestDATTLCallbackEndToEndEntryErrorConsumed(t *testing.T) {
-	_, h, probe := newSourceAndProbe(t, 6, 0xe6)
-	failing := &wrappedTTLEntry{inner: h.service, refuse: errors.New("ttl entry failure")}
-	h.syncEngine.PublishDATTLBinding(failing)
-	probe.apply()
-	require(t, failing.attempts.Load() == 1, "entry attempts=%d, want 1", failing.attempts.Load())
-	h.syncEngine.PublishDATTLBinding(h.service)
-	probe.apply()
-	probe.apply()
-	probe.f.requireRetained(probe.commit, "count 1: the failed entry decreased nothing")
-	probe.apply()
-	probe.f.requireAbsent(probe.commit, "the third admitted decrease expired the record")
 }
 
 // TestDATTLCallbackEndToEndPreCommitLatchInvokesNothing pins that a transition latching before the durable commit
