@@ -294,20 +294,22 @@ type sourceTypedError struct{}
 func (*sourceTypedError) Error() string { return "typed visitor result" }
 
 func TestSourceExportScope(t *testing.T) {
-	for _, mode := range []string{"success", "error", "wrapped", "typed-nil", "panic"} {
-		t.Run(mode, func(t *testing.T) {
+	direct := errors.New("visitor result")
+	for _, row := range []struct {
+		name  string
+		cause error
+	}{
+		{"success", nil},
+		{"error", direct},
+		{"wrapped", fmt.Errorf("application: %w", direct)},
+		{"typed-nil", (*sourceTypedError)(nil)},
+		{"panic", direct},
+	} {
+		t.Run(row.name, func(t *testing.T) {
 			s, o, dir, m, parts := sourceBundleScene(t, 1, false)
 			admitted := m
 			admitted.Parts = slices.Clone(m.Parts)
 			want := slices.Clone(parts[0])
-			cause := errors.New("visitor result")
-			if mode == "wrapped" {
-				cause = fmt.Errorf("application: %w", cause)
-			}
-			if mode == "typed-nil" {
-				var typed *sourceTypedError
-				cause = typed
-			}
 			var escaped SourcePartV1
 			var scope *SourceOperationV1
 			producer := func(op *SourceOperationV1, v func(SourcePartV1) error) error {
@@ -347,25 +349,18 @@ func TestSourceExportScope(t *testing.T) {
 						_, err = tx.Abort()
 						sourceMust(t, err)
 						sourceChild(t, dir, "busy")
-						switch mode {
-						case "error", "typed-nil", "wrapped":
-							return cause
-						case "panic":
-							panic(cause)
+						if row.name == "panic" {
+							panic(row.cause)
 						}
-						return nil
+						return row.cause
 					})
 				}()
-				if mode == "panic" {
-					if panicValue != any(cause) {
+				if row.name == "panic" {
+					if panicValue != any(row.cause) {
 						t.Fatalf("panic=%v", panicValue)
 					}
-				} else if mode == "success" {
-					if got != nil || calls != 6 {
-						t.Fatalf("export result=%v count=%d", got, calls)
-					}
-				} else if any(got) != any(cause) {
-					t.Fatalf("visitor result=%v", got)
+				} else if any(got) != any(row.cause) || row.name == "success" && calls != 6 {
+					t.Fatalf("export result=%v count=%d", got, calls)
 				}
 				if n, err := escaped.ReadAt(make([]byte, 1), 0); n != 0 || any(err) != any(ErrUnavailableV1) {
 					t.Fatalf("escaped read: %d/%v", n, err)

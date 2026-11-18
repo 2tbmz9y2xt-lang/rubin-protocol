@@ -153,7 +153,7 @@ func (o *SourceOwnerV1) openSourceRoot() error {
 
 func syncSourceRoot(r *sourceRoot) error { return r.pin.Sync() }
 
-// census includes every reached file owner and any unlinked release-only debt.
+// census accounts for retained files and pending cleanup.
 func (o *SourceOwnerV1) census(r *sourceRoot) (uint64, uint64, error) {
 	entries, err := o.censusEntries(r)
 	if err != nil {
@@ -164,16 +164,14 @@ func (o *SourceOwnerV1) census(r *sourceRoot) (uint64, uint64, error) {
 
 func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry) (uint64, uint64, error) {
 	var count, size uint64
-	releasePresent := false
+	missing, absentRelease := len(o.live), o.release
 	for _, entry := range entries {
 		name := entry.Name()
 		switch name {
-		case releaseFile:
-			if o.release == nil {
+		case releaseFile, releaseScratch:
+			if name == releaseFile && o.release == nil {
 				return 0, 0, ErrIntegrityV1
 			}
-			continue
-		case releaseScratch:
 			continue
 		}
 		n, err := o.censusFile(r, name, size)
@@ -182,30 +180,40 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry) (uint6
 		}
 		size += n
 		count++
-		releasePresent = releasePresent || o.release != nil && name == o.release.name
+		missing -= o.liveNameCount(name)
+		if absentRelease != nil && name == absentRelease.name {
+			absentRelease = nil
+		}
 	}
-	return o.includeAbsent(count, size, releasePresent)
+	return o.includeAbsent(count, size, missing, absentRelease)
 }
 
-func (o *SourceOwnerV1) includeAbsent(count, size uint64, releasePresent bool) (uint64, uint64, error) {
+func (o *SourceOwnerV1) liveNameCount(name string) int {
+	if o.live[name] == nil {
+		return 0
+	}
+	return 1
+}
+
+func (o *SourceOwnerV1) includeAbsent(count, size uint64, missing int, absentRelease *sourceRelease) (uint64, uint64, error) {
+	var debtBytes, releaseBytes uint64
 	if o.debt != nil && o.debt.removed {
-		if o.debt.size > o.limits.Bytes-size {
-			return 0, 0, ErrCapacityV1
-		}
 		count++
-		size += o.debt.size
+		debtBytes = o.debt.size
 	}
-	if o.release != nil && !releasePresent {
-		if o.release.size > o.limits.Bytes-size {
-			return 0, 0, ErrCapacityV1
-		}
+	if absentRelease != nil {
 		count++
-		size += o.release.size
+		releaseBytes = absentRelease.size
+		missing -= o.liveNameCount(absentRelease.name)
 	}
-	if count > o.limits.Files {
+	remaining := o.limits.Bytes - size
+	if debtBytes > remaining || releaseBytes > remaining-debtBytes || count > o.limits.Files {
 		return 0, 0, ErrCapacityV1
 	}
-	return count, size, nil
+	if missing != 0 {
+		return 0, 0, ErrIntegrityV1
+	}
+	return count, size + debtBytes + releaseBytes, nil
 }
 
 func (o *SourceOwnerV1) censusEntries(r *sourceRoot) ([]os.DirEntry, error) {

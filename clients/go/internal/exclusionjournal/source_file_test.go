@@ -49,12 +49,11 @@ func sourcePrepareRefusal(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, pa
 	}
 }
 
-func sourceFault(o *SourceOwnerV1, stage string, cause error, failed *bool, observe func()) {
+func sourceFault(o *SourceOwnerV1, stage string, cause error, observe func()) {
 	fail := func() error {
 		if observe != nil {
 			observe()
 		}
-		*failed = true
 		o.ops = realSourceFS
 		return cause
 	}
@@ -155,8 +154,7 @@ func TestSourcePartAndAssuranceRefusals(t *testing.T) {
 			case "conditional-short":
 				parts[3] = []byte{2, 1}
 			case "conditional-zero":
-				parts[3] = make([]byte, 33)
-				parts[3][0] = 2
+				parts[3] = append([]byte{2}, make([]byte, 32)...)
 			case "unknown-assurance":
 				parts[3] = []byte{9}
 			case "digest-substitution":
@@ -259,10 +257,11 @@ func TestSourceDurabilityFailures(t *testing.T) {
 				original := sourceReadFile(t, path)
 				cause := errors.New("filesystem refusal")
 				failed := false
-				sourceFault(o, stage, cause, &failed, func() {
+				sourceFault(o, stage, cause, func() {
 					if err := s.Close(); any(err) != any(policycontrol.ErrBusy) {
 						t.Fatalf("close in source I/O: %v", err)
 					}
+					failed = true
 				})
 				want := cause
 				if stage == "statfs" {
@@ -272,11 +271,10 @@ func TestSourceDurabilityFailures(t *testing.T) {
 				if !failed {
 					t.Fatalf("durability operation did not reach %s", stage)
 				}
-				if stage == "parent-sync" {
-					if o.debt == nil || o.debt.staging || len(sourceEntries(t, dir)) != 1 {
-						t.Fatal("renamed backing lost its owner")
-					}
-				} else if o.debt != nil || len(sourceEntries(t, dir)) != 0 {
+				if stage == "parent-sync" && (o.debt == nil || o.debt.staging || len(sourceEntries(t, dir)) != 1) {
+					t.Fatal("renamed backing lost its owner")
+				}
+				if stage != "parent-sync" && (o.debt != nil || len(sourceEntries(t, dir)) != 0) {
 					t.Fatal("unpublished cleanup was not completed")
 				}
 				if reopen {
@@ -465,13 +463,12 @@ func testSourceReleaseStage(t *testing.T, stage string) {
 }
 
 func injectReleaseFault(o *SourceOwnerV1, stage string, cause error) (visible, backing bool) {
-	failed := false
 	switch stage {
 	case "write", "file-sync", "close", "rename":
-		sourceFault(o, stage, cause, &failed, nil)
+		sourceFault(o, stage, cause, nil)
 		return false, true
 	case "unlink", "unlink-reopen-competing-prepare":
-		sourceFault(o, "unlink", cause, &failed, nil)
+		sourceFault(o, "unlink", cause, nil)
 		return true, true
 	case "marker-clear":
 		o.ops.remove = func(r *os.Root, name string) error {
@@ -564,8 +561,7 @@ func TestSourceNoOverwriteAndDistinctCopies(t *testing.T) {
 		}
 	}
 	accepted, acceptedParts := sourceBundle(2, false)
-	acceptedSource := sourcePrepare(t, o, accepted, acceptedParts)
-	if p.name == acceptedSource.name {
+	if acceptedSource := sourcePrepare(t, o, accepted, acceptedParts); p.name == acceptedSource.name {
 		t.Fatal("distinct capture classes share identity")
 	}
 	sourceRead(t, o, m, parts)
@@ -737,14 +733,14 @@ func TestSourceSharedCaptureBudget(t *testing.T) {
 			sourceMust(t, err)
 			limits := sourceLimits()
 			limits.Bytes, limits.Files = a+b, 2
-			if mode == "files" {
+			switch mode {
+			case "files":
 				limits.Bytes = a + 2*b
-			}
-			if mode == "bytes" {
+			case "bytes":
 				limits.Bytes, limits.Files = a+b-1, 3
 			}
 			_, o, dir := sourceScene(t, limits)
-			sourcePrepare(t, o, first, one)
+			original := sourcePrepare(t, o, first, one)
 			attempt := second
 			if mode != "bytes" {
 				sourcePrepare(t, o, second, two)
@@ -754,6 +750,13 @@ func TestSourceSharedCaptureBudget(t *testing.T) {
 			sourcePrepareRefusal(t, o, attempt, two, ErrCapacityV1)
 			if !reflect.DeepEqual(before, sourceEntries(t, dir)) {
 				t.Fatal("shared capacity changed retained backing")
+			}
+			if mode == "files" {
+				path, moved := filepath.Join(dir, sourceDirectory, original.name), filepath.Join(dir, "moved")
+				sourceMust(t, os.Rename(path, moved))
+				sourcePrepareRefusal(t, o, attempt, two, ErrIntegrityV1)
+				sourceFileCount(t, dir, 1, "refused preparation created backing")
+				sourceMust(t, os.Rename(moved, path))
 			}
 			sourceRead(t, o, first, one)
 			if mode != "bytes" {
@@ -893,16 +896,11 @@ func testSourceMovedDuringExport(t *testing.T, reuse bool) {
 		sourcePrepare(t, o, m, parts)
 	}
 	root, moved := filepath.Join(dir, sourceDirectory), filepath.Join(dir, "moved")
-	shifted := false
 	producer := sourceAfterFirstPart(m, parts, func() error {
-		shifted = true
 		sourceMust(t, os.Rename(root, moved))
 		return os.Mkdir(root, 0o700)
 	})
 	sourcePrepareResult(t, o, m, producer, ErrIdentityV1)
-	if !shifted {
-		t.Fatal("export did not move the source directory")
-	}
 	sourcePresence(t, moved, m.name(o.id), true)
 	sourceFileCount(t, dir, 0, "replacement directory acquired backing")
 	sourceMust(t, os.Remove(root))
