@@ -770,11 +770,13 @@ type DARelayState struct {
 	// never copy it.
 	completeHook func(daCompleteStage, *daCompleteCommitPlan)
 	// ttlHook, when set by package tests, runs once at each reached stage of
-	// one in-guard TTL decrease: daTTLPlanned after the plan and every record
-	// check succeeded and before the first mutation, daTTLApplied after the last
-	// apply mutation and before the body returns, both with s.mu held and, on a
-	// bound relay at daTTLApplied, the owner mutex held. It must not take either
-	// mutex. Nil at construction; retained-state images never copy it.
+	// one in-guard TTL decrease: daTTLPlanned after the plan and its record,
+	// locator and accounting checks, before a bound relay's owner, owner-token
+	// and victim-claim checks and before the first mutation; daTTLApplied after
+	// the last apply mutation and before the body returns. Both run with s.mu
+	// held and, on a bound relay at daTTLApplied, the owner mutex held. It must
+	// not take either mutex. Nil at construction; retained-state images never
+	// copy it.
 	ttlHook func(daTTLStage)
 }
 

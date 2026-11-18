@@ -1024,9 +1024,10 @@ func requireDATTLAppliedImage(t *testing.T, f *daNonReplayFixture, r daTTLCallba
 	requireDATTLCount(t, daRelayStateSnapshot(f.relay), r.stateAID, 1)
 }
 
-// TestDATTLCallbackBodyPanicKeepsWholeImage injects a panic after the plan and every check (before the first mutation)
-// and after the last apply mutation (before return): it reaches the caller unrecovered, the DA relay and owner mutexes
-// are released, and the image is the complete old or applied one (RUBIN_COMPACT_BLOCKS.md Section 5).
+// TestDATTLCallbackBodyPanicKeepsWholeImage injects a panic after the plan and its record, locator and accounting checks
+// (before the owner, owner-token and victim-claim checks and the first mutation) and after the last apply mutation
+// (before return): it reaches the caller unrecovered, the DA relay and owner mutexes are released, and the image is the
+// complete old or applied one (RUBIN_COMPACT_BLOCKS.md Section 5).
 func TestDATTLCallbackBodyPanicKeepsWholeImage(t *testing.T) {
 	for _, stage := range []daTTLStage{daTTLPlanned, daTTLApplied} {
 		t.Run(fmt.Sprintf("stage=%d", stage), func(t *testing.T) {
