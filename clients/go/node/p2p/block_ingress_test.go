@@ -97,6 +97,7 @@ func TestBlockIngressBudget(t *testing.T) {
 		{"config_error_precedes_claim", func(t *testing.T) {
 			sink, cfg := unclaimedServiceSink(t)
 			requireRefused(t, cfg, 1073741823, rangeError)
+			require(t, cfg.SyncEngine.DATTLBindingService() == nil, "refused construction published a binding")
 			cfg.InboundBlockBudgetBytes = 1073741824
 			requireFirstClaimant(t, sink, cfg, newBoundService(t, cfg))
 		}},

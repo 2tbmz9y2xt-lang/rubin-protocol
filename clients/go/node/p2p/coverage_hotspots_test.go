@@ -64,6 +64,7 @@ func TestNewServiceInvalidConfigDoesNotConsumeDARelayClaim(t *testing.T) {
 		if _, err := NewService(invalid); err == nil || err.Error() != test.want {
 			t.Fatalf("invalid config error=%v, want %q", err, test.want)
 		}
+		require(t, valid.SyncEngine.DATTLBindingService() == nil, "%s: refused construction published a binding", test.want)
 		// A later construction succeeds either way; the refused one claimed nothing
 		// only if the next successful construction is the first claimant.
 		requireFirstClaimant(t, sink, valid, newBoundService(t, valid))

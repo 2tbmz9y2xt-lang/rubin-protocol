@@ -610,21 +610,30 @@ func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 
 // TestDATTLCallbackEndToEndDrainingBindingRefused drives the production no-lease selection through
 // SyncEngine.ApplyBlock while the current binding's Service S2 is DRAINING and the earlier S1 is OPEN: the publication
-// still returns ACCEPTED/NEW, the registration is refused with zero DA effects and nothing falls back to S1, Close(S2)
+// still returns ACCEPTED/NEW, the registration is refused with zero DA effects and nothing falls back to S1, S2's entry
+// called directly returns errServiceClosed without running the decrease while DRAINING and after Close, Close(S2)
 // returns only after the held lease is released, and a fresh Service then binds and decreases.
 func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xd5)
 	probe.apply()
 	probe.apply()
 	s2 := newBoundService(t, h.service.cfg)
+	requireEntryRefused := func(label string) {
+		t.Helper()
+		err := s2.EnterDATTLMutation(func() error { t.Errorf("%s: the refused registration ran the decrease", label); return nil })
+		requireClosedRejection(t, err, label)
+		require(t, errors.Is(err, errServiceClosed) && reflect.TypeOf(err) == reflect.TypeOf(errServiceClosed), "%s: err=%v, want errServiceClosed", label, err)
+	}
 	release := holdWorkLease(t, s2)
 	closeDone := lifecycleClose(s2)
 	waitDraining(t, s2)
+	requireEntryRefused("EnterDATTLMutation(S2) while DRAINING")
 	probe.apply()
 	probe.f.requireRetained(probe.commit, "the DRAINING binding refused the decrease and nothing fell back to the OPEN S1")
 	requireStillBlocked(t, closeDone, "Close(S2)")
 	release()
 	requireReturned(t, closeDone, "Close(S2) after the release")
+	requireEntryRefused("EnterDATTLMutation(S2) after Close returned")
 	require(t, h.service.workAuthorized() && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S1 left OPEN and the binding kept naming S2")
 	newBoundService(t, h.service.cfg)
 	probe.apply()
