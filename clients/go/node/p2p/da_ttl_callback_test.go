@@ -434,35 +434,65 @@ func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
 	require(t, reflect.DeepEqual(before, observeDARelayPublicImage(t, h)), "later construction changed the DA relay image")
 }
 
-// TestDATTLCallbackEndToEndSelection drives the no-lease selection through real ACCEPTED/NEW applies
-// (SyncEngine.ApplyBlock) over the real DA owner and Services: the bound OPEN Service admits one decrease per
-// publication, AnnounceBlock decreases nothing, a CLOSED current binding changes no count while the apply still returns
-// ACCEPTED/NEW, and a fresh Service binds and decreases while the closed Service's retained AnnounceBlock returns
-// "service already closed" and decreases nothing.
+// newEngineMiner returns a function that mines one block on h's own engine through node.Miner.MineOne, whose apply is
+// the no-lease applyBlockWithProjection the RPC mining path takes, requires it to become the tip and returns its bytes.
+func newEngineMiner(t *testing.T, h *testHarness) func() []byte {
+	t.Helper()
+	cfg := node.DefaultMinerConfig()
+	cfg.MineAddress = consensus.P2PKCovenantDataForPubkey(mustP2PMLDSA87Keypair(t).PubkeyBytes())
+	timestamp := uint64(1_778_000_000)
+	cfg.TimestampSource = func() uint64 { timestamp++; return timestamp }
+	miner, err := node.NewMiner(h.chainState, h.blockStore, h.syncEngine, cfg)
+	must(t, err, "NewMiner")
+	return func() []byte {
+		t.Helper()
+		height := h.chainState.Height + 1
+		mined, err := miner.MineOne(context.Background(), nil)
+		must(t, err, fmt.Sprintf("MineOne(%d)", height))
+		require(t, mined.Height == height && h.chainState.TipHash == mined.Hash, "mined block at %d is not the tip at %d", mined.Height, height)
+		block, err := h.blockStore.GetBlockByHash(mined.Hash)
+		must(t, err, "GetBlockByHash(mined)")
+		return block
+	}
+}
+
+// TestDATTLCallbackEndToEndSelection drives the no-lease selection through blocks mined on the engine
+// (node.Miner.MineOne) over the real DA owner and Services, while the test holds S1's AnnounceBlock as the RPC does and
+// hands it blocks just mined. With S1 bound and OPEN a mined block decreases once, and S1's AnnounceBlock of it
+// decreases nothing; with S1 CLOSED as the current binding a mined block changes no count; with S1 CLOSED and S2 the
+// current OPEN binding a mined block decreases once through S2, and S1's AnnounceBlock of it returns "service already
+// closed" and decreases nothing.
 func TestDATTLCallbackEndToEndSelection(t *testing.T) {
-	source, h, probe := newSourceAndProbe(t, 7, 0xd1)
-	require(t, probe.next == 1, "first applied height=%d, want 1", probe.next)
-	probe.apply()
-	probe.apply()
-	probe.f.requireRetained(probe.commit, "count 1 after two selected decreases")
-	must(t, h.service.AnnounceBlock(blockAtHeight(t, source, 2)), "AnnounceBlock(2)")
-	must(t, h.service.AnnounceBlock(blockAtHeight(t, source, 3)), "AnnounceBlock(3)")
-	probe.f.requireRetained(probe.commit, "AnnounceBlock decreased nothing")
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	probe := newSelectionProbe(t, h, nil, 0xd1)
+	mine := newEngineMiner(t, h)
+	rpcAnnounce := h.service.AnnounceBlock
+	p, f := probe.commit, probe.f
+	must(t, rpcAnnounce(mine()), "AnnounceBlock of mined block 1")
+	b2 := mine()
+	f.requireRetained(p, "count 1 after two mined publications: AnnounceBlock of mined block 1 decreased nothing")
+	must(t, rpcAnnounce(b2), "AnnounceBlock of mined block 2")
+	f.requireRetained(p, "AnnounceBlock of mined block 2 decreased the record at count 1 nothing")
+	second := f.commit(daRelayTestID(0xd6), 2)
+	f.admit(second, "127.0.0.1:19112")
+	mine()
+	f.requireAbsent(p, "mined block 3 decreased the record at count 1 once through the bound OPEN S1")
+	third := f.commit(daRelayTestID(0xd7), 2)
+	f.admit(third, "127.0.0.1:19113")
+	mine()
+	f.requireRetained(second, "count 1 after mined blocks 3 and 4")
 	must(t, h.service.Close(), "Close(S1)")
-	probe.apply()
-	probe.f.requireRetained(probe.commit, "the CLOSED binding refused the decrease")
+	mine()
+	f.requireRetained(second, "the CLOSED binding S1 refused the decrease of mined block 5")
 	s2 := newBoundService(t, h.service.cfg)
 	require(t, h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S2 binding")
-	fresh := probe.f.commit(daRelayTestID(0xd6), 2)
-	probe.f.admit(fresh, "127.0.0.1:19112")
-	probe.apply()
-	probe.f.requireAbsent(probe.commit, "the record S2's admitted decrease expired at count 1")
-	probe.apply()
-	probe.f.requireRetained(fresh, "count 1 after two publications: S2 decreased once per publication")
-	requireClosedRejection(t, h.service.AnnounceBlock(blockAtHeight(t, source, probe.next)), "the closed Service's retained AnnounceBlock")
-	probe.f.requireRetained(fresh, "the closed AnnounceBlock decreased nothing")
-	probe.apply()
-	probe.f.requireAbsent(fresh, "the third decrease expired the record")
+	b6 := mine()
+	f.requireAbsent(second, "mined block 6 decreased the record at count 1 through S2")
+	f.requireRetained(third, "mined block 6 decreased the record at count 2 once")
+	requireClosedRejection(t, rpcAnnounce(b6), "the closed S1's retained AnnounceBlock of mined block 6")
+	f.requireRetained(third, "the closed AnnounceBlock decreased the record at count 1 nothing")
+	mine()
+	f.requireAbsent(third, "mined block 7 decreased the record at count 1 through S2")
 }
 
 // TestDATTLCallbackEndToEndLeasePath pins the lease path end to end through the peer's applyBlockWithReorg: with State
@@ -590,23 +620,28 @@ func mineSideBlock(t *testing.T) []byte {
 	return block
 }
 
-// newSideBlockSetup relays heights 1 and 2 to h through p under a held work lease, retains the probe id and returns a
-// valid side-branch block h does not know.
-func newSideBlockSetup(t *testing.T, id byte) (*testHarness, *testHarness, *peer, *selectionProbe, []byte, [32]byte) {
+// newSideBlockSetup retains the probe commit (State B) and a State A chunk, both at count 3, relays heights 1 and 2 to h
+// through p under a held work lease, which leave both at count 1, and returns the chunk and a valid side-branch block h
+// does not know.
+func newSideBlockSetup(t *testing.T, id byte) (*testHarness, *testHarness, *peer, *selectionProbe, []byte, []byte, [32]byte) {
 	t.Helper()
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	sideBlock := mineSideBlock(t)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	probe := newSelectionProbe(t, h, source, id)
+	x := probe.f.chunk(daRelayTestID(id^0x80), 0, []byte("side-block x"))
+	probe.f.admit(x, "side-a")
 	p := testPeerForService(h.service, "remote", 5)
 	holdWorkLease(t, h.service)
 	relayAccepted(t, p, source, 1)
 	relayAccepted(t, p, source, 2)
-	probe := newSelectionProbe(t, h, source, id)
+	probe.f.requireRetained(x, "the State A chunk at count 1 after two counted publications")
+	probe.f.requireRetained(probe.commit, "the State B commit at count 1 after two counted publications")
 	sideHash, err := consensus.BlockHash(sideBlock[:consensus.BLOCK_HEADER_BYTES])
 	must(t, err, "BlockHash(side block)")
 	known, err := h.service.hasBlock(sideHash)
 	require(t, err == nil && !known, "the side block is already known: err=%v", err)
-	return source, h, p, probe, sideBlock, sideHash
+	return source, h, p, probe, x, sideBlock, sideHash
 }
 
 // relayAccepted relays source's block at height through p and requires an applied summary.
@@ -616,16 +651,19 @@ func relayAccepted(t *testing.T, p *peer, source *testHarness, height uint64) {
 	require(t, err == nil && summary != nil, "processRelayedBlock(%d)=(%+v,%v)", height, summary, err)
 }
 
-// TestDATTLCallbackEndToEndNonAcceptedResults, over the real SyncEngine, DA owner and Service: a side-branch block
-// stored non-canonical, a KNOWN_BLOCK_NOOP replay, a MISSING_PARENT orphan, a CONSENSUS_INVALID block and a
-// DisconnectTip decrease nothing, so the record at count 3 survives two counted publications and expires at the third.
-// Peer calls hold a work lease; the direct side block and DisconnectTip make no entry attempt.
+// TestDATTLCallbackEndToEndNonAcceptedResults, over the real SyncEngine, DA owner and Service: with a State A chunk and
+// a State B commit at count 1, a side-branch block stored non-canonical, a KNOWN_BLOCK_NOOP replay, a MISSING_PARENT
+// orphan and a CONSENSUS_INVALID block decrease nothing, so both are retained until the next counted publication
+// expires them; a DisconnectTip then decreases nothing, so a commit retained at count 3 survives two counted
+// publications and expires at the third. Peer calls hold a work lease; the direct side block and DisconnectTip make no
+// entry attempt.
 func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
-	source, h, p, probe, sideBlock, _ := newSideBlockSetup(t, 0xd3)
+	source, h, p, probe, x, sideBlock, _ := newSideBlockSetup(t, 0xd3)
 	entry := &wrappedTTLEntry{inner: h.service}
 	h.syncEngine.PublishDATTLBinding(entry)
 	summary, err := h.syncEngine.ApplyBlockWithReorg(sideBlock, nil)
 	require(t, err == nil && summary != nil && len(summary.CanonicalAppliedBlocks) == 0 && h.chainState.Height == 2, "side block=(%+v,%v) height=%d, want stored non-canonical", summary, err, h.chainState.Height)
+	probe.f.requireRetained(x, "the State A chunk at count 1 after the stored side block")
 	summary, err = p.processRelayedBlock(blockAtHeight(t, source, 2))
 	require(t, err == nil && summary == nil, "known block replay=(%+v,%v), want KNOWN_BLOCK_NOOP", summary, err)
 	summary, err = p.processRelayedBlock(blockAtHeight(t, source, 5))
@@ -635,31 +673,40 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	summary, err = testPeerForService(h.service, "invalid", 5).processRelayedBlock(invalid)
 	var invalidErr *consensus.TxError
 	require(t, errors.As(err, &invalidErr) && invalidErr.Code == consensus.BLOCK_ERR_MERKLE_INVALID && summary == nil && h.chainState.Height == 2, "invalid block=(%+v,%v), want BLOCK_ERR_MERKLE_INVALID", summary, err)
+	probe.f.requireRetained(x, "the State A chunk at count 1 after the replay, the orphan and the invalid block")
+	probe.f.requireRetained(probe.commit, "the State B commit at count 1 after the side block, the replay, the orphan and the invalid block")
+	require(t, entry.attempts.Load() == 0, "entry attempts=%d after the direct side block, want 0", entry.attempts.Load())
+	fresh := probe.f.commit(daRelayTestID(0xd8), 2)
+	probe.f.admit(fresh, "127.0.0.1:19112")
 	relayAccepted(t, p, source, 3)
+	probe.f.requireAbsent(x, "the State A chunk the next counted publication expired")
+	probe.f.requireAbsent(probe.commit, "the State B commit the next counted publication expired")
 	disconnected, err := h.syncEngine.DisconnectTip()
 	require(t, err == nil && disconnected != nil && h.chainState.Height == 2, "DisconnectTip=(%+v,%v)", disconnected, err)
 	require(t, entry.attempts.Load() == 0, "entry attempts=%d before the reconnect, want 0", entry.attempts.Load())
 	reconnected, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, 3), nil)
 	require(t, err == nil && reconnected != nil, "reconnect(3)=(%+v,%v)", reconnected, err)
-	probe.f.requireRetained(probe.commit, "count 1: two counted publications after the side block, replay and disconnect")
+	probe.f.requireRetained(fresh, "count 1: two counted publications around the disconnect")
 	relayAccepted(t, p, source, 4)
-	probe.f.requireAbsent(probe.commit, "the record the third counted publication expired")
+	probe.f.requireAbsent(fresh, "the record the third counted publication expired")
 }
 
 // TestDATTLCallbackEndToEndStoredSideBlockThroughPeer pins the stored non-canonical result on the peer's lease path: a
-// valid side-branch block relayed by a peer is stored non-canonical and decreases nothing, so the commit retained at
-// count 3 survives the next two counted publications and expires only at the third.
+// State A chunk retained at count 3 is at count 1 after two counted publications when a peer relays a valid
+// side-branch block; the block is stored non-canonical, selects nothing and decreases nothing, so the chunk is still
+// retained after it and expires at the next counted publication.
 func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
-	source, h, p, probe, sideBlock, sideHash := newSideBlockSetup(t, 0xd4)
+	source, h, p, probe, x, sideBlock, sideHash := newSideBlockSetup(t, 0xd4)
+	entry := &wrappedTTLEntry{inner: h.service}
+	h.syncEngine.PublishDATTLBinding(entry)
 	_, err := p.processRelayedBlock(sideBlock)
 	must(t, err, "processRelayedBlock(side block)")
 	stored, err := h.blockStore.GetBlockByHash(sideHash)
 	require(t, err == nil && bytes.Equal(stored, sideBlock) && h.chainState.Height == 2 && h.chainState.TipHash != sideHash, "side block stored=%v err=%v height=%d, want stored non-canonical", stored != nil, err, h.chainState.Height)
+	probe.f.requireRetained(x, "the State A chunk at count 1 after the stored side block")
+	require(t, entry.attempts.Load() == 0, "binding entry attempts=%d, want 0", entry.attempts.Load())
 	relayAccepted(t, p, source, 3)
-	relayAccepted(t, p, source, 4)
-	probe.f.requireRetained(probe.commit, "count 1: two counted publications after the stored side block")
-	relayAccepted(t, p, source, 5)
-	probe.f.requireAbsent(probe.commit, "the record the third counted publication expired")
+	probe.f.requireAbsent(x, "the State A chunk the next counted publication expired")
 }
 
 // TestDATTLCallbackEndToEndDrainingBindingRefused drives the production no-lease selection through
@@ -767,39 +814,63 @@ func TestDATTLCallbackEndToEndPreCommitLatchInvokesNothing(t *testing.T) {
 	require(t, entry.attempts.Load() == 0, "pre-commit latch entry attempts=%d, want 0", entry.attempts.Load())
 }
 
-// TestDATTLCallbackEndToEndDrainingLease pins the lease path while the lease-owning Service is DRAINING: with the
-// worker lease held and Close waiting on it, the peer's applies still run the nested entry, which registers nothing, so
-// three ACCEPTED/NEW publications expire the record; Close returns only after the lease is released.
+// TestDATTLCallbackEndToEndDrainingLease pins the lease path while the lease-owning Service S is DRAINING: S's worker,
+// holding its lease, is parked inside its block message behind a no-lease publication's exclusive hold when Close(S)
+// starts and publishes DRAINING. After that publication's decrease through the bound OPEN S2, the message's nested
+// entry, which registers nothing and reads no binding, is admitted and decreases once: the record at count 1 expires
+// and the record at count 2 is retained. Close(S) returns only after the worker's lease is released.
 func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 	source, h, probe := newSourceAndProbe(t, 6, 0xe7)
+	probe.apply()
+	second := probe.f.commit(daRelayTestID(0xe4), 2)
+	probe.f.admit(second, "127.0.0.1:19112")
+	s2 := &wrappedTTLEntry{inner: newBoundService(t, h.service.cfg)}
 	p := testPeerForService(h.service, "remote", 5)
 	release := holdWorkLease(t, h.service)
-	closeDone, closeExit := startClose(h.service)
-	defer func() { release(); joinWithin(t, "Close", closeExit) }()
-	waitDraining(t, h.service)
-	for height := uint64(1); height <= 3; height++ {
-		relayAccepted(t, p, source, height)
-		if height == 2 {
-			probe.f.requireRetained(probe.commit, "count 1 after two nested decreases while DRAINING")
+	block := blockAtHeight(t, source, probe.next+1)
+	var summary *node.ChainStateConnectSummary
+	var relayErr error
+	var worker, closeExit <-chan struct{}
+	var closeDone <-chan error
+	defer func() { release(); joinWithin(t, "the worker's block message and Close(S)", worker, closeExit) }()
+	var missed []string
+	s2.before = func() {
+		s2.before = nil
+		worker = goDone(func() { summary, relayErr = p.processRelayedBlock(block) })
+		if !pollUntil(func() bool {
+			return goroutineParked("[sync.Mutex.Lock", "ApplyBlockWithReorgDeferredUnderLease", "processRelayedBlock")
+		}) {
+			missed = append(missed, "the worker parked inside its block message")
+		}
+		closeDone, closeExit = startClose(h.service)
+		if !pollUntil(func() bool { return !h.service.workAuthorized() }) {
+			missed = append(missed, "Close(S) publishing DRAINING")
 		}
 	}
-	requireStillBlocked(t, closeDone, "Close")
+	h.syncEngine.PublishDATTLBinding(s2)
+	probe.apply()
+	requireJoined(t, "the worker's block message", worker)
+	require(t, len(missed) == 0, "%v not observed before the watchdog", missed)
+	require(t, relayErr == nil && summary != nil && summary.BlockHeight == probe.next, "processRelayedBlock=(%+v,%v), want ACCEPTED/NEW at %d", summary, relayErr, probe.next)
+	probe.f.requireAbsent(probe.commit, "the nested entry admitted while DRAINING decreased the record at count 1")
+	probe.f.requireRetained(second, "the nested entry decreased the record at count 2 once")
+	require(t, s2.attempts.Load() == 1, "binding entry attempts=%d, want 1", s2.attempts.Load())
+	requireStillBlocked(t, closeDone, "Close(S) while the worker's lease is held")
 	release()
-	requireReturned(t, closeDone, "Close after the release")
-	probe.f.requireAbsent(probe.commit, "the third nested decrease expired the record")
+	requireReturned(t, closeDone, "Close(S) after the worker's lease is released")
 }
 
 // TestDATTLCallbackEndToEndAbsentBinding drives SyncEngine.ApplyBlock on an engine with no constructed Service: the
-// binding is absent, so three ACCEPTED/NEW publications invoke nothing and the commit retained at count 3 survives
-// them. A Service constructed afterwards binds, and its three admitted decreases then expire the same record.
+// binding is absent, so three ACCEPTED/NEW publications invoke nothing and the State A chunk retained at count 3
+// survives them. A Service constructed afterwards binds, and its three admitted decreases then expire the same record.
 func TestDATTLCallbackEndToEndAbsentBinding(t *testing.T) {
 	source := newTestHarness(t, 7, "127.0.0.1:0", nil)
 	sink, cfg := unclaimedServiceSink(t)
 	require(t, sink.syncEngine.DATTLBindingService() == nil, "binding present with no constructed Service")
 	sink.service = &Service{daRelay: sink.syncEngine.DARelayState()}
 	f := newDAIngressFixture(t, sink)
-	commit := f.commit(daRelayTestID(0xe8), 2)
-	f.admit(commit, "127.0.0.1:19111")
+	x := f.chunk(daRelayTestID(0xe8), 0, []byte("absent-binding x"))
+	f.admit(x, "127.0.0.1:19111")
 	apply := func(height uint64) {
 		t.Helper()
 		summary, err := sink.syncEngine.ApplyBlock(blockAtHeight(t, source, height), nil)
@@ -810,14 +881,14 @@ func TestDATTLCallbackEndToEndAbsentBinding(t *testing.T) {
 		apply(height)
 	}
 	require(t, sink.syncEngine.DATTLBindingService() == nil, "an apply published a binding")
-	f.requireRetained(commit, "three publications under an absent binding decreased nothing")
+	f.requireRetained(x, "three publications under an absent binding decreased nothing")
 	newBoundService(t, cfg)
 	for height := start + 3; height < start+6; height++ {
 		if apply(height); height == start+4 {
-			f.requireRetained(commit, "count 1 after two admitted decreases: the absent binding kept count 3")
+			f.requireRetained(x, "count 1 after two admitted decreases: the absent binding kept count 3")
 		}
 	}
-	f.requireAbsent(commit, "the bound Service's third admitted decrease expired the record")
+	f.requireAbsent(x, "the bound Service's third admitted decrease expired the record")
 }
 
 // requireAbsentBindingDecreasesNothing retains a commit at count 3 in sink's DA relay and applies three ACCEPTED/NEW
