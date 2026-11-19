@@ -394,7 +394,7 @@ func testSourceRecoveredFinalPanic(t *testing.T) {
 				return nil
 			})
 		}()
-		sourceFailIf(t, inner != want || outer != want || calls != len(parts), "final visitor panic: caught=%v returned=%v deliveries=%d", inner, outer, calls)
+		sourceFailIf(t, inner != any(want) || outer != any(want) || calls != len(parts), "final visitor panic: caught=%v returned=%v deliveries=%d", inner, outer, calls)
 		_, err := escaped.ReadAt(nil, 0)
 		sourceWantError(t, err, ErrUnavailableV1, "expired final-part reader")
 		_, err = operation.LimitsV1()

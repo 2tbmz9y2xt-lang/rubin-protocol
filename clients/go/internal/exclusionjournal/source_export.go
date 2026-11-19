@@ -51,7 +51,7 @@ func (s *partScope) read(dst []byte, offset int64) (int, error) {
 	if s.closing.Load() {
 		return 0, ErrUnavailableV1
 	}
-	if uint64(offset) > s.part.Length || uint64(len(dst)) > s.part.Length-uint64(offset) {
+	if offset < 0 || offset > int64(min(s.part.Length, math.MaxInt64))-int64(len(dst)) {
 		return 0, ErrIntegrityV1
 	}
 	return s.part.ReadAt(dst, offset)
@@ -245,9 +245,9 @@ func (c *exportCursor) preservePanic() {
 	if value := recover(); value != nil {
 		c.mu.Lock()
 		c.panicked = value
-		c.fail(ErrIntegrityV1)
+		_ = c.fail(ErrIntegrityV1)
 		c.mu.Unlock()
-		panic(value)
+		panic(value) //nolint:forbidigo // Propagate the original visitor panic.
 	}
 }
 
@@ -285,7 +285,7 @@ func (c *exportCursor) result(err error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.panicked != nil {
-		panic(c.panicked)
+		panic(c.panicked) //nolint:forbidigo // Propagate the original visitor panic.
 	}
 	if c.failure != nil {
 		return c.failure
