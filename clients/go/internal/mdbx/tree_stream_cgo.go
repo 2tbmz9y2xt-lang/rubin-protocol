@@ -64,6 +64,22 @@ type TreePairV1 struct {
 	// backing and each ordinary input backing on this same LaneOperation account before creating or
 	// reading it and keeps that grant through the backing's last use; the engine neither
 	// authenticates that grant nor supplies a second account.
+	//
+	// After admission the ObsoleteDeletes rows are Pair delete targets, deleted in the write transaction that
+	// applies Mutations. The key intervals and points the ObsoleteConsulted witnesses observed and the
+	// LargeConsulted block bodies and undo families, without the rows that are Pair targets by exact rank and key,
+	// are compared with ORIGINAL OLD by key set, presence, length and bytes: at the write snapshot before the
+	// first write, where a difference refuses with "OLD/write snapshot mismatch" and stage Prewrite, and at the
+	// final image before commit, where it refuses with "final update image mismatch" and stage
+	// WriteStartedDefinitelyPrecommit; both are StateMismatch/update/-30779 with truth OLD, index -1 and the Store
+	// consumed or retained under the existing owner. After a possibly crossed commit the readback reports OLD when
+	// the ORIGINAL OLD image holds, otherwise NEW when the planned image holds, otherwise UNKNOWN, and either image
+	// holds only while these domains are unchanged. A difference does not end the comparison: a later read error
+	// or refused charge in it is returned instead. Before the first write the comparison raises the operation's
+	// read charge, shared with the other Pair reads, to at least 4*(L+1) bytes, L being the Reader's key limit,
+	// plus twice the length of the longest equal-length present value pair it compares; a refused raise returns
+	// the operation-reservation capacity error with truth OLD, stage Prewrite, index -1 and the Store consumed or
+	// retained. The final and readback comparisons do not raise that charge.
 	ObsoleteDeletes   []ObsoleteRowV1
 	ObsoleteConsulted []ObsoletePageWitnessV1
 	LargeConsulted    []LargeImageSelectorV1
