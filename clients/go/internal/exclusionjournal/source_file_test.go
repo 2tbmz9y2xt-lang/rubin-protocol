@@ -38,7 +38,7 @@ func sourceHeld(t *testing.T, o *SourceOwnerV1) func(string) {
 		for _, entry := range entries {
 			info, err := entry.Info()
 			data, _ := os.ReadFile(filepath.Join(o.dir, sourceDirectory, entry.Name()))
-			held = append(held, fmt.Sprint(entry.Name(), err, info.Sys().(*syscall.Stat_t).Ino, data))
+			held = append(held, fmt.Sprintf("%s %v %d %x", entry.Name(), err, info.Sys().(*syscall.Stat_t).Ino, data))
 		}
 		for name, token := range o.live {
 			held = append(held, fmt.Sprintf("%s %p %v", name, token, *token))
