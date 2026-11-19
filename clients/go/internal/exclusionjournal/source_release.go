@@ -229,7 +229,7 @@ func (o *SourceOwnerV1) writeRelease(r *sourceRoot, record []byte) error {
 	if _, err := w.Write(record); err != nil {
 		return err
 	}
-	return o.finishFile(f)
+	return cmp.Or(o.ops.chmod(f, 0o600), o.finishFile(f))
 }
 
 func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {

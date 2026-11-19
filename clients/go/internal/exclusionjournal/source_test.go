@@ -298,7 +298,51 @@ func (*sourceTypedError) Error() string { return "typed visitor result" }
 
 func TestSourceExportScope(t *testing.T) {
 	for _, mode := range []string{"recovered-final-panic", "visitor-panic-repanicked", "exporter-panic"} {
-		t.Run(mode, func(t *testing.T) { testSourceRecoveredFinalPanic(t, mode) })
+		t.Run(mode, func(t *testing.T) {
+			_, o, _, m, parts := sourceBundleScene(t, 1, false)
+			visitorPanic, exporterPanic := errors.New("final visitor panic"), errors.New("exporter panic")
+			want, wantInner := any(visitorPanic), any(visitorPanic)
+			if mode == "exporter-panic" {
+				want, wantInner = exporterPanic, nil
+			}
+			var inner, outer any
+			var escaped SourcePartV1
+			var operation *SourceOperationV1
+			producer := func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
+				operation = op
+				defer func() {
+					inner = recover()
+					if mode != "recovered-final-panic" {
+						panic(exporterPanic)
+					}
+				}()
+				return sourceExportParts(op, m, parts, visit)
+			}
+			calls := 0
+			sourceAccount(t, func(a *mdbx.OperationAccount) error {
+				func() {
+					defer func() { outer = recover() }()
+					_ = o.WithSourceExportV1(a, m, producer, func(part SourcePartV1) error {
+						calls++
+						if calls == len(parts) {
+							escaped = part
+							if mode != "exporter-panic" {
+								panic(visitorPanic)
+							}
+						}
+						return nil
+					})
+				}()
+				sourceFailIf(t, inner != wantInner || outer != want || calls != len(parts), "%s: caught=%v returned=%v deliveries=%d", mode, inner, outer, calls)
+				_, err := escaped.ReadAt(nil, 0)
+				sourceWantError(t, err, ErrUnavailableV1, "expired final-part reader")
+				_, err = operation.LimitsV1()
+				sourceWantError(t, err, ErrUnavailableV1, "expired source operation")
+				return a.WithReservation(mdbx.TreeLaneMaxBytes, func() error { return nil })
+			})
+			sourcePrepare(t, o, m, parts)
+			sourceRead(t, o, m, parts)
+		})
 	}
 	direct := errors.New("visitor result")
 	causes := map[string]error{"error": direct, "wrapped": fmt.Errorf("application: %w", direct), "typed-nil": (*sourceTypedError)(nil), "panic": direct}
@@ -364,52 +408,6 @@ func TestSourceExportScope(t *testing.T) {
 			sourceMust(t, s.Close())
 		})
 	}
-}
-
-func testSourceRecoveredFinalPanic(t *testing.T, mode string) {
-	_, o, _, m, parts := sourceBundleScene(t, 1, false)
-	visitorPanic, exporterPanic := errors.New("final visitor panic"), errors.New("exporter panic")
-	want, wantInner := any(visitorPanic), any(visitorPanic)
-	if mode == "exporter-panic" {
-		want, wantInner = exporterPanic, nil
-	}
-	var inner, outer any
-	var escaped SourcePartV1
-	var operation *SourceOperationV1
-	producer := func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
-		operation = op
-		defer func() {
-			inner = recover()
-			if mode != "recovered-final-panic" {
-				panic(exporterPanic)
-			}
-		}()
-		return sourceExportParts(op, m, parts, visit)
-	}
-	calls := 0
-	sourceAccount(t, func(a *mdbx.OperationAccount) error {
-		func() {
-			defer func() { outer = recover() }()
-			_ = o.WithSourceExportV1(a, m, producer, func(part SourcePartV1) error {
-				calls++
-				if calls == len(parts) {
-					escaped = part
-					if mode != "exporter-panic" {
-						panic(visitorPanic)
-					}
-				}
-				return nil
-			})
-		}()
-		sourceFailIf(t, inner != wantInner || outer != want || calls != len(parts), "%s: caught=%v returned=%v deliveries=%d", mode, inner, outer, calls)
-		_, err := escaped.ReadAt(nil, 0)
-		sourceWantError(t, err, ErrUnavailableV1, "expired final-part reader")
-		_, err = operation.LimitsV1()
-		sourceWantError(t, err, ErrUnavailableV1, "expired source operation")
-		return a.WithReservation(mdbx.TreeLaneMaxBytes, func() error { return nil })
-	})
-	sourcePrepare(t, o, m, parts)
-	sourceRead(t, o, m, parts)
 }
 
 func TestSourceBackingUnion(t *testing.T) {

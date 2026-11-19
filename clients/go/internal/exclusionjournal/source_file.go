@@ -22,6 +22,7 @@ type sourceFS struct {
 	statfs          func(int, *syscall.Statfs_t) error
 	write           func(*os.File, []byte) (int, error)
 	fileSync, close func(*os.File) error
+	chmod           func(*os.File, os.FileMode) error
 	rename          func(*os.Root, string, string) error
 	remove          func(*os.Root, string) error
 	dirSync         func(*sourceRoot) error
@@ -37,7 +38,7 @@ type sourceUsage struct {
 	stage        *sourceDebt
 }
 
-var realSourceFS = sourceFS{statfs: syscall.Fstatfs, write: (*os.File).Write, fileSync: (*os.File).Sync, close: (*os.File).Close, rename: (*os.Root).Rename, remove: (*os.Root).Remove, dirSync: syncSourceRoot}
+var realSourceFS = sourceFS{statfs: syscall.Fstatfs, write: (*os.File).Write, fileSync: (*os.File).Sync, close: (*os.File).Close, chmod: (*os.File).Chmod, rename: (*os.Root).Rename, remove: (*os.Root).Remove, dirSync: syncSourceRoot}
 
 type sourceRoot struct {
 	*os.Root
@@ -92,8 +93,10 @@ func (o *SourceOwnerV1) currentRoot() error {
 }
 
 func createSourceRoot(parent *os.Root) error {
-	if err := parent.Mkdir(sourceDirectory, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
+	if err := parent.Mkdir(sourceDirectory, 0o700); !errors.Is(err, os.ErrExist) {
+		if err = cmp.Or(err, parent.Chmod(sourceDirectory, 0o700)); err != nil {
+			return err
+		}
 	}
 	f, err := parent.Open(".")
 	if err != nil {
@@ -616,7 +619,7 @@ func (o *SourceOwnerV1) startBundle(r *sourceRoot, w *sourceFileWriter, out io.W
 	w.file = f
 	o.debt = &sourceDebt{name: name, size: size, staging: true}
 	_, err = out.Write(m.header(o.id))
-	return err
+	return cmp.Or(err, o.ops.chmod(f, 0o600))
 }
 
 type sourceFileWriter struct {

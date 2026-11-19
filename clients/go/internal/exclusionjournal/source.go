@@ -151,13 +151,13 @@ func (o *SourceOwnerV1) operation(account *mdbx.OperationAccount, use func() err
 	if !o.matchesBinding(b) {
 		return ErrIdentityV1
 	}
-	if account == nil {
-		return ErrCapacityV1
-	}
 	if !o.busy.CompareAndSwap(false, true) {
 		return ErrBusyV1
 	}
 	defer o.busy.Store(false)
+	if account == nil {
+		return ErrCapacityV1
+	}
 	return account.WithReservation(o.limits.WorkingBytesV1(), use)
 }
 
