@@ -49,6 +49,7 @@ type PeerManager struct {
 	peers map[string]*PeerState
 	cfg   PeerRuntimeConfig
 	mu    sync.RWMutex
+	held  bool
 }
 
 func DefaultPeerRuntimeConfig(network string, maxPeers int) PeerRuntimeConfig {
@@ -112,6 +113,37 @@ func (pm *PeerManager) RemovePeer(addr string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	delete(pm.peers, addr)
+}
+
+// Claim marks a free PeerManager as held by one network service and returns
+// nil. On a held PeerManager it returns "peer manager is already claimed" and
+// changes nothing; on a nil receiver it returns "nil peer manager". The check
+// and the mark are one step under the PeerManager mutex, so of concurrent
+// calls on a free PeerManager exactly one returns nil. It neither reads nor
+// changes the peer table, the MaxPeers limit, Count or Snapshot.
+func (pm *PeerManager) Claim() error {
+	if pm == nil {
+		return errors.New("nil peer manager")
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.held {
+		return errors.New("peer manager is already claimed")
+	}
+	pm.held = true
+	return nil
+}
+
+// Release marks the PeerManager free so a later Claim succeeds. On a free
+// PeerManager or a nil receiver it changes nothing. It neither reads nor
+// changes the peer table, the MaxPeers limit, Count or Snapshot.
+func (pm *PeerManager) Release() {
+	if pm == nil {
+		return
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.held = false
 }
 
 func (pm *PeerManager) Count() int {
