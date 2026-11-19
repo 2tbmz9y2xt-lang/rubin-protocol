@@ -95,7 +95,7 @@ func readRelease(r *sourceRoot) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := r.OpenFile(releaseFile, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	f, err := openSourceFile(r, releaseFile)
 	if err != nil {
 		return nil, ErrIntegrityV1
 	}
@@ -167,7 +167,7 @@ func (o *SourceOwnerV1) releaseManifest(header []byte) (SourceManifestV1, error)
 }
 
 func (o *SourceOwnerV1) releaseBacking(r *sourceRoot, d *sourceRelease, scratch []byte) (bool, error) {
-	f, err := r.OpenFile(d.name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	f, err := openSourceFile(r, d.name)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -250,6 +250,9 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {
 			return err
 		}
 		d.backingSynced = true
+	}
+	if _, err := r.Lstat(d.name); !errors.Is(err, os.ErrNotExist) {
+		return ErrIdentityV1
 	}
 	present, err := d.marker(r)
 	if err != nil {

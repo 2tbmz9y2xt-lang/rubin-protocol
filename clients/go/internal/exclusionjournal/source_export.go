@@ -284,9 +284,6 @@ func (c *exportCursor) result(err error) error {
 	c.waitBacking()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.panicked != nil {
-		panic(c.panicked) //nolint:forbidigo // Propagate the original visitor panic.
-	}
 	if c.failure != nil {
 		return c.failure
 	}
@@ -299,9 +296,11 @@ func (c *exportCursor) result(err error) error {
 	return nil
 }
 
+// expire clears the cursor and then repanics a reached visitor panic over any producer outcome.
 func (c *exportCursor) expire() {
 	c.waitBacking()
 	c.mu.Lock()
+	panicked := c.panicked
 	c.visit = nil
 	c.account = nil
 	c.manifest = SourceManifestV1{}
@@ -309,6 +308,9 @@ func (c *exportCursor) expire() {
 	c.panicked = nil
 	c.next = 0
 	c.mu.Unlock()
+	if panicked != nil {
+		panic(panicked) //nolint:forbidigo // Propagate the original visitor panic.
+	}
 }
 
 func (c *exportCursor) waitBacking() {
@@ -358,14 +360,22 @@ func copyPart(part SourcePartV1, dst io.Writer, scratch []byte) error {
 	for offset := uint64(0); offset < part.Length; {
 		n := min(uint64(len(scratch)), part.Length-offset)
 		chunk := scratch[:n]
-		read, err := part.ReadAt(chunk, int64(offset))
-		if read != len(chunk) || err != nil {
-			return ErrIntegrityV1
+		if err := readPartAt(part, chunk, offset); err != nil {
+			return err
 		}
 		if _, err := dst.Write(chunk); err != nil {
 			return err
 		}
 		offset += n
+	}
+	return nil
+}
+
+// readPartAt fills dst; io.EOF completes the read only when it ends at the part length.
+func readPartAt(part SourcePartV1, dst []byte, offset uint64) error {
+	n, err := part.ReadAt(dst, int64(min(offset, math.MaxInt64)))
+	if n != len(dst) || err != nil && (err != io.EOF || offset+uint64(n) != part.Length) {
+		return ErrIntegrityV1
 	}
 	return nil
 }

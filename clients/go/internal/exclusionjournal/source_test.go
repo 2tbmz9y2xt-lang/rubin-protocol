@@ -294,7 +294,9 @@ type sourceTypedError struct{}
 func (*sourceTypedError) Error() string { return "typed visitor result" }
 
 func TestSourceExportScope(t *testing.T) {
-	t.Run("recovered-final-panic", testSourceRecoveredFinalPanic)
+	for _, mode := range []string{"recovered-final-panic", "visitor-panic-repanicked", "exporter-panic"} {
+		t.Run(mode, func(t *testing.T) { testSourceRecoveredFinalPanic(t, mode) })
+	}
 	direct := errors.New("visitor result")
 	for _, row := range []struct {
 		name  string
@@ -354,7 +356,7 @@ func TestSourceExportScope(t *testing.T) {
 				if row.name == "panic" {
 					sourceFailIf(t, panicValue != any(row.cause), "panic=%v", panicValue)
 				} else {
-					sourceFailIf(t, any(got) != any(row.cause) || row.name == "success" && calls != 6, "export result=%v count=%d", got, calls)
+					sourceFailIf(t, panicValue != nil || any(got) != any(row.cause) || row.name == "success" && calls != 6, "export result=%v count=%d panic=%v", got, calls, panicValue)
 				}
 				n, err := escaped.ReadAt(make([]byte, 1), 0)
 				sourceFailIf(t, n != 0 || any(err) != any(ErrUnavailableV1), "escaped read: %d/%v", n, err)
@@ -370,15 +372,24 @@ func TestSourceExportScope(t *testing.T) {
 	}
 }
 
-func testSourceRecoveredFinalPanic(t *testing.T) {
+func testSourceRecoveredFinalPanic(t *testing.T, mode string) {
 	_, o, _, m, parts := sourceBundleScene(t, 1, false)
-	want := errors.New("final visitor panic")
+	visitorPanic, exporterPanic := errors.New("final visitor panic"), errors.New("exporter panic")
+	want, wantInner := any(visitorPanic), any(visitorPanic)
+	if mode == "exporter-panic" {
+		want, wantInner = exporterPanic, nil
+	}
 	var inner, outer any
 	var escaped SourcePartV1
 	var operation *SourceOperationV1
 	producer := func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
 		operation = op
-		defer func() { inner = recover() }()
+		defer func() {
+			inner = recover()
+			if mode != "recovered-final-panic" {
+				panic(exporterPanic)
+			}
+		}()
 		return sourceExportParts(op, m, parts, visit)
 	}
 	calls := 0
@@ -389,12 +400,14 @@ func testSourceRecoveredFinalPanic(t *testing.T) {
 				calls++
 				if calls == len(parts) {
 					escaped = part
-					panic(want)
+					if mode != "exporter-panic" {
+						panic(visitorPanic)
+					}
 				}
 				return nil
 			})
 		}()
-		sourceFailIf(t, inner != any(want) || outer != any(want) || calls != len(parts), "final visitor panic: caught=%v returned=%v deliveries=%d", inner, outer, calls)
+		sourceFailIf(t, inner != wantInner || outer != want || calls != len(parts), "%s: caught=%v returned=%v deliveries=%d", mode, inner, outer, calls)
 		_, err := escaped.ReadAt(nil, 0)
 		sourceWantError(t, err, ErrUnavailableV1, "expired final-part reader")
 		_, err = operation.LimitsV1()

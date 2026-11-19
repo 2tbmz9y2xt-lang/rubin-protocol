@@ -236,13 +236,16 @@ func (o *SourceOwnerV1) censusFile(r *sourceRoot, name string, used *sourceUsage
 		return ErrIntegrityV1
 	}
 	size := uint64(max(info.Size(), 0))
-	if token := o.live[name]; token != nil {
-		if token.file != filelock.FileIdentityV1(info) {
+	expected, live := o.expectedFile(name)
+	if expected != nil {
+		if expected.file != filelock.FileIdentityV1(info) {
 			return ErrIdentityV1
 		}
-		if size != token.size {
+		if size != expected.size {
 			return ErrIntegrityV1
 		}
+	}
+	if live {
 		*missing -= 1
 	}
 	if err := o.censusEntry(name, size, used); err != nil {
@@ -254,6 +257,22 @@ func (o *SourceOwnerV1) censusFile(r *sourceRoot, name string, used *sourceUsage
 	used.files++
 	used.bytes += size
 	return nil
+}
+
+// expectedFile returns the qualified incarnation of a live token or of a pending release at name.
+func (o *SourceOwnerV1) expectedFile(name string) (*sourceIncarnation, bool) {
+	if token := o.live[name]; token != nil {
+		return token, true
+	}
+	if d := o.release; d != nil && d.name == name {
+		return &d.sourceIncarnation, false
+	}
+	return nil, false
+}
+
+// openSourceFile opens a named entry without following links or blocking on non-regular objects.
+func openSourceFile(r *sourceRoot, name string) (*os.File, error) {
+	return r.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 }
 
 func sourceEntryInfo(r *sourceRoot, name string) (os.FileInfo, error) {
@@ -298,8 +317,8 @@ func (o *SourceOwnerV1) space(r *sourceRoot, required uint64) error {
 
 func assurance(part SourcePartV1) error {
 	var field [8]byte
-	if n, err := part.ReadAt(field[:1], 0); n != 1 || err != nil {
-		return ErrIntegrityV1
+	if err := readPartAt(part, field[:1], 0); err != nil {
+		return err
 	}
 	offset := uint64(1)
 	if field[0] != 1 {
@@ -325,8 +344,8 @@ func assuranceField(part SourcePartV1, offset uint64) (uint64, error) {
 		return 0, ErrIntegrityV1
 	}
 	var field [8]byte
-	if n, err := part.ReadAt(field[:], int64(min(offset, math.MaxInt64))); n != 8 || err != nil {
-		return 0, ErrIntegrityV1
+	if err := readPartAt(part, field[:], offset); err != nil {
+		return 0, err
 	}
 	length := binary.LittleEndian.Uint64(field[:])
 	offset += 8
@@ -422,23 +441,27 @@ func fileExporter(f *os.File, m SourceManifestV1, header int) func(func(SourcePa
 // WithCapturedSourceV1 opens and qualifies the retained file before visiting its parts.
 func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, visit func(SourcePartV1) error) error {
 	return o.withFiles(account, m, false, func(r *sourceRoot, m SourceManifestV1, size uint64, _ sourceUsage) error {
-		name := m.name(o.id)
-		if o.debt != nil && o.debt.name == name || o.release != nil && o.release.name == name {
-			return ErrBusyV1
-		}
-		if visit == nil {
-			return ErrIntegrityV1
-		}
-		f, err := r.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-		if err != nil {
-			return ErrUnavailableV1
-		}
-		defer f.Close()
-		if _, err := o.qualify(f, m, size, make([]byte, scratchBytes), o.live[name], ErrIntegrityV1); err != nil {
-			return err
-		}
-		return fileExporter(f, m, len(m.header(o.id)))(visit)
+		return o.readCaptured(r, m, size, visit)
 	})
+}
+
+func (o *SourceOwnerV1) readCaptured(r *sourceRoot, m SourceManifestV1, size uint64, visit func(SourcePartV1) error) error {
+	name := m.name(o.id)
+	if o.debt != nil && o.debt.name == name || o.release != nil && o.release.name == name {
+		return ErrBusyV1
+	}
+	if visit == nil {
+		return ErrIntegrityV1
+	}
+	f, err := openSourceFile(r, name)
+	if err != nil {
+		return ErrUnavailableV1
+	}
+	defer f.Close()
+	if _, err := o.qualify(f, m, size, make([]byte, scratchBytes), o.live[name], ErrIntegrityV1); err != nil {
+		return err
+	}
+	return fileExporter(f, m, len(m.header(o.id)))(visit)
 }
 
 func (o *SourceOwnerV1) withFiles(account *mdbx.OperationAccount, m SourceManifestV1, preparing bool, use func(*sourceRoot, SourceManifestV1, uint64, sourceUsage) error) error {
@@ -492,7 +515,7 @@ func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, 
 	if o.debt != nil && o.debt.name != name {
 		return nil, ErrBusyV1
 	}
-	f, err := r.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := openSourceFile(r, name)
 	if err == nil {
 		defer f.Close()
 		return o.reuse(r, f, m, name, size, used.stage, produce)

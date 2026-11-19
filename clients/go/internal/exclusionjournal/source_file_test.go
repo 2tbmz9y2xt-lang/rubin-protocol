@@ -15,6 +15,7 @@ import (
 	"slices"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/policycontrol"
@@ -138,6 +139,8 @@ func TestSourceManifestRefusals(t *testing.T) {
 }
 
 func TestSourcePartAndAssuranceRefusals(t *testing.T) {
+	t.Run("eof-at-part-end", func(t *testing.T) { testSourcePartEndRead(t, false) })
+	t.Run("eof-before-part-end", func(t *testing.T) { testSourcePartEndRead(t, true) })
 	for _, mode := range []string{"short", "extra", "reorder", "length", "unreadable", "full-extra", "conditional-short", "conditional-zero", "unknown-assurance", "digest-substitution", "nil-producer", "missing-callback", "nil-reader", "ignored-refusal", "nested-delivery"} {
 		t.Run(mode, func(t *testing.T) {
 			class := byte(3)
@@ -202,6 +205,36 @@ func TestSourcePartAndAssuranceRefusals(t *testing.T) {
 			sourceFailIf(t, len(sourceEntries(t, dir)) != 0 || o.debt != nil, "part refusal lost cleanup ownership")
 		})
 	}
+}
+
+func testSourcePartEndRead(t *testing.T, early bool) {
+	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	parts[0] = bytes.Repeat([]byte{0x5a}, scratchBytes+10)
+	m.Parts[0].Length = uint64(len(parts[0]))
+	eofReads := 0
+	producer := func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
+		return sourceExportParts(op, m, parts, func(p SourcePartV1) error {
+			read := p.ReadAt
+			p.ReadAt = func(dst []byte, off int64) (int, error) {
+				n, err := read(dst, off)
+				final := uint64(off)+uint64(n) == p.Length
+				if err == nil && (final || early && off == 0 && p.Kind == BoundBodyV1) {
+					eofReads++
+					return n, io.EOF
+				}
+				return n, err
+			}
+			return visit(p)
+		})
+	}
+	if early {
+		sourcePrepareResult(t, o, m, producer, ErrIntegrityV1)
+		sourceFailIf(t, eofReads == 0 || len(sourceEntries(t, dir)) != 0 || o.debt != nil, "early io.EOF: reads=%d entries=%v", eofReads, sourceEntries(t, dir))
+		return
+	}
+	sourcePrepareResult(t, o, m, producer, nil)
+	sourceFailIf(t, eofReads != 6, "io.EOF at part end returned by %d reads, want 6", eofReads)
+	sourceRead(t, o, m, parts)
 }
 
 func sourceAlteredPart(mode string, p SourcePartV1, visit func(SourcePartV1) error) error {
@@ -359,6 +392,8 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 	t.Run("changed-content", func(t *testing.T) { testSourceReleaseIncarnation(t, false) })
 	t.Run("changed-inode", func(t *testing.T) { testSourceReleaseIncarnation(t, true) })
 	t.Run("scratch-link", testSourceReleaseScratchLink)
+	t.Run("backing-reappears", testSourceReleaseBackingReappears)
+	t.Run("resumed-marker-census", testSourceResumedMarkerCensus)
 	for _, stage := range []string{"pending-absent", "pending-visible", "clear-present", "clear-absent"} {
 		t.Run(stage, func(t *testing.T) { testSourceReleaseInconclusive(t, stage) })
 	}
@@ -387,6 +422,157 @@ func testSourceReleaseScratchLink(t *testing.T) {
 	fresh := sourceOpen(t, s, sourceID(), sourceLimits(), nil)
 	sourceReleaseResult(t, fresh, nil, true, nil)
 	sourceFileCount(t, dir, 0, "qualified release left backing")
+}
+
+func testSourceReleaseBackingReappears(t *testing.T) {
+	s, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	p := sourcePrepare(t, o, m, parts)
+	root := filepath.Join(dir, sourceDirectory)
+	path, marker := filepath.Join(root, p.name), filepath.Join(root, releaseFile)
+	sourceMust(t, os.Link(path, filepath.Join(t.TempDir(), "held")))
+	entry := []byte("entry at the released name")
+	unlinks := 0
+	o.ops.remove = func(r *os.Root, name string) error {
+		if name == p.name {
+			unlinks++
+			o.ops.dirSync = func(r *sourceRoot) error {
+				o.ops.dirSync = syncSourceRoot
+				err := syncSourceRoot(r)
+				sourceMust(t, os.WriteFile(path, entry, 0o600))
+				return err
+			}
+		}
+		return r.Remove(name)
+	}
+	sourceReleaseResult(t, o, p, true, ErrIdentityV1)
+	sourceFailIf(t, o.release == nil || o.live[p.name] != p.incarnation, "refused marker removal returned the release charge")
+	record := o.release.record
+	info, err := os.Lstat(path)
+	sourceMust(t, err)
+	unchanged := func(message string) {
+		t.Helper()
+		now, err := os.Lstat(path)
+		sourceFailIf(t, err != nil || !os.SameFile(info, now) || !bytes.Equal(sourceReadFile(t, path), entry) || !bytes.Equal(sourceReadFile(t, marker), record),
+			"%s changed the entry or marker", message)
+		sourceFailIf(t, unlinks != 1, "%s: backing unlinks=%d, want 1", message, unlinks)
+	}
+	unchanged("refused marker removal")
+	foreign := m
+	foreign.Identity[0]++
+	sourceAccount(t, func(a *mdbx.OperationAccount) error {
+		sourceWantError(t, o.withFiles(a, foreign, false, func(*sourceRoot, SourceManifestV1, uint64, sourceUsage) error { return nil }), ErrIdentityV1, "census of a pending release with a different entry")
+		return nil
+	})
+	sourceMust(t, os.WriteFile(marker, []byte{1}, 0o600))
+	sourceReleaseResult(t, o, p, true, ErrIdentityV1)
+	sourceFailIf(t, !bytes.Equal(sourceReadFile(t, marker), []byte{1}), "retry with a differing marker changed the marker")
+	sourceMust(t, os.WriteFile(marker, record, 0o600))
+	sourceReleaseResult(t, o, p, true, ErrIdentityV1)
+	unchanged("same-owner retry")
+	sourceMust(t, s.Close())
+	s, err = policycontrol.Open(dir, sourceID())
+	sourceMust(t, err)
+	defer s.Close()
+	sourceOpen(t, s, sourceID(), sourceLimits(), ErrIdentityV1)
+	unchanged("fresh open")
+	sourceMust(t, os.Remove(path))
+	sourceMust(t, syscall.Mkfifo(path, 0o600))
+	sourceOpen(t, s, sourceID(), sourceLimits(), ErrIntegrityV1)
+	sourceFailIf(t, !bytes.Equal(sourceReadFile(t, marker), record), "fresh open over a FIFO changed the marker")
+	sourceMust(t, os.Remove(path))
+	fresh := sourceOpen(t, s, sourceID(), sourceLimits(), nil)
+	sourcePrepareRefusal(t, fresh, foreign, parts, ErrBusyV1)
+	sourceReleaseResult(t, fresh, nil, true, nil)
+	sourceFileCount(t, dir, 0, "resumed release left backing or marker")
+	sourcePrepare(t, fresh, foreign, parts)
+}
+
+func testSourceResumedMarkerCensus(t *testing.T) {
+	s, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	p := sourcePrepare(t, o, m, parts)
+	other := m
+	other.Identity[0]++
+	sourcePrepare(t, o, other, parts)
+	root := filepath.Join(dir, sourceDirectory)
+	path, marker := filepath.Join(root, p.name), filepath.Join(root, releaseFile)
+	original := sourceReadFile(t, path)
+	otherSize := uint64(len(sourceReadFile(t, filepath.Join(root, other.name(o.id)))))
+	cause := errors.New("source unlink refusal")
+	injectReleaseFault(o, "unlink", cause)
+	sourceReleaseResult(t, o, p, true, cause)
+	record := sourceReadFile(t, marker)
+	shortened := original[:len(original)-1]
+	unchanged := func(backing []byte, message string) {
+		t.Helper()
+		sourceFailIf(t, !bytes.Equal(sourceReadFile(t, path), backing) || !bytes.Equal(sourceReadFile(t, marker), record), "%s changed backing or marker", message)
+	}
+	sourceMust(t, os.Truncate(path, int64(len(shortened))))
+	sourceMust(t, s.Close())
+	s, err := policycontrol.Open(dir, sourceID())
+	sourceMust(t, err)
+	defer s.Close()
+	sourceOpen(t, s, sourceID(), sourceLimits(), ErrIntegrityV1)
+	unchanged(shortened, "refused fresh open")
+	sourceMust(t, os.WriteFile(path, original, 0o600))
+	fresh := sourceOpen(t, s, sourceID(), sourceLimits(), nil)
+	readback := func(want error, message string) {
+		t.Helper()
+		sourceAccount(t, func(a *mdbx.OperationAccount) error {
+			sourceWantError(t, fresh.WithCapturedSourceV1(a, other, func(SourcePartV1) error { return nil }), want, message)
+			return nil
+		})
+	}
+	sourceMust(t, os.Truncate(path, int64(len(shortened))))
+	readback(ErrIntegrityV1, "readback beside a shortened pending release")
+	unchanged(shortened, "refused readback")
+	sourceMust(t, os.WriteFile(path, original, 0o600))
+	held := filepath.Join(t.TempDir(), "held")
+	sourceMust(t, os.Rename(path, held))
+	sourceMust(t, os.WriteFile(path, original, 0o600))
+	readback(ErrIdentityV1, "readback beside a replaced pending release")
+	unchanged(original, "refused replaced inode")
+	sourceMust(t, os.Rename(held, path))
+	sourceRead(t, fresh, other, parts)
+	sourceReleaseResult(t, fresh, nil, true, nil)
+	assertSourceReleaseCharge(t, fresh, other, otherSize)
+	sourceFileCount(t, dir, 1, "completed release")
+}
+
+func TestSourceNamedOpenNonBlocking(t *testing.T) {
+	_, o, dir, m, _ := sourceBundleScene(t, 1, false)
+	path := filepath.Join(dir, sourceDirectory, m.name(o.id))
+	sourceMust(t, syscall.Mkfifo(path, 0o600))
+	size, err := m.SizeV1()
+	sourceMust(t, err)
+	r, err := o.root(false)
+	sourceMust(t, err)
+	defer r.Close()
+	for _, step := range []struct {
+		name string
+		run  func() error
+	}{
+		{"readback", func() error {
+			return o.readCaptured(r, m, size, func(SourcePartV1) error { t.Error("FIFO exported a part"); return nil })
+		}},
+		{"prepare", func() error {
+			_, err := o.prepare(r, m, size, sourceUsage{}, func(func(SourcePartV1) error) error { t.Error("FIFO entered the producer"); return nil })
+			return err
+		}},
+	} {
+		done := make(chan error, 1)
+		go func() { done <- step.run() }()
+		select {
+		case err := <-done:
+			sourceWantError(t, err, ErrIntegrityV1, step.name+" of a FIFO")
+		case <-time.After(5 * time.Second):
+			if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
+				_ = f.Close()
+			}
+			t.Fatalf("%s open of a FIFO blocked", step.name)
+		}
+		info, err := os.Lstat(path)
+		sourceFailIf(t, err != nil || info.Mode()&os.ModeNamedPipe == 0, "%s changed the FIFO: %v", step.name, err)
+	}
 }
 
 func testSourceReleaseInconclusive(t *testing.T, stage string) {
