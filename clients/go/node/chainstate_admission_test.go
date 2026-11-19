@@ -223,7 +223,7 @@ func TestTerminalAdmissionReadersReturnUnavailable(t *testing.T) {
 			return nil
 		}},
 		{"ReleasePrefetchPlan", func() error { relay.ReleasePrefetchPlan(plans[0]); return nil }},
-		{"commitOwnerReadyRemoval", func() error { return relay.AdvanceOrphanTTL() }},
+		{"commitOwnerReadyRemoval", func() error { return relay.ReleasePeerQuotaKey("terminal-peer") }},
 	}
 	for _, row := range rows {
 		err := run(row.name, row.call)

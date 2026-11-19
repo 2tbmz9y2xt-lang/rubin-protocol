@@ -95,11 +95,11 @@ func TestBlockIngressBudget(t *testing.T) {
 			requireRefused(t, cfg, 1, "nil peer manager")
 		}},
 		{"config_error_precedes_claim", func(t *testing.T) {
-			cfg := unclaimedServiceConfig(t)
+			sink, cfg := unclaimedServiceSink(t)
 			requireRefused(t, cfg, 1073741823, rangeError)
+			require(t, cfg.SyncEngine.DATTLBindingService() == nil, "refused construction published a binding")
 			cfg.InboundBlockBudgetBytes = 1073741824
-			_, err := NewService(cfg)
-			must(t, err, "NewService on the engine of the failed construction")
+			requireFirstClaimant(t, sink, cfg, newBoundService(t, cfg))
 		}},
 	} {
 		t.Run(row.name, row.run)

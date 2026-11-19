@@ -231,10 +231,11 @@ type daRelayMemberRow struct {
 }
 
 type daRelayRecordRow struct {
-	key     [32]byte
-	value   daRelaySetRecord
-	present bool
-	members []*daRelayMemberRow
+	key        [32]byte
+	value      daRelaySetRecord
+	present    bool
+	members    []*daRelayMemberRow
+	incomplete daRelayRelationLink
 }
 
 type daRelayRelationKey struct {
@@ -253,7 +254,13 @@ type daRelayRelationLink struct {
 	bucket         *daRelayRelationBucket
 	member         *daRelayMemberRow
 	locator        *daRelayLocatorRow
+	record         *daRelayRecordRow
 }
+
+// daRelayIncompleteKey keys the relation bucket that publishRecord links each present State A or
+// State B record row into; incompleteKeys walks only that bucket. newDARelayRelations creates the
+// bucket and no preparation, publication or discard creates, inserts or deletes it.
+var daRelayIncompleteKey = daRelayRelationKey{dimension: 6}
 
 type daRelayRelations struct {
 	sets         map[[32]byte]*daRelayRecordRow
@@ -276,7 +283,7 @@ func newDARelayRelations() daRelayRelations {
 	return daRelayRelations{
 		sets:     make(map[[32]byte]*daRelayRecordRow),
 		locators: make(map[[32]byte]*daRelayLocatorRow),
-		buckets:  make(map[daRelayRelationKey]*daRelayRelationBucket),
+		buckets:  map[daRelayRelationKey]*daRelayRelationBucket{daRelayIncompleteKey: {}},
 	}
 }
 
@@ -358,9 +365,31 @@ func (r *daRelayRelations) prepareRecord(p *daRelayRelationPublication, key [32]
 	}
 	if present {
 		row.members = r.prepareRecordMembers(p, key, value)
+		r.prepareIncomplete(row)
 	}
 	p.oldRecords = append(p.oldRecords, old)
 	p.newRecords = append(p.newRecords, row)
+}
+
+// prepareIncomplete points a present row's link at the State A/B bucket newDARelayRelations
+// created and creates none; publishRecord links it only when the published value is not State C,
+// so a value rewritten after preparation counts.
+func (r *daRelayRelations) prepareIncomplete(row *daRelayRecordRow) {
+	row.incomplete = daRelayRelationLink{bucket: r.buckets[daRelayIncompleteKey], record: row}
+}
+
+// incompleteKeys lists the keys of the rows linked in the State A/B bucket, in link order; the
+// walk is bounded by those rows.
+func (r *daRelayRelations) incompleteKeys() [][32]byte {
+	bucket := r.buckets[daRelayIncompleteKey]
+	if bucket == nil {
+		return nil
+	}
+	var keys [][32]byte
+	for link := bucket.head; link != nil; link = link.next {
+		keys = append(keys, link.record.key)
+	}
+	return keys
 }
 
 func (r *daRelayRelations) prepareRecordMembers(p *daRelayRelationPublication, key [32]byte, value daRelaySetRecord) []*daRelayMemberRow {
@@ -447,6 +476,7 @@ func (r *daRelayRelations) publishRecords(p *daRelayRelationPublication) {
 	for _, row := range p.oldRecords {
 		if row.present {
 			r.setCount--
+			row.incomplete.detach()
 			for _, member := range row.members {
 				for i := range member.links {
 					member.links[i].detach()
@@ -461,6 +491,10 @@ func (r *daRelayRelations) publishRecords(p *daRelayRelationPublication) {
 
 func (r *daRelayRelations) publishRecord(row *daRelayRecordRow) {
 	r.sets[row.key] = row
+	if !row.present || row.value.state == daRelayStateCompleteSet {
+		row.incomplete.bucket = nil // never linked, so a later detach is a no-op
+	}
+	row.incomplete.attach()
 	if row.present {
 		r.setCount++
 		for _, member := range row.members {
@@ -539,6 +573,8 @@ func (r *daRelayRelations) removeLocator(key [32]byte) {
 	r.publish(p)
 }
 
+// scalarRecord replaces a present row's value in place. Precondition: value keeps the row's state,
+// so the row's State A/B bucket membership stays exact.
 func (r *daRelayRelations) scalarRecord(key [32]byte, value daRelaySetRecord) {
 	r.sets[key].value = value
 }
@@ -572,6 +608,7 @@ func (r *daRelayRelations) cloneRecord(key [32]byte, source *daRelayRecordRow) {
 		r.prepareMember(p, &copy)
 		row.members = append(row.members, &copy)
 	}
+	r.prepareIncomplete(row)
 	r.sets[key] = row
 	p.newRecords = append(p.newRecords, row)
 	r.publish(p)
@@ -675,6 +712,7 @@ var (
 	errDAProvenanceInvalid              = errors.New("invalid da provenance")
 	errDARelayMemberIncomplete          = errors.New("da relay member is not owner-ready")
 	errDARelayImageIncompatible         = errors.New("da relay retained image is not owner-ready")
+	errDARelayTTLRecordKeyMismatch      = errors.New("da relay State A/B index names a row that is absent, State C or stored under another da_id")
 	errDARelayRecordStale               = errors.New("da relay record image is stale")
 	errDARelayLocatorMismatch           = errors.New("da relay locator mismatch")
 )
@@ -730,6 +768,15 @@ type DARelayState struct {
 	// and may take the owner mutex. Nil at construction; retained-state images
 	// never copy it.
 	completeHook func(daCompleteStage, *daCompleteCommitPlan)
+	// ttlHook, when non-nil, runs once at each reached stage of
+	// one in-guard TTL decrease: daTTLPlanned after the plan and its record,
+	// locator and accounting checks, before a bound relay's owner, owner-token
+	// and victim-claim checks and before the first mutation; daTTLApplied after
+	// the last apply mutation and before the body returns. Both run with s.mu
+	// held and, on a bound relay at daTTLApplied, the owner mutex held. It must
+	// not take either mutex. Nil at construction; cloneForAtomicBatchLocked does
+	// not copy it.
+	ttlHook func(daTTLStage)
 }
 
 // daAdmitCall is one AdmitDA invocation exactly as it returned.
@@ -745,6 +792,19 @@ const (
 	daCompletePlanned daCompleteStage = iota + 1
 	daCompleteEffects
 )
+
+type daTTLStage uint8
+
+const (
+	daTTLPlanned daTTLStage = iota + 1
+	daTTLApplied
+)
+
+func (s *DARelayState) runTTLHook(stage daTTLStage) {
+	if s.ttlHook != nil {
+		s.ttlHook(stage)
+	}
+}
 
 func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) {
 	if err := caps.validate(); err != nil {
@@ -780,7 +840,7 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 // unfenced behavior rather than inventing one. The nil RECEIVER arm only keeps this
 // function itself from dereferencing s: no fenced body is nil-safe (each takes s.mu
 // next), so nil handling belongs to the exported wrappers — ReleasePeerQuotaKey
-// returns early, AdvanceOrphanTTL promises nothing.
+// returns early.
 //
 // A latched engine returns unavailable before retained state is accessed. The
 // terminal writer remains held, so the closed image cannot be reopened.
@@ -816,15 +876,6 @@ func ValidateDARelayChunk(chunk DARelayChunk) error {
 		return ErrDARelayChunkHashMismatch
 	}
 	return nil
-}
-
-// AdvanceOrphanTTL runs the owner-aware TTL tick once, all-or-nothing: each incomplete owner-ready
-// record with ttl above one decrements once and mints one fresh revision; ttl one expires whole
-// (members, locator rows, accounting, prefetch reservation and, on a bound relay, finalized owner
-// claims) with no revision; valid C is a validated zero-TTL no-op, while zero A/B TTL fails. It returns
-// commitOwnerReadyRemoval's error classes unwrapped; that body owns the fence; a nil receiver is not promised.
-func (s *DARelayState) AdvanceOrphanTTL() error {
-	return s.advanceOwnerReadyTTL()
 }
 
 // ReleasePeerQuotaKey releases the retained members whose finalized PEER provenance carries key

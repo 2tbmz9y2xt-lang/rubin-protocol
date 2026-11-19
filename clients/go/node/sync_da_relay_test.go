@@ -591,7 +591,7 @@ func TestCanonicalDAImagePublishesOnlyForNew(t *testing.T) {
 }
 
 // TestCanonicalDAWritersCannotInterleaveWithTheTransition is the barrier
-// schedule for all five surviving production writers: each one launched while the
+// schedule for the four fenced production writers listed below: each one launched while the
 // admission WRITE guard is held blocks until the guard is released, so no writer
 // can land between a D preparation and its publication. It is the deterministic
 // negative for removing any single fence.
@@ -607,7 +607,6 @@ func TestCanonicalDAWritersCannotInterleaveWithTheTransition(t *testing.T) {
 		run  func()
 	}{
 		{"AdmitDA", func() { _, _ = relay.AdmitDA(commitTx, LocalDAProvenance()) }},
-		{"AdvanceOrphanTTL", func() { _ = relay.AdvanceOrphanTTL() }},
 		{"ReleasePeerQuotaKey", func() { _ = relay.ReleasePeerQuotaKey("fence-peer") }},
 		{"PlanPrefetch", func() { relay.PlanPrefetch(daID, []string{"fence-peer"}, time.Unix(1, 0)) }},
 		{"ReleasePrefetchPlan", func() { relay.ReleasePrefetchPlan(DARelayPrefetchPlan{DAID: daID, PeerKey: "fence-peer"}) }},
