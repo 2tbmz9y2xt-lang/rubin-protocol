@@ -5764,7 +5764,7 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 	f.ownerReadyChunk(aID, 0, "drop", daNonReplayPeer("drop"))
 	f.mutateRelay(func(s *DARelayState) { s.relations.recordValue(aID).chunks[0].member.token.seq = ^uint64(0) })
 	requireOwnerReadySentinel(t, f, ownerReadyDropRelease, errDARelayImageIncompatible, "duplicate C inputs before invalid victim")
-	for kind, name := range []string{"extra surviving C outpoint peer", "extra victim outpoint", "victim token alias", "zero embedded victim token", "foreign embedded victim token", "mismatched embedded victim token", "coherent retokened C alias ttl", "coherent retokened C alias peer", "surviving C token alias ttl", "surviving C token alias peer", "extra surviving C outpoint ttl"} {
+	for kind, name := range []string{"extra surviving C outpoint peer", "extra victim outpoint", "victim token alias", "zero embedded victim token", "foreign embedded victim token", "mismatched embedded victim token", "coherent retokened C alias peer", "surviving C token alias peer"} {
 		f = newDANonReplayFixture(t, 3)
 		aID, cID := [32]byte{0x13}, [32]byte{0x23}
 		f.ownerReadyChunk(aID, 0, "drop", daNonReplayPeer("drop"))
@@ -5773,15 +5773,15 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 		f.mutateRelay(func(s *DARelayState) {
 			s.prefetch.indexes, s.prefetch.expires = map[[32]byte]map[uint16]string{aID: {1: "peer"}}, map[[32]byte]time.Time{aID: time.Unix(1, 0)}
 		})
-		member := daRelayStateSnapshot(f.relay).sets[[][32]byte{cID, aID, aID, aID, aID, aID, cID, cID, cID, cID, cID}[kind]].chunks[0].member
+		member := daRelayStateSnapshot(f.relay).sets[[][32]byte{cID, aID, aID, aID, aID, aID, cID, cID}[kind]].chunks[0].member
 		ownerReadyEditOwner(f, func(o *PendingOutpointOwner) {
 			switch {
-			case kind == 2 || kind == 8 || kind == 9:
+			case kind == 2 || kind == 7:
 				claim := *o.byToken[member.token]
 				o.byToken[PendingOutpointToken{owner: o, seq: ^uint64(0)}] = &claim
 			case kind >= 3 && kind <= 5:
 				o.byToken[member.token].token = []PendingOutpointToken{{}, {owner: &PendingOutpointOwner{}, seq: 1}, {owner: o, seq: ^uint64(0)}}[kind-3]
-			case kind >= 6:
+			case kind == 6:
 				o.tokenHighWater++
 				token, claim := PendingOutpointToken{owner: o, seq: o.tokenHighWater}, *o.byToken[member.token]
 				claim.token, o.byToken[token] = token, &claim
@@ -5789,9 +5789,7 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 				o.byOutpoint[consensus.Outpoint{Txid: [32]byte{0xef}}] = pendingOutpointRow{token: member.token, txid: member.txid}
 			}
 		})
-		// Every alias row runs on the PEER release: the in-guard TTL body never scans the State C
-		// owner domain, and its own State A/B token refusals are pinned by
-		// TestDATTLCallbackBodyRefusalArms.
+		// These rows run the peer release; the TTL body's State A/B token refusals are in TestDATTLCallbackBodyRefusalArms.
 		requireOwnerReadySentinel(t, f, ownerReadyRemovalSelectors[1].run, errDARelayImageIncompatible, name)
 	}
 	for _, defect := range []string{"token", "input outpoint"} {

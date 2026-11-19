@@ -312,8 +312,8 @@ func requireDATTLCount(t *testing.T, view daRelayStateView, daID [32]byte, want 
 	require(t, present && record.ttlBlocksRemaining == want, "record %x: present=%v ttl=%d, want ttl %d", daID[:1], present, record.ttlBlocksRemaining, want)
 }
 
-// TestDATTLCallbackBodyThreeCountedPublications: State A and B records at 3 go to 2, 1, then expire; State C stays.
-func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
+// TestDATTLCallbackBodyThreeCallsExpireStateAB: three body calls under a held guard take State A and B records 3 -> 2 -> 1 -> expired; State C stays.
+func TestDATTLCallbackBodyThreeCallsExpireStateAB(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	tokenA, tokenB := r.setup.sets[r.stateAID].chunks[0].member.token, r.setup.sets[r.stateBID].commit.member.token
 	for call, want := range []uint64{2, 1} {
@@ -625,11 +625,11 @@ func reuseDATTLInputInStateB(f *daNonReplayFixture, r daTTLCallbackRecords) {
 	})
 }
 
-// requireDATTLIndexStep pins the State A/B index after one production publication and runs one succeeding body call.
+// requireDATTLIndexStep pins the State A/B index after one production DA mutation and runs one succeeding body call.
 func requireDATTLIndexStep(t *testing.T, f *daNonReplayFixture, step string) {
 	t.Helper()
 	requireDATTLIndexExact(t, f.relay)
-	requireDATTLOK(t, runDATTLBodyInGuard(t, f), "%s: body after the publication", step)
+	requireDATTLOK(t, runDATTLBodyInGuard(t, f), "%s: body after the mutation", step)
 	requireDATTLIndexExact(t, f.relay)
 }
 
@@ -866,8 +866,8 @@ func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 	require(t, f.engine.DATTLBindingService() == DATTLMutationService(services[publications-1]), "final binding is not the last publication")
 }
 
-// TestDATTLCallbackRunsInsideTheTransitionHold: writers started under the held guard run after it, on the decreased image.
-func TestDATTLCallbackRunsInsideTheTransitionHold(t *testing.T) {
+// TestDATTLCallbackBodyUnderHeldGuardParksWriters: under an admissionMu the test holds exclusively, the TTL body completes while a ReleasePeerQuotaKey and a DA admission stay parked; after the release they run on the decreased image.
+func TestDATTLCallbackBodyUnderHeldGuardParksWriters(t *testing.T) {
 	f, r := newDATTLCallbackRecords(t)
 	f.state.admissionMu.Lock()
 	released := false
@@ -983,8 +983,8 @@ func daTTLEngineRecords(t *testing.T, f *pendingOutpointSyncFixture) (*daNonRepl
 	return x, stateA, stateB
 }
 
-// TestDATTLCallbackEndToEndBodyRefusalConsumed: a body refusal under the selection or the lease entry leaves the apply ACCEPTED/NEW with a nil error, the engine unlatched, one lease released and the image unchanged.
-func TestDATTLCallbackEndToEndBodyRefusalConsumed(t *testing.T) {
+// TestDATTLCallbackEngineBodyRefusalConsumed: a body refusal under ApplyBlock's selection of a test entry or a test lease entry leaves the apply ACCEPTED/NEW with a nil error, the engine unlatched and the image unchanged; the selected entry's one lease is released.
+func TestDATTLCallbackEngineBodyRefusalConsumed(t *testing.T) {
 	corruptions := map[string]func(*daNonReplayFixture, [32]byte, [32]byte){
 		"inconsistent stored value": func(x *daNonReplayFixture, _, stateB [32]byte) {
 			x.mutateRelay(func(s *DARelayState) {
@@ -1113,8 +1113,8 @@ func TestDATTLCallbackBodyPanicKeepsWholeImage(t *testing.T) {
 	}
 }
 
-// TestDATTLCallbackEndToEndBodyPanic: a body panic under ApplyBlock's selection propagates unrecovered, releases the entry's lease once and the DA mutexes, leaves the old or applied image, and the admission guard stays held.
-func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
+// TestDATTLCallbackEngineBodyPanic: a body panic under ApplyBlock's selection of a test entry propagates unrecovered, releases that entry's lease once and the DA mutexes, leaves the old or applied image, and the admission guard stays held.
+func TestDATTLCallbackEngineBodyPanic(t *testing.T) {
 	for _, stage := range []daTTLStage{daTTLPlanned, daTTLApplied} {
 		t.Run(fmt.Sprintf("stage=%d", stage), func(t *testing.T) {
 			f := newPendingOutpointSyncFixture(t)
@@ -1130,7 +1130,7 @@ func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
 				defer func() { released.Add(1); leases.Done() }()
 				return decrease()
 			}})
-			want := fmt.Sprintf("e2e ttl panic at stage %d", stage)
+			want := fmt.Sprintf("engine ttl panic at stage %d", stage)
 			x.relay.ttlHook = func(at daTTLStage) {
 				if at == stage {
 					panic(want)
@@ -1171,8 +1171,8 @@ func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
 	}
 }
 
-// TestDATTLCallbackEndToEndGenesisBootstrap: genesis bootstrap attempts a bound entry once; unbound, it changes nothing.
-func TestDATTLCallbackEndToEndGenesisBootstrap(t *testing.T) {
+// TestDATTLCallbackEngineGenesisBootstrap: genesis bootstrap attempts a bound test entry once; unbound, it changes nothing.
+func TestDATTLCallbackEngineGenesisBootstrap(t *testing.T) {
 	for _, bound := range []bool{true, false} {
 		t.Run(fmt.Sprintf("bound=%v", bound), func(t *testing.T) {
 			engine := newGenesisIdentityTestEngine(t, DevnetGenesisChainID())

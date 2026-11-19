@@ -134,7 +134,7 @@ func TestDATTLCallbackServiceBinding(t *testing.T) {
 	s2 := newBoundService(t, h.service.cfg)
 	require(t, s2.daRelay == s1.daRelay && engine.DATTLBindingService() == node.DATTLMutationService(s2), "identity read after S2 construction")
 	probe.apply()
-	require(t, w1.attempts.Load() == 0, "S1 recorded %d registrations after S2 bound, want 0", w1.attempts.Load())
+	require(t, w1.attempts.Load() == 0, "S1 recorded %d entry attempts after S2 bound, want 0", w1.attempts.Load())
 	s3 := newBoundService(t, h.service.cfg)
 	require(t, s3.Close() == nil && engine.DATTLBindingService() == node.DATTLMutationService(s3), "Close(S3) cleared or replaced the binding")
 	probe.apply()
@@ -510,9 +510,9 @@ func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
 	require(t, s2.attempts.Load() == 0, "the OPEN bound S2 recorded %d entry attempts, want 0", s2.attempts.Load())
 }
 
-// TestDATTLCallbackEndToEndErrorReleasesLease: the entry returns the decrease's error and releases the lease Close awaits.
-func TestDATTLCallbackEndToEndErrorReleasesLease(t *testing.T) {
-	h, refusal := newTestHarness(t, 0, "127.0.0.1:0", nil), errors.New("ttl body refusal")
+// TestDATTLCallbackServiceEntryErrorReleasesLease: EnterDATTLMutation called directly returns the decrease's error and releases the lease Close awaits.
+func TestDATTLCallbackServiceEntryErrorReleasesLease(t *testing.T) {
+	h, refusal := newTestHarness(t, 0, "127.0.0.1:0", nil), errors.New("decrease refusal")
 	var closed <-chan error
 	var closeDone <-chan struct{}
 	defer func() { joinWithin(t, "Close", closeDone) }()
@@ -528,8 +528,8 @@ func TestDATTLCallbackEndToEndErrorReleasesLease(t *testing.T) {
 	requireReturned(t, closed, "Close after the entry released its lease")
 }
 
-// TestDATTLCallbackEndToEndPanicWhileCloseWaits: a decrease panics while Close waits on the entry's lease; the panic propagates unrecovered, the lease is released once and Close returns (RUBIN_L1_P2P_AUX.md Section 5).
-func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
+// TestDATTLCallbackServiceEntryPanicWhileCloseWaits: a decrease passed directly to EnterDATTLMutation panics while Close waits on the entry's lease; the panic propagates unrecovered, the lease is released once and Close returns (RUBIN_L1_P2P_AUX.md Section 5).
+func TestDATTLCallbackServiceEntryPanicWhileCloseWaits(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	entered, unwind := make(chan struct{}), make(chan struct{})
 	var unwindOnce sync.Once
@@ -538,7 +538,7 @@ func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
 	exited := make(chan error, 1)
 	worker := goDone(func() {
 		defer func() { got = recover(); exited <- nil }()
-		_ = h.service.EnterDATTLMutation(func() error { close(entered); <-unwind; panic("ttl body panic") })
+		_ = h.service.EnterDATTLMutation(func() error { close(entered); <-unwind; panic("decrease panic") })
 	})
 	var closeDone <-chan struct{}
 	defer func() {
@@ -558,7 +558,7 @@ func TestDATTLCallbackEndToEndPanicWhileCloseWaits(t *testing.T) {
 	requireStillBlocked(t, closed, "Close")
 	release()
 	requireReturned(t, exited, "the panicking entry after the release")
-	require(t, got == "ttl body panic", "panic value, want the original propagated unrecovered")
+	require(t, got == "decrease panic", "panic value, want the original propagated unrecovered")
 	requireReturned(t, closed, "the waiting Close after the panicking entry")
 }
 
