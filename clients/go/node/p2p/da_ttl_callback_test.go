@@ -131,14 +131,14 @@ func TestDATTLCallbackServiceBinding(t *testing.T) {
 	require(t, engine.DATTLBindingService() == node.DATTLMutationService(s1), "identity read after S1 construction")
 	w1 := &wrappedTTLEntry{inner: s1}
 	engine.PublishDATTLBinding(w1)
-	s2 := newBoundService(t, h.service.cfg)
+	s2 := newBoundService(t, freePeerManager(h.service.cfg))
 	require(t, s2.daRelay == s1.daRelay && engine.DATTLBindingService() == node.DATTLMutationService(s2), "identity read after S2 construction")
 	probe.apply()
 	require(t, w1.attempts.Load() == 0, "S1 recorded %d entry attempts after S2 bound, want 0", w1.attempts.Load())
-	s3 := newBoundService(t, h.service.cfg)
+	s3 := newBoundService(t, freePeerManager(h.service.cfg))
 	require(t, s3.Close() == nil && engine.DATTLBindingService() == node.DATTLMutationService(s3), "Close(S3) cleared or replaced the binding")
 	probe.apply()
-	s4 := newBoundService(t, h.service.cfg)
+	s4 := newBoundService(t, freePeerManager(h.service.cfg))
 	require(t, s1.Close() == nil && engine.DATTLBindingService() == node.DATTLMutationService(s4), "S4 binding")
 	probe.apply()
 	probe.f.requireRetained(probe.commit, "retained after the third publication, with S2, the CLOSED S3 and S4 bound in turn")
@@ -182,7 +182,7 @@ func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
 	for range 2 {
 		racing = append(racing, goDone(func() {
 			<-start
-			service, err := NewService(h.service.cfg)
+			service, err := NewService(freePeerManager(h.service.cfg))
 			built <- construction{service, err}
 		}))
 	}
@@ -360,7 +360,7 @@ func TestDATTLCallbackLaterConstructionKeepsFirstHook(t *testing.T) {
 	for _, closeFirst := range []bool{true, false} {
 		t.Run(fmt.Sprintf("first claimant closed=%v", closeFirst), func(t *testing.T) {
 			source, sink := newTestHarness(t, 1, "127.0.0.1:0", nil), newTestHarness(t, 1, "127.0.0.1:0", nil)
-			s2 := newBoundService(t, sink.service.cfg)
+			s2 := newBoundService(t, freePeerManager(sink.service.cfg))
 			require(t, s2.daRelay == sink.service.daRelay && sink.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S2 construction")
 			if closeFirst {
 				require(t, sink.service.Close() == nil, "Close(S1)")
@@ -401,7 +401,7 @@ func TestDATTLCallbackLaterConstructionKeepsPublicDAImage(t *testing.T) {
 	f.admit(f.commit(daRelayTestID(0xb8), 2), "127.0.0.1:19112")
 	before := observeDARelayPublicImage(t, h)
 	require(t, len(before.identities) == 2 && len(before.members) == 2, "populated image: %d identities", len(before.identities))
-	s2 := newBoundService(t, h.service.cfg)
+	s2 := newBoundService(t, freePeerManager(h.service.cfg))
 	require(t, s2.daRelay == h.service.daRelay && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S2 construction")
 	require(t, reflect.DeepEqual(before, observeDARelayPublicImage(t, h)), "later construction changed the DA relay image")
 }
@@ -464,7 +464,7 @@ func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 // TestDATTLCallbackEndToEndLeasePath: on a peer's lease path, State B Y and State A X are retained after their second relayed publication and absent, with their claims released, after their third; State C Z stays byte-equal and the binding's other OPEN Service S2 records zero entry attempts.
 func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
 	source, h, probe := newSourceAndProbe(t, 5, 0xd2)
-	s2 := &wrappedTTLEntry{inner: newBoundService(t, h.service.cfg)}
+	s2 := &wrappedTTLEntry{inner: newBoundService(t, freePeerManager(h.service.cfg))}
 	h.syncEngine.PublishDATTLBinding(s2)
 	p := testPeerForService(h.service, "remote", 3)
 	holdWorkLease(t, h.service)
@@ -662,7 +662,7 @@ func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xd5)
 	probe.apply()
 	probe.apply()
-	s2 := newBoundService(t, h.service.cfg)
+	s2 := newBoundService(t, freePeerManager(h.service.cfg))
 	requireEntryRefused := func(label string) {
 		t.Helper()
 		err := s2.EnterDATTLMutation(func() error { t.Errorf("%s: the refused registration ran the decrease", label); return nil })
@@ -681,7 +681,7 @@ func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	requireReturned(t, closeDone, "Close(S2) after the release")
 	requireEntryRefused("EnterDATTLMutation(S2) after Close returned")
 	require(t, h.service.workAuthorized() && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S1 left OPEN and the binding kept naming S2")
-	newBoundService(t, h.service.cfg)
+	newBoundService(t, freePeerManager(h.service.cfg))
 	probe.apply()
 	probe.f.requireAbsent(probe.commit, "absent after the fourth publication, the first after a fresh construction")
 }
@@ -762,7 +762,7 @@ func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 	probe.apply()
 	second := probe.f.commit(daRelayTestID(0xe4), 2)
 	probe.f.admit(second, "127.0.0.1:19112")
-	s2 := &wrappedTTLEntry{inner: newBoundService(t, h.service.cfg)}
+	s2 := &wrappedTTLEntry{inner: newBoundService(t, freePeerManager(h.service.cfg))}
 	p := testPeerForService(h.service, "remote", 5)
 	release := holdWorkLease(t, h.service)
 	block := blockAtHeight(t, source, probe.next+1)
@@ -864,7 +864,7 @@ func requireAbsentBindingDecreasesNothing(t *testing.T, sink *testHarness, cfg S
 // TestDATTLCallbackEndToEndSnapshotBeforePublication: S2 bound inside S1's entry gets no attempt from that publication; S1 gets one attempt and S2 the next two, and the commit is retained after the second publication and absent after the third.
 func TestDATTLCallbackEndToEndSnapshotBeforePublication(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xea)
-	s2 := &wrappedTTLEntry{inner: newBoundService(t, h.service.cfg)}
+	s2 := &wrappedTTLEntry{inner: newBoundService(t, freePeerManager(h.service.cfg))}
 	var once sync.Once
 	s1 := &wrappedTTLEntry{inner: h.service}
 	s1.before = func() { once.Do(func() { h.syncEngine.PublishDATTLBinding(s2) }) }
@@ -942,7 +942,7 @@ func TestDATTLCallbackEndToEndCloseRaceOutcomes(t *testing.T) {
 				return
 			}
 			racing = append(racing, goDone(func() { _ = h.service.Close(); closeReturned.Store(true) }), goDone(func() {
-				if service, err := NewService(h.service.cfg); err == nil {
+				if service, err := NewService(freePeerManager(h.service.cfg)); err == nil {
 					s2.Store(service)
 				}
 			}))

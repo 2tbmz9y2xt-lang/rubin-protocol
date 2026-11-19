@@ -172,6 +172,10 @@ type peer struct {
 // this OPEN Service as the current DA TTL binding (RUBIN_COMPACT_BLOCKS.md Section 5).
 // Construction and publication change no DA record, count or claim; a failed
 // construction leaves the binding unchanged; Close never clears it.
+// After every other construction step and immediately before the DA relay state
+// claim it claims cfg.PeerManager, so a PeerManager held by a Service that is not
+// yet closed refuses the construction with "peer manager is already claimed"; a
+// failure after that claim releases it before NewService returns. Close releases it.
 func NewService(cfg ServiceConfig) (*Service, error) {
 	if err := validateServiceConfig(cfg); err != nil {
 		return nil, err
@@ -200,7 +204,11 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		daRelay:        expectedRelay,
 		inboundBudget:  inboundBudget,
 	}
+	if err := cfg.PeerManager.Claim(); err != nil {
+		return nil, err
+	}
 	if _, err := cfg.SyncEngine.ClaimDARelayState(expectedRelay, service.admitDetachedReorgDA); err != nil {
+		cfg.PeerManager.Release()
 		return nil, err
 	}
 	cfg.SyncEngine.PublishDATTLBinding(service)

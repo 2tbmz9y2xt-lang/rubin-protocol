@@ -343,7 +343,7 @@ func TestServiceLocalDAWorkLifecycle(t *testing.T) {
 		mempool, err := node.NewMempoolWithConfig(base.chainState, base.blockStore, node.DevnetGenesisChainID(), mempoolCfg)
 		must(t, err, "NewMempoolWithConfig")
 		engine.SetMempool(mempool)
-		serviceCfg := base.service.cfg
+		serviceCfg := freePeerManager(base.service.cfg)
 		serviceCfg.SyncEngine, serviceCfg.TxPool = engine, NewCanonicalMempoolTxPool(mempool)
 		service, err := NewService(serviceCfg)
 		must(t, err, "NewService")
@@ -428,7 +428,7 @@ func newDABarrierService(t *testing.T, panicValue any) (*Service, *daIngressFixt
 	mempool, err := node.NewMempoolWithConfig(base.chainState, base.blockStore, node.DevnetGenesisChainID(), cfg)
 	must(t, err, "NewMempoolWithConfig")
 	engine.SetMempool(mempool)
-	serviceCfg := base.service.cfg
+	serviceCfg := freePeerManager(base.service.cfg)
 	serviceCfg.SyncEngine, serviceCfg.TxPool = engine, NewCanonicalMempoolTxPool(mempool)
 	service, err := NewService(serviceCfg)
 	must(t, err, "NewService")
