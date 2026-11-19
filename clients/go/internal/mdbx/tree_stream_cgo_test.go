@@ -4942,7 +4942,7 @@ func psAccepted(t *testing.T) {
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
 	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(10), tsCounterLiteral(10, 1))
-	// Ordinary target plus a witness-only empty interval (generation 11 has no counter) is legal.
+	// Ordinary target plus a witness-only empty counter point (generation 11 has no counter) is legal.
 	r = psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
 		page, err := reader.ObsoleteGenerationPageV1(11, ObsoleteCounterV1, nil, 1)
 		mustEnvironment(t, err)
@@ -4956,6 +4956,47 @@ func psAccepted(t *testing.T) {
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
 	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(11), nil)
+	psEmptyIntervals(t, s, path, o)
+}
+
+// Ordinary targets plus witness-only empty range intervals commit NEW: a UTXO interval of generation 11
+// beside the target, the same interval from two separate reads, and empty index and derived-owner
+// intervals of generation 1 that contain the canonical (rank 2) and owner (rank 7) targets, which the
+// residual comparison excludes by exact key.
+func psEmptyIntervals(t *testing.T, s *Store, path string, o *OperationReservationOwner) {
+	t.Helper()
+	forward, owner := tsIndexRows(tdTxid(0x55), 23)
+	cases := []struct {
+		g       uint64
+		classes []ObsoleteClassV1
+		op      TreeOperationV1
+	}{
+		{11, []ObsoleteClassV1{ObsoleteUTXOV1}, tsPair(79)},
+		{11, []ObsoleteClassV1{ObsoleteUTXOV1, ObsoleteUTXOV1}, tsPair(80)},
+		{1, []ObsoleteClassV1{ObsoleteIndexV1, ObsoleteDerivedV1}, TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{forward, owner}}}},
+	}
+	for _, c := range cases {
+		r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+			op := c.op
+			for _, class := range c.classes {
+				page, err := reader.ObsoleteGenerationPageV1(c.g, class, nil, 1)
+				mustEnvironment(t, err)
+				if len(page.Rows) != 0 || page.Stop != PrefixPageExhausted {
+					t.Fatalf("generation %d class %d page rows%d stop%d, want empty exhausted", c.g, class, len(page.Rows), page.Stop)
+				}
+				op.Pair.ObsoleteConsulted = append(op.Pair.ObsoleteConsulted, page.Witness)
+			}
+			return op
+		})
+		r.tuple(t, 2, 3, -1)
+		if r.err != nil {
+			t.Fatalf("empty interval scope refused: generation %d %v", c.g, r.err)
+		}
+	}
+	s = tsReopen(t, s, path)
+	for _, m := range []Mutation{tsTarget(79), tsTarget(80), forward, owner} {
+		tsRead(t, s, m.DBI, m.Key, m.Literal)
+	}
 }
 
 // psGone requires the raw counter target to be absent after the owned plan committed.
