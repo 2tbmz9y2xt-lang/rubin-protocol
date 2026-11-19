@@ -984,6 +984,23 @@ func TestTreeStreamDirectionRelationV1(t *testing.T) {
 }
 
 func TestTreeStreamResourceLayoutV1(t *testing.T) {
+	// Derived 64-bit layouts of the ten listed types, observed before the census below.
+	for _, row := range []struct{ got, want uintptr }{
+		{unsafe.Sizeof(TreeOperationV1{}), 192},
+		{unsafe.Sizeof(treePlanV1{}), 176},
+		{unsafe.Sizeof(TreePairV1{}), 152},
+		{unsafe.Sizeof(largeImageScope{}), 240},
+		{unsafe.Sizeof(obsoleteDomain{}), 88},
+		{unsafe.Sizeof(obsoletePoint{}), 32},
+		{unsafe.Sizeof(ObsoleteRowV1{}), 8},
+		{unsafe.Sizeof(ObsoletePageWitnessV1{}), 8},
+		{unsafe.Sizeof(LargeImageSelectorV1{}), 33},
+		{unsafe.Sizeof(ConfigV1{}), 48},
+	} {
+		if row.got != row.want {
+			t.Fatalf("scope fixed control census differs: layout%d want%d", row.got, row.want)
+		}
+	}
 	for _, row := range []struct{ got, want uintptr }{
 		{unsafe.Sizeof(ownedMutation{}), 128},
 		{unsafe.Sizeof(ownedConsulted{}), 48},
@@ -996,8 +1013,6 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 		{unsafe.Sizeof(treeSectionV1{}), 168},
 		{unsafe.Sizeof(treeScopeV1{}), 504},
 		{unsafe.Sizeof(treeComposeV1{}), 112},
-		{unsafe.Sizeof(TreeOperationV1{}), 120},
-		{unsafe.Sizeof(treePlanV1{}), 168},
 		{unsafe.Sizeof(Reader{}), 216},
 		{unsafe.Sizeof(treePublicEntryV1{}), 48},
 		{unsafe.Sizeof(operationHold{}), 24},
@@ -1047,6 +1062,23 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	control += loan
 	if loan != 96 || control != 3669 || control-2709 > 1024 {
 		t.Fatal("selected fixed control increment", control)
+	}
+	// Two 72-byte Pair/operation transports and the 8-byte plan scope field: 80 and 120 are the TreePairV1 and
+	// TreeOperationV1 sizes without Pair's three 24-byte physical-scope slices, 168 the treePlanV1 size without scope.
+	control += uint64(unsafe.Sizeof(TreePairV1{})) - 80 + uint64(unsafe.Sizeof(TreeOperationV1{})) - 120 + uint64(unsafe.Sizeof(treePlanV1{})) - 168
+	if control != 3821 {
+		t.Fatal("scope fixed control census differs", control)
+	}
+	// Raw pair-only fixed grant: entry, operation, plan, three scope values, section, scope,
+	// compose, two Readers, two streams, two rows, read budget, six image records (144), two C metadata
+	// transports (80), admission budget, temporary Batch and fixed scalar/error transports (256).
+	rawFixed := uint64(unsafe.Sizeof(treePublicEntryV1{})) + uint64(unsafe.Sizeof(TreeOperationV1{})) + uint64(unsafe.Sizeof(treePlanV1{})) +
+		3*uint64(unsafe.Sizeof(largeImageScope{})) + uint64(unsafe.Sizeof(treeSectionV1{})) + uint64(unsafe.Sizeof(treeScopeV1{})) +
+		uint64(unsafe.Sizeof(treeComposeV1{})) + 2*uint64(unsafe.Sizeof(Reader{})) + 2*uint64(unsafe.Sizeof(largeResidualStream{})) +
+		2*uint64(unsafe.Sizeof(largeNativeRow{})) + uint64(unsafe.Sizeof(treePairReadBudgetV1{})) + 144 + 80 +
+		uint64(unsafe.Sizeof(updateBudget{})) + uint64(unsafe.Sizeof(Batch{})) + 256
+	if rawFixed != 3424 || rawFixed > 4096 {
+		t.Fatal("scope fixed control census differs: raw pair-only", rawFixed)
 	}
 	// A replay pair retains a second recorder/delta/key/iterator set under its
 	// second existing C hold; the fixed scope includes both observation slots.
@@ -1142,7 +1174,7 @@ func TestTreePairReadCompatibilityV1(t *testing.T) {
 		t.Fatal("nonzero credit reached primitive source")
 	}
 	tsFollowing(t, s, o)
-	if unsafe.Sizeof(TreePairV1{}) != 80 || unsafe.Sizeof(TreeOperationV1{}) != 120 || unsafe.Sizeof(treePlanV1{}) != 168 || unsafe.Sizeof(treeSectionV1{}) != 168 || unsafe.Sizeof(treePairReadBudgetV1{}) != 32 {
+	if unsafe.Sizeof(TreePairV1{}) != 152 || unsafe.Sizeof(TreeOperationV1{}) != 192 || unsafe.Sizeof(treePlanV1{}) != 176 || unsafe.Sizeof(treeSectionV1{}) != 168 || unsafe.Sizeof(treePairReadBudgetV1{}) != 32 {
 		t.Fatal("ordinary/ENTRY carrier qualification")
 	}
 }
@@ -4690,4 +4722,883 @@ func TestCtxTreeEntryCombinationV1(t *testing.T) {
 			t.Fatalf("R11 preparation with window %+v = %+v, want %+v", w, rows, want)
 		}
 	}
+}
+
+// psScope captures the generation-g counter page from this invocation's ORIGINAL OLD Reader.
+func psScope(t *testing.T, r *Reader, g uint64) ObsoletePageV1 {
+	t.Helper()
+	page, err := r.ObsoleteGenerationPageV1(g, ObsoleteCounterV1, nil, 1)
+	mustEnvironment(t, err)
+	if len(page.Rows) != 1 {
+		t.Fatalf("counter page g%d rows%d, want1", g, len(page.Rows))
+	}
+	return page
+}
+
+// psPageGrant is a test-side covering bound, not a production value, of the caller-held input
+// of a case that reads at most two one-row counter pages or one scene's node/root pages (page, row and
+// witness records, tokens, continuation and key copies), and adds at most one ordinary row with its literal
+// and a few selectors. Cases with larger inputs pass their own bound to psRunG.
+const psPageGrant = 4096
+
+// psRun invokes UpdateTreeV1 once with a Reader-dependent plan on a fresh account of kind.
+func psRun(t *testing.T, s *Store, o *OperationReservationOwner, kind OperationKind, build func(*Reader) TreeOperationV1) tsResult {
+	t.Helper()
+	return psRunG(t, s, o, kind, psPageGrant, build)
+}
+
+// psRunG is psRun whose caller holds one real grant g on the invocation's own account from before the
+// callback creates or reads its input through UpdateTreeV1's return; g stays outside the engine's metadata
+// and read-window charges.
+func psRunG(t *testing.T, s *Store, o *OperationReservationOwner, kind OperationKind, g uint64, build func(*Reader) TreeOperationV1) tsResult {
+	t.Helper()
+	var r tsResult
+	calls := 0
+	before := reservationLive(o)
+	mustEnvironment(t, o.WithOperation(kind, func(a *OperationAccount) error {
+		return a.WithReservation(g, func() error {
+			held := reservationLive(o)
+			r = tsInvoke(s, a, func(reader *Reader) (TreeOperationV1, error) { calls++; return build(reader), nil })
+			if reservationLive(o) != held {
+				t.Fatalf("scope grant leaked: engine hold live%d want%d", reservationLive(o), held)
+			}
+			return nil
+		})
+	}))
+	if calls != 1 || reservationLive(o) != before {
+		t.Fatalf("scope grant leaked: calls%d live%d want%d", calls, reservationLive(o), before)
+	}
+	return r
+}
+
+// psRawDelete is the raw-only plan deleting generation g's counter under its own witness.
+func psRawDelete(t *testing.T, g uint64) func(*Reader) TreeOperationV1 {
+	return func(r *Reader) TreeOperationV1 {
+		page := psScope(t, r, g)
+		return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: page.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness}}}
+	}
+}
+
+func psStore(t *testing.T) (*Store, string, *OperationReservationOwner) {
+	t.Helper()
+	s, path, o := tsNew(t)
+	for _, g := range []uint64{9, 10} {
+		tsSeedCounter(t, s, o, g, false, tsCounterLiteral(g, 1))
+	}
+	return s, path, o
+}
+
+// psRefused asserts the direct pre-section refusal, the unchanged counters and an OPEN Store.
+func psRefused(t *testing.T, s *Store, r tsResult, capacity bool, label string) {
+	t.Helper()
+	if s.state != storeOPEN {
+		t.Fatalf("%s: Store %s, want OPEN", label, s.state)
+	}
+	tsRefusal(t, r, capacity)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), tsCounterLiteral(9, 1))
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(10), tsCounterLiteral(10, 1))
+}
+
+// psF is the physical-scope metadata envelope computed from its literal formula, independently of production.
+func psF(m, c, d, w, p, l, k, u uint64) uint64 {
+	return 4096 + 128*(m+d) + 48*c + k + 176*w + 8*w + 8*d + 32*p + 32*(p+3*w) + 33*l + u
+}
+
+func TestTreeStreamPhysicalScopeV1(t *testing.T) {
+	t.Run("accepted", psAccepted)
+	t.Run("shape", psShape)
+	t.Run("provenance", psProvenance)
+	t.Run("provenance-recreated", psProvenanceRecreated)
+	t.Run("duplicates", psDuplicates)
+	t.Run("overlap", psOverlap)
+	t.Run("counts", psCounts)
+	t.Run("ordinary-first", psOrdinaryFirst)
+	t.Run("metadata", psMetadata)
+	t.Run("successor", psSuccessor)
+	t.Run("key-slot-order", psKeySlotOrder)
+	t.Run("owned-capacity", psOwnedCapacity)
+	t.Run("combined-cap", psCombinedCap)
+	t.Run("store-update-and-rank8", psLegacy)
+	t.Run("callback", psCallback)
+}
+
+// A callback application error (plain, wrapped, typed-nil), panic or Goexit wins over a physical-scope
+// carrier holding three zero ObsoleteDeletes tokens and one LargeConsulted kind 9 selector; the caller
+// grant held inside the callback and the account are released on those five exits. The scene is seeded
+// without the shared owner-live precondition.
+func psCallback(t *testing.T) {
+	s, _, _ := treeNativeStore(t)
+	o := reservationOwner(t, 805_306_368)
+	seeds := []TreeOperationV1{tsEntry(t)}
+	for _, g := range []uint64{9, 10} {
+		seeds = append(seeds, TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(g), AfterKind: 2, Literal: tsCounterLiteral(g, 1)}}}})
+	}
+	for _, op := range seeds {
+		mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+			tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil }).tuple(t, 2, 3, -1)
+			return nil
+		}))
+	}
+	marker := errors.New("scope callback marker")
+	// The five invocations below create the carrier inside their psPageGrant caller grant frame.
+	garbage := func() TreeOperationV1 {
+		return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: make([]ObsoleteRowV1, 3), LargeConsulted: []LargeImageSelectorV1{{Kind: 9}}}}
+	}
+	before := reservationLive(o)
+	var typedNil *nilPointerError
+	for _, application := range []error{marker, fmt.Errorf("scope wrapper: %w", marker), typedNil} {
+		mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+			return a.WithReservation(psPageGrant, func() error {
+				var kept *Reader
+				r := tsInvoke(s, a, func(rd *Reader) (TreeOperationV1, error) {
+					kept = rd
+					return garbage(), a.WithPhaseReservationV1(64, 0, func(func() error) error { return application })
+				})
+				r.tuple(t, 1, 1, -1)
+				tsExpiredReader(t, kept)
+				if any(r.err) != any(application) {
+					t.Fatalf("scope callback error identity lost: %v want %v", r.err, application)
+				}
+				return nil
+			})
+		}))
+		if reservationLive(o) != before || s.state != storeOPEN {
+			t.Errorf("scope grant leaked: error %v live%d want%d state%s", application, reservationLive(o), before, s.state)
+		}
+	}
+	var recovered any
+	var kept *Reader
+	func() {
+		defer func() { recovered = recover() }()
+		_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+			return a.WithReservation(psPageGrant, func() error {
+				tsInvoke(s, a, func(rd *Reader) (TreeOperationV1, error) {
+					kept = rd
+					return garbage(), a.WithPhaseReservationV1(64, 0, func(func() error) error { panic(marker) })
+				})
+				return nil
+			})
+		})
+	}()
+	if recovered != any(marker) || reservationLive(o) != before || s.state != storeOPEN {
+		t.Errorf("scope grant leaked: panic%v live%d state%s", recovered, reservationLive(o), s.state)
+	}
+	tsExpiredReader(t, kept)
+	tsExpiredReader(t, psGoexit(t, s, o, garbage))
+	if reservationLive(o) != before || s.state != storeOPEN {
+		t.Errorf("scope grant leaked: Goexit live%d want%d state%s", reservationLive(o), before, s.state)
+	}
+	r := psRun(t, s, o, LaneOperation, psRawDelete(t, 9))
+	r.tuple(t, 2, 3, -1)
+	if r.err != nil || s.state != storeOPEN {
+		t.Fatalf("scope next operation differs: %v %s", r.err, s.state)
+	}
+}
+
+// psGoexit runs one Lane operation whose callback calls runtime.Goexit on its own goroutine.
+// It returns the callback's Reader for the caller's expiry check.
+func psGoexit(t *testing.T, s *Store, o *OperationReservationOwner, garbage func() TreeOperationV1) *Reader {
+	t.Helper()
+	var kept *Reader
+	done := make(chan bool)
+	go func() {
+		returned := false
+		defer func() { done <- returned }()
+		_ = o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+			return a.WithReservation(psPageGrant, func() error {
+				tsInvoke(s, a, func(rd *Reader) (TreeOperationV1, error) {
+					kept = rd
+					return garbage(), a.WithPhaseReservationV1(64, 0, func(func() error) error { runtime.Goexit(); return nil })
+				})
+				return nil
+			})
+		})
+		returned = true
+	}()
+	if <-done {
+		t.Fatal("scope Goexit callback returned normally")
+	}
+	return kept
+}
+
+// A raw-only delete commits NEW, removes exactly its target and leaves the next operation healthy.
+func psAccepted(t *testing.T) {
+	s, path, o := psStore(t)
+	r := psRun(t, s, o, LaneOperation, psRawDelete(t, 9))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	psGone(t, s, tsCounterKey(9))
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(10), tsCounterLiteral(10, 1))
+	tsFollowing(t, s, o)
+	s = tsReopen(t, s, path)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), nil)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(10), tsCounterLiteral(10, 1))
+	// Ordinary target plus witness-only domain is legal; the witnessed counter stays equal.
+	r = psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		page := psScope(t, reader, 10)
+		op := tsPair(77)
+		op.Pair.ObsoleteConsulted = []ObsoletePageWitnessV1{page.Witness}
+		return op
+	})
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(10), tsCounterLiteral(10, 1))
+	// Ordinary target plus a witness-only empty counter point (generation 11 has no counter) is legal.
+	r = psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		page, err := reader.ObsoleteGenerationPageV1(11, ObsoleteCounterV1, nil, 1)
+		mustEnvironment(t, err)
+		if len(page.Rows) != 0 {
+			t.Fatalf("generation 11 counter page rows%d, want0", len(page.Rows))
+		}
+		op := tsPair(78)
+		op.Pair.ObsoleteConsulted = []ObsoletePageWitnessV1{page.Witness}
+		return op
+	})
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(11), nil)
+	psEmptyIntervals(t, s, path, o)
+}
+
+// Ordinary targets plus witness-only empty range intervals commit NEW: a UTXO interval of generation 11
+// beside the target, the same interval from two separate reads, and empty index and derived-owner
+// intervals of generation 1 that contain the canonical (rank 2) and owner (rank 7) targets, which the
+// residual comparison excludes by exact key.
+func psEmptyIntervals(t *testing.T, s *Store, path string, o *OperationReservationOwner) {
+	t.Helper()
+	// The ordinary rows are created inside the callback; the two-row case holds one more Mutation, its
+	// 40-byte key (capacity 48) and 8-byte literal above psPageGrant.
+	cases := []struct {
+		g       uint64
+		classes []ObsoleteClassV1
+		extra   uint64
+		op      func() TreeOperationV1
+	}{
+		{11, []ObsoleteClassV1{ObsoleteUTXOV1}, 0, func() TreeOperationV1 { return tsPair(79) }},
+		{11, []ObsoleteClassV1{ObsoleteUTXOV1, ObsoleteUTXOV1}, 0, func() TreeOperationV1 { return tsPair(80) }},
+		{1, []ObsoleteClassV1{ObsoleteIndexV1, ObsoleteDerivedV1}, uint64(unsafe.Sizeof(Mutation{})) + 56, func() TreeOperationV1 {
+			forward, owner := tsIndexRows(tdTxid(0x55), 23)
+			return TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{forward, owner}}}
+		}},
+	}
+	for _, c := range cases {
+		r := psRunG(t, s, o, LaneOperation, psPageGrant+c.extra, func(reader *Reader) TreeOperationV1 {
+			op := c.op()
+			for _, class := range c.classes {
+				page, err := reader.ObsoleteGenerationPageV1(c.g, class, nil, 1)
+				mustEnvironment(t, err)
+				if len(page.Rows) != 0 || page.Stop != PrefixPageExhausted {
+					t.Fatalf("generation %d class %d page rows%d stop%d, want empty exhausted", c.g, class, len(page.Rows), page.Stop)
+				}
+				op.Pair.ObsoleteConsulted = append(op.Pair.ObsoleteConsulted, page.Witness)
+			}
+			return op
+		})
+		r.tuple(t, 2, 3, -1)
+		if r.err != nil {
+			t.Fatalf("empty interval scope refused: generation %d %v", c.g, r.err)
+		}
+	}
+	s = tsReopen(t, s, path)
+	forward, owner := tsIndexRows(tdTxid(0x55), 23)
+	for _, m := range []Mutation{tsTarget(79), tsTarget(80), forward, owner} {
+		tsRead(t, s, m.DBI, m.Key, m.Literal)
+	}
+}
+
+// psGone requires the raw counter target to be absent after the owned plan committed.
+func psGone(t *testing.T, s *Store, key []byte) {
+	t.Helper()
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		_, present, err := r.Get(TreeSchemaV1DBIs()[0], key)
+		if err != nil || present {
+			t.Fatalf("owned raw target survived: %x present%v %v", key, present, err)
+		}
+		return nil
+	}))
+}
+
+// The listed forbidden companions of a nonempty physical-scope field refuse with "invalid Update Batch" ahead of
+// a selector count over its bound.
+func psShape(t *testing.T) {
+	s, _, o := psStore(t)
+	// primitive adds one admissible primitive and its body row; its Source is not run.
+	primitive := func(op *TreeOperationV1) {
+		p, body := tsPrimitive(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error {
+			t.Error("scope shape ran a primitive Source")
+			return nil
+		}))
+		op.Primitives = []TreePrimitiveV1{p}
+		op.Pair.Mutations = append(op.Pair.Mutations, body)
+	}
+	edits := []struct {
+		name string
+		kind OperationKind
+		edit func(*TreeOperationV1)
+	}{
+		{"tree-account", TreeOperation, func(*TreeOperationV1) {}},
+		{"primitive", LaneOperation, primitive},
+		{"primitive-tree-account", TreeOperation, primitive},
+		{"prepaid", LaneOperation, func(op *TreeOperationV1) { op.Pair.PrepaidReadBytes = 1 }},
+		{"context", LaneOperation, func(op *TreeOperationV1) {
+			op.Pair.ContextConsulted = &CanonicalContextWindowV1{Generation: 8, FirstHeight: 100, Count: 1}
+		}},
+		{"entry", LaneOperation, func(op *TreeOperationV1) { op.Pair.EntryInventory = &EntryInventoryV1{} }},
+		{"proof", LaneOperation, func(op *TreeOperationV1) { op.Proof = tsProofNil }},
+		{"slot", LaneOperation, func(op *TreeOperationV1) { op.HeaderSlot = &TreeHeaderSlotV1{} }},
+		{"preserve-replay", LaneOperation, func(op *TreeOperationV1) { op.Pair.PreserveReplayObservations = true }},
+		{"large-only-tree", TreeOperation, func(op *TreeOperationV1) {
+			op.Pair.ObsoleteDeletes, op.Pair.ObsoleteConsulted = nil, nil
+			op.Pair.Mutations = []Mutation{tsTarget(5)}
+			op.Pair.LargeConsulted = append(op.Pair.LargeConsulted, LargeImageSelectorV1{Kind: LargeImageBlockBodyV1})
+		}},
+	}
+	for _, row := range edits {
+		r := psRunG(t, s, o, row.kind, psPageGrant+33*2882, func(reader *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(reader)
+			op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881, 2882)
+			row.edit(&op)
+			return op
+		})
+		if s.state != storeOPEN || !treeNativeIsInvalid(r.err) {
+			t.Fatalf("scope shape admitted: %s %v", row.name, r.err)
+		}
+		psRefused(t, s, r, false, row.name)
+	}
+	// Witnesses with no Mutation or delete are an empty operation and refuse with "invalid Update Batch".
+	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		return TreeOperationV1{Pair: TreePairV1{ObsoleteConsulted: []ObsoletePageWitnessV1{psScope(t, reader, 9).Witness}}}
+	})
+	psRefused(t, s, r, false, "consulted-only")
+	// A malformed ordinary Pair returns its own capacity refusal ahead of the scope shape refusal.
+	consultedGrant := (maxUpdateConsulted + 1) * (uint64(unsafe.Sizeof(ConsultedRow{})) + 16)
+	r = psRunG(t, s, o, TreeOperation, psPageGrant+consultedGrant, func(reader *Reader) TreeOperationV1 {
+		op := psRawDelete(t, 9)(reader)
+		op.Pair.Consulted = tsConsulted(int(maxUpdateConsulted) + 1)
+		return op
+	})
+	psRefused(t, s, r, true, "ordinary-first")
+}
+
+// Invalid ordinary rows refuse with "invalid Update Batch" ahead of a scope selector count above
+// its bound; an unpaired canonical forward row in a scoped plan refuses with the canonical pairing
+// error from the native preflight and consumes the Store.
+func psOrdinaryFirst(t *testing.T) {
+	s, _, o := psStore(t)
+	// The listed rows' Mutations are created inside the callback, under the caller grant.
+	for _, row := range []struct {
+		name      string
+		mutations func() []Mutation
+	}{
+		{"order", func() []Mutation { return []Mutation{tsTarget(6), tsTarget(5)} }},
+		{"rank8", func() []Mutation {
+			rank8 := tsTarget(5)
+			rank8.DBI = TreeSchemaV1DBIs()[8]
+			return []Mutation{rank8}
+		}},
+		{"authority", func() []Mutation {
+			return []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: []byte{2}, BeforePresent: true, AfterKind: 2, Literal: []byte{1}}}
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			r := psRunG(t, s, o, LaneOperation, psPageGrant+33*2882, func(reader *Reader) TreeOperationV1 {
+				op := psRawDelete(t, 9)(reader)
+				op.Pair.Mutations = row.mutations()
+				op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881)
+				return op
+			})
+			if !treeNativeIsInvalid(r.err) {
+				t.Fatalf("scope shape admitted: ordinary %s %v", row.name, r.err)
+			}
+			psRefused(t, s, r, false, row.name)
+		})
+	}
+	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		op := psRawDelete(t, 9)(reader)
+		op.Pair.Mutations = []Mutation{canonicalForwardLiteral(1, 5, [32]byte{0x41}, [40]byte{39: 1})}
+		return op
+	})
+	treeNativeError(t, r.err, "update", "InvalidInput", 22, "unpaired canonical owner mutation", nil)
+	r.tuple(t, 1, 1, -1)
+	tsConsumed(t, s, o, 1, r.err)
+}
+
+// Zero-value and earlier-invocation tokens (the five foreign builds) refuse before the metadata charge.
+func psProvenance(t *testing.T) {
+	s, _, o := psStore(t)
+	var earlier ObsoletePageV1
+	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		earlier = psScope(t, reader, 9)
+		return tsPair(31)
+	})
+	mustEnvironment(t, r.err)
+	// After callback expiry the row read refuses with "Reader is not active".
+	if n, err := earlier.Rows[0].ReadAt(make([]byte, 1), 0); n != 0 {
+		t.Fatalf("expired scope row returned %d bytes", n)
+	} else {
+		treeNativeError(t, err, "get", "InvalidInput", 22, "Reader is not active", nil)
+	}
+	foreign := []func(*Reader) TreeOperationV1{
+		func(*Reader) TreeOperationV1 {
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: earlier.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{earlier.Witness}}}
+		},
+		func(reader *Reader) TreeOperationV1 {
+			page := psScope(t, reader, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: earlier.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness}}}
+		},
+		func(reader *Reader) TreeOperationV1 {
+			page := psScope(t, reader, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: page.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{earlier.Witness}}}
+		},
+		func(reader *Reader) TreeOperationV1 {
+			page := psScope(t, reader, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: []ObsoleteRowV1{{}}, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness}}}
+		},
+		func(reader *Reader) TreeOperationV1 {
+			page := psScope(t, reader, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: page.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{{}}}}
+		},
+	}
+	for i, build := range foreign {
+		// One byte below the metadata envelope still yields the charge-free provenance refusal.
+		f := psF(0, 0, 1, 1, 0, 0, 9, 9)
+		r = psRun(t, s, reservationFilled(t, psPageGrant+f-1), LaneOperation, build)
+		if r.err != nil && s.state == storeOPEN && treeNativeIsInvalid(r.err) {
+			psRefused(t, s, r, false, fmt.Sprint("foreign", i))
+			continue
+		}
+		t.Fatalf("foreign scope admitted: %d %v", i, r.err)
+	}
+}
+
+// An earlier invocation's generation-9 counter token refuses before the metadata charge after a later
+// invocation deleted that counter through its own token and the counter was written again with other
+// bytes; the rewritten counter stays readable through View.
+func psProvenanceRecreated(t *testing.T) {
+	s, _, o := psStore(t)
+	var earlier ObsoletePageV1
+	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		earlier = psScope(t, reader, 9)
+		return tsPair(31)
+	})
+	mustEnvironment(t, r.err)
+	r = psRun(t, s, o, LaneOperation, psRawDelete(t, 9))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	psGone(t, s, tsCounterKey(9))
+	recreated := tsCounterLiteral(9, 2)
+	if bytes.Equal(recreated, tsCounterLiteral(9, 1)) {
+		t.Fatal("recreated counter bytes equal the deleted bytes")
+	}
+	tsSeedCounter(t, s, o, 9, false, recreated)
+	builds := []struct {
+		name  string
+		build func(*Reader) TreeOperationV1
+	}{
+		{"earlier-row", func(reader *Reader) TreeOperationV1 {
+			page := psScope(t, reader, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: earlier.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness}}}
+		}},
+		{"earlier-row-and-witness", func(*Reader) TreeOperationV1 {
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: earlier.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{earlier.Witness}}}
+		}},
+	}
+	f := psF(0, 0, 1, 1, 0, 0, 9, 9)
+	for _, row := range builds {
+		r = psRun(t, s, reservationFilled(t, psPageGrant+f-1), LaneOperation, row.build)
+		if s.state != storeOPEN || !treeNativeIsInvalid(r.err) {
+			t.Fatalf("recreated slot admitted an earlier scope token: %s %s %v", row.name, s.state, r.err)
+		}
+		tsRefusal(t, r, false)
+		tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), recreated)
+		tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(10), tsCounterLiteral(10, 1))
+	}
+}
+
+func treeNativeIsInvalid(err error) bool {
+	engine, direct := directTestEngineError(err)
+	return direct && engine.Diagnostic == "invalid Update Batch"
+}
+
+// A repeated witness, a repeated delete and a delete outside its witness refuse.
+func psDuplicates(t *testing.T) {
+	s, _, o := psStore(t)
+	builds := map[string]func(*Reader) TreeOperationV1{
+		"witness": func(reader *Reader) TreeOperationV1 {
+			page := psScope(t, reader, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: page.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness, page.Witness}}}
+		},
+		"row": func(reader *Reader) TreeOperationV1 {
+			page := psScope(t, reader, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: []ObsoleteRowV1{page.Rows[0], page.Rows[0]}, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness}}}
+		},
+		"uncovered": func(reader *Reader) TreeOperationV1 {
+			covered, other := psScope(t, reader, 10), psScope(t, reader, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: other.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{covered.Witness}}}
+		},
+	}
+	// One byte below the metadata envelope of the witness, row and uncovered builds the charge refuses
+	// before the duplicate and coverage checks that need its scratch (the repeated witness is counted twice).
+	short := map[string]uint64{"witness": psF(0, 0, 1, 2, 0, 0, 9, 18), "row": psF(0, 0, 2, 1, 0, 0, 18, 9), "uncovered": psF(0, 0, 1, 1, 0, 0, 9, 9)}
+	for _, name := range []string{"witness", "row", "uncovered"} {
+		r := psRun(t, s, reservationFilled(t, psPageGrant+short[name]-1), LaneOperation, builds[name])
+		if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
+			t.Fatalf("duplicate scope admitted: %s one byte below the envelope %v %s", name, r.err, s.state)
+		}
+		r.tuple(t, 1, 1, -1)
+	}
+	for _, name := range []string{"witness", "row", "uncovered"} {
+		r := psRun(t, s, o, LaneOperation, builds[name])
+		if r.err == nil || r.stage != 1 || s.state != storeOPEN {
+			t.Fatalf("duplicate scope admitted: %s stage%d %s %v", name, r.stage, s.state, r.err)
+		}
+		psRefused(t, s, r, false, name)
+	}
+	// Two witness values from separate reads of generation 9 commit together with its delete.
+	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		a, b := psScope(t, reader, 9), psScope(t, reader, 9)
+		return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: a.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{a.Witness, b.Witness}}}
+	})
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), nil)
+}
+
+// Ordinary-target and Consulted overlap with a raw delete refuse.
+func psOverlap(t *testing.T) {
+	s, _, o := psStore(t)
+	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		op := psRawDelete(t, 9)(reader)
+		op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(9), BeforePresent: true, AfterKind: 2, Literal: tsCounterLiteral(9, 2)}}
+		return op
+	})
+	psRefused(t, s, r, false, "target overlap")
+	r = psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		op := psRawDelete(t, 9)(reader)
+		op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(9)}}
+		return op
+	})
+	psRefused(t, s, r, false, "consulted overlap")
+	// A body selector equal to a rank-4 Consulted key and an undo-family selector whose family holds a
+	// rank-5 Consulted key refuse; the same Consulted row beside a selector of another hash commits.
+	for _, c := range []struct {
+		kind LargeImageKindV1
+		rank int
+		size int
+	}{{LargeImageBlockBodyV1, 4, 32}, {LargeImageUndoFamilyV1, 5, 33}} {
+		scoped := func(hash byte) func(*Reader) TreeOperationV1 {
+			return func(reader *Reader) TreeOperationV1 {
+				op := psRawDelete(t, 9)(reader)
+				op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[c.rank], Key: make([]byte, c.size)}}
+				op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: c.kind, Hash: [32]byte{hash}}}
+				return op
+			}
+		}
+		r = psRun(t, s, o, LaneOperation, scoped(0))
+		psRefused(t, s, r, false, fmt.Sprintf("selector kind %d over Consulted rank %d", c.kind, c.rank))
+		s2, _, o2 := psStore(t)
+		r = psRun(t, s2, o2, LaneOperation, scoped(1))
+		r.tuple(t, 2, 3, -1)
+		if r.err != nil {
+			t.Fatalf("disjoint selector kind %d refused beside Consulted rank %d: %v", c.kind, c.rank, r.err)
+		}
+		psGone(t, s2, tsCounterKey(9))
+	}
+}
+
+// psSelectorRun fills run with selectors of kind whose hashes are 0..len(run)-1.
+func psSelectorRun(run []LargeImageSelectorV1, kind LargeImageKindV1) {
+	for i := range run {
+		run[i].Kind = kind
+		binary.BigEndian.PutUint32(run[i].Hash[:], uint32(i))
+	}
+}
+
+// Count capacity precedes unknown-kind/order and token content; zero hash is legal.
+func psCounts(t *testing.T) {
+	s, _, o := psStore(t)
+	run := func(label string, capacity bool, extra uint64, edit func(*TreeOperationV1)) {
+		r := psRunG(t, s, o, LaneOperation, psPageGrant+extra, func(reader *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(reader)
+			edit(&op)
+			return op
+		})
+		psRefused(t, s, r, capacity, label)
+	}
+	// selectors builds one exactly sized array: the lead kinds, then bodies and families with hashes 0..n-1.
+	selectors := func(bodies, families int, lead ...LargeImageKindV1) []LargeImageSelectorV1 {
+		out := make([]LargeImageSelectorV1, len(lead)+bodies+families)
+		for i, kind := range lead {
+			out[i].Kind = kind
+		}
+		psSelectorRun(out[len(lead):len(lead)+bodies], LargeImageBlockBodyV1)
+		psSelectorRun(out[len(lead)+bodies:], LargeImageUndoFamilyV1)
+		return out
+	}
+	run("2881", true, 33*2881, func(op *TreeOperationV1) {
+		op.Pair.LargeConsulted = selectors(1440, 1440, 0)
+	})
+	run("1441 bodies", true, 33*1442, func(op *TreeOperationV1) {
+		op.Pair.LargeConsulted = selectors(1441, 0, 255)
+	})
+	run("1441 families", true, 33*1442, func(op *TreeOperationV1) { op.Pair.LargeConsulted = selectors(0, 1441, 3) })
+	for _, kind := range []LargeImageKindV1{0, 3, 255} {
+		run(fmt.Sprint("kind", kind), false, 0, func(op *TreeOperationV1) {
+			op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: kind}}
+		})
+	}
+	// The selector order and duplicate checks need admitted scratch, so one byte below the envelope
+	// (one delete, one witness, two selectors) refuses with the metadata charge first.
+	for _, edit := range []func(*TreeOperationV1){
+		func(op *TreeOperationV1) { op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 2}, {Kind: 1}} },
+		func(op *TreeOperationV1) { op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 1}, {Kind: 1}} },
+	} {
+		r := psRun(t, s, reservationFilled(t, psPageGrant+psF(0, 0, 1, 1, 0, 2, 9, 9)-1), LaneOperation, func(reader *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(reader)
+			edit(&op)
+			return op
+		})
+		if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
+			t.Fatalf("scope metadata high-water differs: selector order one byte below the envelope %v %s", r.err, s.state)
+		}
+		r.tuple(t, 1, 1, -1)
+	}
+	run("order", false, 0, func(op *TreeOperationV1) { op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 2}, {Kind: 1}} })
+	run("duplicate", false, 0, func(op *TreeOperationV1) {
+		op.Pair.LargeConsulted = selectors(1, 0)[:1:1]
+		op.Pair.LargeConsulted = append(op.Pair.LargeConsulted, op.Pair.LargeConsulted[0])
+	})
+	run("deletes plus witnesses", true, 8*maxUpdateMutations, func(op *TreeOperationV1) {
+		op.Pair.ObsoleteDeletes = make([]ObsoleteRowV1, maxUpdateMutations)
+	})
+	// One delete under 1600000 copies of its witness: the envelope sum exceeds TreeLaneMaxBytes, and the
+	// charge refuses with OPEN ahead of the duplicate witness check that needs its scratch.
+	const copies = 1_600_000
+	if psF(0, 0, 1, copies, 0, 0, 9, 9*copies) <= TreeLaneMaxBytes {
+		t.Fatal("scope metadata high-water differs: saturated envelope below TreeLaneMaxBytes")
+	}
+	r := psRunG(t, s, o, LaneOperation, psPageGrant+8*copies, func(reader *Reader) TreeOperationV1 {
+		op := psRawDelete(t, 9)(reader)
+		witnesses := make([]ObsoletePageWitnessV1, copies)
+		for i := range witnesses {
+			witnesses[i] = op.Pair.ObsoleteConsulted[0]
+		}
+		op.Pair.ObsoleteConsulted = witnesses
+		return op
+	})
+	if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
+		t.Fatalf("scope metadata high-water differs: saturated envelope %v %s", r.err, s.state)
+	}
+	r.tuple(t, 1, 1, -1)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), tsCounterLiteral(9, 1))
+	// At the four bounds below (deletes plus witnesses, 2880 selectors, 1440 bodies, 1440 families) the
+	// count admits and the next refusal is "invalid Update Batch".
+	run("deletes plus witnesses at bound", false, 8*maxUpdateMutations, func(op *TreeOperationV1) {
+		op.Pair.ObsoleteDeletes = make([]ObsoleteRowV1, maxUpdateMutations-1)
+	})
+	run("2880", false, 33*2880, func(op *TreeOperationV1) {
+		op.Pair.LargeConsulted = selectors(1440, 1439, 0)
+	})
+	run("1440 bodies", false, 33*1441, func(op *TreeOperationV1) {
+		op.Pair.LargeConsulted = selectors(1440, 0, 255)
+	})
+	run("1440 families", false, 33*1441, func(op *TreeOperationV1) {
+		op.Pair.LargeConsulted = selectors(0, 1440, 3)
+	})
+	// Counts 1 and 1440 of one known kind commit; the first selector's hash is zero.
+	for _, n := range []int{1, 1440} {
+		s2, _, o2 := psStore(t)
+		r := psRunG(t, s2, o2, LaneOperation, psPageGrant+33*uint64(n), func(reader *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(reader)
+			op.Pair.LargeConsulted = selectors(n, 0)
+			return op
+		})
+		r.tuple(t, 2, 3, -1)
+		mustEnvironment(t, r.err)
+		tsRead(t, s2, TreeSchemaV1DBIs()[0], tsCounterKey(9), nil)
+	}
+}
+
+// The metadata envelope is charged before allocation and one byte less refuses at admission with
+// OPEN; the scoped read window is a separate same-account charge refused after the section begins.
+func psMetadata(t *testing.T) {
+	s, _, o := psStore(t)
+	f := psF(0, 0, 1, 1, 0, 0, 9, 9)
+	if got := treeScopeBytesV1(&TreePairV1{}); got != psF(0, 0, 0, 0, 0, 0, 0, 0) {
+		t.Fatalf("scope metadata high-water differs: empty %d", got)
+	}
+	r := psRun(t, s, reservationFilled(t, psPageGrant+f-1), LaneOperation, psRawDelete(t, 9))
+	if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
+		t.Fatalf("scope metadata high-water differs: one byte below the envelope %v %s", r.err, s.state)
+	}
+	r.tuple(t, 1, 1, -1)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), tsCounterLiteral(9, 1))
+	if s.state != storeOPEN {
+		t.Fatal("admission metadata refusal did not leave OPEN", s.state)
+	}
+	var maxKey uint64
+	mustEnvironment(t, s.View(func(reader *Reader) error { maxKey = reader.maxKey; return nil }))
+	window := 4 * (maxKey + 1)
+	// The envelope alone admits; the scoped preflight window then refuses after beginTreeSectionV1 (CLOSED).
+	r = psRun(t, s, reservationFilled(t, psPageGrant+f+window-1), LaneOperation, psRawDelete(t, 9))
+	if any(r.err) != any(errOperationReservationCapacity) {
+		t.Fatalf("scope operand window not funded: %v", r.err)
+	}
+	r.tuple(t, 1, 1, -1)
+	tsConsumed(t, s, o, 1, errOperationReservationCapacity)
+	s2, _, o2 := psStore(t)
+	// Bound equality: exactly the caller grant, envelope and window remaining admits the raw-only plan.
+	r = psRun(t, s2, reservationFilled(t, psPageGrant+f+window), LaneOperation, psRawDelete(t, 9))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	tsRead(t, s2, TreeSchemaV1DBIs()[0], tsCounterKey(9), nil)
+	tsFollowing(t, s2, o2)
+}
+
+// The successor of a key shorter than the bound is one exact-capacity copy with a trailing zero byte.
+func psSuccessor(t *testing.T) {
+	key := []byte{1, 2, 3}
+	var next []byte
+	allocs := testing.AllocsPerRun(100, func() { next = largeImageAdvance(key, 8) })
+	if allocs != 1 || len(next) != 4 || cap(next) != 4 || !bytes.Equal(next, []byte{1, 2, 3, 0}) || &next[0] == &key[0] {
+		t.Fatalf("scope successor copy differs: allocs%v len%d cap%d %x", allocs, len(next), cap(next), next)
+	}
+	// A maximum-width successor is one copy whose capacity equals its length.
+	wide := bytes.Repeat([]byte{7}, 77)
+	allocs = testing.AllocsPerRun(100, func() { next = largeImageAdvance(wide, 77) })
+	if allocs != 1 || len(next) != 77 || cap(next) != 77 || next[76] != 8 || wide[76] != 7 {
+		t.Fatalf("scope successor capacity differs: allocs%v len%d cap%d", allocs, len(next), cap(next))
+	}
+	carried := append(bytes.Repeat([]byte{7}, 74), 9, 255, 255)
+	next = largeImageAdvance(carried, 77)
+	if len(next) != 75 || cap(next) != 75 || next[74] != 10 {
+		t.Fatalf("scope successor capacity differs: carried len%d cap%d", len(next), cap(next))
+	}
+	if next = largeImageAdvance([]byte{255, 255}, 2); next != nil {
+		t.Fatalf("scope successor copy differs: %x", next)
+	}
+}
+
+// The borrowed native key is ordered against the seek before its one copy (a refused key allocates
+// only its error), and a residual stream drops its seek field before the fetch.
+func psKeySlotOrder(t *testing.T) {
+	seek := []byte{5, 5}
+	below, above := []byte{5, 4, 9}, []byte{5, 6}
+	errAllocs := testing.AllocsPerRun(100, func() { _ = largeImageShapeError() })
+	var err error
+	allocs := testing.AllocsPerRun(100, func() { _, err = largeNativeKey(unsafe.Pointer(&below[0]), 3, 8, seek) })
+	if allocs != errAllocs || err == nil {
+		t.Fatalf("scope key slot order differs: refused key allocs%v error allocs%v %v", allocs, errAllocs, err)
+	}
+	var key []byte
+	allocs = testing.AllocsPerRun(100, func() { key, err = largeNativeKey(unsafe.Pointer(&above[0]), 2, 8, seek) })
+	if allocs != 1 || err != nil || !bytes.Equal(key, above) || cap(key) != 2 || &key[0] == &above[0] {
+		t.Fatalf("scope key slot order differs: admitted key allocs%v cap%d %v", allocs, cap(key), err)
+	}
+	stream := largeResidualStream{reader: &Reader{}, selector: LargeImageSelectorV1{Kind: LargeImageUndoFamilyV1}, seek: []byte{1}}
+	if _, err = stream.next(); err == nil || stream.seek != nil {
+		t.Fatalf("scope key slot order differs: seek field %x held across the fetch: %v", stream.seek, err)
+	}
+}
+
+// Owned raw rows, raw target keys, control keys and selectors have capacity equal to their charged
+// length or count; the inputs are sized where an appended or cloned copy rounds its capacity up.
+func psOwnedCapacity(t *testing.T) {
+	reader := &Reader{updateOld: true, format: 3}
+	prefix := bytes.Repeat([]byte{7}, 76)
+	witness := &obsoleteWitness{reader: reader, domain: obsoleteDomain{rank: 8, prefix: prefix, end: true}}
+	deletes := make([]ObsoleteRowV1, 5)
+	for i := range deletes {
+		deletes[i] = ObsoleteRowV1{span: &obsoleteSpan{reader: reader, rank: 8, key: append(bytes.Clone(prefix), byte(5-i))}}
+	}
+	batch := Batch{ObsoleteDeletes: deletes, ObsoleteConsulted: []ObsoletePageWitnessV1{{scope: witness}}}
+	rows, err := obsoleteAdmitRows(batch, reader, nil)
+	if err != nil || len(rows) != 5 || cap(rows) != 5 {
+		t.Fatalf("scope owned capacity differs: rows len%d cap%d %v", len(rows), cap(rows), err)
+	}
+	plan, err := obsoleteCompileRows(batch, rows, make([]ownedMutation, 0, 5))
+	if err != nil || len(plan) != 5 {
+		t.Fatalf("scope owned capacity differs: plan %d %v", len(plan), err)
+	}
+	for _, m := range plan {
+		if len(m.key) != 77 || cap(m.key) != 77 {
+			t.Fatalf("scope owned capacity differs: target key len%d cap%d", len(m.key), cap(m.key))
+		}
+	}
+	selectors := make([]LargeImageSelectorV1, 16)
+	for i := range selectors {
+		selectors[i] = LargeImageSelectorV1{Kind: LargeImageUndoFamilyV1, Hash: [32]byte{byte(i + 1)}}
+	}
+	scope, err := updateOwnedLarge(Batch{LargeConsulted: selectors, ObsoleteConsulted: batch.ObsoleteConsulted}, nil, 77)
+	if err != nil || len(scope.selectors) != 16 || cap(scope.selectors) != 16 {
+		t.Fatalf("scope owned capacity differs: selectors len%d cap%d %v", len(scope.selectors), cap(scope.selectors), err)
+	}
+	if len(scope.domains) != 1 || len(scope.domains[0].prefix) != 76 || cap(scope.domains[0].prefix) != 76 || &scope.domains[0].prefix[0] == &prefix[0] {
+		t.Fatalf("scope owned capacity differs: control key %+v", scope.domains)
+	}
+}
+
+// Ordinary counter targets and one raw counter delete share the aux cap 16384: 16384 ordinary rows
+// plus the raw row exceed it, 16383 plus the raw row commit, and 16384 ordinary rows with the witness but
+// no raw row commit (the raw row is what crosses the combined cap).
+func psCombinedCap(t *testing.T) {
+	for _, n := range []uint64{16384, 16383, 0} {
+		witnessOnly := n == 0
+		if witnessOnly {
+			n = 16384
+		}
+		s, _, o := psStore(t)
+		// The Mutations and one key/literal backing are each created once at their final size.
+		mutations := func() []Mutation {
+			out := make([]Mutation, n)
+			backing := make([]byte, 25*n)
+			for i := range out {
+				g := 1000 + uint64(i)
+				row := backing[25*i : 25*(i+1) : 25*(i+1)]
+				row[0] = 0x10
+				binary.BigEndian.PutUint64(row[1:9], g)
+				binary.BigEndian.PutUint64(row[9:17], g)
+				binary.BigEndian.PutUint64(row[17:25], 1)
+				out[i] = Mutation{DBI: TreeSchemaV1DBIs()[0], Key: row[:9:9], AfterKind: 2, Literal: row[9:25:25]}
+			}
+			return out
+		}
+		grant := psPageGrant + n*(uint64(unsafe.Sizeof(Mutation{}))+uint64(len(tsCounterKey(1000))+len(tsCounterLiteral(1000, 1))))
+		r := psRunG(t, s, o, LaneOperation, grant, func(reader *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(reader)
+			op.Pair.Mutations = mutations()
+			if witnessOnly {
+				op.Pair.ObsoleteDeletes = nil
+			}
+			return op
+		})
+		if n == 16384 && !witnessOnly {
+			psRefused(t, s, r, true, "combined aux cap")
+			continue
+		}
+		r.tuple(t, 2, 3, -1)
+		mustEnvironment(t, r.err)
+		if witnessOnly {
+			tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), tsCounterLiteral(9, 1))
+			continue
+		}
+		psGone(t, s, tsCounterKey(9))
+	}
+}
+
+// Store.Update on a format-3 store refuses before its callback; a Pair Mutation at rank 8 is "invalid Update Batch".
+func psLegacy(t *testing.T) {
+	s, _, o := psStore(t)
+	calls := 0
+	truth, stage, err := s.Update(func(*Reader) (Batch, error) { calls++; return Batch{}, nil })
+	treeNativeError(t, err, operationUpdate, EngineClass("StateMismatch"), -30779, "tree store requires typed tree operation", nil)
+	if truth != 1 || stage != 1 || calls != 0 {
+		t.Fatal("format3 Store.Update reached its callback")
+	}
+	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		op := psRawDelete(t, 9)(reader)
+		op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[8], Key: append(obsoleteGenerationLiteral(9), make([]byte, 38)...), AfterKind: 1}}
+		return op
+	})
+	psRefused(t, s, r, false, "rank8 pair")
 }

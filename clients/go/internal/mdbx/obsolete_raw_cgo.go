@@ -7,7 +7,9 @@ import (
 	"crypto/sha3"
 	"encoding/binary"
 	"io"
+	"slices"
 	"sort"
+	"unsafe"
 )
 
 // ObsoleteClassV1 selects a nonzero generation's dedicated physical namespace.
@@ -420,19 +422,36 @@ func obsoleteContains(domain obsoleteDomain, rank uint8, key []byte) bool {
 	return domain.end || bytes.Compare(key, domain.last) <= 0
 }
 
+// obsoleteWitnesses classifies provenance, then duplicate identity over one exact 8-byte-per-token
+// sorted copy. Addresses order only this call's duplicate check and never leave it.
 func obsoleteWitnesses(batch Batch, reader *Reader) error {
-	seen := make(map[*obsoleteWitness]struct{}, len(batch.ObsoleteConsulted))
+	identities := make([]uintptr, 0, len(batch.ObsoleteConsulted))
 	for _, token := range batch.ObsoleteConsulted {
 		witness := token.scope
 		if witness == nil || witness.reader != reader || !reader.updateOld {
 			return updateInvalidBatch()
 		}
-		if _, duplicate := seen[witness]; duplicate {
+		identities = append(identities, uintptr(unsafe.Pointer(witness))) //nolint:gosec // G103: identity-only compare of live witnesses; never dereferenced, stored or persisted
+	}
+	return obsoleteUniqueWitnesses(identities)
+}
+
+func obsoleteUniqueWitnesses(identities []uintptr) error {
+	slices.Sort(identities)
+	for i := 1; i < len(identities); i++ {
+		if identities[i] == identities[i-1] {
 			return updateInvalidBatch()
 		}
-		seen[witness] = struct{}{}
 	}
 	return nil
+}
+
+// obsoleteDBI is the Reader format's descriptor for rank, including the format-3 rank 8.
+func obsoleteDBI(format, rank uint8) DBI {
+	if format == 3 {
+		return TreeSchemaV1DBIs()[rank]
+	}
+	return schemaDBIs[rank]
 }
 
 func obsoleteCovered(domains []obsoleteDomain, span *obsoleteSpan) bool {
@@ -445,7 +464,7 @@ func obsoleteCovered(domains []obsoleteDomain, span *obsoleteSpan) bool {
 }
 
 func obsoleteCharge(budget *updateBudget, span *obsoleteSpan) bool {
-	m := Mutation{DBI: schemaDBIs[span.rank], Key: span.key, BeforePresent: true, AfterKind: AfterAbsent}
+	m := Mutation{DBI: obsoleteDBI(span.reader.format, span.rank), Key: span.key, BeforePresent: true, AfterKind: AfterAbsent}
 	if !budget.addTotals(m) {
 		return false
 	}
@@ -494,12 +513,31 @@ func obsoleteCompileRows(batch Batch, rows []ObsoleteRowV1, plan []ownedMutation
 	}
 	for _, row := range rows {
 		span := row.span
-		plan = append(plan, ownedMutation{dbi: schemaDBIs[span.rank], key: bytes.Clone(span.key), beforePresent: true, after: AfterAbsent})
+		plan = append(plan, ownedMutation{dbi: obsoleteDBI(span.reader.format, span.rank), key: obsoleteExactCopy(span.key), beforePresent: true, after: AfterAbsent})
 	}
-	sort.Slice(plan, func(i, j int) bool {
-		return updateKeyOrdered(plan[i].dbi.Rank, plan[i].key, plan[j].dbi.Rank, plan[j].key)
-	})
+	slices.SortFunc(plan, obsoleteMutationCmp)
 	return plan, nil
+}
+
+// obsoleteExactCopy is a copy of key with capacity equal to its length; nil stays nil.
+func obsoleteExactCopy(key []byte) []byte {
+	if key == nil {
+		return nil
+	}
+	owned := make([]byte, len(key))
+	copy(owned, key)
+	return owned
+}
+
+func obsoleteMutationCmp(a, b ownedMutation) int {
+	return obsoleteRowCmp(a.dbi.Rank, a.key, b.dbi.Rank, b.key)
+}
+
+func obsoleteRowCmp(rankA uint8, keyA []byte, rankB uint8, keyB []byte) int {
+	if rankA != rankB {
+		return int(rankA) - int(rankB)
+	}
+	return bytes.Compare(keyA, keyB)
 }
 
 func obsoleteAdmitRows(batch Batch, reader *Reader, plan []ownedMutation) ([]ObsoleteRowV1, error) {
@@ -508,14 +546,15 @@ func obsoleteAdmitRows(batch Batch, reader *Reader, plan []ownedMutation) ([]Obs
 		domains = append(domains, token.scope.domain)
 	}
 	domains = obsoleteCoalesce(domains)
-	rows := append([]ObsoleteRowV1(nil), batch.ObsoleteDeletes...)
+	rows := make([]ObsoleteRowV1, len(batch.ObsoleteDeletes))
+	copy(rows, batch.ObsoleteDeletes)
 	for _, row := range rows {
 		if !obsoleteRowCurrent(row, reader, domains) {
 			return nil, updateInvalidBatch()
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		return updateKeyOrdered(rows[i].span.rank, rows[i].span.key, rows[j].span.rank, rows[j].span.key)
+	slices.SortFunc(rows, func(a, b ObsoleteRowV1) int {
+		return obsoleteRowCmp(a.span.rank, a.span.key, b.span.rank, b.span.key)
 	})
 	for i, row := range rows {
 		span := row.span
@@ -544,7 +583,7 @@ func obsoleteDomainOrdered(a, b obsoleteDomain) bool {
 }
 
 func obsoleteCoalesce(domains []obsoleteDomain) []obsoleteDomain {
-	sort.Slice(domains, func(i, j int) bool { return obsoleteDomainOrdered(domains[i], domains[j]) })
+	slices.SortFunc(domains, obsoleteDomainCmp)
 	merged := domains[:0]
 	for _, domain := range domains {
 		if len(merged) != 0 && obsoleteMergeable(merged[len(merged)-1], domain) {
@@ -560,6 +599,16 @@ func obsoleteCoalesce(domains []obsoleteDomain) []obsoleteDomain {
 	return merged
 }
 
+func obsoleteDomainCmp(a, b obsoleteDomain) int {
+	if obsoleteDomainOrdered(a, b) {
+		return -1
+	}
+	if obsoleteDomainOrdered(b, a) {
+		return 1
+	}
+	return 0
+}
+
 func obsoleteMergeable(a, b obsoleteDomain) bool {
 	if a.rank != b.rank || a.point != b.point || !bytes.Equal(a.prefix, b.prefix) {
 		return false
@@ -568,9 +617,7 @@ func obsoleteMergeable(a, b obsoleteDomain) bool {
 }
 
 func obsoleteCoalescePoints(points []obsoletePoint, domains []obsoleteDomain) []obsoletePoint {
-	sort.Slice(points, func(i, j int) bool {
-		return updateKeyOrdered(points[i].rank, points[i].key, points[j].rank, points[j].key)
-	})
+	slices.SortFunc(points, obsoletePointCmp)
 	merged := points[:0]
 	for _, point := range points {
 		if len(merged) != 0 && !updateKeyOrdered(merged[len(merged)-1].rank, merged[len(merged)-1].key, point.rank, point.key) {
@@ -587,6 +634,10 @@ func obsoleteCoalescePoints(points []obsoletePoint, domains []obsoleteDomain) []
 	return merged
 }
 
+func obsoletePointCmp(a, b obsoletePoint) int {
+	return obsoleteRowCmp(a.rank, a.key, b.rank, b.key)
+}
+
 func obsoleteRetainControls(scope *largeImageScope) error {
 	if uint64(len(scope.domains))+uint64(len(scope.points))+uint64(len(scope.selectors)) > maxUpdateMutations {
 		return updateBoundError()
@@ -600,7 +651,7 @@ func obsoleteRetainControls(scope *largeImageScope) error {
 		}
 	}
 	for i := range keys {
-		keys[i].key = bytes.Clone(keys[i].key)
+		keys[i].key = obsoleteExactCopy(keys[i].key)
 	}
 	for i := range scope.domains {
 		domain := &scope.domains[i]
@@ -615,7 +666,8 @@ func obsoleteRetainControls(scope *largeImageScope) error {
 }
 
 func obsoleteControlKeys(scope largeImageScope) []obsoletePoint {
-	keys := append([]obsoletePoint(nil), scope.points...)
+	keys := make([]obsoletePoint, 0, len(scope.points)+3*len(scope.domains))
+	keys = append(keys, scope.points...)
 	for _, domain := range scope.domains {
 		keys = append(keys, obsoletePoint{rank: domain.rank, key: domain.prefix}, obsoletePoint{rank: domain.rank, key: domain.after}, obsoletePoint{rank: domain.rank, key: domain.last})
 	}
@@ -634,17 +686,12 @@ func updateObsoleteScope(batch Batch, scope largeImageScope) (largeImageScope, e
 	if len(batch.ObsoleteConsulted) == 0 {
 		return scope, nil
 	}
-	for _, token := range batch.ObsoleteConsulted {
-		witness := token.scope
-		if witness.domain.prefix != nil {
-			scope.domains = append(scope.domains, witness.domain)
-		}
-		scope.points = append(scope.points, witness.points...)
-	}
+	format := batch.ObsoleteConsulted[0].scope.reader.format
+	scope.domains, scope.points = obsoleteScopeArrays(batch.ObsoleteConsulted)
 	// A complete admitted large undo family subsumes its raw intervals only.
 	domains := scope.domains[:0]
 	for _, domain := range scope.domains {
-		row := ownedConsulted{dbi: schemaDBIs[domain.rank], key: domain.prefix}
+		row := ownedConsulted{dbi: obsoleteDBI(format, domain.rank), key: domain.prefix}
 		if domain.rank != 5 || !largeSelectorContains(scope.selectors, row) {
 			domains = append(domains, domain)
 		}
@@ -657,6 +704,30 @@ func updateObsoleteScope(batch Batch, scope largeImageScope) (largeImageScope, e
 	return scope, nil
 }
 
+// obsoleteScopeArrays copies each witness domain with a non-nil prefix into an array of capacity
+// len(tokens) and all witness points into an array of capacity equal to their summed count.
+func obsoleteScopeArrays(tokens []ObsoletePageWitnessV1) ([]obsoleteDomain, []obsoletePoint) {
+	domains := make([]obsoleteDomain, 0, len(tokens))
+	points := make([]obsoletePoint, 0, obsoleteWitnessPoints(tokens))
+	for _, token := range tokens {
+		witness := token.scope
+		if witness.domain.prefix != nil {
+			domains = append(domains, witness.domain)
+		}
+		points = append(points, witness.points...)
+	}
+	return domains, points
+}
+
+// obsoleteWitnessPoints is the sum of witness point counts.
+func obsoleteWitnessPoints(tokens []ObsoletePageWitnessV1) int {
+	n := 0
+	for _, token := range tokens {
+		n += len(token.scope.points)
+	}
+	return n
+}
+
 // Ordinary Consulted has already folded its physical equality at each stage.
 func obsoleteConsultedContains(consulted []ownedConsulted, rank uint8, key []byte) bool {
 	i := sort.Search(len(consulted), func(i int) bool {
@@ -665,8 +736,8 @@ func obsoleteConsultedContains(consulted []ownedConsulted, rank uint8, key []byt
 	return i < len(consulted) && consulted[i].dbi.Rank == rank && bytes.Equal(consulted[i].key, key)
 }
 
-func obsoletePointEqual(old, candidate *Reader, point obsoletePoint, plan []ownedMutation, consulted []ownedConsulted) (bool, error) {
-	if canonicalTargetIndex(plan, point.rank, point.key) >= 0 || obsoleteConsultedContains(consulted, point.rank, point.key) {
+func obsoletePointEqual(old, candidate *Reader, point obsoletePoint, plan []ownedMutation, fund *largeImageScope) (bool, error) {
+	if canonicalTargetIndex(plan, point.rank, point.key) >= 0 || obsoleteConsultedContains(fund.consulted, point.rank, point.key) {
 		return true, nil
 	}
 	a, err := old.obsoletePoint(point.rank, point.key, operationUpdate)
@@ -677,12 +748,12 @@ func obsoletePointEqual(old, candidate *Reader, point obsoletePoint, plan []owne
 	if err != nil {
 		return false, err
 	}
-	return largeRowsEqual(largeNativeRow{key: point.key, image: a}, largeNativeRow{key: point.key, image: b}), nil
+	return fund.rowsEqualV1(largeNativeRow{key: point.key, image: a}, largeNativeRow{key: point.key, image: b})
 }
 
-func obsoleteDomainEqual(old, candidate *Reader, domain obsoleteDomain, plan []ownedMutation, consulted []ownedConsulted) (bool, error) {
+func obsoleteDomainEqual(old, candidate *Reader, domain obsoleteDomain, plan []ownedMutation, fund *largeImageScope) (bool, error) {
 	if domain.point {
-		return obsoletePointEqual(old, candidate, obsoletePoint{rank: domain.rank, key: domain.prefix}, plan, consulted)
+		return obsoletePointEqual(old, candidate, obsoletePoint{rank: domain.rank, key: domain.prefix}, plan, fund)
 	}
 	seek := domain.seek(old.maxKey)
 	start := sort.Search(len(plan), func(i int) bool {
@@ -690,21 +761,65 @@ func obsoleteDomainEqual(old, candidate *Reader, domain obsoleteDomain, plan []o
 	})
 	left := largeResidualStream{reader: old, domain: &domain, seek: seek, plan: plan[start:]}
 	right := largeResidualStream{reader: candidate, domain: &domain, seek: seek, plan: plan[start:]}
-	equal := true
-	for {
-		a, err := left.next()
-		if err != nil {
-			return false, err
-		}
-		b, err := right.next()
-		if err != nil {
-			return false, err
-		}
-		if a.done && b.done {
-			return equal, nil
-		}
-		equal = obsoleteRowsEqual(a, b, domain.rank, consulted) && equal
+	return obsoleteStreamsEqual(&left, &right, domain.rank, fund)
+}
+
+// obsoleteStreamsEqual traverses both residual streams completely, pairing rows by key; only a read
+// or funding error stops early. A key on one side only is an inequality without payload use; a key on
+// both sides gets its funded comparison.
+func obsoleteStreamsEqual(left, right *largeResidualStream, rank uint8, fund *largeImageScope) (bool, error) {
+	var a, b largeNativeRow
+	if err := left.advance(&a); err != nil {
+		return false, err
 	}
+	if err := right.advance(&b); err != nil {
+		return false, err
+	}
+	equal := true
+	for !a.done || !b.done {
+		order, match, err := obsoleteStreamPair(a, b, rank, fund)
+		if err != nil {
+			return false, err
+		}
+		equal = match && equal
+		if err := obsoleteStreamsAdvance(left, right, &a, &b, order); err != nil {
+			return false, err
+		}
+	}
+	return equal, nil
+}
+
+// obsoleteStreamPair orders a and b by key (an ended stream sorts last) and compares an equal-key pair.
+func obsoleteStreamPair(a, b largeNativeRow, rank uint8, fund *largeImageScope) (int, bool, error) {
+	order := obsoleteStreamOrder(a, b)
+	if order != 0 {
+		return order, false, nil
+	}
+	match, err := obsoleteRowsFundedV1(a, b, rank, fund)
+	return 0, match, err
+}
+
+func obsoleteStreamOrder(a, b largeNativeRow) int {
+	switch {
+	case a.done:
+		return 1
+	case b.done:
+		return -1
+	}
+	return bytes.Compare(a.key, b.key)
+}
+
+// obsoleteStreamsAdvance advances the stream holding the smaller key, or both after an equal-key pair.
+func obsoleteStreamsAdvance(left, right *largeResidualStream, a, b *largeNativeRow, order int) error {
+	if order <= 0 {
+		if err := left.advance(a); err != nil {
+			return err
+		}
+	}
+	if order >= 0 {
+		return right.advance(b)
+	}
+	return nil
 }
 
 func obsoleteRowsEqual(a, b largeNativeRow, rank uint8, consulted []ownedConsulted) bool {
@@ -716,4 +831,15 @@ func obsoleteRowsEqual(a, b largeNativeRow, rank uint8, consulted []ownedConsult
 		return true
 	}
 	return largeRowsEqual(a, b)
+}
+
+// obsoleteRowsFundedV1 is obsoleteRowsEqual with the scope's typed funding before C use.
+func obsoleteRowsFundedV1(a, b largeNativeRow, rank uint8, fund *largeImageScope) (bool, error) {
+	if a.done != b.done || !bytes.Equal(a.key, b.key) {
+		return false, nil
+	}
+	if obsoleteConsultedContains(fund.consulted, rank, a.key) {
+		return true, nil
+	}
+	return fund.rowsEqualV1(a, b)
 }
