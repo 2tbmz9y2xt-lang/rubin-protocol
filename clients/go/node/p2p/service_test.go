@@ -493,7 +493,7 @@ func TestProcessRelayedBlockDropsRetainedDAOrphanNotValidAgainstC1(t *testing.T)
 }
 
 // TestAnnounceBlockMakesNoDARelayTTLDecrease: an accepted remote or mined block decreases a retained record once in its
-// canonical transition (3 -> 2 -> 1, then removed); post-return effects and AnnounceBlock decrease nothing.
+// canonical transition (3 -> 2 -> 1, then removed); post-return effects and AnnounceBlock do not decrease it.
 func TestAnnounceBlockMakesNoDARelayTTLDecrease(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)

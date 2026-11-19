@@ -6416,7 +6416,7 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 	// accounting second would report the higher da_id's locator refusal instead, and this row's
 	// evidence string on the peer release, and on the ttl tick the bare errDARelayImageIncompatible of the lower da_id's per-da_id bytes check where its locator check returns errDARelayLocatorMismatch, is what separates the two orders — the earlier two-record row (0xdb, 0xdd)
 	// carries one defect, so both orders answer it identically. Both records are provenance "keep",
-	// leaving the preflight as the only arm the peer release can refuse on.
+	// so the peer release's refusal in this row comes from the preflight.
 	for _, selector := range ownerReadyRemovalSelectors {
 		t.Run("a two-defect image refuses record-major on the "+selector.name, func(t *testing.T) {
 			f := newDANonReplayFixture(t, 2)

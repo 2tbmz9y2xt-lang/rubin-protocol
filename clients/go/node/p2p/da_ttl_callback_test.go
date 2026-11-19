@@ -194,7 +194,7 @@ func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
 	probe.apply()
 	requireJoined(t, "the racing constructions", racing...)
 	close(built)
-	probe.f.requireAbsent(probe.commit, "every racing selection admitted its decrease")
+	probe.f.requireAbsent(probe.commit, "each of the three racing selections admitted its decrease")
 	services := map[node.DATTLMutationService]bool{}
 	for c := range built {
 		require(t, c.err == nil && c.service != nil, "NewService: %v", c.err)
@@ -317,7 +317,7 @@ func detachedReorgHookRetains(t *testing.T, source, sink *testHarness) bool {
 	return result.Disposition == node.DAAdmissionDuplicate
 }
 
-// requireRetainedTx requires LookupRetainedTx, which changes nothing, to report raw's retention as want.
+// requireRetainedTx requires LookupRetainedTx to report raw's retention as want.
 func requireRetainedTx(t *testing.T, h *testHarness, raw []byte, want bool, step string) {
 	t.Helper()
 	_, present, err := h.syncEngine.DARelayState().LookupRetainedTx(mustTxID(t, raw))
@@ -393,8 +393,8 @@ func observeDARelayPublicImage(t *testing.T, h *testHarness) daRelayPublicImage 
 	return image
 }
 
-// TestDATTLCallbackLaterConstructionChangesNoDAState: a later NewService leaves the exported DA relay image unchanged.
-func TestDATTLCallbackLaterConstructionChangesNoDAState(t *testing.T) {
+// TestDATTLCallbackLaterConstructionKeepsPublicDAImage: a later NewService leaves the exported DA relay image unchanged.
+func TestDATTLCallbackLaterConstructionKeepsPublicDAImage(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
 	f.admit(f.chunk(daRelayTestID(0xa8), 0, []byte("ttl nochg chunk")), "127.0.0.1:19111")
@@ -427,7 +427,7 @@ func newEngineMiner(t *testing.T, h *testHarness) func() []byte {
 	}
 }
 
-// TestDATTLCallbackEndToEndSelection: mined blocks decrease once through the OPEN current binding (S1, then S2), none under a CLOSED one, and S1's held AnnounceBlock decreases nothing, returning "service already closed" once closed.
+// TestDATTLCallbackEndToEndSelection: mined blocks decrease the probed records once through the OPEN current binding (S1, then S2) and not under the CLOSED S1, and S1's held AnnounceBlock decreases none of them, returning "service already closed" once closed.
 func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	probe := newSelectionProbe(t, h, nil, 0xd1)
@@ -436,7 +436,7 @@ func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 	p, f := probe.commit, probe.f
 	must(t, rpcAnnounce(mine()), "AnnounceBlock of mined block 1")
 	b2 := mine()
-	f.requireRetained(p, "count 1 after two mined publications: AnnounceBlock of mined block 1 decreased nothing")
+	f.requireRetained(p, "count 1 after two mined publications: AnnounceBlock of mined block 1 did not decrease the record")
 	must(t, rpcAnnounce(b2), "AnnounceBlock of mined block 2")
 	f.requireRetained(p, "AnnounceBlock of mined block 2 decreased the record at count 1 nothing")
 	second := f.commit(daRelayTestID(0xd6), 2)
@@ -606,7 +606,7 @@ func relayAccepted(t *testing.T, p *peer, source *testHarness, height uint64) {
 	require(t, err == nil && summary != nil, "processRelayedBlock(%d)=(%+v,%v)", height, summary, err)
 }
 
-// TestDATTLCallbackEndToEndNonAcceptedResults: a stored side block, KNOWN_BLOCK_NOOP, MISSING_PARENT, CONSENSUS_INVALID and DisconnectTip decrease nothing; only the next counted publications expire the records.
+// TestDATTLCallbackEndToEndNonAcceptedResults: a stored side block, KNOWN_BLOCK_NOOP, MISSING_PARENT, CONSENSUS_INVALID and DisconnectTip decrease none of the probed records; the next counted publications expire them.
 func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	source, h, p, probe, x, sideBlock, _ := newSideBlockSetup(t, 0xd3)
 	entry := &wrappedTTLEntry{inner: h.service}
@@ -641,7 +641,7 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	probe.f.requireAbsent(fresh, "the record the third counted publication expired")
 }
 
-// TestDATTLCallbackEndToEndStoredSideBlockThroughPeer: a side-branch block a peer relays is stored non-canonical and decreases nothing, so a State A chunk at count 1 survives it and expires at the next counted publication.
+// TestDATTLCallbackEndToEndStoredSideBlockThroughPeer: a side-branch block a peer relays is stored non-canonical and does not decrease a State A chunk at count 1, which survives it and expires at the next counted publication.
 func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 	source, h, p, probe, x, sideBlock, sideHash := newSideBlockSetup(t, 0xd4)
 	entry := &wrappedTTLEntry{inner: h.service}
@@ -801,7 +801,7 @@ func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 	probe.f.requireAbsent(second, "the next counted publication expired the record at count 1")
 }
 
-// TestDATTLCallbackEndToEndAbsentBinding: with no Service, three publications decrease nothing until a Service binds.
+// TestDATTLCallbackEndToEndAbsentBinding: with no Service, three publications do not decrease a State A chunk until a Service binds.
 func TestDATTLCallbackEndToEndAbsentBinding(t *testing.T) {
 	source := newTestHarness(t, 7, "127.0.0.1:0", nil)
 	sink, cfg := unclaimedServiceSink(t)
@@ -820,7 +820,7 @@ func TestDATTLCallbackEndToEndAbsentBinding(t *testing.T) {
 		apply(height)
 	}
 	require(t, sink.syncEngine.DATTLBindingService() == nil, "an apply published a binding")
-	f.requireRetained(x, "three publications under an absent binding decreased nothing")
+	f.requireRetained(x, "the State A chunk after three publications under an absent binding")
 	newBoundService(t, cfg)
 	for height := start + 3; height < start+6; height++ {
 		if apply(height); height == start+4 {

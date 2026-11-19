@@ -33,7 +33,7 @@ func runDATTLBodyInGuard(t *testing.T, f *daNonReplayFixture) error {
 	case err := <-done:
 		return err
 	case <-time.After(10 * time.Second):
-		t.Fatal("TTL body blocked under the held exclusive admission guard")
+		t.Fatal("TTL body did not return within 10s under the held exclusive admission guard")
 	}
 	return nil
 }
@@ -610,7 +610,7 @@ func editDATTLChunkMember(f *daNonReplayFixture, daID [32]byte, edit func(*daRel
 	})
 }
 
-// reuseDATTLInputInStateB re-signs State B's commit over State A's same-length input, so only the input set repeats.
+// reuseDATTLInputInStateB re-signs State B's commit over State A's same-length input, so the two records share that input set.
 func reuseDATTLInputInStateB(f *daNonReplayFixture, r daTTLCallbackRecords) {
 	next := f.next
 	f.next = slices.Index(f.outpoints, r.stateA.inputs[0])
@@ -749,7 +749,7 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	decrease := func() error { decreases++; return nil }
 	s1 := &daTTLRecordingService{name: "S1", attempts: &attempts}
 	s2 := &daTTLRecordingService{name: "S2", attempts: &attempts}
-	require(t, f.engine.DATTLBindingService() == nil, "binding present before any publication")
+	require(t, f.engine.DATTLBindingService() == nil, "binding present before this test's first publication")
 	require(t, f.engine.enterSelectedDATTL(decrease) == nil && len(attempts) == 0 && decreases == 0, "absent binding invoked: attempts=%v decreases=%d", attempts, decreases)
 	f.engine.PublishDATTLBinding(nil)
 	require(t, f.engine.DATTLBindingService() == nil, "nil publication populated the binding")
@@ -773,7 +773,7 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	f.owner.mu.Unlock()
 	f.engine.daRelay.mu.Unlock()
 	joinWithin(t, "the identity read after the DA locks were released", reader)
-	require(t, returned, "identity read waited on the DA relay or owner mutex")
+	require(t, returned, "identity read did not return within 5s under the held DA relay and owner mutexes")
 	require(t, got == DATTLMutationService(s2), "identity read under held DA locks=%v, want S2", got)
 	require(t, f.engine.enterSelectedDATTL(decrease) == nil && slices.Equal(attempts, []string{"S2"}) && decreases == 1, "latest binding: attempts=%v decreases=%d", attempts, decreases)
 	// S2 binds after the selection snapshot and before the registration attempt.
@@ -786,7 +786,7 @@ func TestDATTLCallbackBindingSelection(t *testing.T) {
 	f.engine.PublishDATTLBinding(snapshotThenBind)
 	err := f.engine.enterSelectedDATTL(decrease)
 	require(t, err == nil && slices.Equal(attempts, []string{"S1"}) && decreases == 1 && f.engine.DATTLBindingService() == DATTLMutationService(s2), "snapshot retarget: attempts=%v decreases=%d", attempts, decreases)
-	// A refused registration is returned unchanged, runs no decrease, and falls back nowhere.
+	// A refused registration is returned unchanged, runs no decrease, and attempts no other Service this test published.
 	attempts, decreases = nil, 0
 	closed := errors.New("service already closed")
 	refusing := &daTTLRecordingService{name: "closed", attempts: &attempts, refuse: closed}
@@ -861,7 +861,7 @@ func TestDATTLCallbackBindingConcurrentPublications(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the publisher goroutine did not finish")
+		t.Fatal("the publisher goroutine did not finish within 10s")
 	}
 	require(t, f.engine.DATTLBindingService() == DATTLMutationService(services[publications-1]), "final binding is not the last publication")
 }
@@ -891,7 +891,7 @@ func TestDATTLCallbackBodyUnderHeldGuardParksWriters(t *testing.T) {
 	case err := <-body:
 		require(t, err == nil, "in-guard TTL body: %v", err)
 	case <-time.After(10 * time.Second):
-		t.Fatal("TTL body blocked under the held exclusive admission guard")
+		t.Fatal("TTL body did not return within 10s under the held exclusive admission guard")
 	}
 	select {
 	case err := <-done:
@@ -905,7 +905,7 @@ func TestDATTLCallbackBodyUnderHeldGuardParksWriters(t *testing.T) {
 		case err := <-done:
 			require(t, err == nil, "parked writer after the guard release: %v", err)
 		case <-time.After(5 * time.Second):
-			t.Fatal("a writer never proceeded after the guard release")
+			t.Fatal("a parked writer did not return within 5s after the guard release")
 		}
 	}
 	after := daRelayStateSnapshot(f.relay)
@@ -1152,7 +1152,7 @@ func TestDATTLCallbackEngineBodyPanic(t *testing.T) {
 			select {
 			case <-waited:
 			case <-time.After(5 * time.Second):
-				t.Fatal("a wait on the released lease is stranded")
+				t.Fatal("a wait on the released lease did not return within 5s")
 			}
 			requireDATTLLocksFree(t, x.relay, x.mp.pendingOutpoints)
 			require(t, !f.engine.chainState.admissionMu.TryLock(), "admission guard released after the unwind")
@@ -1171,7 +1171,7 @@ func TestDATTLCallbackEngineBodyPanic(t *testing.T) {
 	}
 }
 
-// TestDATTLCallbackEngineGenesisBootstrap: genesis bootstrap attempts a bound test entry once; unbound, it changes nothing.
+// TestDATTLCallbackEngineGenesisBootstrap: genesis bootstrap attempts a bound test entry once; unbound, it changes no DA record.
 func TestDATTLCallbackEngineGenesisBootstrap(t *testing.T) {
 	for _, bound := range []bool{true, false} {
 		t.Run(fmt.Sprintf("bound=%v", bound), func(t *testing.T) {
