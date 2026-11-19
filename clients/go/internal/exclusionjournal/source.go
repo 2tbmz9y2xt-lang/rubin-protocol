@@ -100,7 +100,7 @@ const (
 	bundleHeader    = 4 + 97 + 32 + 32 + 1 + 1
 )
 
-// NewSourceOwnerV1 claims the Store's protected source directory and accounts for retained files.
+// NewSourceOwnerV1 reserves its workspace on account before claiming the Store's source directory and accounting for retained files.
 func NewSourceOwnerV1(store *policycontrol.Store, expected policycontrol.Identity, limits SourceLimitsV1, account *mdbx.OperationAccount) (*SourceOwnerV1, error) {
 	b, err := store.BorrowSourceAuthorityV1()
 	if err != nil {
@@ -116,8 +116,8 @@ func NewSourceOwnerV1(store *policycontrol.Store, expected policycontrol.Identit
 	}
 	o := &SourceOwnerV1{store: store, dir: dir, id: id, parent: parent, limits: limits, ops: realSourceFS, live: make(map[string]*sourceIncarnation)}
 	o.self = o
-	err = b.WithSourceOwnerClaimV1(func() error {
-		return account.WithReservation(limits.WorkingBytesV1(), o.openSourceRoot)
+	err = account.WithReservation(limits.WorkingBytesV1(), func() error {
+		return b.WithSourceOwnerClaimV1(o.openSourceRoot)
 	})
 	if any(err) == any(policycontrol.ErrBusy) {
 		return nil, ErrBusyV1
@@ -130,10 +130,7 @@ func NewSourceOwnerV1(store *policycontrol.Store, expected policycontrol.Identit
 
 func (l SourceLimitsV1) valid() bool {
 	bounds := []uint64{l.Bytes, l.Files, l.Scans, l.RAM, l.Headers, l.Descriptors, l.Overhead}
-	if slices.Min(bounds) == 0 || slices.Max(bounds) >= math.MaxInt64 {
-		return false
-	}
-	return l.Scans <= uint64(math.MaxInt-scratchBytes-4096)/512 &&
+	return slices.Min(bounds) != 0 && slices.Max(bounds) < math.MaxInt64 && l.Scans <= uint64(math.MaxInt-scratchBytes-4096)/512 &&
 		l.Descriptors >= 4 && l.Files < l.Scans && l.RAM >= l.WorkingBytesV1()+l.retainedRAM()
 }
 

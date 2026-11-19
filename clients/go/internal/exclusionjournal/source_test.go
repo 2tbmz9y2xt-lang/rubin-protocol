@@ -432,7 +432,7 @@ func testSourceRecoveredFinalPanic(t *testing.T, mode string) {
 }
 
 func TestSourceBackingUnion(t *testing.T) {
-	for _, mode := range []string{"shared", "equal-copies", "live-empty", "planned", "invalid-index", "invalid-offset", "missing-origin", "length", "overlap", "overflow", "sum-overflow", "ram-limit"} {
+	for _, mode := range []string{"shared", "equal-copies", "live-empty", "planned", "invalid-index", "invalid-offset", "missing-origin", "length", "overlap", "overflow", "sum-overflow", "ram-limit", "ram-exact"} {
 		t.Run(mode, func(t *testing.T) { testSourceOriginAdmission(t, mode) })
 	}
 }
@@ -505,10 +505,10 @@ func sourceOriginFixture(mode string, origins *[]SourceOriginV1, views []SourceV
 	case "sum-overflow":
 		*origins = append(*origins, SourceOriginV1{PlannedBytes: math.MaxInt}, SourceOriginV1{PlannedBytes: math.MaxInt - 253})
 		return 256, ErrCapacityV1
-	case "ram-limit":
-		ram := sourceLimits()
-		*origins = append(*origins, SourceOriginV1{PlannedBytes: ram.RAM - ram.WorkingBytesV1() - ram.retainedRAM() - 255})
-		return 256 + (*origins)[1].PlannedBytes, ErrCapacityV1
+	case "ram-limit", "ram-exact":
+		ram, over := sourceLimits(), map[bool]uint64{true: 1}[mode == "ram-limit"]
+		*origins = append(*origins, SourceOriginV1{PlannedBytes: ram.RAM - ram.WorkingBytesV1() - ram.retainedRAM() - 256 + over})
+		return 256 + (*origins)[1].PlannedBytes, map[uint64]error{1: ErrCapacityV1}[over]
 	}
 	if mode == "shared" || mode == "planned" {
 		return 256, nil
