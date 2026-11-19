@@ -7776,8 +7776,10 @@ func psfClosedBeforeHold(t *testing.T) {
 	}
 }
 
-// Every physical-scope admission refusal, before and after the metadata charge, aborts ORIGINAL OLD
-// exactly once, reaches no commit and leaves the Store OPEN with its rows unchanged.
+// The nine listed physical-scope admission refusals (shape, count and provenance before the metadata
+// charge; duplicate witness, duplicate delete, uncovered, target overlap, consulted overlap and selector
+// order after it) abort ORIGINAL OLD exactly once, reach no commit and leave the Store OPEN with the
+// generation-9 and generation-10 counters unchanged.
 func psfAdmissionAborts(t *testing.T) {
 	rows := []struct {
 		name     string
@@ -7961,7 +7963,8 @@ func psfUndoEntryCap(t *testing.T) {
 }
 
 // A Reader EIO inside the callback stays the result whether the callback ignores, returns or wraps
-// it with a physical-scope plan whose selector count is above its bound; the scope is never read.
+// it with a physical-scope plan whose selector count is above its bound; that EIO is returned in place
+// of the selector-count Capacity refusal.
 func psfCallbackReaderError(t *testing.T) {
 	for _, mode := range []string{"ignored", "returned", "wrapped"} {
 		t.Run(mode, func(t *testing.T) {
@@ -8114,7 +8117,8 @@ func psfEmptyFamily(t *testing.T, s *Store, hash [32]byte) {
 	}))
 }
 
-// A raw undo target inside the selected family disappears once; every nontarget member stays equal.
+// A raw undo target inside the selected three-member family disappears; the two nontarget members keep
+// their bytes.
 func psfTargetInFamily(t *testing.T) {
 	sc := psfNew(t)
 	hash, undo := psfUndo(t, sc.s)
@@ -8422,7 +8426,8 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	})
 	t.Run("crossed-complete-OLD", func(t *testing.T) {
 		// Mode 7 breaks the write transaction before a commit reported as possibly crossed: the strict
-		// readback finds the complete OLD image (targets and every residual unchanged), so OLD wins.
+		// readback finds the complete OLD image (the targets, the node domain, the root point and the body
+		// unchanged), so OLD wins.
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 7, 0, []byte{9}, func() { r = sc.run(t, sc.o) })
@@ -8490,8 +8495,9 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		sc.image(t, tsReopen(t, sc.s, sc.path), false)
 	})
 	t.Run("mismatch-then-read-error", func(t *testing.T) {
-		// Mode 29 drifts the body at commit, then fails every later readback prefix read of another DBI:
-		// the large body mismatch comes first and the raw domain traversal must still reach its EIO.
+		// Mode 29 drifts the body at commit, then its prefix interceptor returns EIO for readback prefix reads
+		// of another DBI: the large body mismatch comes first and the raw domain traversal must still reach
+		// its EIO.
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 29, 4, sc.key(), func() { r = sc.run(t, sc.o) })
@@ -8631,7 +8637,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 	t.Run("larger-candidate-readback", func(t *testing.T) {
 		// The selected body is present with length 0 in ORIGINAL OLD. Commit drift (mode 3) writes one byte
 		// at it after the real commit, so the possible-crossed readback candidate is longer than ORIGINAL OLD:
-		// the length mismatch is inequality before any funded payload comparison, and the truth is UNKNOWN.
+		// the length mismatch is inequality without a body payload comparison, and the truth is UNKNOWN.
 		sc, r, evidence, compared := psfBodyRun(t, 3, []byte{})
 		if evidence.commits != 1 || evidence.drift != 1 || r.truth != 3 || r.stage != 3 {
 			t.Fatalf("scope sealed window grew: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
@@ -8686,7 +8692,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		if any(r.err) != any(errOperationReservationCapacity) || sc.s.state != storeOPEN {
 			t.Fatalf("scope metadata high-water differs: %v %s", r.err, sc.s.state)
 		}
-		// The prewrite refusal aborts ORIGINAL OLD exactly once and never reaches a commit.
+		// The prewrite refusal aborts ORIGINAL OLD exactly once and reaches no commit.
 		if evidence.aborts != 1 || evidence.commits != 0 {
 			t.Fatalf("scope next operation differs: OLD abort %+v", evidence)
 		}
@@ -8734,8 +8740,9 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		if err := (&largeImageScope{}).fundV1(); err != nil {
 			t.Fatal("legacy scope funded", err)
 		}
-		// Typed nil budget with a zero seal refuses before any native acquisition or comparison; a positive
-		// seal over the same body selector reaches both.
+		// Typed nil budget with a zero seal refuses with zero large-image interceptor calls, pair-read gets
+		// and payload comparisons; a positive seal over the same body selector makes interceptor calls and
+		// payload comparisons.
 		psfSealedTraversal(t, 0, false)
 		psfSealedTraversal(t, 1<<20, true)
 	})
@@ -8773,9 +8780,9 @@ func psfSealedTraversal(t *testing.T, limit uint64, reached bool) {
 	}
 }
 
-// Mode 29 adds an extra member to the rank-5 undo domain at commit, then fails every later
-// readback prefix read of another DBI: the raw-domain mismatch comes first and the rank-8 node domain
-// traversal must still reach its EIO.
+// Mode 29 adds an extra member to the rank-5 undo domain at commit, then its prefix interceptor returns
+// EIO for readback prefix reads of another DBI: the raw-domain mismatch comes first and the rank-8 node
+// domain traversal must still reach its EIO.
 func psfDomainMismatchThenError(t *testing.T) {
 	sc := psfNew(t)
 	hash, _ := psfUndo(t, sc.s)

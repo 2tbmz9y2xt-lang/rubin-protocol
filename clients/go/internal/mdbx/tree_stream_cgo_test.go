@@ -1063,8 +1063,8 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	if loan != 96 || control != 3669 || control-2709 > 1024 {
 		t.Fatal("selected fixed control increment", control)
 	}
-	// Two 72-byte Pair/operation transports and the 8-byte plan scope field, measured from
-	// each changed type's growth over its baseline size.
+	// Two 72-byte Pair/operation transports and the 8-byte plan scope field, measured from the
+	// growth of TreePairV1, TreeOperationV1 and treePlanV1 over their baseline sizes 80, 120 and 168.
 	control += uint64(unsafe.Sizeof(TreePairV1{})) - 80 + uint64(unsafe.Sizeof(TreeOperationV1{})) - 120 + uint64(unsafe.Sizeof(treePlanV1{})) - 168
 	if control != 3821 {
 		t.Fatal("scope fixed control census differs", control)
@@ -4822,9 +4822,10 @@ func TestTreeStreamPhysicalScopeV1(t *testing.T) {
 	t.Run("callback", psCallback)
 }
 
-// Callback error, panic and Goexit win before any new field is inspected; the caller grant held
-// inside the callback and the account are released once on every exit. The scene is seeded without
-// the shared owner-live precondition.
+// A callback application error (plain, wrapped, typed-nil), panic or Goexit wins over a physical-scope
+// carrier holding three zero ObsoleteDeletes tokens and one LargeConsulted kind 9 selector; the caller
+// grant held inside the callback and the account are released on those five exits. The scene is seeded
+// without the shared owner-live precondition.
 func psCallback(t *testing.T) {
 	s, _, _ := treeNativeStore(t)
 	o := reservationOwner(t, 805_306_368)
@@ -4839,7 +4840,7 @@ func psCallback(t *testing.T) {
 		}))
 	}
 	marker := errors.New("scope callback marker")
-	// The carrier is created inside each invocation's caller grant frame (psPageGrant covers it).
+	// The five invocations below create the carrier inside their psPageGrant caller grant frame.
 	garbage := func() TreeOperationV1 {
 		return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: make([]ObsoleteRowV1, 3), LargeConsulted: []LargeImageSelectorV1{{Kind: 9}}}}
 	}
@@ -5122,7 +5123,7 @@ func psOrdinaryFirst(t *testing.T) {
 	tsConsumed(t, s, o, 1, r.err)
 }
 
-// Zero, fabricated and earlier-invocation tokens refuse before any charge.
+// Zero-value and earlier-invocation tokens (the five foreign builds) refuse before the metadata charge.
 func psProvenance(t *testing.T) {
 	s, _, o := psStore(t)
 	var earlier ObsoletePageV1
@@ -5236,8 +5237,8 @@ func psDuplicates(t *testing.T) {
 			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: other.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{covered.Witness}}}
 		},
 	}
-	// One byte below each row's metadata envelope the charge refuses before the duplicate and
-	// coverage checks that need its scratch (the repeated witness is counted twice).
+	// One byte below the metadata envelope of the witness, row and uncovered builds the charge refuses
+	// before the duplicate and coverage checks that need its scratch (the repeated witness is counted twice).
 	short := map[string]uint64{"witness": psF(0, 0, 1, 2, 0, 0, 9, 18), "row": psF(0, 0, 2, 1, 0, 0, 18, 9), "uncovered": psF(0, 0, 1, 1, 0, 0, 9, 9)}
 	for _, name := range []string{"witness", "row", "uncovered"} {
 		r := psRun(t, s, reservationFilled(t, psPageGrant+short[name]-1), LaneOperation, builds[name])
@@ -5390,7 +5391,8 @@ func psCounts(t *testing.T) {
 	}
 	r.tuple(t, 1, 1, -1)
 	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), tsCounterLiteral(9, 1))
-	// At each bound the count admits and the next refusal is "invalid Update Batch".
+	// At the four bounds below (deletes plus witnesses, 2880 selectors, 1440 bodies, 1440 families) the
+	// count admits and the next refusal is "invalid Update Batch".
 	run("deletes plus witnesses at bound", false, 8*maxUpdateMutations, func(op *TreeOperationV1) {
 		op.Pair.ObsoleteDeletes = make([]ObsoleteRowV1, maxUpdateMutations-1)
 	})
