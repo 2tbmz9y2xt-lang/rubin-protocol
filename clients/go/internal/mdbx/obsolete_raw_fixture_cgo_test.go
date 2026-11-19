@@ -1565,7 +1565,8 @@ func TestObsoleteGenerationV1Projection148(t *testing.T) {
 	}
 }
 
-// H1, H2: format-3 node rows and witnesses reach no admission path and expire with their View.
+// A format-3 node page row expires with its View; legacy Store.Update refuses its rows and witness as an
+// invalid Update Batch, and Store.Update on a tree store refuses before the callback.
 func TestObsoleteGenerationV1TreeInert(t *testing.T) {
 	tree, _, _ := treeNativeStore(t)
 	family := obsoleteTreeFamily(9)

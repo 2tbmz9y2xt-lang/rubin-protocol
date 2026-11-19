@@ -15,7 +15,7 @@ import (
 	"unsafe"
 )
 
-// TreePairV1 contains ordinary non-tree targets and unchanged consulted rows.
+// TreePairV1 contains ordinary non-tree targets, unchanged consulted rows and the optional physical scope below.
 // Mutations and Consulted rows must be strictly (rank, key) ordered in each slice and disjoint. Rank 8
 // is never a Mutations or Consulted row. AfterOldValueRef is forbidden. The operation owns copies
 // after admission. Pair slices, records and Key/Literal bytes remain immutable
