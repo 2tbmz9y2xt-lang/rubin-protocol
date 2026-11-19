@@ -58,7 +58,7 @@ func newBoundService(t *testing.T, cfg ServiceConfig) *Service {
 	t.Helper()
 	service, err := NewService(cfg)
 	require(t, err == nil && service != nil, "NewService: %v", err)
-	t.Cleanup(func() { _ = service.Close() })
+	t.Cleanup(func() { _, exit := startClose(service); joinWithin(t, "Close in cleanup", exit) })
 	return service
 }
 
@@ -200,7 +200,7 @@ func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
 	for c := range built {
 		require(t, c.err == nil && c.service != nil, "NewService: %v", c.err)
 		services[c.service] = true
-		t.Cleanup(func() { _ = c.service.Close() })
+		t.Cleanup(func() { _, exit := startClose(c.service); joinWithin(t, "Close in cleanup", exit) })
 	}
 	require(t, len(services) == 2 && services[h.syncEngine.DATTLBindingService()], "final binding outside the racing constructions")
 }

@@ -185,7 +185,7 @@ func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
 			require(t, result.err == nil && result.service != nil && result.service.daRelay == cfg.SyncEngine.DARelayState(), "construction=(%p,%v)", result.service, result.err)
 			winners++
 			built[result.service] = true
-			t.Cleanup(func() { _ = result.service.Close() })
+			t.Cleanup(func() { _, exit := startClose(result.service); joinWithin(t, "Close in cleanup", exit) })
 		}
 		require(t, winners == 2 && built[cfg.SyncEngine.DATTLBindingService()], "constructions=%d, binding outside them", winners)
 	})

@@ -179,12 +179,13 @@ func daTTLOutsideErr(before, after daTTLImage) error {
 }
 
 // daTTLSelectedErr requires a selected record absent from after to have been at count 1, and a present one to equal
-// its before record one count lower with a revision minted above before's high-water (RUBIN_COMPACT_BLOCKS.md Section 5).
+// its before record one count lower with a distinct revision minted above before's high-water (RUBIN_COMPACT_BLOCKS.md Section 5).
 func daTTLSelectedErr(before, after daRelayStateView, selected map[[32]byte]daRelaySetRecord) error {
+	minted := map[uint64]bool{}
 	for daID, was := range selected {
 		var err error
 		if got, present := after.sets[daID]; present {
-			err = daTTLSurvivorErr(was, got, before.records, after.records)
+			err = daTTLSurvivorErr(was, got, before.records, after.records, minted)
 		} else if was.ttlBlocksRemaining != 1 {
 			err = fmt.Errorf("record %x removed at count %d, want removal at count 1", daID[:1], was.ttlBlocksRemaining)
 		}
@@ -195,14 +196,17 @@ func daTTLSelectedErr(before, after daRelayStateView, selected map[[32]byte]daRe
 	return nil
 }
 
-// daTTLSurvivorErr requires got to equal was with the count one lower and a revision in (low, high].
-func daTTLSurvivorErr(was, got daRelaySetRecord, low, high uint64) error {
+// daTTLSurvivorErr requires got to equal was with the count one lower and a revision in (low, high] not yet in minted.
+func daTTLSurvivorErr(was, got daRelaySetRecord, low, high uint64, minted map[uint64]bool) error {
 	switch {
 	case was.ttlBlocksRemaining < 2:
 		return fmt.Errorf("record %x kept at count %d, want removal at count 1", was.daID[:1], was.ttlBlocksRemaining)
 	case got.revision <= low || got.revision > high:
 		return fmt.Errorf("surviving record %x revision %d, want one minted in (%d, %d]", was.daID[:1], got.revision, low, high)
+	case minted[got.revision]:
+		return fmt.Errorf("surviving record %x shares revision %d with another survivor, want one distinct revision per survivor", was.daID[:1], got.revision)
 	}
+	minted[got.revision] = true
 	want := was
 	want.ttlBlocksRemaining, want.revision = was.ttlBlocksRemaining-1, got.revision
 	if !reflect.DeepEqual(want, got) {
