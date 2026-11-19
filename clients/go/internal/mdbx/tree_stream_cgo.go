@@ -19,7 +19,8 @@ import (
 // Mutations and Consulted rows must be strictly (rank, key) ordered in each slice and disjoint. Rank 8
 // is never a Mutations or Consulted row. AfterOldValueRef is forbidden. The operation owns copies
 // after admission. Pair slices, records and Key/Literal bytes remain immutable
-// through the first Source call, or operation completion if no Source is reached.
+// through the first Source call, or operation completion if no Source is reached; for a
+// physical-scope Pair, through its owned admission, with the caller's charged backing kept until return.
 type TreePairV1 struct {
 	Mutations []Mutation
 	Consulted []ConsultedRow
@@ -256,7 +257,8 @@ func (s *TreeDeltaSinkV1) WindowV1() []byte {
 // absent, byte-identical or differing, and refuses a differing row with no
 // write, as documented on TreeOperationV1.
 // Pair inputs remain immutable through the first Source call (or completion if
-// none); primitive backing and Source bindings remain immutable through completion
+// none; owned admission for a physical-scope Pair, whose charged backing the caller keeps until
+// return); primitive backing and Source bindings remain immutable through completion
 // including unwind cleanup. Source backing remains immutable through its last
 // consumer and cannot alias Pair buffers mutated after their independent copy.
 //

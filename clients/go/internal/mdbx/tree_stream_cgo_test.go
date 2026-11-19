@@ -4965,19 +4965,24 @@ func psAccepted(t *testing.T) {
 // residual comparison excludes by exact key.
 func psEmptyIntervals(t *testing.T, s *Store, path string, o *OperationReservationOwner) {
 	t.Helper()
-	forward, owner := tsIndexRows(tdTxid(0x55), 23)
+	// The ordinary rows are created inside the callback; the two-row case holds one more Mutation, its
+	// 40-byte key (capacity 48) and 8-byte literal above psPageGrant.
 	cases := []struct {
 		g       uint64
 		classes []ObsoleteClassV1
-		op      TreeOperationV1
+		extra   uint64
+		op      func() TreeOperationV1
 	}{
-		{11, []ObsoleteClassV1{ObsoleteUTXOV1}, tsPair(79)},
-		{11, []ObsoleteClassV1{ObsoleteUTXOV1, ObsoleteUTXOV1}, tsPair(80)},
-		{1, []ObsoleteClassV1{ObsoleteIndexV1, ObsoleteDerivedV1}, TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{forward, owner}}}},
+		{11, []ObsoleteClassV1{ObsoleteUTXOV1}, 0, func() TreeOperationV1 { return tsPair(79) }},
+		{11, []ObsoleteClassV1{ObsoleteUTXOV1, ObsoleteUTXOV1}, 0, func() TreeOperationV1 { return tsPair(80) }},
+		{1, []ObsoleteClassV1{ObsoleteIndexV1, ObsoleteDerivedV1}, uint64(unsafe.Sizeof(Mutation{})) + 56, func() TreeOperationV1 {
+			forward, owner := tsIndexRows(tdTxid(0x55), 23)
+			return TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{forward, owner}}}
+		}},
 	}
 	for _, c := range cases {
-		r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
-			op := c.op
+		r := psRunG(t, s, o, LaneOperation, psPageGrant+c.extra, func(reader *Reader) TreeOperationV1 {
+			op := c.op()
 			for _, class := range c.classes {
 				page, err := reader.ObsoleteGenerationPageV1(c.g, class, nil, 1)
 				mustEnvironment(t, err)
@@ -4994,6 +4999,7 @@ func psEmptyIntervals(t *testing.T, s *Store, path string, o *OperationReservati
 		}
 	}
 	s = tsReopen(t, s, path)
+	forward, owner := tsIndexRows(tdTxid(0x55), 23)
 	for _, m := range []Mutation{tsTarget(79), tsTarget(80), forward, owner} {
 		tsRead(t, s, m.DBI, m.Key, m.Literal)
 	}
@@ -5272,6 +5278,31 @@ func psOverlap(t *testing.T) {
 		return op
 	})
 	psRefused(t, s, r, false, "consulted overlap")
+	// A body selector equal to a rank-4 Consulted key and an undo-family selector whose family holds a
+	// rank-5 Consulted key refuse; the same Consulted row beside a selector of another hash commits.
+	for _, c := range []struct {
+		kind LargeImageKindV1
+		rank int
+		size int
+	}{{LargeImageBlockBodyV1, 4, 32}, {LargeImageUndoFamilyV1, 5, 33}} {
+		scoped := func(hash byte) func(*Reader) TreeOperationV1 {
+			return func(reader *Reader) TreeOperationV1 {
+				op := psRawDelete(t, 9)(reader)
+				op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[c.rank], Key: make([]byte, c.size)}}
+				op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: c.kind, Hash: [32]byte{hash}}}
+				return op
+			}
+		}
+		r = psRun(t, s, o, LaneOperation, scoped(0))
+		psRefused(t, s, r, false, fmt.Sprintf("selector kind %d over Consulted rank %d", c.kind, c.rank))
+		s2, _, o2 := psStore(t)
+		r = psRun(t, s2, o2, LaneOperation, scoped(1))
+		r.tuple(t, 2, 3, -1)
+		if r.err != nil {
+			t.Fatalf("disjoint selector kind %d refused beside Consulted rank %d: %v", c.kind, c.rank, r.err)
+		}
+		psGone(t, s2, tsCounterKey(9))
+	}
 }
 
 // psSelectorRun fills run with selectors of kind whose hashes are 0..len(run)-1.

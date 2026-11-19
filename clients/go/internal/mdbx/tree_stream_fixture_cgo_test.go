@@ -7505,9 +7505,11 @@ func (sc *psfScene) run(t *testing.T, o *OperationReservationOwner) tsResult {
 	return psRun(t, sc.s, o, LaneOperation, sc.build(t))
 }
 
-// image asserts the generation-9 raw rows (absent when deleted), the untouched generation-8 rows and the body.
+// image asserts the generation-9 raw rows (absent when deleted), the untouched generation-8 rows, the body and the
+// TreeAuthority row (psfAuthority's literal when deleted, else the scene's initial literal).
 func (sc *psfScene) image(t *testing.T, s *Store, deleted bool) {
 	t.Helper()
+	psfAuthorityRow(t, s, deleted)
 	for _, row := range obsoleteTreeFamily(9) {
 		want := row.value
 		if deleted {
@@ -7562,19 +7564,41 @@ func (sc *psfScene) crossedImage(t *testing.T, s *Store, deleted bool, rank uint
 	tsRead(t, s, TreeSchemaV1DBIs()[0], []byte{2}, psfAuthority(t).Literal)
 }
 
-// psfCrossedUnknown asserts a possibly crossed commit whose complete readback found neither image: UNKNOWN
-// carried by the CommitError, a nil readback cause and the fixture commit hook's ENOSPC as the commit cause.
-func psfCrossedUnknown(t *testing.T, r tsResult) {
+// psfAuthorityRow asserts the TreeAuthority row: psfAuthority's literal when written, else tsEntry's.
+func psfAuthorityRow(t *testing.T, s *Store, written bool) {
 	t.Helper()
-	r.tuple(t, 3, 3, -1)
-	var commit *CommitError
-	if !errors.As(r.err, &commit) || commit.Truth != CommitTruthUnknown {
+	want := tsEntry(t).Pair.Mutations[0].Literal
+	if written {
+		want = psfAuthority(t).Literal
+	}
+	psfRaw(t, s, 0, []byte{2}, want)
+}
+
+// psfCrossed asserts a possibly crossed commit: truth in the public result and in the CommitError itself, and the
+// fixture commit hook's ENOSPC as the commit cause. It returns the readback cause.
+func psfCrossed(t *testing.T, r tsResult, truth CommitTruth) error {
+	t.Helper()
+	r.tuple(t, truth, 3, -1)
+	commit, ok := r.err.(*CommitError)
+	if !ok || commit.Truth != truth {
 		t.Fatalf("scope strict truth differs: %T %v", r.err, r.err)
 	}
-	if commit.ReadbackCause != nil {
-		t.Fatalf("scope strict truth differs: readback cause %v", commit.ReadbackCause)
-	}
 	treeNativeError(t, commit.Cause, "update", "Capacity", 28, "error 28", nil)
+	return commit.ReadbackCause
+}
+
+// psfCrossedClean is psfCrossed whose complete readback found its image with a nil readback cause.
+func psfCrossedClean(t *testing.T, r tsResult, truth CommitTruth) {
+	t.Helper()
+	if cause := psfCrossed(t, r, truth); cause != nil {
+		t.Fatalf("scope strict truth differs: readback cause %v", cause)
+	}
+}
+
+// psfCrossedUnknown asserts a possibly crossed commit whose complete readback found neither image.
+func psfCrossedUnknown(t *testing.T, r tsResult) {
+	t.Helper()
+	psfCrossedClean(t, r, CommitTruthUnknown)
 }
 
 // psfCompared runs run under the pair-read observation of s and returns its native payload comparison count.
@@ -7640,8 +7664,8 @@ func psfWindow(t *testing.T, s *Store) uint64 {
 	return 4 * (maxKey + 1)
 }
 
-// psfDelete deletes generation g's nodes and root under their witnesses with the given mutations and selectors.
-func psfDelete(t *testing.T, g uint64, mutations []Mutation, selectors func() []LargeImageSelectorV1) func(*Reader) TreeOperationV1 {
+// psfDelete deletes generation g's nodes and root under their witnesses with the authority target and selectors.
+func psfDelete(t *testing.T, g uint64, selectors func() []LargeImageSelectorV1) func(*Reader) TreeOperationV1 {
 	return func(r *Reader) TreeOperationV1 {
 		var large []LargeImageSelectorV1
 		if selectors != nil {
@@ -7652,7 +7676,7 @@ func psfDelete(t *testing.T, g uint64, mutations []Mutation, selectors func() []
 		root, err := r.ObsoleteGenerationPageV1(g, ObsoleteRootV1, nil, 1)
 		mustEnvironment(t, err)
 		return TreeOperationV1{Pair: TreePairV1{
-			Mutations:         mutations,
+			Mutations:         []Mutation{psfAuthority(t)},
 			ObsoleteDeletes:   append(append([]ObsoleteRowV1(nil), root.Rows...), nodes.Rows...),
 			ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness, root.Witness},
 			LargeConsulted:    large,
@@ -7923,7 +7947,7 @@ func psfUndoEntryCap(t *testing.T) {
 				return
 			}
 			// At the bound admission completes and the commit is reached, then its fixture fault leaves NEW.
-			r.tuple(t, 2, 3, -1)
+			psfCrossedClean(t, r, CommitTruthNew)
 			if evidence.commits != 1 || evidence.drift != 0 {
 				t.Fatalf("undo entry delete cap refused at its bound: %+v %v", evidence, r.err)
 			}
@@ -8028,6 +8052,7 @@ func psfPageBounds(t *testing.T) {
 			psfRaw(t, sc.s, 8, row.key, want)
 		}
 		psfRaw(t, sc.s, 0, tsRootKey(9), []byte{0xee, 9})
+		psfAuthorityRow(t, sc.s, false)
 	}
 }
 
@@ -8065,7 +8090,7 @@ func psfLargeDomains(t *testing.T) {
 			{Kind: LargeImageBlockBodyV1, Hash: absent},
 		}, families...)
 	}
-	r := psRun(t, sc.s, sc.o, LaneOperation, psfDelete(t, 9, nil, selectors))
+	r := psRun(t, sc.s, sc.o, LaneOperation, psfDelete(t, 9, selectors))
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
 	reopened := tsReopen(t, sc.s, sc.path)
@@ -8140,7 +8165,7 @@ func psfBothIdentical(t *testing.T) {
 	if evidence.commits != 1 || evidence.drift != 0 || r.truth != 1 || r.stage != 3 {
 		t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
 	}
-	r.tuple(t, 1, 3, -1)
+	psfCrossedClean(t, r, CommitTruthOld)
 	tsConsumed(t, sc.s, sc.o, 1, r.err)
 	reopened := tsReopen(t, sc.s, sc.path)
 	sc.image(t, reopened, true)
@@ -8158,7 +8183,7 @@ func psfDormant(t *testing.T) {
 	r := sc.run(t, sc.o)
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
-	r = psRun(t, sc.s, sc.o, LaneOperation, psfDelete(t, 1, nil, nil))
+	r = psRun(t, sc.s, sc.o, LaneOperation, psfDelete(t, 1, nil))
 	r.tuple(t, 2, 3, -1)
 	mustEnvironment(t, r.err)
 	reopened := tsReopen(t, sc.s, sc.path)
@@ -8370,6 +8395,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 			psfRaw(t, reopened, 8, row.key, row.value)
 		}
 		psfRaw(t, reopened, 0, tsRootKey(9), []byte{0xee, 9})
+		psfAuthorityRow(t, reopened, false)
 	})
 	t.Run("final", func(t *testing.T) {
 		sc := psfNew(t)
@@ -8390,7 +8416,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		if evidence.commits != 1 || evidence.drift != 0 || r.truth != 2 || r.stage != 3 {
 			t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
 		}
-		r.tuple(t, 2, 3, -1)
+		psfCrossedClean(t, r, CommitTruthNew)
 		tsConsumed(t, sc.s, sc.o, 2, r.err)
 		sc.image(t, tsReopen(t, sc.s, sc.path), true)
 	})
@@ -8403,10 +8429,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		if evidence.commits != 1 || evidence.drift != 0 || r.truth != 1 || r.stage != 3 {
 			t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
 		}
-		r.tuple(t, 1, 3, -1)
-		if _, ok := r.err.(*CommitError); !ok {
-			t.Fatalf("scope strict truth differs: cause %T %v", r.err, r.err)
-		}
+		psfCrossedClean(t, r, CommitTruthOld)
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		sc.image(t, tsReopen(t, sc.s, sc.path), false)
 	})
@@ -8464,6 +8487,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		}
 		r.tuple(t, 1, 1, -1)
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		sc.image(t, tsReopen(t, sc.s, sc.path), false)
 	})
 	t.Run("mismatch-then-read-error", func(t *testing.T) {
 		// Mode 29 drifts the body at commit, then fails every later readback prefix read of another DBI:
@@ -8471,16 +8495,15 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		sc := psfNew(t)
 		var r tsResult
 		evidence := ctxTreeFault(t, sc.s, 29, 4, sc.key(), func() { r = sc.run(t, sc.o) })
-		ce, ok := r.err.(*CommitError)
-		if !ok || evidence.drift != 1 || evidence.commits != 1 || evidence.gets == 0 || r.truth != 3 {
+		if evidence.drift != 1 || evidence.commits != 1 || evidence.gets == 0 || r.truth != 3 {
 			t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
 		}
 		var engine *EngineError
-		if !errors.As(ce.ReadbackCause, &engine) || engine.Class != EngineIO {
-			t.Fatalf("later scope error lost: %v", ce.ReadbackCause)
+		if cause := psfCrossed(t, r, CommitTruthUnknown); !errors.As(cause, &engine) || engine.Class != EngineIO {
+			t.Fatalf("later scope error lost: %v", cause)
 		}
-		r.tuple(t, 3, 3, -1)
 		tsConsumed(t, sc.s, sc.o, 3, r.err)
+		sc.crossedImage(t, tsReopen(t, sc.s, sc.path), true, 4, sc.key(), []byte{0x7f})
 	})
 	t.Run("domain-mismatch-then-read-error", psfDomainMismatchThenError)
 	t.Run("point-mismatch-then-capacity", psfPointMismatchThenCapacity)
@@ -8548,6 +8571,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		for _, row := range obsoleteTreeFamily(8) {
 			psfRaw(t, reopened, 8, row.key, row.value)
 		}
+		psfAuthorityRow(t, reopened, false)
 	})
 	t.Run("larger-candidate-preflight", func(t *testing.T) {
 		// The first write-snapshot get reports the body one byte longer than ORIGINAL OLD. The account holds
@@ -8602,6 +8626,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 			psfRaw(t, reopened, 8, row.key, row.value)
 		}
 		psfRaw(t, reopened, 0, tsRootKey(9), []byte{0xee, 9})
+		psfAuthorityRow(t, reopened, false)
 	})
 	t.Run("larger-candidate-readback", func(t *testing.T) {
 		// The selected body is present with length 0 in ORIGINAL OLD. Commit drift (mode 3) writes one byte
@@ -8613,8 +8638,10 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		}
 		// A one-byte ORIGINAL OLD body under the same drift adds one funded body comparison at preflight,
 		// one at final and one at the readback.
-		_, same, _, equalLength := psfBodyRun(t, 3, []byte{1})
-		same.tuple(t, 3, 3, -1)
+		sameScene, same, _, equalLength := psfBodyRun(t, 3, []byte{1})
+		psfCrossedUnknown(t, same)
+		tsConsumed(t, sameScene.s, sameScene.o, 3, same.err)
+		sameScene.crossedImage(t, tsReopen(t, sameScene.s, sameScene.path), true, 4, sameScene.key(), []byte{0x7f})
 		if equalLength != compared+3 {
 			t.Fatalf("scope sealed window grew: readback comparisons %d, equal-length body %d", compared, equalLength)
 		}
@@ -8649,6 +8676,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		tsConsumed(t, sc.s, sc.o, 1, r.err)
 		reopened := tsReopen(t, sc.s, sc.path)
 		psfRaw(t, reopened, 8, target.key, target.value)
+		psfAuthorityRow(t, reopened, false)
 	})
 	t.Run("operand-window", func(t *testing.T) {
 		sc := psfNew(t)
@@ -8753,16 +8781,22 @@ func psfDomainMismatchThenError(t *testing.T) {
 	hash, _ := psfUndo(t, sc.s)
 	var r tsResult
 	evidence := ctxTreeFault(t, sc.s, 29, 5, append(bytes.Clone(hash[:]), 1), func() { r = psRun(t, sc.s, sc.o, LaneOperation, psfUndoScopeOp(t)) })
-	ce, ok := r.err.(*CommitError)
-	if !ok || evidence.drift != 1 || evidence.commits != 1 || evidence.gets == 0 || r.truth != 3 {
+	if evidence.drift != 1 || evidence.commits != 1 || evidence.gets == 0 || r.truth != 3 {
 		t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
 	}
 	var engine *EngineError
-	if !errors.As(ce.ReadbackCause, &engine) || engine.Class != EngineIO {
-		t.Fatalf("later scope error lost: %v", ce.ReadbackCause)
+	if cause := psfCrossed(t, r, CommitTruthUnknown); !errors.As(cause, &engine) || engine.Class != EngineIO {
+		t.Fatalf("later scope error lost: %v", cause)
 	}
-	r.tuple(t, 3, 3, -1)
 	tsConsumed(t, sc.s, sc.o, 3, r.err)
+	// The committed plan deleted generation 9's nodes and wrote the authority; the drift added hash||1.
+	reopened := tsReopen(t, sc.s, sc.path)
+	for _, row := range obsoleteTreeFamily(9) {
+		psfRaw(t, reopened, 8, row.key, nil)
+	}
+	psfRaw(t, reopened, 0, tsRootKey(9), []byte{0xee, 9})
+	psfRaw(t, reopened, 5, append(bytes.Clone(hash[:]), 1), []byte{0x7f})
+	psfAuthorityRow(t, reopened, true)
 }
 
 // psfUndoScopeOp deletes generation 9's nodes under their witness with the authority target and also
@@ -8872,6 +8906,7 @@ func psfRowMismatchThenCapacity(t *testing.T, rank uint8, f, following uint64, k
 	reopened := tsReopen(t, sc.s, sc.path)
 	psfRaw(t, reopened, rank, first, []byte{0x7f})
 	psfRaw(t, reopened, rank, later, big)
+	psfAuthorityRow(t, reopened, false)
 	// Attribution: without the fault the same account refuses at the later row; with ample capacity
 	// the first row's mismatch alone is the OLD/write refusal.
 	if _, r, _ = run(false, psfRowBig+64); any(r.err) != any(errOperationReservationCapacity) {
@@ -9011,6 +9046,7 @@ func psfWitnessBytes(t *testing.T) {
 			treeNativeError(t, r.err, "update", "InvalidInput", 22, "invalid Update Batch", nil)
 		}
 		psfRaw(t, sc.s, 5, undo[1], []byte{1})
+		psfAuthorityRow(t, sc.s, false)
 	}
 }
 
@@ -9025,7 +9061,9 @@ func psfRetained(t *testing.T) {
 		t.Fatalf("scope next operation differs: retained %s %v", sc.s.state, r.err)
 	}
 	// The commit crossed and readback selected NEW before its abort failed; the readback cause is that abort.
-	r.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	if cause := psfCrossed(t, r, CommitTruthNew); cause == nil {
+		t.Fatal("scope strict truth differs: retained readback cause missing")
+	}
 	tcPoisonedCause(t, r.err)
 	if reservationLive(sc.o) != 0 {
 		t.Fatalf("scope grant leaked: retained live%d", reservationLive(sc.o))
