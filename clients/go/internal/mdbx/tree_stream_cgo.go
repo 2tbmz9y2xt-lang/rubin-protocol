@@ -15,11 +15,12 @@ import (
 	"unsafe"
 )
 
-// TreePairV1 contains ordinary non-tree targets and unchanged consulted rows.
-// Rows must be strictly (rank, key) ordered in each slice and disjoint. Rank 8
-// is never a Pair row. AfterOldValueRef is forbidden. The operation owns copies
+// TreePairV1 contains ordinary non-tree targets, unchanged consulted rows and the optional physical scope below.
+// Mutations and Consulted rows must be strictly (rank, key) ordered in each slice and disjoint. Rank 8
+// is never a Mutations or Consulted row. AfterOldValueRef is forbidden. The operation owns copies
 // after admission. Pair slices, records and Key/Literal bytes remain immutable
-// through the first Source call, or operation completion if no Source is reached.
+// through the first Source call, or operation completion if no Source is reached; for a
+// physical-scope Pair, through its owned admission, with the caller's charged backing kept until return.
 type TreePairV1 struct {
 	Mutations []Mutation
 	Consulted []ConsultedRow
@@ -44,6 +45,44 @@ type TreePairV1 struct {
 	// undo for a selected CURRENT Transient replay through final and strict equality.
 	// Deletion requires a successful callback endpoint; every other shape refuses.
 	PreserveReplayObservations bool
+	// ObsoleteDeletes and ObsoleteConsulted hold tokens read from this operation's ORIGINAL OLD Reader
+	// only; LargeConsulted holds plain (Kind, Hash) selector values. For all three nil and empty are
+	// equivalent, and they are read only after the callback. Any nonempty field makes the operation a physical-scope Pair, which needs a
+	// LaneOperation account, no primitives, Proof, HeaderSlot, EntryInventory or ContextConsulted,
+	// zero PrepaidReadBytes, PreserveReplayObservations false and at least one Mutation or ObsoleteDeletes row. After the ordinary Pair checks, which return their own refusals,
+	// the refusals are, in order: any other shape is "invalid Update Batch"; more than 2391106
+	// deletes plus witnesses, more than 2880 selectors or more than 1440 of one kind is "Update Batch
+	// exceeds bound"; a token not from this operation's Reader is "invalid Update Batch"; after the
+	// closed-account refusal, the metadata charge refuses with the operation-reservation capacity
+	// error; then a duplicate witness or delete, an uncovered delete, or a delete overlapping a
+	// Mutation or Consulted row is "invalid Update Batch"; the combined Update Batch caps refuse
+	// with "Update Batch exceeds bound"; then an unknown-kind or not strictly (Kind, Hash) ordered
+	// selector, or a Consulted row inside a selector, is "invalid Update Batch"; last, more than
+	// 2391106 coalesced domains, points and selectors, or their control keys above 137676154 bytes,
+	// is "Update Batch exceeds bound". ObsoleteDeletes may be unordered and may delete rank-8 and
+	// generation root rows. The caller charges each raw page, token, key, continuation and selector
+	// backing and each ordinary input backing on this same LaneOperation account before creating or
+	// reading it and keeps that grant through the backing's last use; the engine neither
+	// authenticates that grant nor supplies a second account.
+	//
+	// After admission the ObsoleteDeletes rows are Pair delete targets, deleted in the write transaction that
+	// applies Mutations. The key intervals and points the ObsoleteConsulted witnesses observed and the
+	// LargeConsulted block bodies and undo families, without the rows that are Pair targets by exact rank and key,
+	// are compared with ORIGINAL OLD by key set, presence, length and bytes: at the write snapshot before the
+	// first write, where a difference refuses with "OLD/write snapshot mismatch" and stage Prewrite, and at the
+	// final image before commit, where it refuses with "final update image mismatch" and stage
+	// WriteStartedDefinitelyPrecommit; both are StateMismatch/update/-30779 with truth OLD, index -1 and the Store
+	// CLOSED, or POISONED_THREAD or CLOSE_BLOCKED when an abort or the close is retained. After a possibly crossed commit the readback reports OLD when
+	// the ORIGINAL OLD image holds, otherwise NEW when the planned image holds, otherwise UNKNOWN, and either image
+	// holds only while these domains are unchanged. A difference does not end the comparison: a later read error
+	// or refused charge in it is returned instead. Before the first write the comparison raises the operation's
+	// read charge, shared with the other Pair reads, to at least 4*(L+1) bytes, L being the Reader's key limit,
+	// plus twice the length of the longest equal-length present value pair it compares; a refused raise returns
+	// the operation-reservation capacity error with truth OLD, stage Prewrite, index -1 and the Store consumed or
+	// retained. The final and readback comparisons do not raise that charge.
+	ObsoleteDeletes   []ObsoleteRowV1
+	ObsoleteConsulted []ObsoletePageWitnessV1
+	LargeConsulted    []LargeImageSelectorV1
 }
 
 // TreeSourceV1 is an immutable, replayable complete block source. At each position
@@ -211,10 +250,10 @@ func (s *TreeDeltaSinkV1) WindowV1() []byte {
 // any native read; then ORIGINAL OLD qualification per ascending offset (index
 // present with 104 bytes, header key not a Pair row nor HeaderSlot.Hash, header
 // present with 148 bytes; "canonical context OLD image is incomplete"). One primitive requires TreeOperation; pair-only plans
-// also admit LaneOperation and need at least one target. Rank 8 and references
-// are forbidden in Pairs, as are primitive-owned undo families and generation
-// root bindings. Meta keys 0, 1, 3 and 0x12 are immutable targets; 2 is literal-only,
-// 0x10 and 0x11 allow literal/delete, and all valid meta keys may be consulted.
+// also admit LaneOperation and need at least one Mutation or ObsoleteDeletes row. Rank 8 and
+// references are forbidden in Pair Mutations and Consulted rows, as are primitive-owned undo
+// families and generation root bindings; ObsoleteDeletes may delete such rows covered by its tokens.
+// Meta keys 0, 1, 3 and 0x12 are immutable targets; 2 is literal-only, 0x10 and 0x11 allow literal/delete, and all valid meta keys may be consulted.
 // Non-reverse Pair caps are 2,391,106 mutations, 137,676,154 key bytes,
 // 155,659,727 literal bytes, 414,634 UTXO deletes, 1,545,454 UTXO literals,
 // 16,384 other mutations and 16,384 consulted rows. Mutation shape/order/value
@@ -234,7 +273,8 @@ func (s *TreeDeltaSinkV1) WindowV1() []byte {
 // absent, byte-identical or differing, and refuses a differing row with no
 // write, as documented on TreeOperationV1.
 // Pair inputs remain immutable through the first Source call (or completion if
-// none); primitive backing and Source bindings remain immutable through completion
+// none; owned admission for a physical-scope Pair, whose charged backing the caller keeps until
+// return); primitive backing and Source bindings remain immutable through completion
 // including unwind cleanup. Source backing remains immutable through its last
 // consumer and cannot alias Pair buffers mutated after their independent copy.
 //
@@ -374,6 +414,11 @@ func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(
 		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, e.prewriteAbortV1(err)
 	}
 	plan := treeOwnPlanV1(op)
+	err = e.scopeCompileV1(op, &plan)
+	if err != nil {
+		e.retireEntryV1()
+		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, e.prewriteAbortV1(err)
+	}
 	if e.inventory != nil {
 		plan.inventory = e.inventory
 		plan.inventory.ownV1(&plan)
@@ -426,7 +471,7 @@ func treeReplayDeletesV1(plan *treePlanV1) bool {
 
 // prewriteV1 preserves ordinary/ENTRY/Proof/refusal priority before the owned-plan charge.
 func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperationV1, saved error) error {
-	slotOver, admissionErr := treeAdmitSlotV1(op, account, e.store.databaseID)
+	slotOver, admissionErr := e.admitScopedV1(op, account)
 	if admissionErr != nil {
 		return admissionErr
 	}
@@ -446,7 +491,85 @@ func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperati
 		return err
 	}
 	// A zero-byte grow also preserves the post-callback open check.
-	return e.hold.grow(treeStepFiveBytesV1(op))
+	return e.hold.grow(treePrewriteBytesV1(op))
+}
+
+// treePrewriteBytesV1 is the one post-admission charge: for a physical scope its metadata
+// envelope, which covers its plan copy; otherwise treeStepFiveBytesV1.
+func treePrewriteBytesV1(op TreeOperationV1) uint64 {
+	if treeScopePresentV1(&op.Pair) {
+		return treeScopeBytesV1(&op.Pair)
+	}
+	return treeStepFiveBytesV1(op)
+}
+
+// treeScopeBytesV1 is the physical-scope metadata envelope: 4096 fixed bytes, the ordinary plan
+// copy, 136 bytes per delete, 280 per witness, 64 per witness point, 33 per selector, and every
+// delete key and witness key byte.
+func treeScopeBytesV1(pair *TreePairV1) uint64 {
+	d, w := uint64(len(pair.ObsoleteDeletes)), uint64(len(pair.ObsoleteConsulted))
+	n := treePlanChargeAddV1(treePlanCopyBytesV1(*pair), 1, 4096)
+	n = treePlanChargeAddV1(n, d, 128+8)
+	n = treePlanChargeAddV1(n, w, 176+8+3*32)
+	n = treePlanChargeAddV1(n, uint64(len(pair.LargeConsulted)), 33)
+	for _, row := range pair.ObsoleteDeletes {
+		n = treePlanChargeAddV1(n, uint64(len(row.span.key)), 1)
+	}
+	for _, token := range pair.ObsoleteConsulted {
+		n = treeWitnessChargeV1(n, token.scope)
+	}
+	return n
+}
+
+// treeWitnessChargeV1 adds one witness's domain bound bytes and, per point, 64 bytes plus its key bytes.
+func treeWitnessChargeV1(n uint64, witness *obsoleteWitness) uint64 {
+	n = treePlanChargeAddV1(n, uint64(len(witness.domain.prefix)), 1)
+	n = treePlanChargeAddV1(n, uint64(len(witness.domain.after)), 1)
+	n = treePlanChargeAddV1(n, uint64(len(witness.domain.last)), 1)
+	for _, point := range witness.points {
+		n = treePlanChargeAddV1(n, 1, 32+32)
+		n = treePlanChargeAddV1(n, uint64(len(point.key)), 1)
+	}
+	return n
+}
+
+// scopeCompileV1 compiles raw targets, then the owned large/raw scope, under the admitted metadata charge.
+// The scope carries the engine-captured format-3 context of this Store's ORIGINAL OLD Reader.
+func (e *treePublicEntryV1) scopeCompileV1(op TreeOperationV1, plan *treePlanV1) error {
+	if !treeScopePresentV1(&op.Pair) {
+		return nil
+	}
+	batch := Batch{Mutations: op.Pair.Mutations, ObsoleteDeletes: op.Pair.ObsoleteDeletes, ObsoleteConsulted: op.Pair.ObsoleteConsulted, LargeConsulted: op.Pair.LargeConsulted}
+	err := treeScopeRowsV1(batch, e.reader, plan)
+	if err != nil {
+		return err
+	}
+	scope, err := updateOwnedLarge(batch, plan.consulted, e.reader.maxKey)
+	if err != nil {
+		return err
+	}
+	scope.databaseID, scope.config = e.reader.databaseID, e.reader.treeConfig
+	plan.scope = &scope
+	return nil
+}
+
+// treeScopeRowsV1: witness identity, coverage/duplicate/target overlap, Consulted disjointness, then caps.
+func treeScopeRowsV1(batch Batch, reader *Reader, plan *treePlanV1) error {
+	err := obsoleteWitnesses(batch, reader)
+	if err != nil {
+		return err
+	}
+	rows, err := obsoleteAdmitRows(batch, reader, plan.pair)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if obsoleteConsultedContains(plan.consulted, row.span.rank, row.span.key) {
+			return updateInvalidBatch()
+		}
+	}
+	plan.pair, err = obsoleteCompileRows(batch, rows, plan.pair)
+	return err
 }
 
 // prewriteAbortV1 aborts OLD after a prewrite refusal; only a wrapped context qualification error is infrastructure.
@@ -485,15 +608,85 @@ func (l treeAccountLedgerV1) chargeV1(n uint64) error { return l.hold.grow(n) }
 func (l treeAccountLedgerV1) releaseV1(n uint64) { _ = l.hold.shrink(n) }
 
 func treeAdmitV1(op TreeOperationV1, account *OperationAccount, databaseID [32]byte) error {
-	_, err := treeAdmitSlotV1(op, account, databaseID)
+	_, err := treeAdmitSlotV1(op, account, databaseID, false)
 	return err
 }
 
-// treeAdmitSlotV1 is treeAdmitV1 that also returns the verdict of its one Pair scan on whether op.HeaderSlot, as
+// admitScopedV1 runs the ordinary admission rows, then the charge-free physical-scope shape,
+// count and provenance rows on the post-callback path only.
+func (e *treePublicEntryV1) admitScopedV1(op TreeOperationV1, account *OperationAccount) (bool, error) {
+	over, err := treeAdmitSlotV1(op, account, e.store.databaseID, len(op.Pair.ObsoleteDeletes) != 0)
+	if err != nil {
+		return false, err
+	}
+	return over, treeScopeAdmitV1(op, account, e.reader)
+}
+
+// treeScopePresentV1 reports whether a physical-scope field selects the pair-only domain.
+func treeScopePresentV1(pair *TreePairV1) bool {
+	return len(pair.ObsoleteDeletes) != 0 || len(pair.ObsoleteConsulted) != 0 || len(pair.LargeConsulted) != 0
+}
+
+// treeScopeShapeV1 is the closed pair-only physical-scope shape.
+func treeScopeShapeV1(op TreeOperationV1, account *OperationAccount) bool {
+	if len(op.Primitives) != 0 || op.Proof != nil || op.HeaderSlot != nil {
+		return false
+	}
+	p := &op.Pair
+	if p.EntryInventory != nil || p.ContextConsulted != nil || p.PrepaidReadBytes != 0 || p.PreserveReplayObservations {
+		return false
+	}
+	return account.shared.ceiling == LaneMaxBytes
+}
+
+// treeScopeAdmitV1 checks shape, then counts (Capacity), then raw provenance, without allocating.
+func treeScopeAdmitV1(op TreeOperationV1, account *OperationAccount, reader *Reader) error {
+	pair := &op.Pair
+	if !treeScopePresentV1(pair) {
+		return nil
+	}
+	if !treeScopeShapeV1(op, account) {
+		return updateInvalidBatch()
+	}
+	if uint64(len(pair.ObsoleteDeletes))+uint64(len(pair.ObsoleteConsulted)) > maxUpdateMutations {
+		return updateBoundError()
+	}
+	countErr := largeSelectorCounts(pair.LargeConsulted)
+	if countErr != nil {
+		return countErr
+	}
+	return treeScopeProvenanceV1(pair, reader)
+}
+
+// treeScopeProvenanceV1 requires every token from this operation's ORIGINAL OLD Reader.
+func treeScopeProvenanceV1(pair *TreePairV1, reader *Reader) error {
+	if !reader.updateOld {
+		return updateInvalidBatch()
+	}
+	for _, token := range pair.ObsoleteConsulted {
+		if token.scope == nil || token.scope.reader != reader {
+			return updateInvalidBatch()
+		}
+	}
+	for _, row := range pair.ObsoleteDeletes {
+		if row.span == nil || row.span.reader != reader {
+			return updateInvalidBatch()
+		}
+	}
+	return nil
+}
+
+// treeEmptyOperationV1 is the nonempty-operation row; raw admits a raw-delete-only post-callback plan.
+func treeEmptyOperationV1(op TreeOperationV1, raw bool) bool {
+	return len(op.Primitives) == 0 && len(op.Pair.Mutations) == 0 && !raw
+}
+
+// treeAdmitSlotV1 is treeAdmitV1 (which passes raw=false) that also admits a Pair-mutation-free plan when raw
+// reports raw deletes, and returns the verdict of its one Pair scan on whether op.HeaderSlot, as
 // one more auxiliary mutation, exceeds a non-reverse Pair mutation cap; the verdict is false without a slot or on
 // error. Only that verdict, never a budget, is held in the frames live during the scan (RUB-1750 resource_boundary).
-func treeAdmitSlotV1(op TreeOperationV1, account *OperationAccount, databaseID [32]byte) (bool, error) {
-	if len(op.Primitives) == 0 && len(op.Pair.Mutations) == 0 {
+func treeAdmitSlotV1(op TreeOperationV1, account *OperationAccount, databaseID [32]byte, raw bool) (bool, error) {
+	if treeEmptyOperationV1(op, raw) {
 		return false, updateInvalidBatch()
 	}
 	if len(op.Primitives) != 0 && account.shared.ceiling != TreeLaneMaxBytes {
@@ -885,7 +1078,7 @@ func treePlanCopyBytesV1(pair TreePairV1) uint64 {
 func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
 	extra := treeHeaderSlotRowsV1(op.HeaderSlot)
 	plan := treePlanV1{primitives: op.Primitives, slot: treeOwnHeaderSlotV1(op.HeaderSlot), prepaidReadBytes: op.Pair.PrepaidReadBytes, preserveReplay: op.Pair.PreserveReplayObservations}
-	plan.pair = make([]ownedMutation, len(op.Pair.Mutations), len(op.Pair.Mutations)+extra)
+	plan.pair = make([]ownedMutation, len(op.Pair.Mutations), len(op.Pair.Mutations)+extra+len(op.Pair.ObsoleteDeletes))
 	plan.consulted = make([]ownedConsulted, len(op.Pair.Consulted), len(op.Pair.Consulted)+extra)
 	for j, m := range op.Pair.Mutations {
 		plan.pair[j] = ownedMutation{m.DBI, updateClone(m.Key), m.BeforePresent, m.AfterKind, updateClone(m.Literal), m.RefDBI, updateClone(m.RefKey)}

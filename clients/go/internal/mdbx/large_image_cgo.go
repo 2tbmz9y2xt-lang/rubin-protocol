@@ -69,6 +69,42 @@ type largeImageScope struct {
 	domains        []obsoleteDomain
 	points         []obsoletePoint
 	consulted      []ownedConsulted
+	// Typed scopes only: a nonzero engine-captured format-3 databaseID selects funded comparison.
+	// pairBudget/pairLimit are set on synchronous comparison copies and never retained.
+	pairBudget *treePairReadBudgetV1
+	pairLimit  uint64
+	databaseID [32]byte
+	config     ConfigV1
+}
+
+func (scope *largeImageScope) typedV1() bool { return scope.databaseID != [32]byte{} }
+
+// windowV1 is 4*(maxKey+1): two residual streams, each one copied key and one seek.
+func (scope *largeImageScope) windowV1() uint64 {
+	if scope.maxKey >= ^uint64(0)/4 {
+		return ^uint64(0)
+	}
+	return 4 * (scope.maxKey + 1)
+}
+
+// fundV1 covers the window before any typed acquisition; a scope with a zero databaseID returns nil without a charge.
+func (scope *largeImageScope) fundV1() error {
+	if !scope.typedV1() {
+		return nil
+	}
+	return scope.pairBudget.coverV1(scope.windowV1(), scope.pairLimit)
+}
+
+// rowsEqualV1 funds both typed operands plus the window before C use; presence or length
+// inequality is decided without payload use.
+func (scope *largeImageScope) rowsEqualV1(a, b largeNativeRow) (bool, error) {
+	if !scope.typedV1() {
+		return largeRowsEqual(a, b), nil
+	}
+	if a.done != b.done || !bytes.Equal(a.key, b.key) {
+		return false, nil
+	}
+	return updatePairImageEqualV1(a.image, b.image, true, scope.windowV1(), scope.pairBudget, scope.pairLimit)
 }
 
 func largeImageInput(diagnostic string) error {
@@ -239,16 +275,21 @@ func (r *Reader) largeNext(selector LargeImageSelectorV1, seek []byte) (largeNat
 // The immediate successor uses one bounded copied key, including maximum-width keys.
 func largeImageAdvance(key []byte, maxKey uint64) []byte {
 	if uint64(len(key)) < maxKey {
-		return append(bytes.Clone(key), 0)
+		next := make([]byte, len(key)+1)
+		copy(next, key)
+		return next
 	}
-	next := bytes.Clone(key)
-	for i := len(next) - 1; i >= 0; i-- {
-		if next[i] != 255 {
-			next[i]++
-			return next[:i+1]
-		}
+	i := len(key) - 1
+	for i >= 0 && key[i] == 255 {
+		i--
 	}
-	return nil
+	if i < 0 {
+		return nil
+	}
+	next := make([]byte, i+1)
+	copy(next, key)
+	next[i]++
+	return next
 }
 
 func largeNativeShape(pointer unsafe.Pointer, length uint64) bool {
@@ -260,11 +301,13 @@ func largeNativeKey(pointer unsafe.Pointer, length, maximum uint64, seek []byte)
 	if pointer == nil || length == 0 || length > maximum || !largeNativeShape(pointer, length) {
 		return nil, largeImageShapeError()
 	}
-	key := make([]byte, length)
-	C.memcpy(unsafe.Pointer(&key[0]), pointer, C.size_t(length))
-	if bytes.Compare(key, seek) < 0 {
+	// The borrowed key is ordered against the seek before its one copy is made.
+	native := unsafe.Slice((*byte)(pointer), length)
+	if bytes.Compare(native, seek) < 0 {
 		return nil, largeImageShapeError()
 	}
+	key := make([]byte, length)
+	copy(key, native)
 	return key, nil
 }
 
@@ -350,7 +393,9 @@ func updateOwnedLarge(batch Batch, consulted []ownedConsulted, maxKey uint64) (l
 			return largeImageScope{}, updateInvalidBatch()
 		}
 	}
-	return updateObsoleteScope(batch, largeImageScope{selectors: append([]LargeImageSelectorV1(nil), selectors...), maxKey: maxKey, consulted: consulted})
+	owned := make([]LargeImageSelectorV1, len(selectors))
+	copy(owned, selectors)
+	return updateObsoleteScope(batch, largeImageScope{selectors: owned, maxKey: maxKey, consulted: consulted})
 }
 
 type largeResidualStream struct {
@@ -380,7 +425,10 @@ func (stream *largeResidualStream) excluded(key []byte) bool {
 
 func (stream *largeResidualStream) next() (largeNativeRow, error) {
 	for !stream.done {
-		row, err := stream.fetch()
+		// The seek field is dropped before the fetch, which orders the native key against it.
+		seek := stream.seek
+		stream.seek = nil
+		row, err := stream.fetch(seek)
 		if err != nil || row.done {
 			return row, err
 		}
@@ -393,11 +441,19 @@ func (stream *largeResidualStream) next() (largeNativeRow, error) {
 	return largeNativeRow{done: true}, nil
 }
 
-func (stream *largeResidualStream) fetch() (largeNativeRow, error) {
+// advance drops row before reading the stream's next row into it.
+func (stream *largeResidualStream) advance(row *largeNativeRow) error {
+	*row = largeNativeRow{}
+	next, err := stream.next()
+	*row = next
+	return err
+}
+
+func (stream *largeResidualStream) fetch(seek []byte) (largeNativeRow, error) {
 	if stream.domain == nil {
-		return stream.reader.largeNext(stream.selector, stream.seek)
+		return stream.reader.largeNext(stream.selector, seek)
 	}
-	row, err := stream.reader.obsoleteFetch(*stream.domain, stream.seek, operationUpdate)
+	row, err := stream.reader.obsoleteFetch(*stream.domain, seek, operationUpdate)
 	if err == nil && !row.done && !stream.domain.end && bytes.Compare(row.key, stream.domain.last) > 0 {
 		return largeNativeRow{done: true}, nil
 	}
@@ -423,56 +479,48 @@ func largeRowsEqual(a, b largeNativeRow) bool {
 	return true
 }
 
-func largeDomainEqual(old, candidate *Reader, selector LargeImageSelectorV1, plan []ownedMutation) (bool, error) {
+func largeDomainEqual(old, candidate *Reader, selector LargeImageSelectorV1, plan []ownedMutation, fund *largeImageScope) (bool, error) {
 	start := sort.Search(len(plan), func(i int) bool {
 		return !updateKeyOrdered(plan[i].dbi.Rank, plan[i].key, largeImageRank(selector.Kind), selector.Hash[:])
 	})
 	left := largeResidualStream{reader: old, selector: selector, seek: selector.Hash[:], plan: plan[start:]}
 	right := largeResidualStream{reader: candidate, selector: selector, seek: selector.Hash[:], plan: plan[start:]}
-	equal := true
-	for {
-		a, err := left.next()
-		if err != nil {
-			return false, err
-		}
-		b, err := right.next()
-		if err != nil {
-			return false, err
-		}
-		if a.done && b.done {
-			return equal, nil
-		}
-		if !largeRowsEqual(a, b) {
-			equal = false
-		}
-	}
+	return obsoleteStreamsEqual(&left, &right, largeImageRank(selector.Kind), fund)
 }
 
 func largeResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ownedMutation) (bool, error) {
-	equal, err := contextEqual(old, candidate, scope)
-	if err != nil {
-		return false, err
+	fundErr := scope.fundV1()
+	if fundErr != nil {
+		return false, fundErr
+	}
+	equal := true
+	if scope.contextPresent {
+		var err error
+		equal, err = contextEqual(old, candidate, scope)
+		if err != nil {
+			return false, err
+		}
 	}
 	for _, selector := range scope.selectors {
-		match, err := largeDomainEqual(old, candidate, selector, plan)
+		match, err := largeDomainEqual(old, candidate, selector, plan, &scope)
 		if err != nil {
 			return false, err
 		}
 		equal = equal && match
 	}
-	return obsoleteResidualEqual(old, candidate, scope, plan, equal)
+	return obsoleteResidualEqual(old, candidate, &scope, plan, equal)
 }
 
-func obsoleteResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ownedMutation, equal bool) (bool, error) {
+func obsoleteResidualEqual(old, candidate *Reader, scope *largeImageScope, plan []ownedMutation, equal bool) (bool, error) {
 	for _, domain := range scope.domains {
-		match, err := obsoleteDomainEqual(old, candidate, domain, plan, scope.consulted)
+		match, err := obsoleteDomainEqual(old, candidate, domain, plan, scope)
 		if err != nil {
 			return false, err
 		}
 		equal = equal && match
 	}
 	for _, point := range scope.points {
-		match, err := obsoletePointEqual(old, candidate, point, plan, scope.consulted)
+		match, err := obsoletePointEqual(old, candidate, point, plan, scope)
 		if err != nil {
 			return false, err
 		}
