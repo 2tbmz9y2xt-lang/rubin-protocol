@@ -5011,16 +5011,27 @@ func psGone(t *testing.T, s *Store, key []byte) {
 	}))
 }
 
-// Each forbidden companion of a nonempty physical-scope field refuses with "invalid Update Batch" ahead of
+// The listed forbidden companions of a nonempty physical-scope field refuse with "invalid Update Batch" ahead of
 // a selector count over its bound.
 func psShape(t *testing.T) {
 	s, _, o := psStore(t)
+	// primitive adds one admissible primitive and its body row; its Source is not run.
+	primitive := func(op *TreeOperationV1) {
+		p, body := tsPrimitive(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error {
+			t.Error("scope shape ran a primitive Source")
+			return nil
+		}))
+		op.Primitives = []TreePrimitiveV1{p}
+		op.Pair.Mutations = append(op.Pair.Mutations, body)
+	}
 	edits := []struct {
 		name string
 		kind OperationKind
 		edit func(*TreeOperationV1)
 	}{
 		{"tree-account", TreeOperation, func(*TreeOperationV1) {}},
+		{"primitive", LaneOperation, primitive},
+		{"primitive-tree-account", TreeOperation, primitive},
 		{"prepaid", LaneOperation, func(op *TreeOperationV1) { op.Pair.PrepaidReadBytes = 1 }},
 		{"context", LaneOperation, func(op *TreeOperationV1) {
 			op.Pair.ContextConsulted = &CanonicalContextWindowV1{Generation: 8, FirstHeight: 100, Count: 1}
@@ -5298,7 +5309,7 @@ func psCounts(t *testing.T) {
 	run("1441 bodies", true, 33*1442, func(op *TreeOperationV1) {
 		op.Pair.LargeConsulted = selectors(1441, 0, 255)
 	})
-	run("1441 families", true, 33*1441, func(op *TreeOperationV1) { op.Pair.LargeConsulted = selectors(0, 1441) })
+	run("1441 families", true, 33*1442, func(op *TreeOperationV1) { op.Pair.LargeConsulted = selectors(0, 1441, 3) })
 	for _, kind := range []LargeImageKindV1{0, 3, 255} {
 		run(fmt.Sprint("kind", kind), false, 0, func(op *TreeOperationV1) {
 			op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: kind}}
@@ -5328,6 +5339,26 @@ func psCounts(t *testing.T) {
 	run("deletes plus witnesses", true, 8*maxUpdateMutations, func(op *TreeOperationV1) {
 		op.Pair.ObsoleteDeletes = make([]ObsoleteRowV1, maxUpdateMutations)
 	})
+	// One delete under 1600000 copies of its witness: the envelope sum exceeds TreeLaneMaxBytes, and the
+	// charge refuses with OPEN ahead of the duplicate witness check that needs its scratch.
+	const copies = 1_600_000
+	if psF(0, 0, 1, copies, 0, 0, 9, 9*copies) <= TreeLaneMaxBytes {
+		t.Fatal("scope metadata high-water differs: saturated envelope below TreeLaneMaxBytes")
+	}
+	r := psRunG(t, s, o, LaneOperation, psPageGrant+8*copies, func(reader *Reader) TreeOperationV1 {
+		op := psRawDelete(t, 9)(reader)
+		witnesses := make([]ObsoletePageWitnessV1, copies)
+		for i := range witnesses {
+			witnesses[i] = op.Pair.ObsoleteConsulted[0]
+		}
+		op.Pair.ObsoleteConsulted = witnesses
+		return op
+	})
+	if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN {
+		t.Fatalf("scope metadata high-water differs: saturated envelope %v %s", r.err, s.state)
+	}
+	r.tuple(t, 1, 1, -1)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), tsCounterLiteral(9, 1))
 	// At each bound the count admits and the next refusal is "invalid Update Batch".
 	run("deletes plus witnesses at bound", false, 8*maxUpdateMutations, func(op *TreeOperationV1) {
 		op.Pair.ObsoleteDeletes = make([]ObsoleteRowV1, maxUpdateMutations-1)
