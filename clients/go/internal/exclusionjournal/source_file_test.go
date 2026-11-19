@@ -31,25 +31,26 @@ func sourceEntries(t *testing.T, dir string) []string {
 	return names
 }
 
-// sourceHeld returns a check that each entry of o's source directory keeps its inode and exact bytes and o its live tokens, staging debt and pending release.
+// sourceHeld returns a check that o's source directory keeps its listing error, entry names, inodes, read errors and exact bytes and o its live tokens, staging debt and pending release.
 func sourceHeld(t *testing.T, o *SourceOwnerV1) func(string) {
 	state := func() (held []string) {
-		entries, _ := os.ReadDir(filepath.Join(o.dir, sourceDirectory))
+		entries, err := os.ReadDir(filepath.Join(o.dir, sourceDirectory))
 		for _, entry := range entries {
-			info, err := entry.Info()
-			data, _ := os.ReadFile(filepath.Join(o.dir, sourceDirectory, entry.Name()))
-			held = append(held, fmt.Sprintf("%s %v %d %x", entry.Name(), err, info.Sys().(*syscall.Stat_t).Ino, data))
+			info, infoErr := entry.Info()
+			sourceFailIf(t, infoErr != nil, "source entry %s vanished: %v", entry.Name(), infoErr)
+			data, readErr := os.ReadFile(filepath.Join(o.dir, sourceDirectory, entry.Name()))
+			held = append(held, fmt.Sprintf("%s %d %v %s", entry.Name(), info.Sys().(*syscall.Stat_t).Ino, readErr, data))
 		}
 		for name, token := range o.live {
 			held = append(held, fmt.Sprintf("%s %p %v", name, token, *token))
 		}
 		slices.Sort(held)
-		return append(held, fmt.Sprint(o.debt, o.release))
+		return append(held, fmt.Sprint(err, o.debt, o.release))
 	}
 	before := state()
 	return func(action string) {
 		t.Helper()
-		sourceFailIf(t, !slices.Equal(before, state()), "%s changed source entries or charges: %q", action, before)
+		sourceFailIf(t, !slices.Equal(before, state()), "%s changed source entries or charges", action)
 	}
 }
 
@@ -808,9 +809,8 @@ func TestSourceNoOverwriteAndDistinctCopies(t *testing.T) {
 		a, b := sourcePrepare(t, owner, m, parts), sourcePrepare(t, owner, m, parts)
 		copied := *b
 		sourceReleaseResult(t, owner, a, true, nil)
-		replacement := sourcePrepare(t, owner, m, parts)
+		replacement, held := sourcePrepare(t, owner, m, parts), sourceHeld(t, owner)
 		for _, old := range []*PreparedSourceV1{b, &copied} {
-			held := sourceHeld(t, owner)
 			sourceReleaseResult(t, owner, old, true, ErrIntegrityV1)
 			held("stale release")
 			sourceRead(t, owner, m, parts)
