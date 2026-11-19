@@ -1783,7 +1783,7 @@ func TestSyncApplyHelperAdditionalBranches(t *testing.T) {
 	}
 }
 
-func reorgTestCoinbaseForAddress(t *testing.T, height uint64, value uint64, address []byte) []byte {
+func reorgTestCoinbaseForAddress(t testing.TB, height uint64, value uint64, address []byte) []byte {
 	t.Helper()
 	return reorgTestCoinbaseForWtxids(t, height, value, address, [][32]byte{{}})
 }
@@ -1840,7 +1840,7 @@ func reorgTestSuiteRegistry(extraSuiteID uint8) *consensus.SuiteRegistry {
 	})
 }
 
-func reorgTestCoinbaseForWtxids(t *testing.T, height uint64, value uint64, address []byte, wtxids [][32]byte) []byte {
+func reorgTestCoinbaseForWtxids(t testing.TB, height uint64, value uint64, address []byte, wtxids [][32]byte) []byte {
 	t.Helper()
 	wroot, err := consensus.WitnessMerkleRootWtxids(wtxids)
 	if err != nil {

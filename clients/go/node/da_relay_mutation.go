@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
+	"fmt"
 	"maps"
 	"slices"
 	"sort"
@@ -818,7 +819,8 @@ func checkStagedCandidateSlot(next daRelaySetRecord, rows []daRelayLocatorRow, c
 // OrphanChunks and StagedCommit, so only the state equality stops a resident image
 // switching between them; the other five move no counter at INSTALL, but the installed
 // record LIVES in s.relations.sets, where missingChunkIndexes and validateChunkInsert read
-// replaceableChunks and the TTL sweep decrements ttlBlocksRemaining. Staging copies all six.
+// replaceableChunks and advanceOwnerReadyTTLInGuard decrements ttlBlocksRemaining. Staging
+// copies all six.
 func checkPreservedOwnerReadySlots(live, next daRelaySetRecord, target daRelayLocator) error {
 	if !samePreservedRecordFields(live, next) {
 		return errDARelayImageIncompatible
@@ -1050,8 +1052,339 @@ func (s *DARelayState) releaseOwnerReadyPeerQuota(quotaIdentity string) error {
 	})
 }
 
-func (s *DARelayState) advanceOwnerReadyTTL() error {
-	return s.commitOwnerReadyRemoval(ownerReadyTTLTickVictims)
+// ownerReadyTTLPlan is one in-guard TTL decrease planned over the State A and State B records
+// of the published image. records is the ABSOLUTE post-decrease revision high-water; selected
+// totals every selected record's accounting, survivors every surviving record's, and peerBytes
+// projects each selected peer key to its surviving charge (zero deletes the entry).
+type ownerReadyTTLPlan struct {
+	selected, survivors, removed   []daRelaySetRecord
+	victims                        []DAAdmissionVictim
+	records                        uint64
+	selectedTotals, survivorTotals retainedDAAccountingTotals
+	peerBytes                      map[string]uint64
+}
+
+// advanceOwnerReadyTTLInGuard is the DA TTL decrease body of the canonical transition
+// (RUBIN_COMPACT_BLOCKS.md Section 5); the canonical transition is its
+// only permitted caller. PRECONDITION: the caller holds ChainState admissionMu EXCLUSIVELY, after
+// the D1 publication; this body never acquires that guard (no lockAdmissionFence, no
+// RLockUnlessTerminal).
+//
+// It plans over exactly the State A and State B records of the published image, walking the
+// relations' State A/B bucket, so no State C record is visited, the relay state is not cloned
+// and the standard owner domain is not scanned. It checks every selected record, locator,
+// accounting value and exact owner token with checked arithmetic before any mutation; on an
+// unbound relay (nil mempool) it reads no owner token, claim or row.
+// On success each selected record with a count above one decreases by one with one fresh
+// revision, and each record at count one is removed with the owner-ready expiry effect:
+// members, locator rows, accounting, prefetch reservation and, on a bound relay, finalized
+// owner claims. On failure it changes nothing, releases every relation reservation it prepared
+// exactly once (discard) and returns its own error. Postcondition: no DA record, locator,
+// charge or claim outside the selected set changes. DARelayState.mu and the owner lock it takes
+// are released by defer on every exit, unwind included; the apply phase runs no fallible step.
+func (s *DARelayState) advanceOwnerReadyTTLInGuard() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	plan, err := s.planOwnerReadyTTLLocked()
+	if err != nil {
+		return err
+	}
+	s.runTTLHook(daTTLPlanned)
+	if s.mempool == nil { // truly unbound: no claim domain, the DA image is the whole change
+		s.applyOwnerReadyTTLPlanLocked(plan, s.prepareOwnerReadyTTLRelationsLocked(plan))
+		s.runTTLHook(daTTLApplied)
+		return nil
+	}
+	owner, err := s.ownerReadyTTLOwnerLocked()
+	if err != nil {
+		return err
+	}
+	return s.commitOwnerReadyTTLPlanLocked(owner, plan)
+}
+
+// ownerReadyTTLOwnerLocked keeps commitOwnerReadyRemoval's refusals for a bound relay: a nil
+// chainstate or a nil pending-outpoint owner.
+func (s *DARelayState) ownerReadyTTLOwnerLocked() (*PendingOutpointOwner, error) {
+	switch {
+	case s.mempool.chainState == nil:
+		return nil, txAdmitUnavailable("nil chainstate")
+	case s.mempool.pendingOutpoints == nil:
+		return nil, txAdmitUnavailable("nil pending-outpoint owner")
+	}
+	return s.mempool.pendingOutpoints, nil
+}
+
+func (s *DARelayState) planOwnerReadyTTLLocked() (ownerReadyTTLPlan, error) {
+	plan := ownerReadyTTLPlan{records: s.records, selectedTotals: retainedDAAccountingTotals{peerBytes: map[string]uint64{}}, survivorTotals: retainedDAAccountingTotals{peerBytes: map[string]uint64{}}}
+	daIDs := s.relations.incompleteKeys()
+	slices.SortFunc(daIDs, func(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) })
+	for _, daID := range daIDs {
+		if err := s.planOwnerReadyTTLRecordLocked(&plan, daID); err != nil {
+			return ownerReadyTTLPlan{}, err
+		}
+	}
+	if err := plan.selectedTotals.checkOwnerReadyTTLTotalsLocked(s); err != nil {
+		return ownerReadyTTLPlan{}, err
+	}
+	plan.peerBytes = make(map[string]uint64, len(plan.selectedTotals.peerBytes))
+	for key := range plan.selectedTotals.peerBytes {
+		plan.peerBytes[key] = plan.survivorTotals.peerBytes[key]
+	}
+	return plan, nil
+}
+
+// ownerReadyTTLSelectedRecordLocked refuses an index entry whose row is absent, State C or
+// carries another da_id before any other check reads the record.
+func (s *DARelayState) ownerReadyTTLSelectedRecordLocked(daID [32]byte) (daRelaySetRecord, error) {
+	record, present := s.relations.record(daID)
+	if !present || record.state == daRelayStateCompleteSet || record.daID != daID {
+		return daRelaySetRecord{}, errDARelayTTLRecordKeyMismatch
+	}
+	return record, nil
+}
+
+func (s *DARelayState) planOwnerReadyTTLRecordLocked(plan *ownerReadyTTLPlan, daID [32]byte) error {
+	record, err := s.ownerReadyTTLSelectedRecordLocked(daID)
+	if err != nil {
+		return err
+	}
+	accounting, err := s.checkOwnerReadyTTLRecordLocked(record)
+	if err != nil {
+		return err
+	}
+	if err := plan.selectedTotals.addOwnerReadyTTL(accounting); err != nil {
+		return err
+	}
+	plan.selected = append(plan.selected, record)
+	if record.ttlBlocksRemaining == 1 {
+		plan.removed = append(plan.removed, record)
+		plan.victims = append(plan.victims, ownerReadyRecordVictims(record)...)
+		return nil
+	}
+	return plan.addOwnerReadyTTLSurvivor(record, accounting)
+}
+
+// checkOwnerReadyTTLRecordLocked runs the per-record checks in order and returns the record's
+// own accounting.
+func (s *DARelayState) checkOwnerReadyTTLRecordLocked(record daRelaySetRecord) (daRelayRecordAccounting, error) {
+	if err := checkOwnerReadyRetainedRecordLocked(record); err != nil {
+		return daRelayRecordAccounting{}, err
+	}
+	if err := s.checkOwnerReadyTTLHighWaterLocked(record); err != nil {
+		return daRelayRecordAccounting{}, err
+	}
+	if err := s.checkOwnerReadyTTLLocatorsLocked(record); err != nil {
+		return daRelayRecordAccounting{}, err
+	}
+	return s.checkOwnerReadyTTLDAIDBytesLocked(record)
+}
+
+// checkOwnerReadyTTLHighWaterLocked refuses a record above either stored high-water, the
+// precondition every survivor revision minted from s.records relies on, and a count above the
+// configured orphan TTL, which every count starts at and never exceeds (RUBIN_COMPACT_BLOCKS.md
+// Section 5).
+func (s *DARelayState) checkOwnerReadyTTLHighWaterLocked(record daRelaySetRecord) error {
+	if record.ttlBlocksRemaining > s.caps.orphanTTLBlocks {
+		return fmt.Errorf("%w: record %x count %d above the orphan TTL %d", errDARelayImageIncompatible, record.daID, record.ttlBlocksRemaining, s.caps.orphanTTLBlocks)
+	}
+	if record.revision > s.records {
+		return fmt.Errorf("%w: record %x revision %d above the high-water %d", errDARelayImageIncompatible, record.daID, record.revision, s.records)
+	}
+	if record.receivedTime > s.nextReceivedTime {
+		return fmt.Errorf("%w: record %x received time %d above the high-water %d", errDARelayImageIncompatible, record.daID, record.receivedTime, s.nextReceivedTime)
+	}
+	return nil
+}
+
+func (s *DARelayState) checkOwnerReadyTTLLocatorsLocked(record daRelaySetRecord) error {
+	for _, row := range record.locatorRows() {
+		if s.relations.locatorValue(row.txid) != row.locator {
+			return errDARelayLocatorMismatch
+		}
+	}
+	return nil
+}
+
+// checkOwnerReadyTTLDAIDBytesLocked requires the record's per-da_id orphan byte entry to equal
+// its own accounting: present and equal when the record carries orphan bytes, absent otherwise.
+func (s *DARelayState) checkOwnerReadyTTLDAIDBytesLocked(record daRelaySetRecord) (daRelayRecordAccounting, error) {
+	accounting, err := record.ownerReadyAccounting()
+	if err != nil {
+		return daRelayRecordAccounting{}, err
+	}
+	stored, present := s.orphanBytesByDAID[record.daID]
+	if stored != accounting.orphanBytes || present != (accounting.orphanBytes != 0) {
+		return daRelayRecordAccounting{}, errDARelayImageIncompatible
+	}
+	return accounting, nil
+}
+
+// addOwnerReadyTTLSurvivor decreases one record by one with one fresh revision minted from the
+// plan's checked revision high-water and adds its unchanged accounting to the survivor totals.
+func (p *ownerReadyTTLPlan) addOwnerReadyTTLSurvivor(record daRelaySetRecord, accounting daRelayRecordAccounting) error {
+	survivor := record
+	survivor.ttlBlocksRemaining--
+	if err := checkOwnerReadyRemovalBaseline(record, survivor); err != nil {
+		return err
+	}
+	revision, err := checkedAddUint64(p.records, 1)
+	if err != nil {
+		return err
+	}
+	if err := p.survivorTotals.addOwnerReadyTTL(accounting); err != nil {
+		return err
+	}
+	survivor.revision, p.records = revision, revision
+	p.survivors = append(p.survivors, survivor)
+	return nil
+}
+
+// addOwnerReadyTTL adds one State A or B record's accounting with checked arithmetic; such a
+// record contributes no complete or pinned bytes.
+func (t *retainedDAAccountingTotals) addOwnerReadyTTL(accounting daRelayRecordAccounting) error {
+	if accounting.orphanBytes != 0 {
+		t.daIDEntries++
+	}
+	return t.add(accounting, 0)
+}
+
+// checkOwnerReadyTTLTotalsLocked requires every stored total the State A and B records alone
+// contribute to equal the selected records' sum, so the survivor sums are the post-decrease
+// totals.
+func (t retainedDAAccountingTotals) checkOwnerReadyTTLTotalsLocked(s *DARelayState) error {
+	var err error
+	switch {
+	case t.stagedBytes != s.stagedBytes:
+		err = fmt.Errorf("staged retained bytes: records imply %d, state holds %d", t.stagedBytes, s.stagedBytes)
+	case t.orphanBytes != s.orphanBytes:
+		err = fmt.Errorf("orphan pool bytes: records imply %d, state holds %d", t.orphanBytes, s.orphanBytes)
+	case t.commitBytes != s.orphanCommitOverheadBytes:
+		err = fmt.Errorf("orphan commit overhead bytes: records imply %d, state holds %d", t.commitBytes, s.orphanCommitOverheadBytes)
+	case t.daIDEntries != len(s.orphanBytesByDAID):
+		err = fmt.Errorf("per-da_id orphan bytes: records imply %d entries, state holds %d", t.daIDEntries, len(s.orphanBytesByDAID))
+	default:
+		err = t.checkPeerBytesLocked(s)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", errDARelayImageIncompatible, err)
+	}
+	return nil
+}
+
+// commitOwnerReadyTTLPlanLocked proves every selected member's exact owner token and every
+// victim claim under the owner lock and only then applies the plan and drops the victim claims.
+// The member walk, the victim batch and the relation publication are prepared before the hold.
+func (s *DARelayState) commitOwnerReadyTTLPlanLocked(owner *PendingOutpointOwner, plan ownerReadyTTLPlan) error {
+	members, err := ownerReadyTTLMembers(owner, plan.selected)
+	if err != nil {
+		return err
+	}
+	var batch []DAAdmissionVictim
+	if len(plan.victims) != 0 {
+		if batch, err = prepareDAAdmissionVictims(plan.victims, [32]byte{}); err != nil {
+			return txAdmitFromPendingOutpointError(err)
+		}
+	}
+	relations := s.prepareOwnerReadyTTLRelationsLocked(plan)
+	failure, refusal := s.applyOwnerReadyTTLPlanUnderOwner(owner, plan, relations, batch, members)
+	if refusal == ownerReadyTTLApplied {
+		return nil
+	}
+	s.relations.discard(relations)
+	if refusal == ownerReadyTTLVictimRefused {
+		return txAdmitFromPendingOutpointError(&failure)
+	}
+	return errDARelayImageIncompatible
+}
+
+type ownerReadyTTLRefusal uint8
+
+const (
+	ownerReadyTTLApplied ownerReadyTTLRefusal = iota
+	ownerReadyTTLVictimRefused
+	ownerReadyTTLMemberUnbound
+)
+
+// applyOwnerReadyTTLPlanUnderOwner holds the owner lock only for the claim proof and the apply;
+// it returns plain values so the caller builds any refusal error after the lock is released.
+func (s *DARelayState) applyOwnerReadyTTLPlanUnderOwner(owner *PendingOutpointOwner, plan ownerReadyTTLPlan, relations *daRelayRelationPublication, batch []DAAdmissionVictim, members []*daRelayMemberIdentity) (PendingOutpointError, ownerReadyTTLRefusal) {
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if failure, failed := owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
+		return failure, ownerReadyTTLVictimRefused
+	}
+	if !ownerReadyTTLMembersBoundLocked(owner, members) {
+		return PendingOutpointError{}, ownerReadyTTLMemberUnbound
+	}
+	s.applyOwnerReadyTTLPlanLocked(plan, relations)
+	for _, victim := range batch {
+		owner.dropClaimLocked(victim.Token)
+	}
+	s.runTTLHook(daTTLApplied)
+	return PendingOutpointError{}, ownerReadyTTLApplied
+}
+
+// ownerReadyTTLMembers lists the selected records' members, refusing a foreign or zero token,
+// a token held twice and an input claimed twice.
+func ownerReadyTTLMembers(owner *PendingOutpointOwner, selected []daRelaySetRecord) ([]*daRelayMemberIdentity, error) {
+	seen, expected := map[PendingOutpointToken]struct{}{}, map[consensus.Outpoint]pendingOutpointRow{}
+	var members []*daRelayMemberIdentity
+	for _, record := range selected {
+		recordMembers, err := ownerReadyRecordMembers(record, owner, seen)
+		if err != nil {
+			return nil, err
+		}
+		for _, member := range recordMembers {
+			if err := ownerReadyExpectedRowsAdd(member.token, member.txid, member.inputs, expected); err != nil {
+				return nil, err
+			}
+		}
+		members = append(members, recordMembers...)
+	}
+	return members, nil
+}
+
+// ownerReadyTTLMembersBoundLocked proves every selected member's exact owner token and inputs.
+func ownerReadyTTLMembersBoundLocked(owner *PendingOutpointOwner, members []*daRelayMemberIdentity) bool {
+	for _, member := range members {
+		if !ownerReadyMemberClaimBound(owner, owner.byToken[member.token], member) {
+			return false
+		}
+		for _, input := range member.inputs {
+			if owner.byOutpoint[input] != (pendingOutpointRow{token: member.token, txid: member.txid}) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// prepareOwnerReadyTTLRelationsLocked reserves the removal rows of every expiring record before
+// the first mutation; preparation changes no logical membership and discard undoes it.
+func (s *DARelayState) prepareOwnerReadyTTLRelationsLocked(plan ownerReadyTTLPlan) *daRelayRelationPublication {
+	p := &daRelayRelationPublication{}
+	for _, record := range plan.removed {
+		s.relations.prepareRecord(p, record.daID, daRelaySetRecord{}, false)
+		for _, row := range record.locatorRows() {
+			s.relations.prepareLocator(p, row, false)
+		}
+	}
+	return p
+}
+
+// applyOwnerReadyTTLPlanLocked PERFORMS NO VALIDATION and runs no fallible step: every check ran
+// in the plan and the claim proof.
+func (s *DARelayState) applyOwnerReadyTTLPlanLocked(plan ownerReadyTTLPlan, relations *daRelayRelationPublication) {
+	s.relations.publish(relations)
+	for _, survivor := range plan.survivors {
+		s.relations.scalarRecord(survivor.daID, survivor)
+	}
+	for _, record := range plan.removed {
+		s.applyProjectedDAIDBytes(record.daID, 0) // the plan proved the entry equals the record's whole charge
+		s.prefetch.releaseSet(record.daID)
+	}
+	s.applyProjectedPeerBytes(plan.peerBytes)
+	s.records, s.stagedBytes, s.orphanBytes, s.orphanCommitOverheadBytes = plan.records, plan.survivorTotals.stagedBytes, plan.survivorTotals.orphanBytes, plan.survivorTotals.commitBytes
 }
 
 // commitOwnerReadyRemoval runs one owner-atomic incomplete-record removal batch. It clones
@@ -1436,22 +1769,6 @@ func ownerReadyPeerRemovalVictims(clone *DARelayState, quotaIdentity string) ([]
 	return victims, nil
 }
 
-func ownerReadyTTLTickVictims(clone *DARelayState) ([]DAAdmissionVictim, error) {
-	candidates, err := clone.ownerReadyRemovalCandidatesLocked()
-	if err != nil {
-		return nil, err
-	}
-	var victims []DAAdmissionVictim
-	for _, daID := range candidates {
-		removed, err := clone.tickOwnerReadyTTLRecordLocked(daID)
-		if err != nil {
-			return nil, err
-		}
-		victims = append(victims, removed...)
-	}
-	return victims, nil
-}
-
 // releaseOwnerReadyPeerRecordLocked applies the PEER rule to one record on the clone. The
 // commit arm quantifies over the retained members' PROVENANCE KIND, never over the released
 // quota identity: the kind set is closed at PEER, LOCAL and DETACHED_REORG, and exactly a
@@ -1507,31 +1824,6 @@ func ownerReadyPeerMatches(record daRelaySetRecord, quotaIdentity string) (match
 		}
 	}
 	return matchCommit, matchChunks, memberCount, nonPeerChunk
-}
-
-// tickOwnerReadyTTLRecordLocked expires a ttl-one record whole; otherwise it copies the record
-// VALUE only (same chunks container and backing), decrements once and mints one checked revision.
-func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissionVictim, error) {
-	record := s.relations.recordValue(daID)
-	if record.state == daRelayStateCompleteSet {
-		return nil, nil
-	}
-	if record.ttlBlocksRemaining == 1 {
-		return s.removeOwnerReadyWholeRecordLocked(record)
-	}
-	survivor := record
-	survivor.ttlBlocksRemaining--
-	if err := checkOwnerReadyRemovalBaseline(record, survivor); err != nil {
-		return nil, err
-	}
-	revision, err := checkedAddUint64(s.records, 1)
-	if err != nil {
-		return nil, err
-	}
-	survivor.revision = revision
-	s.relations.scalarRecord(daID, survivor)
-	s.records = revision
-	return nil, nil
 }
 
 // ownerReadyRemovalCaps lifts the staged and four orphan-domain caps to the uint64 maximum.
@@ -1638,7 +1930,7 @@ func (s *DARelayState) dropOwnerReadyChunksLocked(record daRelaySetRecord, dropI
 }
 
 // checkOwnerReadyRemovalBaseline re-checks the live record's own shape as a fail-closed backstop —
-// the candidate gate already refuses all three disjuncts before either selector runs — and then
+// the candidate gate already refuses all three disjuncts before the selector runs — and then
 // proves next a byte-identical submultiset of it, so no member, token, provenance, commit slot or
 // locator can change unseen. It does not test the caller's baseline: the caller reads live out of
 // s.relations.sets and mints image.baseline from that same record, unlike checkDARecordImageBaselineLocked,
@@ -1655,7 +1947,7 @@ func checkOwnerReadyRemovalBaseline(live, next daRelaySetRecord) error {
 // every surviving chunk byte-identical, lets ttlBlocksRemaining only decrease and never to
 // zero, and leaves revision to the projector's remint. replaceableChunks is the one live field it
 // does not pin, unlike its admission-side twin samePreservedRecordFields: the candidate gate
-// refuses a non-nil one before either selector runs, and the survivor is a value copy of that
+// refuses a non-nil one before the selector runs, and the survivor is a value copy of that
 // same record. Under shared backing the check is structural only (a value copy compares equal
 // to itself): a fail-closed backstop, not an oracle of the removal arms' copy rules.
 func checkOwnerReadyRemovalSurvivor(live, next daRelaySetRecord) error {
@@ -1703,7 +1995,7 @@ func ownerReadyMemberMatchesPeer(member *daRelayMemberIdentity, quotaIdentity st
 //
 // PRECONDITION shared by both arms: member is non-nil. dropOwnerReadyChunksLocked reads a
 // member only for the indexes ownerReadyPeerMatches accepted, and that predicate starts at
-// member != nil (the TTL selector passes no indexes at all); ownerReadyRecordVictims proves
+// member != nil; ownerReadyRecordVictims proves
 // its own two arms.
 func ownerReadyMemberVictim(member *daRelayMemberIdentity) DAAdmissionVictim {
 	return DAAdmissionVictim{TxID: member.txid, Token: member.token, Inputs: slices.Clone(member.inputs)}

@@ -166,8 +166,12 @@ type peer struct {
 	inboundLease *inboundBlockLease
 }
 
-// NewService validates and normalizes cfg before atomically claiming the
-// SyncEngine's sole lifetime DA relay state; Close never releases that claim.
+// NewService validates and normalizes cfg, then claims the SyncEngine's DA relay
+// state (the first successful claimant keeps the detached-reorg hook; an earlier
+// claim or binding refuses no later construction), and as its final step publishes
+// this OPEN Service as the current DA TTL binding (RUBIN_COMPACT_BLOCKS.md Section 5).
+// Construction and publication change no DA record, count or claim; a failed
+// construction leaves the binding unchanged; Close never clears it.
 func NewService(cfg ServiceConfig) (*Service, error) {
 	if err := validateServiceConfig(cfg); err != nil {
 		return nil, err
@@ -199,6 +203,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	if _, err := cfg.SyncEngine.ClaimDARelayState(expectedRelay, service.admitDetachedReorgDA); err != nil {
 		return nil, err
 	}
+	cfg.SyncEngine.PublishDATTLBinding(service)
 	return service, nil
 }
 
@@ -291,6 +296,29 @@ func (s *Service) acquireWork() bool {
 	return true
 }
 
+// enterDATTLMutationLeased is this Service's own nested DA TTL entry for an apply
+// that runs under this Service's worker lease (applyBlockWithReorg passes it): it
+// registers and releases nothing and never reads the binding.
+func (s *Service) enterDATTLMutationLeased(decrease func() error) error {
+	return decrease()
+}
+
+// EnterDATTLMutation is this Service's own DA TTL entry under no Service lease
+// (RUBIN_L1_P2P_AUX.md Section 5). Called inside the canonical transition's
+// exclusive ChainState admission guard, it never reacquires that guard and takes
+// no lock any path holds while waiting for it. It registers one call lease, or
+// returns "service already closed" with zero effects once Close published the
+// non-OPEN state; otherwise it runs decrease once, returns its result unchanged and
+// releases the lease once on every exit, unwind included, before a panic in
+// decrease propagates unrecovered. It never reads the binding, retries or falls back.
+func (s *Service) EnterDATTLMutation(decrease func() error) error {
+	if !s.acquireWork() {
+		return errServiceClosed
+	}
+	defer s.releaseWork()
+	return decrease()
+}
+
 // releaseWork releases exactly one lease taken by acquireWork.
 func (s *Service) releaseWork() {
 	s.loopWG.Done()
@@ -311,16 +339,10 @@ func (s *Service) workAuthorized() bool {
 
 // AnnounceBlock parses a locally accepted block and announces it to the
 // current peers. It takes one Service call lease before parsing, seen-set
-// mutation, broadcast or DA TTL work: once Close has published the non-OPEN
-// state it returns exactly "service already closed" with zero effects, and a
-// call that won the lease first finishes while Close waits for it.
-//
-// The retained-DA TTL advance is additionally gated on the engine's terminal
-// latch so an already-latched node skips the work. If a latch lands after this
-// check, the shared admission fence returns unavailable before retained-state
-// access; an ordinary transition still serializes the advance. TerminalFaulted() is nil-safe by its own
-// documented contract, and no constructed Service reaches this gate with a
-// nil engine: validateServiceConfig rejects a nil SyncEngine.
+// mutation or broadcast: once Close has published the non-OPEN state it
+// returns exactly "service already closed" with zero effects, and a call that
+// won the lease first finishes while Close waits for it. It performs no DA TTL
+// decrease; only the canonical transition of an ACCEPTED/NEW apply invokes one.
 func (s *Service) AnnounceBlock(blockBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
@@ -340,15 +362,7 @@ func (s *Service) AnnounceBlock(blockBytes []byte) error {
 	if !s.blockSeen.Add(blockHash) {
 		return nil
 	}
-	broadcastErr := s.broadcastAcceptedBlock(nil, blockHash)
-	var ttlErr error
-	if !s.cfg.SyncEngine.TerminalFaulted() {
-		ttlErr = s.advanceDAOrphanTTL()
-	}
-	if broadcastErr != nil {
-		return broadcastErr
-	}
-	return ttlErr
+	return s.broadcastAcceptedBlock(nil, blockHash)
 }
 
 // AnnounceTx admits a locally submitted transaction to the relay pool and
