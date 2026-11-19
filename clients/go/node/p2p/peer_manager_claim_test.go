@@ -61,7 +61,7 @@ func startServing(t *testing.T, s *Service) {
 func startWithInboundPeer(t *testing.T, s *Service) (string, net.Conn) {
 	t.Helper()
 	startServing(t, s)
-	remote, err := net.Dial("tcp", s.Addr())
+	remote, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", s.Addr())
 	must(t, err, "dial")
 	t.Cleanup(func() { _ = remote.Close() })
 	must(t, completeRemoteHandshake(remote, s.cfg.PeerRuntimeConfig, testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 0)), "remote handshake")
@@ -208,7 +208,8 @@ func TestPeerManagerClaimJoinedCloseReturnsAfterRelease(t *testing.T) {
 	requireJoined(t, "joined Close(S1)", joinedExit)
 	requireClaimFree(t, cfg2, "construction after the joined Close returned")
 	requireJoined(t, "first Close(S1)", firstExit)
-	require(t, <-closed == nil && <-closed == nil, "Close(S1) returned an error")
+	errA, errB := <-closed, <-closed
+	require(t, errA == nil && errB == nil, "Close(S1) returned an error")
 }
 
 func TestPeerManagerClaimLaterCloseReleasesNothing(t *testing.T) {

@@ -166,14 +166,14 @@ type peer struct {
 	inboundLease *inboundBlockLease
 }
 
-// NewService validates and normalizes cfg and builds the Service, then claims
-// cfg.PeerManager, then the SyncEngine's DA relay state (the first successful claimant
-// keeps the detached-reorg hook; an earlier DA claim or binding refuses no later
-// construction); a refused DA relay state claim releases the PeerManager claim before
-// NewService returns. As its final step it publishes this OPEN Service as the current
-// DA TTL binding (RUBIN_COMPACT_BLOCKS.md Section 5). Beyond these two claims,
-// construction and publication change no DA record, count or claim; a failed
-// construction leaves the binding unchanged; Close never clears it.
+// NewService validates and normalizes cfg (its nil cfg.PeerManager check refuses with
+// "nil peer manager"), builds the Service, claims cfg.PeerManager (a held one is refused with
+// "peer manager is already claimed" before any later step), then claims the SyncEngine's DA
+// relay state (the first successful claimant keeps the detached-reorg hook; an earlier DA claim
+// or binding refuses no later construction) and returns that claim's refusal after releasing the
+// PeerManager claim. Its final step publishes this OPEN Service as the current DA TTL binding
+// (RUBIN_COMPACT_BLOCKS.md Section 5). Construction and publication change no other DA record,
+// count or claim; a failed construction leaves the binding unchanged; Close never clears it.
 func NewService(cfg ServiceConfig) (*Service, error) {
 	if err := validateServiceConfig(cfg); err != nil {
 		return nil, err
