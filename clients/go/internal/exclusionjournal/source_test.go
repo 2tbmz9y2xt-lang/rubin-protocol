@@ -93,11 +93,13 @@ func sourceReopen(t *testing.T, old *policycontrol.Store, dir string, limits Sou
 }
 
 func sourceBundle(class byte, conditional bool) (SourceManifestV1, [][]byte) {
+	m := SourceManifestV1{Identity: [32]byte{7}, Class: CaptureClassV1(class)}
 	kinds := []byte{1, 2, 3, 4, 5, 6}
 	parts := [][]byte{[]byte("original body bytes"), []byte("TX_ERR_EXACT"), []byte("original law/config/build"), {1}, []byte("original parent path"), {}}
 	if class == 3 {
 		kinds = []byte{7, 8, 3, 4, 9}
 		parts = [][]byte{[]byte("acquired canonical bytes"), []byte("expected header path"), []byte("original law/config/build"), {1}, []byte("acquisition position")}
+		m.AcquiredDigest = sha256.Sum256(parts[0])
 	}
 	if conditional {
 		parts[3] = []byte{2}
@@ -106,12 +108,8 @@ func sourceBundle(class byte, conditional bool) (SourceManifestV1, [][]byte) {
 			parts[3] = append(parts[3], original...)
 		}
 	}
-	m := SourceManifestV1{Identity: [32]byte{7}, Class: CaptureClassV1(class)}
 	for i, kind := range kinds {
 		m.Parts = append(m.Parts, SourcePartSpecV1{Kind: PartKindV1(kind), Length: uint64(len(parts[i]))})
-	}
-	if class == 3 {
-		m.AcquiredDigest = sha256.Sum256(parts[0])
 	}
 	return m, parts
 }
@@ -174,10 +172,7 @@ func sourceAfterFirstPart(m SourceManifestV1, parts [][]byte, after func() error
 
 func sourceRead(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, want [][]byte, beforeFirst ...func()) {
 	t.Helper()
-	kinds := []byte{1, 2, 3, 4, 5, 6}
-	if byte(m.Class) == 3 {
-		kinds = []byte{7, 8, 3, 4, 9}
-	}
+	kinds := map[bool][]byte{false: {1, 2, 3, 4, 5, 6}, true: {7, 8, 3, 4, 9}}[m.Class == 3]
 	i := 0
 	sourceAccount(t, func(a *mdbx.OperationAccount) error {
 		return o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error {
@@ -311,17 +306,9 @@ func TestSourceExportScope(t *testing.T) {
 		t.Run(mode, func(t *testing.T) { testSourceRecoveredFinalPanic(t, mode) })
 	}
 	direct := errors.New("visitor result")
-	for _, row := range []struct {
-		name  string
-		cause error
-	}{
-		{"success", nil},
-		{"error", direct},
-		{"wrapped", fmt.Errorf("application: %w", direct)},
-		{"typed-nil", (*sourceTypedError)(nil)},
-		{"panic", direct},
-	} {
-		t.Run(row.name, func(t *testing.T) {
+	causes := map[string]error{"error": direct, "wrapped": fmt.Errorf("application: %w", direct), "typed-nil": (*sourceTypedError)(nil), "panic": direct}
+	for _, name := range []string{"success", "error", "wrapped", "typed-nil", "panic"} {
+		t.Run(name, func(t *testing.T) {
 			s, o, dir, m, parts := sourceBundleScene(t, 1, false)
 			admitted := m
 			admitted.Parts = slices.Clone(m.Parts)
@@ -360,16 +347,16 @@ func TestSourceExportScope(t *testing.T) {
 						_, err = tx.Abort()
 						sourceMust(t, err)
 						sourceChild(t, dir, "busy")
-						if row.name == "panic" {
-							panic(row.cause)
+						if name == "panic" {
+							panic(causes[name])
 						}
-						return row.cause
+						return causes[name]
 					})
 				}()
-				if row.name == "panic" {
-					sourceFailIf(t, panicValue != any(row.cause), "panic=%v", panicValue)
+				if name == "panic" {
+					sourceFailIf(t, panicValue != any(causes[name]), "panic=%v", panicValue)
 				} else {
-					sourceFailIf(t, panicValue != nil || any(got) != any(row.cause) || row.name == "success" && calls != 6, "export result=%v count=%d panic=%v", got, calls, panicValue)
+					sourceFailIf(t, panicValue != nil || any(got) != any(causes[name]) || name == "success" && calls != 6, "export result=%v count=%d panic=%v", got, calls, panicValue)
 				}
 				n, err := escaped.ReadAt(make([]byte, 1), 0)
 				sourceFailIf(t, n != 0 || any(err) != any(ErrUnavailableV1), "escaped read: %d/%v", n, err)

@@ -147,10 +147,7 @@ func TestSourceManifestRefusals(t *testing.T) {
 func TestSourcePartAndAssuranceRefusals(t *testing.T) {
 	for _, mode := range []string{"short", "extra", "reorder", "length", "unreadable", "full-extra", "conditional-short", "conditional-zero", "unknown-assurance", "digest-substitution", "nil-producer", "missing-callback", "nil-reader", "ignored-refusal", "nested-delivery"} {
 		t.Run(mode, func(t *testing.T) {
-			class := byte(3)
-			if mode == "short" || mode == "unreadable" || mode == "length" {
-				class = 1
-			}
+			class := map[bool]byte{false: 3, true: 1}[mode == "short" || mode == "unreadable" || mode == "length"]
 			_, o, dir, m, parts := sourceBundleScene(t, class, false)
 			switch mode {
 			case "full-extra":
@@ -599,6 +596,14 @@ func testSourceReleaseStage(t *testing.T, stage string) {
 		sourceOpen(t, store, sourceID(), narrow, ErrCapacityV1)
 		sourceFailIf(t, !bytes.Equal(record, sourceReadFile(t, filepath.Join(root, releaseFile))) || !bytes.Equal(backed, sourceReadFile(t, filepath.Join(root, p.name))), "over-limit reopen changed the release marker or backing")
 	}
+	if !backing && stage != "final-sync" {
+		extra, narrow, record := filepath.Join(root, fmt.Sprintf("%064x", 0)), limits, sourceReadFile(t, filepath.Join(root, releaseFile))
+		narrow.Files = 2
+		sourceMust(t, os.WriteFile(extra, []byte{1}, 0o600))
+		sourceOpen(t, store, sourceID(), narrow, ErrCapacityV1)
+		sourceFailIf(t, !bytes.Equal(record, sourceReadFile(t, filepath.Join(root, releaseFile))) || !bytes.Equal(sourceReadFile(t, extra), []byte{1}), "over-limit reopen changed the release marker or retained file")
+		sourceMust(t, os.Remove(extra))
+	}
 	fresh := sourceOpen(t, store, sourceID(), limits, nil)
 	var oversized SourceManifestV1
 	if spare {
@@ -840,7 +845,7 @@ func TestSourceCapacityBeforeCopy(t *testing.T) {
 			case "scans":
 				limits.Scans = 6*3 + 2*limits.Files + 1
 			}
-			_, o, dir := sourceScene(t, limits)
+			s, o, dir := sourceScene(t, limits)
 			want := ErrCapacityV1
 			root := filepath.Join(dir, sourceDirectory)
 			switch mode {
@@ -863,9 +868,7 @@ func TestSourceCapacityBeforeCopy(t *testing.T) {
 					}
 					path := filepath.Join(root, name)
 					sourceMust(t, os.WriteFile(path, nil, 0o600))
-					if mode == "census-bytes" {
-						sourceMust(t, os.Truncate(path, int64(limits.Bytes)+1))
-					}
+					sourceMust(t, os.Truncate(path, map[bool]int64{true: int64(limits.Bytes) + 1}[mode == "census-bytes"]))
 				}
 			case "files":
 				sourcePrepare(t, o, m, parts)
@@ -890,6 +893,13 @@ func TestSourceCapacityBeforeCopy(t *testing.T) {
 			}
 			before := sourceEntries(t, dir)
 			sourcePrepareRefusal(t, o, m, parts, want)
+			if mode == "census-files" {
+				s = sourceReopenStore(t, s, dir)
+				for files := uint64(8); files <= 9; files++ {
+					limits.Files, limits.Scans = files, 10
+					sourceOpen(t, s, sourceID(), limits, map[bool]error{true: ErrCapacityV1}[files == 8])
+				}
+			}
 			sourceFailIf(t, !reflect.DeepEqual(sourceEntries(t, dir), before), "admission changed existing source files")
 		})
 	}
