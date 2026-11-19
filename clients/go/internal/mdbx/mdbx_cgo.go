@@ -2749,7 +2749,7 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 	return s.applyUpdateOutcome(outcome, begun.txn, cleanupErr, oldRetained)
 }
 
-// newUpdateReaderV1 builds the Update-position Reader over txn exactly as Update does at base ed0e0d1b (mdbx_cgo.go:2291-2296 there).
+// newUpdateReaderV1 builds the Update-position Reader over txn exactly as Update does.
 func (s *Store) newUpdateReaderV1(txn *C.MDBX_txn) *Reader {
 	reader := newReader(txn, s.dbis)
 	reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config

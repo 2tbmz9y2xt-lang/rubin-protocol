@@ -4830,7 +4830,7 @@ func TestCloseFreezesIngressBeforePublishingCancellation(t *testing.T) {
 		_ = second.Body.Close()
 		t.Fatalf("post-cutoff pipelined request got a second response %d %s: the ingress cutoff does not cover an established keep-alive connection", second.StatusCode, body)
 		// ReadResponse maps a clean close on the status line to
-		// io.ErrUnexpectedEOF (net/http/response.go:161-167); ECONNRESET is the
+		// io.ErrUnexpectedEOF (net/http.ReadResponse); ECONNRESET is the
 		// tolerated variant on a platform that answers with an RST instead.
 	} else if !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatalf("post-cutoff read = %v, want connection termination", err)

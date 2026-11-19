@@ -242,9 +242,9 @@ func TestTreeRoleQualificationV1(t *testing.T) {
 }
 
 // treeRoleSizesV1 pins the inventoried layouts on the supported 64-bit
-// targets: contract line 141 (TreeChildV1 108, TreeNodeV1 48, UTXOValue 56),
-// line 142 (TreeEvidenceV1 72, reference 88), the S1 measured retention sizes,
-// and the retention components of line 139.
+// targets: (TreeChildV1 108, TreeNodeV1 48, UTXOValue 56), (TreeEvidenceV1 72,
+// reference 88), the S1 measured retention sizes,
+// and the retention components.
 func treeRoleSizesV1(t *testing.T) {
 	sizes := []struct {
 		name      string
@@ -820,7 +820,7 @@ func treeRoleCompletionRefusalsV1(t *testing.T, r *Reader, a *OperationAccount, 
 	}
 }
 
-// treeRoleCrossPairsV1 is line 110's "not the ordered two roles of one
+// treeRoleCrossPairsV1 is "not the ordered two roles of one
 // pair": both members authentic, ordered and Bound on this Reader, their pair
 // projections differing, for the active and the target pair. Each row changes
 // one projection component, except the source rows: a legal source change
@@ -1071,7 +1071,7 @@ func treeRoleImageAuthV1() TreeAuthorityV1 {
 	return treeRoleReplayV1(TreeSourceImageV1, TreeProgressCompleteV1, ReplayCursorV1{})
 }
 
-// treeRoleSourceRowsV1 is line 110's "without legal source": CURRENT
+// treeRoleSourceRowsV1 is "without legal source": CURRENT
 // requests covering every conjunct of the source check (the Replay conjunct on
 // both REPLAY bases), each breaking only that conjunct of an otherwise legal
 // base (active, GENESIS_REPLAY or IMAGE COMPLETE).

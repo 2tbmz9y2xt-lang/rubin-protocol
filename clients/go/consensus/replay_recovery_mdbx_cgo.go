@@ -21,7 +21,7 @@ import (
 // runs inside Store.UpdateTreeV1's plan callback, and a Batch it returns is committed through replayTreeOperation.
 
 const (
-	// replayRecoveryMinBytes is M, the identity, walk and plan terms of the entry lane (RE L27-36): 3,550,822.
+	// replayRecoveryMinBytes is M, the identity, walk and plan terms of the entry lane: 3,550,822.
 	replayRecoveryMinBytes = replayEntryIdentityBytes + replayEntryWalkBytes + replayEntryPlanBytes
 	// replayRecoveryIntentBytes is the intent planner's charge: three authority buffers, fixed bookkeeping and the clear
 	// planner's checked transfer sublimit (the archiveSelectedSideCharge precedent without its identity envelope and
@@ -85,7 +85,7 @@ func replayRecoveryRefusal(result, message string) error {
 	return &selectedSideFailure{result: result, cause: errors.New(message)}
 }
 
-// PlanRecoveryIntentMDBX plans the recovery intent (MP 2495-2503, 1553-1571): RECOVERY_REQUIRED with pending = the
+// PlanRecoveryIntentMDBX plans the recovery intent: RECOVERY_REQUIRED with pending = the
 // active profile, through the selected-side clear when a side is selected; no ReplayV1, target, generation or counter.
 // Any authority other than PRUNE_GC/STABLE or NONE/STABLE with a selected side is the empty plan. On a tree Reader
 // (replayTreeIntent) the domain is read from the TreeAuthorityV1 envelope: without a selected side the plan writes
@@ -159,7 +159,7 @@ func replayRecoveryAuthorityBatch(literal []byte, consulted []mdbx.ConsultedRow)
 }
 
 // PlanDirectReplayEntryMDBX plans the direct header-qualified replay-target entry on NONE/STABLE with no selected side
-// and a positive-height active identity (MP 1704-1706, 2618-2639). On a format-2 Reader it runs the merged inventory,
+// and a positive-height active identity. On a format-2 Reader it runs the merged inventory,
 // walk, selection, protection and entry plan with the inventory share replayInvLimit(limit) after the minimum share
 // replayRecoveryMinBytes. On a format-3 Reader, selected only by ReadStorageAuthorityV1's exact tree-Reader refusal, it
 // reads the TreeAuthorityV1 envelope, requires the minimum share replayRecoveryMin148Bytes (M148), and runs the 148
@@ -247,7 +247,7 @@ func (o *ReplayEntryOwnerV1) replayRecoveryGates(reader *mdbx.Reader, limit uint
 	return a, err != nil, err
 }
 
-// PlanReplayTargetConversionMDBX plans the target-to-GENERATION plan change (MP 2508-2512) for a PLAN_CHANGE report
+// PlanReplayTargetConversionMDBX plans the target-to-GENERATION plan change for a PLAN_CHANGE report
 // returned by RecomputeReplayTargetMDBX on this same Reader; any other report is the empty Batch and nil. It reads
 // nothing: PRUNE_GC/RECOVERY_REQUIRED, pending = ReplayV1.target_profile, ReplayV1 cleared and CleanupV1 exactly
 // {GENERATION(target_generation_id)} on format 2; no row is deleted, no counter written and no target index row touched.
@@ -292,7 +292,7 @@ type replayRecompute struct {
 	activeN    uint64 // the active walk's end count: H+1, 1 for an established Fork F anchor, 0 for an anchor-less empty index
 }
 
-// RecomputeReplayTargetMDBX is the pre-activation recomputation (MP 2789-2803, 2873-2916) at REPLAY with the cursor
+// RecomputeReplayTargetMDBX is the pre-activation recomputation at REPLAY with the cursor
 // APPLIED at the target height: the active index walk, then the target index stream through the cursor, then
 // stitching and selection over the complete candidate set, then the fresh-best-tip and published-comparand
 // classification and one ProtectV1. It writes nothing and returns no Batch; any other authority is NOT_APPLICABLE. On a

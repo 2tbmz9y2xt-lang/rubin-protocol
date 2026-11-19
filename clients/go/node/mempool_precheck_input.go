@@ -159,8 +159,8 @@ func precheckP2PKWitnessItemValid(w *consensus.WitnessItem, entry consensus.Utxo
 // precheckP2PKInputStructurallyValid returns true iff the input is
 // structurally valid for the cheap P2PK precheck. Wave-4 guards mirror
 // terminal-reject parse-time checks at clients/go/consensus/utxo_basic.go
-// for non-empty ScriptSig (193-194), out-of-range Sequence (196-197),
-// and coinbase-prevout marker on non-coinbase (199-200). Returns false
+// for non-empty ScriptSig, out-of-range Sequence,
+// and coinbase-prevout marker on non-coinbase. Returns false
 // on any structural defect so the caller defers to the slow path.
 func precheckP2PKInputStructurallyValid(in consensus.TxInput) bool {
 	var zeroTxid [32]byte

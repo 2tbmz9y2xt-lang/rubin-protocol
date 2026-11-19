@@ -1034,7 +1034,7 @@ func TestReplayRecomputeTargetClasses(t *testing.T) {
 	// R53b at 0 (structural-only): the context GenesisHash names a zero-target header and the active index is empty.
 	w = newReplayWorld(t, -1)
 	gh, ghash := zeroTargetHeader([32]byte{}, w.lastTime)
-	w.genesis.GenesisHash, w.genesis.Published = ghash, nil // an identity-only context (RE L125-127)
+	w.genesis.GenesisHash, w.genesis.Published = ghash, nil // an identity-only context
 	zh, zhashes := replayChain(t, ghash, w.lastTime, 4)
 	zt := recoveryTarget{headers: append([][116]byte{gh}, zh...), hashes: append([][32]byte{ghash}, zhashes...)}
 	w.seedTarget(zt, nil)
@@ -1165,7 +1165,7 @@ func TestPlanDirectReplayEntryRefusals(t *testing.T) {
 	refused(defect(), &replayView{inv: HeaderCandidateInventoryV1{Status: HeaderCandidateIncompleteV1}}, replayEntryRecovery, "R41 Incomplete with a D1-D9 defect")
 	v := recoveryEmpty()
 	plan, release, err = recoveryDirect(defect(), v, mdbx.MaxOperationDataBytes, false)
-	// R41b: a decided D1/D3-D9 refusal above height 0 is returned with the step cleared (RE L651-664, L677-716).
+	// R41b: a decided D1/D3-D9 refusal above height 0 is returned with the step cleared.
 	logicalMDBXAssert(t, err != nil && plan.ReadResource == "" && recoveryClass(err, plan.ReadResource) == selectedSideIntegrity && release == nil && len(v.versions) == 0 && len(plan.Batch.Mutations) == 0, "R41b: %+v %v", plan, err)
 	exhausted := func() *replayWorld {
 		w := newReplayWorld(t, 5)
@@ -1260,7 +1260,7 @@ func TestReplayRecomputeInventoryOrder(t *testing.T) {
 	view = &replayView{inv: bad}
 	rep, _, err, _ = w2.recompute(view, mdbx.MaxOperationDataBytes, false)
 	logicalMDBXAssert(t, err != nil && recoveryClass(err, rep.ReadResource) == selectedSideInvariant && rep.Report == 0 && len(view.versions) == 0, "R29c CC-7: %+v %v", rep, err)
-	// R29c: every other producer violation the merged check rejects (RE L310-328).
+	// R29c: every other producer violation the merged check rejects.
 	over := replayComplete([][32]byte{{1}, {2}, {3}, {4}}, nil)
 	partial := replayComplete([][32]byte{{7}}, nil)
 	partial.Status = HeaderCandidateIncompleteV1
