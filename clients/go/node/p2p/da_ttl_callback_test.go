@@ -211,8 +211,8 @@ type detachedReorgFixture struct {
 	branch              [][]byte
 }
 
-// mineDetachedReorgFixture applies the common chain and the sink DA block to sink and mines branchLen unapplied source blocks; with spendChunkInput the first one spends the chunk's input, so the requeue retains only the commit.
-func mineDetachedReorgFixture(t *testing.T, source, sink *testHarness, branchLen int, spendChunkInput bool) detachedReorgFixture {
+// mineDetachedReorgFixture applies the common chain to sink, runs beforeOld, applies the sink DA block and mines branchLen unapplied source blocks; with spendChunkInput the first one spends the chunk's input, so the requeue retains only the commit.
+func mineDetachedReorgFixture(t *testing.T, source, sink *testHarness, branchLen int, spendChunkInput bool, beforeOld func()) detachedReorgFixture {
 	t.Helper()
 	signer := mustP2PMLDSA87Keypair(t)
 	mineAddress, timestamp := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes()), uint64(1_778_000_000)
@@ -269,6 +269,7 @@ func mineDetachedReorgFixture(t *testing.T, source, sink *testHarness, branchLen
 		DAID: daID, PayloadBytes: uint64(len(payload)), CommitTx: commitRaw,
 		Chunks: []node.CompleteDASetChunkCandidate{{Index: 0, Tx: chunkRaw}},
 	}}
+	beforeOld()
 	oldMiner, err := node.NewMiner(sink.chainState, sink.blockStore, sink.syncEngine, minerConfig(provider, 1))
 	must(t, err, "NewMiner(old)")
 	old, err := oldMiner.MineOne(context.Background(), nil)
@@ -305,7 +306,7 @@ func mineDetachedReorgFixture(t *testing.T, source, sink *testHarness, branchLen
 // detachedReorgHookRetains reports whether a two-block reorganization retains the sink DA block's commit via the hook.
 func detachedReorgHookRetains(t *testing.T, source, sink *testHarness) bool {
 	t.Helper()
-	fixture := mineDetachedReorgFixture(t, source, sink, 2, false)
+	fixture := mineDetachedReorgFixture(t, source, sink, 2, false, func() {})
 	for i, block := range fixture.branch {
 		_, err := sink.syncEngine.ApplyBlockWithReorg(block, nil)
 		must(t, err, fmt.Sprintf("apply branch %d", i))
@@ -316,19 +317,19 @@ func detachedReorgHookRetains(t *testing.T, source, sink *testHarness) bool {
 	return result.Disposition == node.DAAdmissionDuplicate
 }
 
-// requireCommitRetained requires LookupRetainedTx, which changes nothing, to report the commit's retention as want.
-func requireCommitRetained(t *testing.T, h *testHarness, fixture detachedReorgFixture, want bool, step string) {
+// requireRetainedTx requires LookupRetainedTx, which changes nothing, to report raw's retention as want.
+func requireRetainedTx(t *testing.T, h *testHarness, raw []byte, want bool, step string) {
 	t.Helper()
-	_, txid, _, _, err := consensus.ParseTx(fixture.commitRaw)
-	must(t, err, "ParseTx(commit)")
-	_, present, err := h.syncEngine.DARelayState().LookupRetainedTx(txid)
-	require(t, err == nil && present == want, "%s: commit present=%v err=%v, want present=%v", step, present, err, want)
+	_, present, err := h.syncEngine.DARelayState().LookupRetainedTx(mustTxID(t, raw))
+	require(t, err == nil && present == want, "%s: present=%v err=%v, want present=%v", step, present, err, want)
 }
 
-// TestDATTLCallbackEndToEndReorgRequeueNotDecreased: on a peer's lease path the requeued commit, created at count 3 by a winning reorganization, survives the next two counted publications and expires at the third.
+// TestDATTLCallbackEndToEndReorgRequeueNotDecreased: on a peer's lease path a winning reorganization decreases once a State B commit that the sink DA block's publication left at count 2 (retained right after it, expired at the next counted publication), and the requeued commit it creates at count 3 survives the next two counted publications and expires at the third.
 func TestDATTLCallbackEndToEndReorgRequeueNotDecreased(t *testing.T) {
 	source, sink := newTestHarness(t, 1, "127.0.0.1:0", nil), newTestHarness(t, 1, "127.0.0.1:0", nil)
-	fixture := mineDetachedReorgFixture(t, source, sink, 5, true)
+	f := newDAIngressFixture(t, sink)
+	independent := f.commit(daRelayTestID(0xd9), 2)
+	fixture := mineDetachedReorgFixture(t, source, sink, 5, true, func() { f.admit(independent, "127.0.0.1:19111") })
 	p := testPeerForService(sink.service, "remote", 3)
 	holdWorkLease(t, sink.service)
 	relay := func(i int) {
@@ -343,17 +344,15 @@ func TestDATTLCallbackEndToEndReorgRequeueNotDecreased(t *testing.T) {
 		relay(next)
 		next++
 	}
-	requireCommitRetained(t, sink, fixture, true, "requeued by the reorganization")
-	_, chunkTxid, _, _, err := consensus.ParseTx(fixture.chunkRaw)
-	must(t, err, "ParseTx(chunk)")
-	_, chunkPresent, err := sink.syncEngine.DARelayState().LookupRetainedTx(chunkTxid)
-	require(t, err == nil && !chunkPresent, "the chunk whose input the branch spent was retained: err=%v", err)
-	for i := range 2 {
-		relay(next + i)
-	}
-	requireCommitRetained(t, sink, fixture, true, "count 1 after two counted publications following the requeue")
+	requireRetainedTx(t, sink, independent, true, "the State B commit at count 2 decreased once by the reorganization")
+	requireRetainedTx(t, sink, fixture.commitRaw, true, "the commit requeued by the reorganization")
+	requireRetainedTx(t, sink, fixture.chunkRaw, false, "the chunk whose input the branch spent")
+	relay(next)
+	requireRetainedTx(t, sink, independent, false, "the State B commit at count 1 expired at the first counted publication after the reorganization")
+	relay(next + 1)
+	requireRetainedTx(t, sink, fixture.commitRaw, true, "the requeued commit at count 1 after two counted publications following the requeue")
 	relay(next + 2)
-	requireCommitRetained(t, sink, fixture, false, "expired at the third counted publication following the requeue")
+	requireRetainedTx(t, sink, fixture.commitRaw, false, "the requeued commit expired at the third counted publication following the requeue")
 }
 
 // TestDATTLCallbackLaterConstructionKeepsFirstHook: a later S2 becomes the binding while the detached-reorg hook stays with S1, so with S1 CLOSED the disconnected commit is not retained; with S1 OPEN it is.
