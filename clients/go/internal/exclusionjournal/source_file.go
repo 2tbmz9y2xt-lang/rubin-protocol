@@ -257,19 +257,21 @@ func (o *SourceOwnerV1) censusFile(r *sourceRoot, name string, used *sourceUsage
 	return nil
 }
 
-// openSourceFile opens the regular file named by name without blocking. A failed name observation returns unobserved,
-// or its own error when unobserved is nil; a failed open returns ErrUnavailableV1 and an opened object that is not the
-// named regular file ErrIntegrityV1.
+// openSourceFile opens the regular file named by name without blocking. A failed name observation returns unobserved, or its
+// own error when unobserved is nil; a named object that is not a regular file or another opened object ErrIntegrityV1; a failed open ErrUnavailableV1.
 func openSourceFile(r *sourceRoot, name string, unobserved error) (*os.File, error) {
 	named, err := r.Lstat(name)
 	if err != nil {
 		return nil, cmp.Or(unobserved, err)
 	}
+	if !named.Mode().IsRegular() {
+		return nil, ErrIntegrityV1
+	}
 	f, err := r.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, ErrUnavailableV1
 	}
-	if info, _ := f.Stat(); !os.SameFile(named, info) || !info.Mode().IsRegular() {
+	if info, _ := f.Stat(); !os.SameFile(named, info) {
 		_ = f.Close()
 		return nil, ErrIntegrityV1
 	}

@@ -84,12 +84,8 @@ func TestSourceCodecCorpus(t *testing.T) {
 			o = sourceReopen(t, s, dir, sourceLimits())
 			refuse := func(b []byte) {
 				sourceMust(t, os.WriteFile(path, b, 0o600))
-				calls := 0
-				sourceAccount(t, func(a *mdbx.OperationAccount) error {
-					err := o.WithCapturedSourceV1(a, m, func(SourcePartV1) error { calls++; return nil })
-					sourceFailIf(t, any(err) != any(ErrIntegrityV1) || calls != 0 || !bytes.Equal(sourceReadFile(t, path), b), "malformed source: length=%d error=%v calls=%d", len(b), err, calls)
-					return nil
-				})
+				sourceReadRefusal(t, o, m, ErrIntegrityV1, fmt.Sprintf("malformed source length %d", len(b)))
+				sourceFailIf(t, !bytes.Equal(sourceReadFile(t, path), b), "malformed source length %d changed", len(b))
 			}
 			for n := range image {
 				refuse(image[:n])
@@ -377,14 +373,13 @@ func testSourceReleaseScratchLink(t *testing.T) {
 	sourceReleaseResult(t, o, p, true, cause)
 	sourceMust(t, os.Rename(marker, scratch))
 	record := sourceReadFile(t, scratch)
-	sourceMust(t, os.Symlink(releaseScratch, marker))
-	sourceMust(t, s.Close())
-	s, err := policycontrol.Open(dir, sourceID())
-	sourceMust(t, err)
-	defer s.Close()
-	sourceOpen(t, s, sourceID(), sourceLimits(), ErrIntegrityV1)
-	sourceFailIf(t, !bytes.Equal(sourceReadFile(t, path), original) || !bytes.Equal(sourceReadFile(t, scratch), record), "refused marker changed backing or scratch")
-	sourceMust(t, os.Remove(marker))
+	s = sourceReopenStore(t, s, dir)
+	for _, target := range []string{releaseScratch, "absent"} {
+		sourceMust(t, os.Symlink(target, marker))
+		sourceOpen(t, s, sourceID(), sourceLimits(), ErrIntegrityV1)
+		sourceFailIf(t, !bytes.Equal(sourceReadFile(t, path), original) || !bytes.Equal(sourceReadFile(t, scratch), record), "marker link to %s changed backing or scratch", target)
+		sourceMust(t, os.Remove(marker))
+	}
 	sourceMust(t, os.Rename(scratch, marker))
 	fresh := sourceOpen(t, s, sourceID(), sourceLimits(), nil)
 	sourceReleaseResult(t, fresh, nil, true, nil)
@@ -432,11 +427,7 @@ func testSourceReleaseBackingReappears(t *testing.T) {
 	sourceReleaseResult(t, o, p, true, ErrIdentityV1)
 	unchanged([]byte{1}, "retry with a differing marker")
 	sourceMust(t, os.WriteFile(marker, record, 0o600))
-	sourceMust(t, s.Close())
-	s, err = policycontrol.Open(dir, sourceID())
-	sourceMust(t, err)
-	defer s.Close()
-	sourceOpen(t, s, sourceID(), sourceLimits(), ErrIdentityV1)
+	sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), ErrIdentityV1)
 	unchanged(record, "fresh open")
 }
 
@@ -594,8 +585,14 @@ func testSourceReleaseIncarnation(t *testing.T, mode string) {
 		r, err := o.root(false)
 		sourceMust(t, err)
 		defer r.Close()
-		_, err = openSourceFile(r, p.name, ErrUnavailableV1)
-		sourceWantError(t, err, ErrIntegrityV1, "open through a link at the backing name")
+		sourceMust(t, os.Symlink("absent", filepath.Join(root, "dangling")))
+		if os.Geteuid() != 0 {
+			sourceMust(t, os.WriteFile(filepath.Join(root, "unreadable"), nil, 0))
+		}
+		for name, want := range map[string]error{p.name: ErrIntegrityV1, "dangling": ErrIntegrityV1, "unreadable": ErrUnavailableV1, "absent": ErrUnavailableV1} {
+			_, err = openSourceFile(r, name, ErrUnavailableV1)
+			sourceWantError(t, err, want, "open of "+name)
+		}
 	}
 }
 
@@ -639,11 +636,7 @@ func testSourceReleaseStage(t *testing.T, stage string) {
 		overSize, err := oversized.SizeV1()
 		sourceFailIf(t, err != nil || overSize != limits.Bytes+1, "oversized manifest: %d/%v", overSize, err)
 		sourcePrepareRefusal(t, fresh, oversized, parts, ErrBusyV1)
-		sourceAccount(t, func(a *mdbx.OperationAccount) error {
-			err := fresh.WithCapturedSourceV1(a, m, func(SourcePartV1) error { t.Fatal("release-only backing was exported"); return nil })
-			sourceWantError(t, err, ErrBusyV1, "release-only readback")
-			return nil
-		})
+		sourceReadRefusal(t, fresh, m, ErrBusyV1, "release-only readback")
 	}
 	sourcePresence(t, root, p.name, backing)
 	sourcePresence(t, root, releaseFile, visible && stage != "final-sync")
@@ -723,10 +716,7 @@ func sourceReleaseResult(t *testing.T, o *SourceOwnerV1, p *PreparedSourceV1, pr
 func TestSourceReopenRequiresDirectorySync(t *testing.T) {
 	s, o, dir, m, parts := sourceBundleScene(t, 1, false)
 	sourcePrepare(t, o, m, parts)
-	sourceMust(t, s.Close())
-	opened, err := policycontrol.Open(dir, sourceID())
-	sourceMust(t, err)
-	defer opened.Close()
+	opened := sourceReopenStore(t, s, dir)
 	child, err := os.Stat(filepath.Join(dir, sourceDirectory))
 	sourceMust(t, err)
 	saved := realSourceFS
@@ -1164,11 +1154,7 @@ func TestSourceStagingRestartAndAmbiguousRename(t *testing.T) {
 			}
 			fresh := sourceReopen(t, s, dir, sourceLimits())
 			if mode == "staging" {
-				sourceAccount(t, func(a *mdbx.OperationAccount) error {
-					err := fresh.WithCapturedSourceV1(a, m, func(SourcePartV1) error { t.Fatal("staging name was accepted as source"); return nil })
-					sourceFailIf(t, any(err) != any(ErrBusyV1), "staging owner: %v", err)
-					return nil
-				})
+				sourceReadRefusal(t, fresh, m, ErrBusyV1, "staging owner readback")
 			}
 			sourcePrepare(t, fresh, m, parts)
 			sourceRead(t, fresh, m, parts)

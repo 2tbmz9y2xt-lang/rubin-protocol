@@ -78,13 +78,18 @@ func sourceScene(t *testing.T, limits SourceLimitsV1) (*policycontrol.Store, *So
 	return s, sourceOpen(t, s, sourceID(), limits, nil), dir
 }
 
-func sourceReopen(t *testing.T, old *policycontrol.Store, dir string, limits SourceLimitsV1) *SourceOwnerV1 {
+func sourceReopenStore(t *testing.T, old *policycontrol.Store, dir string) *policycontrol.Store {
 	t.Helper()
 	sourceMust(t, old.Close())
 	s, err := policycontrol.Open(dir, sourceID())
 	sourceMust(t, err)
 	t.Cleanup(func() { _ = s.Close() })
-	return sourceOpen(t, s, sourceID(), limits, nil)
+	return s
+}
+
+func sourceReopen(t *testing.T, old *policycontrol.Store, dir string, limits SourceLimitsV1) *SourceOwnerV1 {
+	t.Helper()
+	return sourceOpen(t, sourceReopenStore(t, old, dir), sourceID(), limits, nil)
 }
 
 func sourceBundle(class byte, conditional bool) (SourceManifestV1, [][]byte) {
@@ -187,6 +192,14 @@ func sourceRead(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, want [][]byt
 	sourceFailIf(t, i != len(want), "part count=%d, want %d", i, len(want))
 }
 
+func sourceReadRefusal(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, want error, action string) {
+	t.Helper()
+	sourceAccount(t, func(a *mdbx.OperationAccount) error {
+		sourceWantError(t, o.WithCapturedSourceV1(a, m, func(SourcePartV1) error { t.Fatalf("%s: refused source was visited", action); return nil }), want, action)
+		return nil
+	})
+}
+
 func sourceCheckPart(t *testing.T, part SourcePartV1, i int, kinds []byte, want [][]byte) []byte {
 	t.Helper()
 	sourceFailIf(t, i >= len(want), "extra source part")
@@ -237,6 +250,7 @@ func TestSourceDurableRoundTrip(t *testing.T) {
 		for _, conditional := range []bool{false, true} {
 			t.Run(fmt.Sprintf("class%d/conditional%v", class, conditional), func(t *testing.T) {
 				s, o, dir, m, parts := sourceBundleScene(t, class, conditional)
+				sourceReadRefusal(t, o, m, ErrUnavailableV1, "unprepared source readback")
 				generations := []string{t.TempDir(), t.TempDir()}
 				for _, path := range generations {
 					sourceMust(t, os.WriteFile(filepath.Join(path, "body"), parts[0], 0o600))
