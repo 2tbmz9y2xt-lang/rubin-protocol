@@ -2058,15 +2058,22 @@ func TestUpdatePlanSurfaceOwnership(t *testing.T) {
 	}
 	// The raw extension remains Go-only admission; inspect its complete reachable
 	// control closure without excluding the new ordinary source from package inventory.
-	raw, err := os.ReadFile("obsolete_raw_cgo.go")
-	mustEnvironment(t, err)
-	rawFile, err := parser.ParseFile(fset, "obsolete_raw_cgo.go", raw, 0)
-	mustEnvironment(t, err)
+	var rawDecls []ast.Decl
+	for _, name := range []string{"obsolete_raw_cgo.go", "tree_stream_cgo.go"} {
+		raw, err := os.ReadFile(name)
+		mustEnvironment(t, err)
+		rawFile, err := parser.ParseFile(fset, name, raw, 0)
+		mustEnvironment(t, err)
+		rawDecls = append(rawDecls, rawFile.Decls...)
+	}
 	owners := map[string]bool{}
-	for _, name := range []string{"updateOwnedObsolete", "obsoleteWitnesses", "obsoleteAdmitRows", "obsoleteRowCurrent", "obsoleteCovered", "obsoleteCharge", "obsoleteCompileRows", "updateObsoleteScope", "obsoleteDomainOrdered", "obsoleteCoalesce", "obsoleteMergeable", "obsoleteCoalescePoints", "obsoleteRetainControls", "obsoleteControlKeys", "obsoleteControlKey", "obsoleteContains"} {
+	for _, name := range []string{
+		"updateOwnedObsolete", "obsoleteWitnesses", "obsoleteAdmitRows", "obsoleteRowCurrent", "obsoleteCovered", "obsoleteCharge", "obsoleteCompileRows", "updateObsoleteScope", "obsoleteDomainOrdered", "obsoleteCoalesce", "obsoleteMergeable", "obsoleteCoalescePoints", "obsoleteRetainControls", "obsoleteControlKeys", "obsoleteControlKey", "obsoleteContains", "obsoleteUniqueWitnesses", "obsoleteDBI", "obsoleteMutationCmp", "obsoleteRowCmp", "obsoleteDomainCmp", "obsoletePointCmp", "obsoleteScopeArrays", "obsoleteWitnessPoints", "obsoleteExactCopy",
+		"treePrewriteBytesV1", "treeScopeBytesV1", "treeWitnessChargeV1", "treeScopeRowsV1", "scopeCompileV1", "admitScopedV1", "treeScopePresentV1", "treeScopeShapeV1", "treeScopeAdmitV1", "treeScopeProvenanceV1", "treeEmptyOperationV1", "treeAdmitSlotV1",
+	} {
 		owners[name] = false
 	}
-	for _, declaration := range rawFile.Decls {
+	for _, declaration := range rawDecls {
 		function, ok := declaration.(*ast.FuncDecl)
 		if !ok {
 			continue
@@ -4125,8 +4132,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|newUpdateReaderV1:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:s.canonicalOwnerVerified = true|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, s.format.Load() != 3|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [9]C.MDBX_dbi{}, err|poison:s.databaseID = [32]byte{}|consumeFailure:s.databaseID = [32]byte{}|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [9]C.MDBX_dbi{}|consume:s.databaseID = [32]byte{}|consume:s.state = storeCLOSED"
-	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch:s.canonicalOwnerVerified = true|entry_inventory_equal_cgo.go:equalV1:r.format, r.databaseID, r.maxKey = original.format, original.databaseID, s.maxKey|entry_inventory_equal_cgo.go:equalV1:*right = entryStreamV1{}|entry_inventory_visit_cgo.go:ownerV1:*row = EntryInventoryRowV1{Source: 28, Artifact: 5, Role: sourceRole, Generation: g, Hash: primary.Hash}|entry_inventory_visit_cgo.go:priorOwnerV1:*row = EntryInventoryRowV1{Source: 17, Artifact: 5, Generation: g, Hash: primary.Hash}|entry_inventory_visit_cgo.go:reverseV1:*row = EntryInventoryRowV1{Source: 17, Artifact: 5, Generation: primary.Generation, Height: primary.Height, Hash: primary.Hash}|mdbx_cgo.go:Reader-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:newUpdateReaderV1|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:poison|mdbx_cgo.go:consumeFailure|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
+	wantStoreWrites := "updateNativeLargeEqual:before.format, before.databaseID, before.treeConfig = 3, scopes[0].databaseID, scopes[0].config|updateNativeLargeEqual:after.format, after.databaseID, after.treeConfig = 3, scopes[0].databaseID, scopes[0].config|applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|newUpdateReaderV1:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:s.canonicalOwnerVerified = true|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, s.format.Load() != 3|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [9]C.MDBX_dbi{}, err|poison:s.databaseID = [32]byte{}|consumeFailure:s.databaseID = [32]byte{}|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [9]C.MDBX_dbi{}|consume:s.databaseID = [32]byte{}|consume:s.state = storeCLOSED"
+	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch:s.canonicalOwnerVerified = true|entry_inventory_equal_cgo.go:equalV1:r.format, r.databaseID, r.maxKey = original.format, original.databaseID, s.maxKey|entry_inventory_equal_cgo.go:equalV1:*right = entryStreamV1{}|entry_inventory_visit_cgo.go:ownerV1:*row = EntryInventoryRowV1{Source: 28, Artifact: 5, Role: sourceRole, Generation: g, Hash: primary.Hash}|entry_inventory_visit_cgo.go:priorOwnerV1:*row = EntryInventoryRowV1{Source: 17, Artifact: 5, Generation: g, Hash: primary.Hash}|entry_inventory_visit_cgo.go:reverseV1:*row = EntryInventoryRowV1{Source: 17, Artifact: 5, Generation: primary.Generation, Height: primary.Height, Hash: primary.Hash}|mdbx_cgo.go:Reader-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:updateNativeLargeEqual|mdbx_cgo.go:updateNativeLargeEqual|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:newUpdateReaderV1|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:poison|mdbx_cgo.go:consumeFailure|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume|obsolete_raw_cgo.go:Store-unsafe-escape|tree_stream_cgo.go:scopeCompileV1:scope.databaseID, scope.config = e.reader.databaseID, e.reader.treeConfig"
 	if strings.Join(storeWrites, "|") != wantStoreWrites || strings.Join(packageStoreWriteOwners, "|") != wantStoreOwners {
 		t.Fatalf("Store publication/clear ownership drifted: %v / %v", storeWrites, packageStoreWriteOwners)
 	}

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unsafe"
 )
 
 // The raw native owner distinguishes metadata-only mismatches from payload use.
@@ -7440,4 +7441,1776 @@ func TestCtxTreeSlotOverlapV1(t *testing.T) {
 			ctxTreeOpen(t, s)
 		})
 	}
+}
+
+// psfScene is a format-3 Store with generation 9 and 8 node families, both root bindings and one stored body.
+type psfScene struct {
+	s    *Store
+	path string
+	o    *OperationReservationOwner
+	body [32]byte
+}
+
+// key is an independent copy: the scene struct holds Go pointers and cannot back a cgo argument.
+func (sc *psfScene) key() []byte { return bytes.Clone(sc.body[:]) }
+
+var psfBodyValue = bytes.Repeat([]byte{0xb7}, 1000)
+
+func psfNew(t *testing.T) *psfScene {
+	t.Helper()
+	s, path, o := tsNew(t)
+	// Releases a retained thread or close-blocked Store left by a failed assertion; no-op when OPEN or CLOSED.
+	t.Cleanup(func() { mustEnvironment(t, fixtureLargeRelease(s)) })
+	for _, g := range []uint64{8, 9} {
+		for _, row := range obsoleteTreeFamily(g) {
+			treeNativeSeed(t, s, 8, row.key, row.value)
+		}
+		treeNativeSeed(t, s, 0, tsRootKey(g), []byte{0xee, byte(g)})
+	}
+	scene := &psfScene{s: s, path: path, o: o, body: [32]byte{0xb0, 1}}
+	treeNativeSeed(t, s, 4, scene.key(), psfBodyValue)
+	return scene
+}
+
+// psfAuthority is the complete TreeAuthority literal target committed with the raw deletes.
+func psfAuthority(t *testing.T) Mutation {
+	t.Helper()
+	a := TreeAuthorityV1{Authority: StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 6, Phase: 1, Lifecycle: 1}, LagGenerationID: 2}
+	authority, err := a.Encode()
+	mustEnvironment(t, err)
+	return Mutation{DBI: TreeSchemaV1DBIs()[0], Key: []byte{2}, BeforePresent: true, AfterKind: 2, Literal: authority}
+}
+
+// psfBuild deletes generation 9's nodes and root binding under their witnesses with the body selector.
+func (sc *psfScene) build(t *testing.T) func(*Reader) TreeOperationV1 {
+	return func(r *Reader) TreeOperationV1 {
+		nodes, err := r.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1440)
+		mustEnvironment(t, err)
+		root, err := r.ObsoleteGenerationPageV1(9, ObsoleteRootV1, nil, 1)
+		mustEnvironment(t, err)
+		if len(nodes.Rows) != 3 || len(root.Rows) != 1 {
+			t.Fatalf("scene pages nodes%d root%d", len(nodes.Rows), len(root.Rows))
+		}
+		return TreeOperationV1{Pair: TreePairV1{
+			Mutations:         []Mutation{psfAuthority(t)},
+			ObsoleteDeletes:   append(append([]ObsoleteRowV1(nil), root.Rows...), nodes.Rows...),
+			ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness, root.Witness},
+			LargeConsulted:    []LargeImageSelectorV1{{Kind: LargeImageBlockBodyV1, Hash: sc.body}},
+		}}
+	}
+}
+
+func (sc *psfScene) run(t *testing.T, o *OperationReservationOwner) tsResult {
+	t.Helper()
+	return psRun(t, sc.s, o, LaneOperation, sc.build(t))
+}
+
+// image asserts the generation-9 raw rows (absent when deleted), the untouched generation-8 rows, the body and the
+// TreeAuthority row (psfAuthority's literal when deleted, else the scene's initial literal).
+func (sc *psfScene) image(t *testing.T, s *Store, deleted bool) {
+	t.Helper()
+	psfAuthorityRow(t, s, deleted)
+	for _, row := range obsoleteTreeFamily(9) {
+		want := row.value
+		if deleted {
+			want = nil
+		}
+		psfRaw(t, s, 8, row.key, want)
+	}
+	for _, row := range obsoleteTreeFamily(8) {
+		psfRaw(t, s, 8, row.key, row.value)
+	}
+	root9 := []byte{0xee, 9}
+	if deleted {
+		root9 = nil
+	}
+	psfRaw(t, s, 0, tsRootKey(9), root9)
+	psfRaw(t, s, 0, tsRootKey(8), []byte{0xee, 8})
+	psfRaw(t, s, 4, sc.key(), psfBodyValue)
+}
+
+// crossedImage asserts the scene's rows with generation 9's nodes and root deleted when deleted, the authority
+// target written, and the one drifted row at rank/key holding want (nil when the drift deleted it).
+func (sc *psfScene) crossedImage(t *testing.T, s *Store, deleted bool, rank uint8, key, want []byte) {
+	t.Helper()
+	type row struct {
+		rank       uint8
+		key, value []byte
+	}
+	root9 := []byte{0xee, 9}
+	if deleted {
+		root9 = nil
+	}
+	rows := []row{{0, tsRootKey(9), root9}, {0, tsRootKey(8), []byte{0xee, 8}}, {4, sc.key(), psfBodyValue}}
+	for _, node := range obsoleteTreeFamily(9) {
+		value := node.value
+		if deleted {
+			value = nil
+		}
+		rows = append(rows, row{8, node.key, value})
+	}
+	for _, node := range obsoleteTreeFamily(8) {
+		rows = append(rows, row{8, node.key, node.value})
+	}
+	rows = append(rows, row{rank, key, want})
+	for i, r := range rows[:len(rows)-1] {
+		if r.rank == rank && bytes.Equal(r.key, key) {
+			rows[i].value = want
+		}
+	}
+	for _, r := range rows {
+		psfRaw(t, s, r.rank, r.key, r.value)
+	}
+	tsRead(t, s, TreeSchemaV1DBIs()[0], []byte{2}, psfAuthority(t).Literal)
+}
+
+// psfAuthorityRow asserts the TreeAuthority row: psfAuthority's literal when written, else tsEntry's.
+func psfAuthorityRow(t *testing.T, s *Store, written bool) {
+	t.Helper()
+	want := tsEntry(t).Pair.Mutations[0].Literal
+	if written {
+		want = psfAuthority(t).Literal
+	}
+	psfRaw(t, s, 0, []byte{2}, want)
+}
+
+// psfCrossed asserts a possibly crossed commit: truth in the public result and in the CommitError itself, and the
+// fixture commit hook's ENOSPC as the commit cause. It returns the readback cause.
+func psfCrossed(t *testing.T, r tsResult, truth CommitTruth) error {
+	t.Helper()
+	r.tuple(t, truth, 3, -1)
+	commit, ok := r.err.(*CommitError)
+	if !ok || commit.Truth != truth {
+		t.Fatalf("scope strict truth differs: %T %v", r.err, r.err)
+	}
+	treeNativeError(t, commit.Cause, "update", "Capacity", 28, "error 28", nil)
+	return commit.ReadbackCause
+}
+
+// psfCrossedClean is psfCrossed whose complete readback found its image with a nil readback cause.
+func psfCrossedClean(t *testing.T, r tsResult, truth CommitTruth) {
+	t.Helper()
+	if cause := psfCrossed(t, r, truth); cause != nil {
+		t.Fatalf("scope strict truth differs: readback cause %v", cause)
+	}
+}
+
+// psfCrossedUnknown asserts a possibly crossed commit whose complete readback found neither image.
+func psfCrossedUnknown(t *testing.T, r tsResult) {
+	t.Helper()
+	psfCrossedClean(t, r, CommitTruthUnknown)
+}
+
+// psfCompared runs run under the pair-read observation of s and returns its native payload comparison count.
+func psfCompared(t *testing.T, s *Store, run func()) uint64 {
+	t.Helper()
+	observed, err := FixturePairReadObservation(s, func(uint32) {}, run)
+	mustEnvironment(t, err)
+	return observed.Comparisons
+}
+
+// psfWindowRefused runs the scene plan on a fresh scene whose account lacks one byte of the envelope f plus
+// the residual window, so it refuses before the scoped streams read, and returns its payload comparison count.
+func psfWindowRefused(t *testing.T, f, window uint64) uint64 {
+	t.Helper()
+	sc := psfNew(t)
+	var r tsResult
+	compared := psfCompared(t, sc.s, func() { r = sc.run(t, reservationFilled(t, psPageGrant+f+window-1)) })
+	if any(r.err) != any(errOperationReservationCapacity) {
+		t.Fatalf("scope operand window not funded: window refusal %v", r.err)
+	}
+	return compared
+}
+
+// psfBodyRun seeds the body as old and runs the scene plan under large-image mode at the body key, returning
+// the scene, result, fixture evidence and native payload comparison count.
+func psfBodyRun(t *testing.T, mode uint32, old []byte) (*psfScene, tsResult, fixtureLargeEvidence, uint64) {
+	t.Helper()
+	sc := psfNew(t)
+	treeNativeSeed(t, sc.s, 4, sc.key(), old)
+	psfRaw(t, sc.s, 4, sc.key(), old)
+	var r tsResult
+	var evidence fixtureLargeEvidence
+	compared := psfCompared(t, sc.s, func() {
+		evidence = ctxTreeFault(t, sc.s, mode, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+	})
+	return sc, r, evidence, compared
+}
+
+func psfRaw(t *testing.T, s *Store, rank uint8, key, want []byte) {
+	t.Helper()
+	equal, err := FixtureRawRowEqual(s, rank, key, want)
+	if err != nil || !equal {
+		t.Fatalf("scope persisted image differs: rank%d %x want %x: %v", rank, key, want, err)
+	}
+}
+
+// psfF is the scene's metadata envelope: one Mutation, four deletes, two witnesses, no points and one
+// selector, with key and witness bytes from the literal row widths.
+func psfF(t *testing.T) uint64 {
+	auth := psfAuthority(t)
+	nodes := obsoleteTreeFamily(9)
+	k := uint64(len(auth.Key)+len(auth.Literal)) + 9
+	for _, row := range nodes {
+		k += uint64(len(row.key))
+	}
+	u := uint64(8+len(nodes[2].key)) + 9 // node prefix + last, root point prefix
+	return psF(1, 0, 4, 2, 0, 1, k, u)
+}
+
+func psfWindow(t *testing.T, s *Store) uint64 {
+	var maxKey uint64
+	mustEnvironment(t, s.View(func(r *Reader) error { maxKey = r.maxKey; return nil }))
+	return 4 * (maxKey + 1)
+}
+
+// psfDelete deletes generation g's nodes and root under their witnesses with the authority target and selectors.
+func psfDelete(t *testing.T, g uint64, selectors func() []LargeImageSelectorV1) func(*Reader) TreeOperationV1 {
+	return func(r *Reader) TreeOperationV1 {
+		var large []LargeImageSelectorV1
+		if selectors != nil {
+			large = selectors()
+		}
+		nodes, err := r.ObsoleteGenerationPageV1(g, ObsoleteNodeV1, nil, 1440)
+		mustEnvironment(t, err)
+		root, err := r.ObsoleteGenerationPageV1(g, ObsoleteRootV1, nil, 1)
+		mustEnvironment(t, err)
+		return TreeOperationV1{Pair: TreePairV1{
+			Mutations:         []Mutation{psfAuthority(t)},
+			ObsoleteDeletes:   append(append([]ObsoleteRowV1(nil), root.Rows...), nodes.Rows...),
+			ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness, root.Witness},
+			LargeConsulted:    large,
+		}}
+	}
+}
+
+// UTXO, index-forward, counter and derived-owner rows, each holding the malformed disposable value
+// 0xde, are deleted by the typed raw path; no value is decoded. The scene's node and root rows are
+// not targets here and stay present.
+func psfClassDeletes(t *testing.T) {
+	sc := psfNew(t)
+	utxo := append(obsoleteGenerationLiteral(9), 0x44)
+	treeNativeSeed(t, sc.s, 1, utxo, []byte{0xde})
+	hash := [32]byte{0x41}
+	forward, derived := canonicalForwardKeyLiteral(9, 1), canonicalOwnerKeyLiteral(9, hash)
+	treeNativeSeed(t, sc.s, 2, forward, []byte{0xde})
+	treeNativeSeed(t, sc.s, 7, derived, []byte{0xde})
+	treeNativeSeed(t, sc.s, 0, tsCounterKey(9), []byte{0xde})
+	r := psRun(t, sc.s, sc.o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		var op TreeOperationV1
+		for _, class := range []ObsoleteClassV1{ObsoleteUTXOV1, ObsoleteIndexV1, ObsoleteCounterV1, ObsoleteDerivedV1} {
+			page, err := reader.ObsoleteGenerationPageV1(9, class, nil, 1)
+			mustEnvironment(t, err)
+			if len(page.Rows) != 1 {
+				t.Fatalf("class %d page rows%d, want1", class, len(page.Rows))
+			}
+			op.Pair.ObsoleteDeletes = append(op.Pair.ObsoleteDeletes, page.Rows...)
+			op.Pair.ObsoleteConsulted = append(op.Pair.ObsoleteConsulted, page.Witness)
+		}
+		return op
+	})
+	r.tuple(t, 2, 3, -1)
+	if r.err != nil {
+		t.Fatalf("scope persisted image differs: classes 1-4 %v", r.err)
+	}
+	reopened := tsReopen(t, sc.s, sc.path)
+	psfRaw(t, reopened, 1, utxo, nil)
+	psfRaw(t, reopened, 2, forward, nil)
+	psfRaw(t, reopened, 7, derived, nil)
+	psfRaw(t, reopened, 0, tsCounterKey(9), nil)
+	sc.image(t, reopened, false)
+}
+
+// With the account closed before the hold, the physical-scope shape, count and provenance rows win
+// over the saved closed-account refusal; a valid raw-only plan returns that saved refusal, which
+// precedes the metadata charge.
+func psfClosedBeforeHold(t *testing.T) {
+	for _, mode := range []string{"shape", "count", "provenance", "valid"} {
+		t.Run(mode, func(t *testing.T) {
+			s, _, o := psStore(t)
+			kind := LaneOperation
+			if mode == "shape" {
+				kind = TreeOperation
+			}
+			var closed *OperationAccount
+			mustEnvironment(t, o.WithOperation(kind, func(a *OperationAccount) error {
+				closed = a
+				return nil
+			}))
+			var result tsResult
+			calls := 0
+			func() {
+				var unwind treeUnwindV1
+				defer func() { unwind.resumeV1() }()
+				s.operations.Lock()
+				defer s.operations.Unlock()
+				result.truth, result.stage, result.index, unwind, result.err = s.treeEntryLockedV1(closed, func(r *Reader) (TreeOperationV1, error) {
+					calls++
+					op := psRawDelete(t, 9)(r)
+					switch mode {
+					case "count":
+						op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881)
+					case "provenance":
+						op.Pair.ObsoleteDeletes = []ObsoleteRowV1{{}}
+					}
+					return op, nil
+				})
+			}()
+			switch mode {
+			case "valid":
+				result.tuple(t, 1, 1, -1)
+				if any(result.err) != any(errOperationReservationInput) {
+					t.Fatalf("saved original hold singleton replaced: %v", result.err)
+				}
+			case "count":
+				tsRefusal(t, result, true)
+			default:
+				tsRefusal(t, result, false)
+			}
+			if calls != 1 || s.state != storeOPEN || reservationLive(o) != 0 {
+				t.Fatalf("fallback callback/cleanup count: calls%d %s live%d", calls, s.state, reservationLive(o))
+			}
+			tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(9), tsCounterLiteral(9, 1))
+			tsFollowing(t, s, o)
+		})
+	}
+}
+
+// The nine listed physical-scope admission refusals (shape, count and provenance before the metadata
+// charge; duplicate witness, duplicate delete, uncovered, target overlap, consulted overlap and selector
+// order after it) abort ORIGINAL OLD exactly once, reach no commit and leave the Store OPEN with the
+// generation-9 and generation-10 counters unchanged.
+func psfAdmissionAborts(t *testing.T) {
+	rows := []struct {
+		name     string
+		capacity bool
+		build    func(*Reader) TreeOperationV1
+	}{
+		{"shape", false, func(r *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(r)
+			op.Pair.PrepaidReadBytes = 1
+			return op
+		}},
+		{"count", true, func(r *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(r)
+			op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881)
+			return op
+		}},
+		{"provenance", false, func(r *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(r)
+			op.Pair.ObsoleteDeletes = []ObsoleteRowV1{{}}
+			return op
+		}},
+		{"duplicate witness", false, func(r *Reader) TreeOperationV1 {
+			page := psScope(t, r, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: page.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness, page.Witness}}}
+		}},
+		{"duplicate delete", false, func(r *Reader) TreeOperationV1 {
+			page := psScope(t, r, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: []ObsoleteRowV1{page.Rows[0], page.Rows[0]}, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness}}}
+		}},
+		{"uncovered", false, func(r *Reader) TreeOperationV1 {
+			covered, other := psScope(t, r, 10), psScope(t, r, 9)
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: other.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{covered.Witness}}}
+		}},
+		{"target overlap", false, func(r *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(r)
+			op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(9), BeforePresent: true, AfterKind: 2, Literal: tsCounterLiteral(9, 2)}}
+			return op
+		}},
+		{"consulted overlap", false, func(r *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(r)
+			op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(9)}}
+			return op
+		}},
+		{"selector order", false, func(r *Reader) TreeOperationV1 {
+			op := psRawDelete(t, 9)(r)
+			op.Pair.LargeConsulted = []LargeImageSelectorV1{{Kind: 2}, {Kind: 1}}
+			return op
+		}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			s, _, o := psStore(t)
+			var r tsResult
+			evidence := ctxTreeFault(t, s, 12, 0, []byte{9}, func() { r = psRunG(t, s, o, LaneOperation, psPageGrant+33*2881, row.build) })
+			psRefused(t, s, r, row.capacity, row.name)
+			if evidence.aborts != 1 || evidence.commits != 0 {
+				t.Fatalf("scope next operation differs: %s OLD abort %+v", row.name, evidence)
+			}
+			tsFollowing(t, s, o)
+		})
+	}
+}
+
+// Ordinary UTXO deletes and one raw UTXO-class delete share the UTXO delete cap 414634: 414634
+// ordinary rows plus the raw row exceed it after the metadata charge and abort ORIGINAL OLD; 414633
+// plus the raw row pass the cap and reach a later refusal.
+func psfCombinedUTXOCap(t *testing.T) {
+	for _, n := range []int{414_634, 414_633} {
+		s, _, o := psStore(t)
+		raw := append(obsoleteGenerationLiteral(9), 0x44)
+		treeNativeSeed(t, s, 1, raw, []byte{0xde})
+		grant := psPageGrant + uint64(n)*(uint64(unsafe.Sizeof(Mutation{}))+44)
+		var r tsResult
+		evidence := ctxTreeFault(t, s, 12, 0, []byte{9}, func() {
+			r = psRunG(t, s, o, LaneOperation, grant, func(reader *Reader) TreeOperationV1 {
+				// The key backing and Mutations are created under the grant held for them.
+				backing := make([]byte, 44*n)
+				mutations := make([]Mutation, n)
+				for i := range mutations {
+					k := backing[44*i : 44*(i+1) : 44*(i+1)]
+					binary.BigEndian.PutUint64(k, 1000+uint64(i))
+					mutations[i] = Mutation{DBI: TreeSchemaV1DBIs()[1], Key: k, BeforePresent: true, AfterKind: AfterAbsent}
+				}
+				page, err := reader.ObsoleteGenerationPageV1(9, ObsoleteUTXOV1, nil, 1)
+				mustEnvironment(t, err)
+				if len(page.Rows) != 1 {
+					t.Fatalf("UTXO page rows%d, want1", len(page.Rows))
+				}
+				return TreeOperationV1{Pair: TreePairV1{Mutations: mutations, ObsoleteDeletes: page.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness}}}
+			})
+		})
+		if n == 414_634 {
+			psRefused(t, s, r, true, "combined UTXO delete cap")
+			if evidence.aborts != 1 || evidence.commits != 0 {
+				t.Fatalf("scope next operation differs: UTXO cap OLD abort %+v", evidence)
+			}
+			psfRaw(t, s, 1, raw, []byte{0xde})
+			continue
+		}
+		// At the bound admission completes and the refusal comes from the write section.
+		if engine, direct := directTestEngineError(r.err); r.err == nil || r.stage != UpdateStageWriteStartedDefinitelyPrecommit || s.state != storeCLOSED || (direct && engine.Diagnostic == "Update Batch exceeds bound") {
+			t.Fatalf("combined UTXO delete cap refused at its bound: stage%d %s %v", r.stage, s.state, r.err)
+		}
+	}
+}
+
+// psfCollectUndo pages generation 9's first undo family into arrays created once with capacity rows and
+// pages; a family that needs more fails instead of growing them.
+func psfCollectUndo(t *testing.T, reader *Reader, rows, pages int) ([]ObsoleteRowV1, []ObsoletePageWitnessV1) {
+	t.Helper()
+	index := obsoleteIndexPage(t, reader, 9).Rows[0]
+	deletes := make([]ObsoleteRowV1, 0, rows)
+	witnesses := make([]ObsoletePageWitnessV1, 0, pages)
+	var next []byte
+	for {
+		page, err := reader.ObsoleteUndoPageV1(index, next, 1440)
+		mustEnvironment(t, err)
+		if uint8(page.Projection) != 3 || page.Witness == (ObsoletePageWitnessV1{}) {
+			t.Fatal("own projection lost during sequential pages")
+		}
+		if len(page.Rows) > cap(deletes)-len(deletes) || len(witnesses) == cap(witnesses) {
+			t.Fatalf("undo family exceeds %d rows or %d pages", rows, pages)
+		}
+		deletes = append(deletes, page.Rows...)
+		witnesses = append(witnesses, page.Witness)
+		if uint8(page.Stop) == 1 {
+			return deletes, witnesses
+		}
+		next = page.Next
+	}
+}
+
+// Raw undo rows outside the 33-byte manifest form share the undo entry delete cap 414634: one
+// generation-9 family with 414635 such rows exceeds it after the metadata charge and aborts ORIGINAL
+// OLD; 414634 such rows pass the cap.
+func psfUndoEntryCap(t *testing.T) {
+	for _, n := range []int{414_635, 414_634} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			s, path, o := psStore(t)
+			hash, undo := psfUndo(t, s)
+			mustEnvironment(t, fixtureLargeBulk(s, 6, uint32(n-2), 20, hash))
+			first := append(bytes.Clone(hash[:]), 1, 0, 0, 0, 0)
+			last := bytes.Clone(first)
+			binary.BigEndian.PutUint32(last[33:], uint32(n-3))
+			pages := uint64(n/1440 + 1)
+			grant := psPageGrant*(pages+1) + uint64(n+1)*(8+uint64(unsafe.Sizeof(obsoleteSpan{}))+37)
+			var r tsResult
+			evidence := ctxTreeFault(t, s, 12, 0, []byte{9}, func() {
+				r = psRunG(t, s, o, LaneOperation, grant, func(reader *Reader) TreeOperationV1 {
+					deletes, witnesses := psfCollectUndo(t, reader, n+1, int(pages))
+					if len(deletes) != n+1 {
+						t.Fatalf("undo family rows%d, want%d", len(deletes), n+1)
+					}
+					return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: deletes, ObsoleteConsulted: witnesses}}
+				})
+			})
+			if n == 414_635 {
+				psRefused(t, s, r, true, "undo entry delete cap")
+				if evidence.aborts != 1 || evidence.commits != 0 {
+					t.Fatalf("scope next operation differs: undo cap OLD abort %+v", evidence)
+				}
+				for i, k := range undo {
+					psfRaw(t, s, 5, k, []byte{byte(i)})
+				}
+				psfRaw(t, s, 5, first, append([]byte{0x5a}, make([]byte, 19)...))
+				psfRaw(t, s, 5, last, append([]byte{0x5a}, make([]byte, 19)...))
+				return
+			}
+			// At the bound admission completes and the commit is reached, then its fixture fault leaves NEW.
+			psfCrossedClean(t, r, CommitTruthNew)
+			if evidence.commits != 1 || evidence.drift != 0 {
+				t.Fatalf("undo entry delete cap refused at its bound: %+v %v", evidence, r.err)
+			}
+			tsConsumed(t, s, o, 2, r.err)
+			reopened := tsReopen(t, s, path)
+			for _, k := range append(undo, first, last) {
+				psfRaw(t, reopened, 5, k, nil)
+			}
+		})
+	}
+}
+
+// A Reader EIO inside the callback stays the result whether the callback ignores, returns or wraps
+// it with a physical-scope plan whose selector count is above its bound; that EIO is returned in place
+// of the selector-count Capacity refusal.
+func psfCallbackReaderError(t *testing.T) {
+	for _, mode := range []string{"ignored", "returned", "wrapped"} {
+		t.Run(mode, func(t *testing.T) {
+			s, _, o := psStore(t)
+			key := tsTarget(71).Key
+			var f, application error
+			var r tsResult
+			_, fixtureErr := FixtureSelectedDamage(s, o, SelectedDamageGetEIO, 6, key, func() {
+				mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+					return a.WithReservation(psPageGrant+33*2881, func() error {
+						r = tsInvoke(s, a, func(reader *Reader) (TreeOperationV1, error) {
+							op := psRawDelete(t, 9)(reader)
+							op.Pair.LargeConsulted = make([]LargeImageSelectorV1, 2881)
+							_, _, f = reader.Get(TreeSchemaV1DBIs()[6], key)
+							switch mode {
+							case "returned":
+								application = f
+							case "wrapped":
+								application = fmt.Errorf("callback: %w", f)
+							}
+							return op, application
+						})
+						return nil
+					})
+				}))
+			})
+			mustEnvironment(t, fixtureErr)
+			treeNativeError(t, f, "get", "IO", 5, "error 5", nil)
+			if mode == "wrapped" {
+				joined, ok := r.err.(interface{ Unwrap() []error })
+				if !ok || len(joined.Unwrap()) != 2 || any(joined.Unwrap()[0]) != any(application) || any(joined.Unwrap()[1]) != any(f) {
+					t.Fatalf("scope callback error lost: %v", r.err)
+				}
+			} else if any(r.err) != any(f) {
+				t.Fatalf("scope callback error lost: %v want %v", r.err, f)
+			}
+			r.tuple(t, 1, 1, -1)
+			if reservationLive(o) != 0 {
+				t.Fatal("scope grant leaked", reservationLive(o))
+			}
+			tsConsumed(t, s, o, 1, r.err)
+		})
+	}
+}
+
+// Node page bounds 1, 7 and 1440 over a nine-row generation-9 family delete exactly the rows their page
+// returned; bounds 1 and 7 stop at the row limit and 1440 exhausts the family.
+func psfPageBounds(t *testing.T) {
+	var extra []obsoleteTreeRow
+	for k := byte(1); k <= 6; k++ {
+		var upper [36]byte
+		upper[34] = k
+		extra = append(extra, obsoleteTreeRow{obsoleteTreeNodeLiteral(9, upper, 0), []byte{0xa4, k}})
+	}
+	family := append(obsoleteTreeFamily(9), extra...)
+	slices.SortFunc(family, func(a, b obsoleteTreeRow) int { return bytes.Compare(a.key, b.key) })
+	stops := map[uint32]PrefixPageStop{1: PrefixPageRowLimit, 7: PrefixPageRowLimit, 1440: PrefixPageExhausted}
+	for _, bound := range []uint32{1, 7, 1440} {
+		sc := psfNew(t)
+		for _, row := range extra {
+			treeNativeSeed(t, sc.s, 8, row.key, row.value)
+		}
+		var deleted [][]byte
+		r := psRun(t, sc.s, sc.o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+			nodes, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, bound)
+			mustEnvironment(t, err)
+			if nodes.Stop != stops[bound] {
+				t.Fatalf("page bound %d stop %d, want %d", bound, nodes.Stop, stops[bound])
+			}
+			for _, row := range nodes.Rows {
+				deleted = append(deleted, row.Key())
+			}
+			return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: nodes.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness}}}
+		})
+		r.tuple(t, 2, 3, -1)
+		mustEnvironment(t, r.err)
+		if want := min(int(bound), len(family)); len(deleted) != want {
+			t.Fatalf("page bound %d rows%d, want%d", bound, len(deleted), want)
+		}
+		for i, row := range family {
+			want := row.value
+			if i < len(deleted) {
+				if !bytes.Equal(deleted[i], row.key) {
+					t.Fatalf("page bound %d row%d key %x, want %x", bound, i, deleted[i], row.key)
+				}
+				want = nil
+			}
+			psfRaw(t, sc.s, 8, row.key, want)
+		}
+		psfRaw(t, sc.s, 0, tsRootKey(9), []byte{0xee, 9})
+		psfAuthorityRow(t, sc.s, false)
+	}
+}
+
+// psfUndo seeds generation 9's proven format-3 own index projection (148-byte header) and a three-member undo family under its hash.
+func psfUndo(t *testing.T, s *Store) ([32]byte, [][]byte) {
+	header := make([]byte, obsoleteHeaderWidth(3))
+	header[0], header[len(header)-1] = 3, 7
+	hash := sha3.Sum256(header)
+	entry := append(append(bytes.Clone(hash[:]), make([]byte, 32)...), make([]byte, 40)...)
+	entry[103] = 1
+	treeNativeSeed(t, s, 2, binary.BigEndian.AppendUint64(obsoleteGenerationLiteral(9), 1), entry)
+	treeNativeSeed(t, s, 3, hash[:], header)
+	undo := [][]byte{bytes.Clone(hash[:]), append(bytes.Clone(hash[:]), 0), append(bytes.Clone(hash[:]), 2, 0xff)}
+	for i, k := range undo {
+		treeNativeSeed(t, s, 5, k, []byte{byte(i)})
+	}
+	return hash, undo
+}
+
+// Present and empty undo families plus an absent body are valid physical domains.
+func psfLargeDomains(t *testing.T) {
+	sc := psfNew(t)
+	hash, undo := psfUndo(t, sc.s)
+	empty := hash
+	empty[31] ^= 1
+	absent := [32]byte{0xb0, 2}
+	// The selectors are created inside the callback, under the caller grant.
+	selectors := func() []LargeImageSelectorV1 {
+		families := []LargeImageSelectorV1{{Kind: LargeImageUndoFamilyV1, Hash: hash}, {Kind: LargeImageUndoFamilyV1, Hash: empty}}
+		if bytes.Compare(empty[:], hash[:]) < 0 {
+			families[0], families[1] = families[1], families[0]
+		}
+		return append([]LargeImageSelectorV1{
+			{Kind: LargeImageBlockBodyV1, Hash: sc.body},
+			{Kind: LargeImageBlockBodyV1, Hash: absent},
+		}, families...)
+	}
+	r := psRun(t, sc.s, sc.o, LaneOperation, psfDelete(t, 9, selectors))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	reopened := tsReopen(t, sc.s, sc.path)
+	sc.image(t, reopened, true)
+	for i, k := range undo {
+		psfRaw(t, reopened, 5, k, []byte{byte(i)})
+	}
+	psfRaw(t, reopened, 4, absent[:], nil)
+	psfEmptyFamily(t, reopened, empty)
+}
+
+// psfEmptyFamily reads the whole undo prefix hash and requires no row under it.
+func psfEmptyFamily(t *testing.T, s *Store, hash [32]byte) {
+	t.Helper()
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		page, err := r.PrefixPage(TreeSchemaV1DBIs()[5], bytes.Clone(hash[:]), nil, 1, 65637)
+		if err != nil || len(page.Rows) != 0 {
+			t.Fatalf("scope persisted image differs: undo family %x rows %d: %v", hash, len(page.Rows), err)
+		}
+		return nil
+	}))
+}
+
+// A raw undo target inside the selected three-member family disappears; the two nontarget members keep
+// their bytes.
+func psfTargetInFamily(t *testing.T) {
+	sc := psfNew(t)
+	hash, undo := psfUndo(t, sc.s)
+	r := psRun(t, sc.s, sc.o, LaneOperation, func(reader *Reader) TreeOperationV1 {
+		index, err := reader.ObsoleteGenerationPageV1(9, 2, nil, 1440)
+		mustEnvironment(t, err)
+		page, err := reader.ObsoleteUndoPageV1(index.Rows[0], nil, 1)
+		mustEnvironment(t, err)
+		if len(page.Rows) != 1 {
+			t.Fatalf("scene undo page rows %d projection %d stop %d", len(page.Rows), page.Projection, page.Stop)
+		}
+		return TreeOperationV1{Pair: TreePairV1{
+			ObsoleteDeletes:   page.Rows,
+			ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness},
+			LargeConsulted:    []LargeImageSelectorV1{{Kind: LargeImageUndoFamilyV1, Hash: hash}},
+		}}
+	})
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	reopened := tsReopen(t, sc.s, sc.path)
+	psfRaw(t, reopened, 5, undo[0], nil)
+	psfRaw(t, reopened, 5, undo[1], []byte{1})
+	psfRaw(t, reopened, 5, undo[2], []byte{2})
+	sc.image(t, reopened, false)
+}
+
+// An identical ordinary put under a witnessed scope satisfies both predicates after a possibly
+// crossed commit; OLD is selected first.
+func psfBothIdentical(t *testing.T) {
+	sc := psfNew(t)
+	r := sc.run(t, sc.o)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	same := func(reader *Reader) TreeOperationV1 {
+		nodes, err := reader.ObsoleteGenerationPageV1(8, ObsoleteNodeV1, nil, 1440)
+		mustEnvironment(t, err)
+		return TreeOperationV1{Pair: TreePairV1{
+			Mutations:         []Mutation{psfAuthority(t)},
+			ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness},
+			LargeConsulted:    []LargeImageSelectorV1{{Kind: LargeImageBlockBodyV1, Hash: sc.body}},
+		}}
+	}
+	evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = psRun(t, sc.s, sc.o, LaneOperation, same) })
+	// The readback compares under the sealed precommit limit.
+	if ce, ok := r.err.(*CommitError); ok && errors.Is(ce.ReadbackCause, errOperationReservationCapacity) {
+		t.Fatalf("scope missing budget admitted: readback %v", r.err)
+	}
+	if evidence.commits != 1 || evidence.drift != 0 || r.truth != 1 || r.stage != 3 {
+		t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
+	}
+	psfCrossedClean(t, r, CommitTruthOld)
+	tsConsumed(t, sc.s, sc.o, 1, r.err)
+	reopened := tsReopen(t, sc.s, sc.path)
+	sc.image(t, reopened, true)
+	tsRead(t, reopened, TreeSchemaV1DBIs()[0], []byte{2}, psfAuthority(t).Literal)
+}
+
+// Raw deletion does not consult generation roles: the committed active generation's physical rows
+// are deleted exactly as tokens name them.
+func psfDormant(t *testing.T) {
+	sc := psfNew(t)
+	for _, row := range obsoleteTreeFamily(1) {
+		treeNativeSeed(t, sc.s, 8, row.key, row.value)
+	}
+	treeNativeSeed(t, sc.s, 0, tsRootKey(1), []byte{0xee, 1})
+	r := sc.run(t, sc.o)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	r = psRun(t, sc.s, sc.o, LaneOperation, psfDelete(t, 1, nil))
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	reopened := tsReopen(t, sc.s, sc.path)
+	for _, row := range obsoleteTreeFamily(1) {
+		psfRaw(t, reopened, 8, row.key, nil)
+	}
+	psfRaw(t, reopened, 0, tsRootKey(1), nil)
+	sc.image(t, reopened, true)
+	tsRead(t, reopened, TreeSchemaV1DBIs()[0], []byte{2}, psfAuthority(t).Literal)
+}
+
+// psfOldOnlyRun commits build's operation on a fresh scene under large-image mode (3 rewrites key to 0x7f, 4
+// deletes it, after the commit, which then reports ENOSPC) and returns the result and the native payload
+// comparison count of the whole operation; the readback is UNKNOWN in both modes.
+func psfOldOnlyRun(t *testing.T, mode uint32, rank uint8, seed func(*psfScene) []byte, build func() func(*Reader) TreeOperationV1) uint64 {
+	t.Helper()
+	sc := psfNew(t)
+	key := seed(sc)
+	var r tsResult
+	var observed PairReadObservation
+	evidence := ctxTreeFault(t, sc.s, mode, rank, key, func() {
+		var err error
+		observed, err = FixturePairReadObservation(sc.s, func(uint32) {}, func() { r = psRun(t, sc.s, sc.o, LaneOperation, build()) })
+		mustEnvironment(t, err)
+	})
+	if evidence.commits != 1 || evidence.drift != 1 || r.truth != CommitTruthUnknown || r.stage != 3 || r.err == nil {
+		t.Fatalf("scope strict truth differs: mode %d %+v (%d,%d) %v", mode, evidence, r.truth, r.stage, r.err)
+	}
+	psfCrossedUnknown(t, r)
+	tsConsumed(t, sc.s, sc.o, 3, r.err)
+	want := []byte{0x7f}
+	if mode == 4 {
+		want = nil
+	}
+	sc.crossedImage(t, tsReopen(t, sc.s, sc.path), false, rank, key, want)
+	return observed.Comparisons
+}
+
+// A residual key present only in ORIGINAL OLD at the possibly crossed readback is an inequality without
+// payload use; the next key, present on both sides, still gets its payload comparison, so the deleted-key
+// run compares exactly as the rewritten-key run less the rewritten key's own equal-length comparison.
+func psfOldOnlyResidual(t *testing.T) {
+	t.Run("undo-family", func(t *testing.T) {
+		var hash [32]byte
+		seed := func(sc *psfScene) []byte {
+			h, undo := psfUndo(t, sc.s)
+			hash = h
+			return undo[1]
+		}
+		build := func() func(*Reader) TreeOperationV1 {
+			return func(*Reader) TreeOperationV1 {
+				return TreeOperationV1{Pair: TreePairV1{
+					Mutations:      []Mutation{psfAuthority(t)},
+					LargeConsulted: []LargeImageSelectorV1{{Kind: LargeImageUndoFamilyV1, Hash: hash}},
+				}}
+			}
+		}
+		rewritten := psfOldOnlyRun(t, 3, 5, seed, build)
+		if deleted := psfOldOnlyRun(t, 4, 5, seed, build); deleted+1 != rewritten {
+			t.Fatalf("later scope comparison lost: undo family deleted-key comparisons %d, rewritten-key %d", deleted, rewritten)
+		}
+	})
+	t.Run("raw-domain", func(t *testing.T) {
+		seed := func(*psfScene) []byte { return obsoleteTreeFamily(8)[1].key }
+		build := func() func(*Reader) TreeOperationV1 {
+			return func(reader *Reader) TreeOperationV1 {
+				nodes, err := reader.ObsoleteGenerationPageV1(8, ObsoleteNodeV1, nil, 1440)
+				mustEnvironment(t, err)
+				return TreeOperationV1{Pair: TreePairV1{
+					Mutations:         []Mutation{psfAuthority(t)},
+					ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness},
+				}}
+			}
+		}
+		rewritten := psfOldOnlyRun(t, 3, 8, seed, build)
+		if deleted := psfOldOnlyRun(t, 4, 8, seed, build); deleted != rewritten {
+			t.Fatalf("later scope comparison lost: raw domain deleted-key comparisons %d, rewritten-key %d", deleted, rewritten)
+		}
+	})
+}
+
+// psfStreamCase is one stored residual family read through a large-image selector stream (domain nil) or
+// a raw obsolete domain stream; keys are its three stored keys in order and length is keys[1]'s value length.
+type psfStreamCase struct {
+	rank     uint8
+	selector LargeImageSelectorV1
+	domain   *obsoleteDomain
+	keys     [][]byte
+	length   uint64
+}
+
+type psfStreamResult struct {
+	equal       bool
+	err         error
+	extra       uint64
+	maxKey      uint64
+	comparisons uint64
+}
+
+// stream reads the family from r with the listed keys excluded as exact plan targets.
+func (c psfStreamCase) stream(r *Reader, out [][]byte) largeResidualStream {
+	plan := make([]ownedMutation, len(out))
+	for i, key := range out {
+		plan[i] = ownedMutation{dbi: DBI{Rank: c.rank}, key: key}
+	}
+	if c.domain != nil {
+		return largeResidualStream{reader: r, domain: c.domain, seek: c.domain.seek(r.maxKey), plan: plan}
+	}
+	return largeResidualStream{reader: r, selector: c.selector, seek: bytes.Clone(c.selector.Hash[:]), plan: plan}
+}
+
+// run compares the OLD stream (oldOut excluded) with the candidate stream (newOut excluded) over one View
+// Reader under a typed scope funded by ledger, and counts native payload comparisons.
+func (c psfStreamCase) run(t *testing.T, s *Store, oldOut, newOut [][]byte, ledger treeLedgerV1) psfStreamResult {
+	t.Helper()
+	var res psfStreamResult
+	observed, err := FixturePairReadObservation(s, func(uint32) {}, func() {
+		mustEnvironment(t, s.View(func(r *Reader) error {
+			budget := &treePairReadBudgetV1{ledger: ledger}
+			fund := &largeImageScope{maxKey: r.maxKey, databaseID: [32]byte{1}, pairBudget: budget}
+			left, right := c.stream(r, oldOut), c.stream(r, newOut)
+			res.equal, res.err = obsoleteStreamsEqual(&left, &right, c.rank, fund)
+			res.extra, res.maxKey = budget.extra, r.maxKey
+			return nil
+		}))
+	})
+	mustEnvironment(t, err)
+	res.comparisons = observed.Comparisons
+	return res
+}
+
+// A key only in the OLD stream is an inequality without payload use: before a key on both sides, that
+// key's refused funding is returned, and ample funding admits exactly its one comparison; a trailing OLD
+// key after the candidate stream ends is an inequality after the shared key's comparison.
+func psfStreamOldOnly(t *testing.T) {
+	sc := psfNew(t)
+	hash, undo := psfUndo(t, sc.s)
+	cases := []struct {
+		name string
+		c    psfStreamCase
+	}{
+		{"undo-family", psfStreamCase{rank: 5, selector: LargeImageSelectorV1{Kind: LargeImageUndoFamilyV1, Hash: hash}, keys: undo, length: 1}},
+		{"raw-domain", psfStreamCase{rank: 8, domain: &obsoleteDomain{rank: 8, prefix: obsoleteGenerationLiteral(8), end: true}, keys: obsoleteTreeKeys(obsoleteTreeFamily(8)), length: 32}},
+	}
+	for _, row := range cases {
+		t.Run(row.name, func(t *testing.T) { psfStreamOldOnlyCase(t, sc.s, row.c) })
+	}
+}
+
+func psfStreamOldOnlyCase(t *testing.T, s *Store, c psfStreamCase) {
+	k := c.keys
+	candidate := [][]byte{k[0], k[2]}
+	refusal := errors.New("scope later comparison refusal")
+	res := c.run(t, s, k[2:], candidate, &pairReadTestLedgerV1{err: refusal})
+	if !treeSameErrorV1(res.err, refusal) || res.equal || res.comparisons != 0 {
+		t.Fatalf("later scope refusal lost: %v equal %v comparisons %d", res.err, res.equal, res.comparisons)
+	}
+	for _, oldOut := range [][][]byte{k[2:], k[:1]} {
+		ledger := &pairReadTestLedgerV1{}
+		res = c.run(t, s, oldOut, candidate, ledger)
+		need := 2*c.length + 4*(res.maxKey+1)
+		if res.err != nil || res.equal || res.comparisons != 1 || ledger.held != need || res.extra != need {
+			t.Fatalf("later scope comparison lost: OLD excludes %x: %v equal %v comparisons %d held %d extra %d want %d",
+				oldOut, res.err, res.equal, res.comparisons, ledger.held, res.extra, need)
+		}
+	}
+}
+
+func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
+	t.Run("pre-hold-close-window", psfClosedBeforeHold)
+	t.Run("admission-aborts", psfAdmissionAborts)
+	t.Run("combined-utxo-cap", psfCombinedUTXOCap)
+	t.Run("undo-entry-cap", psfUndoEntryCap)
+	t.Run("large-domains", psfLargeDomains)
+	t.Run("target-in-family", psfTargetInFamily)
+	t.Run("both-identical-OLD-first", psfBothIdentical)
+	t.Run("old-only-residual", psfOldOnlyResidual)
+	t.Run("old-only-stream", psfStreamOldOnly)
+	t.Run("dormant", psfDormant)
+	t.Run("classes-1-4", psfClassDeletes)
+	t.Run("page-bounds", psfPageBounds)
+	t.Run("callback-reader-error", psfCallbackReaderError)
+	t.Run("commit", func(t *testing.T) {
+		sc := psfNew(t)
+		r := sc.run(t, sc.o)
+		r.tuple(t, 2, 3, -1)
+		if r.err != nil {
+			t.Fatalf("rank8 typed page did not commit: %v", r.err)
+		}
+		sc.image(t, sc.s, true)
+		psfRaw(t, sc.s, 0, []byte{2}, psfAuthority(t).Literal)
+		tsFollowing(t, sc.s, sc.o)
+		sc.image(t, tsReopen(t, sc.s, sc.path), true)
+	})
+	t.Run("write-snapshot", func(t *testing.T) {
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 14, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		// The drifted body is a nontarget residual: only preflight (stage 1) may refuse it.
+		if evidence.drift != 1 || evidence.commits != 0 || r.stage != 1 {
+			t.Fatalf("scope preflight mismatch committed: %+v stage%d %v", evidence, r.stage, r.err)
+		}
+		r.tuple(t, 1, 1, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		// The fixture's drift of the body is itself durable; the raw targets must survive.
+		reopened := tsReopen(t, sc.s, sc.path)
+		for _, row := range obsoleteTreeFamily(9) {
+			psfRaw(t, reopened, 8, row.key, row.value)
+		}
+		psfRaw(t, reopened, 0, tsRootKey(9), []byte{0xee, 9})
+		psfAuthorityRow(t, reopened, false)
+	})
+	t.Run("final", func(t *testing.T) {
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 13, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		if evidence.drift != 1 || evidence.commits != 0 || r.stage != 2 {
+			t.Fatalf("scope final mismatch committed: %+v stage%d %v", evidence, r.stage, r.err)
+		}
+		r.tuple(t, 1, 2, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "final update image mismatch", nil)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		sc.image(t, tsReopen(t, sc.s, sc.path), false)
+	})
+	t.Run("crossed-clean", func(t *testing.T) {
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = sc.run(t, sc.o) })
+		if evidence.commits != 1 || evidence.drift != 0 || r.truth != 2 || r.stage != 3 {
+			t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
+		}
+		psfCrossedClean(t, r, CommitTruthNew)
+		tsConsumed(t, sc.s, sc.o, 2, r.err)
+		sc.image(t, tsReopen(t, sc.s, sc.path), true)
+	})
+	t.Run("crossed-complete-OLD", func(t *testing.T) {
+		// Mode 7 breaks the write transaction before a commit reported as possibly crossed: the strict
+		// readback finds the complete OLD image (the targets, the node domain, the root point and the body
+		// unchanged), so OLD wins.
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 7, 0, []byte{9}, func() { r = sc.run(t, sc.o) })
+		if evidence.commits != 1 || evidence.drift != 0 || r.truth != 1 || r.stage != 3 {
+			t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
+		}
+		psfCrossedClean(t, r, CommitTruthOld)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		sc.image(t, tsReopen(t, sc.s, sc.path), false)
+	})
+	// After a possibly crossed commit one durable change defeats both predicates: an extra member inside
+	// the witnessed node domain, the missing nontarget body, or the deleted raw root point re-appearing.
+	var extra [36]byte
+	for i := range extra {
+		extra[i] = 0x11
+	}
+	for _, c := range []struct {
+		name string
+		mode uint32
+		rank uint8
+		key  func(*psfScene) []byte
+	}{
+		{"extra-member", 3, 8, func(*psfScene) []byte { return obsoleteTreeNodeLiteral(9, extra, 0) }},
+		{"missing-member", 4, 4, func(sc *psfScene) []byte { return sc.key() }},
+		{"changed-root-point", 3, 0, func(*psfScene) []byte { return tsRootKey(9) }},
+	} {
+		t.Run("neither/"+c.name, func(t *testing.T) {
+			sc := psfNew(t)
+			var r tsResult
+			evidence := ctxTreeFault(t, sc.s, c.mode, c.rank, c.key(sc), func() { r = sc.run(t, sc.o) })
+			if evidence.commits != 1 || evidence.drift != 1 || r.truth != 3 || r.stage != 3 {
+				t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
+			}
+			psfCrossedUnknown(t, r)
+			tsConsumed(t, sc.s, sc.o, 3, r.err)
+			// Mode 3 rewrites the drifted row to 0x7f and mode 4 deletes it, after the committed plan.
+			want := []byte{0x7f}
+			if c.mode == 4 {
+				want = nil
+			}
+			sc.crossedImage(t, tsReopen(t, sc.s, sc.path), true, c.rank, c.key(sc), want)
+		})
+	}
+	t.Run("crossed-drift", func(t *testing.T) {
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 3, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		if evidence.commits != 1 || evidence.drift != 1 || r.truth != 3 || r.stage != 3 {
+			t.Fatalf("scope strict truth differs: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
+		}
+		psfCrossedUnknown(t, r)
+		tsConsumed(t, sc.s, sc.o, 3, r.err)
+		sc.crossedImage(t, tsReopen(t, sc.s, sc.path), true, 4, sc.key(), []byte{0x7f})
+	})
+	t.Run("native-read", func(t *testing.T) {
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 28, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		var engine *EngineError
+		if evidence.gets == 0 || !errors.As(r.err, &engine) || engine.Class != EngineIO || r.stage != 1 {
+			t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
+		}
+		r.tuple(t, 1, 1, -1)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		sc.image(t, tsReopen(t, sc.s, sc.path), false)
+	})
+	t.Run("mismatch-then-read-error", func(t *testing.T) {
+		// Mode 29 drifts the body at commit, then its prefix interceptor returns EIO for readback prefix reads
+		// of another DBI: the large body mismatch comes first and the raw domain traversal must still reach
+		// its EIO.
+		sc := psfNew(t)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 29, 4, sc.key(), func() { r = sc.run(t, sc.o) })
+		if evidence.drift != 1 || evidence.commits != 1 || evidence.gets == 0 || r.truth != 3 {
+			t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
+		}
+		var engine *EngineError
+		if cause := psfCrossed(t, r, CommitTruthUnknown); !errors.As(cause, &engine) || engine.Class != EngineIO {
+			t.Fatalf("later scope error lost: %v", cause)
+		}
+		tsConsumed(t, sc.s, sc.o, 3, r.err)
+		sc.crossedImage(t, tsReopen(t, sc.s, sc.path), true, 4, sc.key(), []byte{0x7f})
+	})
+	t.Run("domain-mismatch-then-read-error", psfDomainMismatchThenError)
+	t.Run("point-mismatch-then-capacity", psfPointMismatchThenCapacity)
+	t.Run("selector-row-mismatch-then-capacity", psfSelectorRowMismatchThenCapacity)
+	t.Run("domain-row-mismatch-then-capacity", psfDomainRowMismatchThenCapacity)
+	t.Run("selector-row-insert-then-capacity", psfSelectorRowInsertThenCapacity)
+	t.Run("domain-row-insert-then-capacity", psfDomainRowInsertThenCapacity)
+	t.Run("retained", psfRetained)
+	t.Run("witness-bytes", psfWitnessBytes)
+	t.Run("callback-cleanup", psfCallbackCleanup)
+	t.Run("selector-alias", func(t *testing.T) {
+		// At the first write observation the caller rewrites its own LargeConsulted value to an absent body; the body then
+		// drifts after the first write. The owned selector copy still compares the drifted body at final.
+		sc := psfNew(t)
+		build := sc.build(t)
+		var selectors []LargeImageSelectorV1
+		op := func(r *Reader) TreeOperationV1 {
+			out := build(r)
+			selectors = out.Pair.LargeConsulted
+			return out
+		}
+		var r tsResult
+		var evidence fixtureLargeEvidence
+		observed, err := FixturePairReadObservation(sc.s, func(site uint32) {
+			if site == 3 && selectors != nil {
+				selectors[0].Hash = [32]byte{0xb0, 2}
+				selectors = nil
+			}
+		}, func() {
+			evidence = ctxTreeFault(t, sc.s, 13, 4, sc.key(), func() { r = psRun(t, sc.s, sc.o, LaneOperation, op) })
+		})
+		mustEnvironment(t, err)
+		if observed.Writes == 0 || evidence.drift != 1 || evidence.commits != 0 || r.stage != 2 {
+			t.Fatalf("owned scope changed with input: %+v %+v stage%d %v", observed, evidence, r.stage, r.err)
+		}
+		r.tuple(t, 1, 2, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "final update image mismatch", nil)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		sc.image(t, tsReopen(t, sc.s, sc.path), false)
+	})
+	t.Run("same-prefix-sibling", func(t *testing.T) {
+		// Only the generation-9 one-leaf is a target; its same-generation-prefix sibling, ordered before it,
+		// drifts at the write snapshot. Generation 8 holds byte-equal values under another prefix.
+		sc := psfNew(t)
+		build := sc.build(t)
+		target, sibling := obsoleteTreeFamily(9)[1], obsoleteTreeFamily(9)[0]
+		one := func(r *Reader) TreeOperationV1 {
+			op := build(r)
+			op.Pair.ObsoleteDeletes = slices.DeleteFunc(op.Pair.ObsoleteDeletes, func(row ObsoleteRowV1) bool { return !bytes.Equal(row.Key(), target.key) })
+			if len(op.Pair.ObsoleteDeletes) != 1 {
+				t.Fatal("scene target row missing")
+			}
+			return op
+		}
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 14, 8, sibling.key, func() { r = psRun(t, sc.s, sc.o, LaneOperation, one) })
+		if evidence.drift != 1 || evidence.commits != 0 || r.stage != 1 {
+			t.Fatalf("independent residual changed: %+v stage%d %v", evidence, r.stage, r.err)
+		}
+		r.tuple(t, 1, 1, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		reopened := tsReopen(t, sc.s, sc.path)
+		psfRaw(t, reopened, 8, target.key, target.value)
+		for _, row := range obsoleteTreeFamily(8) {
+			psfRaw(t, reopened, 8, row.key, row.value)
+		}
+		psfAuthorityRow(t, reopened, false)
+	})
+	t.Run("larger-candidate-preflight", func(t *testing.T) {
+		// The first write-snapshot get reports the body one byte longer than ORIGINAL OLD. The account holds
+		// exactly what the equal-length body comparison needs; the length mismatch is inequality without
+		// funding. Mode 31 fires at preflight only.
+		sc := psfNew(t)
+		f, window := psfF(t), psfWindow(t, sc.s)
+		var r tsResult
+		var evidence fixtureLargeEvidence
+		compared := psfCompared(t, sc.s, func() {
+			evidence = ctxTreeFault(t, sc.s, 31, 4, sc.key(), func() {
+				r = sc.run(t, reservationFilled(t, psPageGrant+f+window+2*uint64(len(psfBodyValue))))
+			})
+		})
+		if any(r.err) == any(errOperationReservationCapacity) || evidence.gets != 1 || evidence.commits != 0 || r.stage != 1 {
+			t.Fatalf("scope larger candidate funded: %+v stage%d %v", evidence, r.stage, r.err)
+		}
+		r.tuple(t, 1, 1, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		sc.image(t, tsReopen(t, sc.s, sc.path), false)
+		// The body is the scene's only residual row with a value and the other residual domains hold only
+		// targets, so the plan compares exactly as the same plan refused at the window.
+		if ordinary := psfWindowRefused(t, f, window); compared != ordinary {
+			t.Fatalf("scope larger candidate funded: comparisons %d, window-refused plan %d", compared, ordinary)
+		}
+	})
+	t.Run("larger-candidate-final", func(t *testing.T) {
+		// The selected body is present with length 0 in ORIGINAL OLD. Mode 13 upserts one byte at it inside the
+		// write transaction after its first put, so the final candidate is longer than ORIGINAL OLD: the length
+		// mismatch is inequality under the sealed limit, with no funded payload comparison.
+		sc, r, evidence, compared := psfBodyRun(t, 13, []byte{})
+		// A one-byte ORIGINAL OLD body under the same drift is an equal-length mismatch: it adds one funded
+		// body comparison at preflight and one at final.
+		_, same, _, equalLength := psfBodyRun(t, 13, []byte{1})
+		same.tuple(t, 1, 2, -1)
+		if equalLength != compared+2 {
+			t.Fatalf("scope sealed window grew: final comparisons %d, equal-length body %d", compared, equalLength)
+		}
+		if engine, direct := directTestEngineError(r.err); !direct || engine.Diagnostic != "final update image mismatch" {
+			t.Fatalf("scope sealed window grew: final %v", r.err)
+		}
+		if evidence.drift != 1 || evidence.commits != 0 || r.stage != 2 {
+			t.Fatalf("scope final mismatch committed: %+v stage%d %v", evidence, r.stage, r.err)
+		}
+		r.tuple(t, 1, 2, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "final update image mismatch", nil)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		reopened := tsReopen(t, sc.s, sc.path)
+		psfRaw(t, reopened, 4, sc.key(), []byte{})
+		for _, row := range obsoleteTreeFamily(9) {
+			psfRaw(t, reopened, 8, row.key, row.value)
+		}
+		psfRaw(t, reopened, 0, tsRootKey(9), []byte{0xee, 9})
+		psfAuthorityRow(t, reopened, false)
+	})
+	t.Run("larger-candidate-readback", func(t *testing.T) {
+		// The selected body is present with length 0 in ORIGINAL OLD. Commit drift (mode 3) writes one byte
+		// at it after the real commit, so the possible-crossed readback candidate is longer than ORIGINAL OLD:
+		// the length mismatch is inequality without a body payload comparison, and the truth is UNKNOWN.
+		sc, r, evidence, compared := psfBodyRun(t, 3, []byte{})
+		if evidence.commits != 1 || evidence.drift != 1 || r.truth != 3 || r.stage != 3 {
+			t.Fatalf("scope sealed window grew: %+v (%d,%d) %v", evidence, r.truth, r.stage, r.err)
+		}
+		// A one-byte ORIGINAL OLD body under the same drift adds one funded body comparison at preflight,
+		// one at final and one at the readback.
+		sameScene, same, _, equalLength := psfBodyRun(t, 3, []byte{1})
+		psfCrossedUnknown(t, same)
+		tsConsumed(t, sameScene.s, sameScene.o, 3, same.err)
+		sameScene.crossedImage(t, tsReopen(t, sameScene.s, sameScene.path), true, 4, sameScene.key(), []byte{0x7f})
+		if equalLength != compared+3 {
+			t.Fatalf("scope sealed window grew: readback comparisons %d, equal-length body %d", compared, equalLength)
+		}
+		psfCrossedUnknown(t, r)
+		tsConsumed(t, sc.s, sc.o, 3, r.err)
+		sc.crossedImage(t, tsReopen(t, sc.s, sc.path), true, 4, sc.key(), []byte{0x7f})
+	})
+	t.Run("equal-digest-other-generation", func(t *testing.T) {
+		// Only the generation-9 one-leaf is a target; the generation-8 node domain is also compared and its
+		// one-leaf holds a byte-equal value under another generation key. That row drifts at the write snapshot.
+		sc := psfNew(t)
+		build := sc.build(t)
+		target, other := obsoleteTreeFamily(9)[1], obsoleteTreeFamily(8)[1]
+		one := func(r *Reader) TreeOperationV1 {
+			op := build(r)
+			op.Pair.ObsoleteDeletes = slices.DeleteFunc(op.Pair.ObsoleteDeletes, func(row ObsoleteRowV1) bool { return !bytes.Equal(row.Key(), target.key) })
+			nodes8, err := r.ObsoleteGenerationPageV1(8, ObsoleteNodeV1, nil, 1440)
+			mustEnvironment(t, err)
+			if len(op.Pair.ObsoleteDeletes) != 1 || len(nodes8.Rows) != 3 || !bytes.Equal(target.value, other.value) {
+				t.Fatal("scene equal-digest rows missing")
+			}
+			op.Pair.ObsoleteConsulted = append(op.Pair.ObsoleteConsulted, nodes8.Witness)
+			return op
+		}
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 14, 8, other.key, func() { r = psRun(t, sc.s, sc.o, LaneOperation, one) })
+		if evidence.drift != 1 || evidence.commits != 0 || r.stage != 1 {
+			t.Fatalf("independent residual changed: %+v stage%d %v", evidence, r.stage, r.err)
+		}
+		r.tuple(t, 1, 1, -1)
+		treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		reopened := tsReopen(t, sc.s, sc.path)
+		psfRaw(t, reopened, 8, target.key, target.value)
+		psfAuthorityRow(t, reopened, false)
+	})
+	t.Run("operand-window", func(t *testing.T) {
+		sc := psfNew(t)
+		f, window := psfF(t), psfWindow(t, sc.s)
+		var r tsResult
+		evidence := ctxTreeFault(t, sc.s, 12, 0, []byte{9}, func() { r = sc.run(t, reservationFilled(t, psPageGrant+f-1)) })
+		if any(r.err) != any(errOperationReservationCapacity) || sc.s.state != storeOPEN {
+			t.Fatalf("scope metadata high-water differs: %v %s", r.err, sc.s.state)
+		}
+		// The prewrite refusal aborts ORIGINAL OLD exactly once and reaches no commit.
+		if evidence.aborts != 1 || evidence.commits != 0 {
+			t.Fatalf("scope next operation differs: OLD abort %+v", evidence)
+		}
+		sc.image(t, sc.s, false)
+		// One byte less than the envelope, window and both body operands refuses the funded two-span comparison.
+		compared := psfCompared(t, sc.s, func() {
+			r = sc.run(t, reservationFilled(t, psPageGrant+f+window+2*uint64(len(psfBodyValue))-1))
+		})
+		if any(r.err) != any(errOperationReservationCapacity) {
+			t.Fatalf("scope operand window not funded: %v", r.err)
+		}
+		r.tuple(t, 1, 1, -1)
+		tsConsumed(t, sc.s, sc.o, 1, r.err)
+		// The body is the first scoped residual, so the refused body adds no comparison to the plan's
+		// comparisons before the scope, which a refusal at the window also makes.
+		if ordinary := psfWindowRefused(t, f, window); compared != ordinary {
+			t.Fatalf("scope operand window not funded: comparisons %d, window-refused plan %d", compared, ordinary)
+		}
+		sc2 := psfNew(t)
+		r = sc2.run(t, reservationFilled(t, psPageGrant+f+window+2*uint64(len(psfBodyValue))))
+		// The preflight budget and the final sealed limit fund this typed scope commit.
+		if r.err != nil || r.truth != 2 {
+			t.Fatalf("scope missing budget admitted: %v truth%d", r.err, r.truth)
+		}
+		r.tuple(t, 2, 3, -1)
+		mustEnvironment(t, r.err)
+		sc2.image(t, sc2.s, true)
+	})
+	t.Run("sealed-helper", func(t *testing.T) {
+		left, right := bytes.Repeat([]byte{1}, 64), bytes.Repeat([]byte{1}, 64)
+		a := updateImage{present: true, bytes: unsafe.Pointer(&left[0]), length: 64}
+		b := updateImage{present: true, bytes: unsafe.Pointer(&right[0]), length: 64}
+		scope := largeImageScope{databaseID: [32]byte{7}, maxKey: 1, pairLimit: 8 + 127}
+		_, err := scope.rowsEqualV1(largeNativeRow{image: a}, largeNativeRow{image: b})
+		if any(err) != any(errOperationReservationCapacity) {
+			t.Fatalf("scope sealed window grew: %v", err)
+		}
+		scope.pairLimit = 8 + 128
+		equal, err := scope.rowsEqualV1(largeNativeRow{image: a}, largeNativeRow{image: b})
+		if err != nil || !equal {
+			t.Fatalf("sealed equal-length comparison: %v %v", equal, err)
+		}
+		runtime.KeepAlive(left)
+		runtime.KeepAlive(right)
+		if err := (&largeImageScope{}).fundV1(); err != nil {
+			t.Fatal("zero-value scope funded", err)
+		}
+		// Typed nil budget with a zero seal refuses with zero large-image interceptor calls, pair-read gets
+		// and payload comparisons; a positive seal over the same body selector makes interceptor calls and
+		// payload comparisons.
+		psfSealedTraversal(t, 0, false)
+		psfSealedTraversal(t, 1<<20, true)
+	})
+}
+
+// psfSealedTraversal compares a typed body-selector scope with a nil budget and the given seal over one
+// View Reader, and asserts the result and whether native acquisitions and payload comparisons occurred.
+func psfSealedTraversal(t *testing.T, limit uint64, reached bool) {
+	t.Helper()
+	sc := psfNew(t)
+	var calls uint32
+	var equal bool
+	var compareErr error
+	observed, err := FixturePairReadObservation(sc.s, nil, func() {
+		_, faultErr := fixtureLargeFault(sc.s, 1, 4, bytes.Repeat([]byte{0xff}, 32), func() {
+			mustEnvironment(t, sc.s.View(func(r *Reader) error {
+				scope := largeImageScope{selectors: []LargeImageSelectorV1{{Kind: 1, Hash: sc.body}}, maxKey: r.maxKey, pairLimit: limit, databaseID: r.databaseID, config: r.treeConfig}
+				before := fixtureLargeNativeCalls()
+				equal, compareErr = largeResidualEqual(r, r, scope, nil)
+				calls = fixtureLargeNativeCalls() - before
+				return nil
+			}))
+		})
+		mustEnvironment(t, faultErr)
+	})
+	mustEnvironment(t, err)
+	if !reached {
+		if any(compareErr) != any(errOperationReservationCapacity) || calls != 0 || observed.Gets != 0 || observed.Comparisons != 0 {
+			t.Fatalf("scope missing budget admitted: %v calls%d %+v", compareErr, calls, observed)
+		}
+		return
+	}
+	if compareErr != nil || !equal || calls == 0 || observed.Comparisons == 0 {
+		t.Fatalf("sealed body traversal: %v %v calls%d %+v", equal, compareErr, calls, observed)
+	}
+}
+
+// Mode 29 adds an extra member to the rank-5 undo domain at commit, then its prefix interceptor returns
+// EIO for readback prefix reads of another DBI: the raw-domain mismatch comes first and the rank-8 node
+// domain traversal must still reach its EIO.
+func psfDomainMismatchThenError(t *testing.T) {
+	sc := psfNew(t)
+	hash, _ := psfUndo(t, sc.s)
+	var r tsResult
+	evidence := ctxTreeFault(t, sc.s, 29, 5, append(bytes.Clone(hash[:]), 1), func() { r = psRun(t, sc.s, sc.o, LaneOperation, psfUndoScopeOp(t)) })
+	if evidence.drift != 1 || evidence.commits != 1 || evidence.gets == 0 || r.truth != 3 {
+		t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
+	}
+	var engine *EngineError
+	if cause := psfCrossed(t, r, CommitTruthUnknown); !errors.As(cause, &engine) || engine.Class != EngineIO {
+		t.Fatalf("later scope error lost: %v", cause)
+	}
+	tsConsumed(t, sc.s, sc.o, 3, r.err)
+	// The committed plan deleted generation 9's nodes and wrote the authority; the drift added hash||1.
+	reopened := tsReopen(t, sc.s, sc.path)
+	for _, row := range obsoleteTreeFamily(9) {
+		psfRaw(t, reopened, 8, row.key, nil)
+	}
+	psfRaw(t, reopened, 0, tsRootKey(9), []byte{0xee, 9})
+	psfRaw(t, reopened, 5, append(bytes.Clone(hash[:]), 1), []byte{0x7f})
+	psfAuthorityRow(t, reopened, true)
+}
+
+// psfUndoScopeOp deletes generation 9's nodes under their witness with the authority target and also
+// consults the undo witness, whose rank-2 index and rank-3 header points follow the raw domains.
+func psfUndoScopeOp(t *testing.T) func(*Reader) TreeOperationV1 {
+	return func(reader *Reader) TreeOperationV1 {
+		nodes, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1440)
+		mustEnvironment(t, err)
+		index, err := reader.ObsoleteGenerationPageV1(9, 2, nil, 1440)
+		mustEnvironment(t, err)
+		undo, err := reader.ObsoleteUndoPageV1(index.Rows[0], nil, 1440)
+		mustEnvironment(t, err)
+		return TreeOperationV1{Pair: TreePairV1{
+			Mutations:         []Mutation{psfAuthority(t)},
+			ObsoleteDeletes:   nodes.Rows,
+			ObsoleteConsulted: []ObsoletePageWitnessV1{nodes.Witness, undo.Witness},
+		}}
+	}
+}
+
+// Point loop: mode 36 makes the rank-2 index point differ in length (unfunded inequality); the
+// later rank-3 header point needs the window plus two 148-byte operands, but the account holds the
+// envelope, the window, one operand and 64 bytes, so its preflight comparison must still refuse with
+// the capacity singleton.
+func psfPointMismatchThenCapacity(t *testing.T) {
+	index := binary.BigEndian.AppendUint64(obsoleteGenerationLiteral(9), 1)
+	var compared uint64
+	run := func(mode uint32, remaining func(f, window uint64) uint64) (*psfScene, tsResult, fixtureLargeEvidence) {
+		sc := psfNew(t)
+		psfUndo(t, sc.s)
+		o := reservationFilled(t, psPageGrant+remaining(psfUndoScopeF(t), psfWindow(t, sc.s)))
+		sc.o = o
+		var r tsResult
+		var evidence fixtureLargeEvidence
+		compared = psfCompared(t, sc.s, func() {
+			if mode == 0 {
+				r = psRun(t, sc.s, o, LaneOperation, psfUndoScopeOp(t))
+				return
+			}
+			evidence = ctxTreeFault(t, sc.s, mode, 2, index, func() { r = psRun(t, sc.s, o, LaneOperation, psfUndoScopeOp(t)) })
+		})
+		return sc, r, evidence
+	}
+	short := func(f, window uint64) uint64 { return f + window + obsoleteHeaderWidth(3) + 64 }
+	sc, r, evidence := run(36, short)
+	shortCompared := compared
+	if any(r.err) != any(errOperationReservationCapacity) || evidence.gets != 1 || evidence.aborts != 1 || evidence.commits != 0 {
+		t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
+	}
+	r.tuple(t, 1, 1, -1)
+	tsConsumed(t, sc.s, sc.o, 1, r.err)
+	sc.image(t, tsReopen(t, sc.s, sc.path), false)
+	// Attribution: without the fault the same account refuses at the header point; with ample capacity
+	// the index-point mismatch alone is the OLD/write refusal.
+	if _, r, _ = run(0, short); any(r.err) != any(errOperationReservationCapacity) {
+		t.Fatalf("scope operand window not funded: %v", r.err)
+	}
+	// Only the unfaulted index point is equal-length, so it alone adds a comparison before the refused header.
+	if compared != shortCompared+1 {
+		t.Fatalf("scope operand window not funded: unfaulted comparisons %d, faulted %d", compared, shortCompared)
+	}
+	_, r, _ = run(36, func(f, window uint64) uint64 { return f + window + 2*obsoleteHeaderWidth(3) + 4096 })
+	r.tuple(t, 1, 1, -1)
+	treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+	// Funded, the header point is the one comparison the refused run lacks.
+	if compared != shortCompared+1 {
+		t.Fatalf("scope operand window not funded: funded header comparisons %d, refused %d", compared, shortCompared)
+	}
+}
+
+const psfRowBig = 4000
+
+// psfRowMismatchThenCapacity: mode 14 changes the first residual row of one stream before the write
+// section, and a later row of the same stream holds psfRowBig bytes. The account funds the envelope f,
+// the window and psfRowBig+64 bytes, so after the first row's inequality the later row's two-operand
+// comparison must still refuse with the capacity singleton. following counts the equal-length rows after the
+// later row in its stream.
+func psfRowMismatchThenCapacity(t *testing.T, rank uint8, f, following uint64, keys func([32]byte) ([]byte, []byte, func(*Reader) TreeOperationV1)) {
+	t.Helper()
+	big := bytes.Repeat([]byte{0xc5}, psfRowBig)
+	var first, later []byte
+	var compared uint64
+	run := func(fault bool, extra uint64) (*psfScene, tsResult, fixtureLargeEvidence) {
+		sc := psfNew(t)
+		hash, _ := psfUndo(t, sc.s)
+		var op func(*Reader) TreeOperationV1
+		first, later, op = keys(hash)
+		treeNativeSeed(t, sc.s, rank, later, big)
+		sc.o = reservationFilled(t, psPageGrant+f+psfWindow(t, sc.s)+extra)
+		if !fault {
+			return sc, psRun(t, sc.s, sc.o, LaneOperation, op), fixtureLargeEvidence{}
+		}
+		var r tsResult
+		var evidence fixtureLargeEvidence
+		compared = psfCompared(t, sc.s, func() {
+			evidence = ctxTreeFault(t, sc.s, 14, rank, first, func() { r = psRun(t, sc.s, sc.o, LaneOperation, op) })
+		})
+		return sc, r, evidence
+	}
+	sc, r, evidence := run(true, psfRowBig+64)
+	refused := compared
+	if any(r.err) != any(errOperationReservationCapacity) || evidence.drift != 1 || evidence.aborts != 1 || evidence.commits != 0 {
+		t.Fatalf("later scope error lost: %v %+v", r.err, evidence)
+	}
+	r.tuple(t, 1, 1, -1)
+	tsConsumed(t, sc.s, sc.o, 1, r.err)
+	reopened := tsReopen(t, sc.s, sc.path)
+	psfRaw(t, reopened, rank, first, []byte{0x7f})
+	psfRaw(t, reopened, rank, later, big)
+	psfAuthorityRow(t, reopened, false)
+	// Attribution: without the fault the same account refuses at the later row; with ample capacity
+	// the first row's mismatch alone is the OLD/write refusal.
+	if _, r, _ = run(false, psfRowBig+64); any(r.err) != any(errOperationReservationCapacity) {
+		t.Fatalf("scope operand window not funded: %v", r.err)
+	}
+	_, r, _ = run(true, 2*psfRowBig+4096)
+	r.tuple(t, 1, 1, -1)
+	treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+	// Funded, the later row and the rows after it are the comparisons the refused run lacks.
+	if compared != refused+1+following {
+		t.Fatalf("scope operand window not funded: funded comparisons %d, refused %d, following rows %d", compared, refused, following)
+	}
+}
+
+// psfSelectorRowMismatchThenCapacity runs the row case inside one undo-family selector: the family's
+// first member drifts and its second member is the later row.
+func psfSelectorRowMismatchThenCapacity(t *testing.T) {
+	auth := psfAuthority(t)
+	f := psF(1, 0, 0, 0, 0, 1, uint64(len(auth.Key)+len(auth.Literal)), 0)
+	psfRowMismatchThenCapacity(t, 5, f, 1, func(hash [32]byte) ([]byte, []byte, func(*Reader) TreeOperationV1) {
+		op := func(*Reader) TreeOperationV1 {
+			return TreeOperationV1{Pair: TreePairV1{
+				Mutations:      []Mutation{psfAuthority(t)},
+				LargeConsulted: []LargeImageSelectorV1{{Kind: LargeImageUndoFamilyV1, Hash: hash}},
+			}}
+		}
+		return bytes.Clone(hash[:]), append(bytes.Clone(hash[:]), 0), op
+	})
+}
+
+// psfDomainRowMismatchThenCapacity runs the row case inside one witnessed node domain of generation 9:
+// the first node drifts and the second node is the later row.
+func psfDomainRowMismatchThenCapacity(t *testing.T) {
+	auth := psfAuthority(t)
+	nodes := obsoleteTreeFamily(9)
+	f := psF(1, 0, 0, 1, 0, 0, uint64(len(auth.Key)+len(auth.Literal)), uint64(8+len(nodes[2].key)))
+	psfRowMismatchThenCapacity(t, 8, f, 1, func([32]byte) ([]byte, []byte, func(*Reader) TreeOperationV1) {
+		op := func(reader *Reader) TreeOperationV1 {
+			page, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1440)
+			mustEnvironment(t, err)
+			return TreeOperationV1{Pair: TreePairV1{
+				Mutations:         []Mutation{psfAuthority(t)},
+				ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness},
+			}}
+		}
+		return bytes.Clone(nodes[0].key), bytes.Clone(nodes[1].key), op
+	})
+}
+
+// psfSelectorRowInsertThenCapacity: the write view gains the family key hash||1 between OLD members
+// hash||0 and hash||2||ff, and hash||2||ff holds psfRowBig bytes; the rows pair by key, so the
+// inserted key is an inequality and hash||2||ff still gets its two-operand comparison.
+func psfSelectorRowInsertThenCapacity(t *testing.T) {
+	auth := psfAuthority(t)
+	f := psF(1, 0, 0, 0, 0, 1, uint64(len(auth.Key)+len(auth.Literal)), 0)
+	psfRowMismatchThenCapacity(t, 5, f, 0, func(hash [32]byte) ([]byte, []byte, func(*Reader) TreeOperationV1) {
+		op := func(*Reader) TreeOperationV1 {
+			return TreeOperationV1{Pair: TreePairV1{
+				Mutations:      []Mutation{psfAuthority(t)},
+				LargeConsulted: []LargeImageSelectorV1{{Kind: LargeImageUndoFamilyV1, Hash: hash}},
+			}}
+		}
+		return append(bytes.Clone(hash[:]), 1), append(bytes.Clone(hash[:]), 2, 0xff), op
+	})
+}
+
+// psfDomainRowInsertThenCapacity: the write view gains a node key between the first and second nodes
+// of generation 9's witnessed domain, and the second node holds psfRowBig bytes.
+func psfDomainRowInsertThenCapacity(t *testing.T) {
+	auth := psfAuthority(t)
+	nodes := obsoleteTreeFamily(9)
+	f := psF(1, 0, 0, 1, 0, 0, uint64(len(auth.Key)+len(auth.Literal)), uint64(8+len(nodes[2].key)))
+	psfRowMismatchThenCapacity(t, 8, f, 1, func([32]byte) ([]byte, []byte, func(*Reader) TreeOperationV1) {
+		op := func(reader *Reader) TreeOperationV1 {
+			page, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1440)
+			mustEnvironment(t, err)
+			return TreeOperationV1{Pair: TreePairV1{
+				Mutations:         []Mutation{psfAuthority(t)},
+				ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness},
+			}}
+		}
+		return append(bytes.Clone(nodes[0].key), 0), bytes.Clone(nodes[1].key), op
+	})
+}
+
+// psfUndoScopeF is psfUndoScopeOp's metadata envelope: one Mutation, three deletes, two witnesses, two
+// points (index and header) and no selector.
+func psfUndoScopeF(t *testing.T) uint64 {
+	auth := psfAuthority(t)
+	nodes := obsoleteTreeFamily(9)
+	k := uint64(len(auth.Key) + len(auth.Literal))
+	for _, row := range nodes {
+		k += uint64(len(row.key))
+	}
+	// Node witness: prefix 8 + last; undo witness: hash prefix 32 + last family key 34 + points 16 + 32.
+	u := uint64(8+len(nodes[2].key)) + 32 + 34 + 16 + 32
+	return psF(1, 0, 3, 2, 2, 0, k, u)
+}
+
+// psfWitnessBytes repeats the second one-row undo page's witness, whose domain has a prefix, an after
+// bound, a last key and two points. One byte below the metadata envelope counting every one of those
+// bytes refuses with the capacity singleton before the duplicate-witness check; at the envelope that
+// check refuses with "invalid Update Batch".
+func psfWitnessBytes(t *testing.T) {
+	build := func(reader *Reader) TreeOperationV1 {
+		index, err := reader.ObsoleteGenerationPageV1(9, 2, nil, 1440)
+		mustEnvironment(t, err)
+		first, err := reader.ObsoleteUndoPageV1(index.Rows[0], nil, 1)
+		mustEnvironment(t, err)
+		page, err := reader.ObsoleteUndoPageV1(index.Rows[0], first.Next, 1)
+		mustEnvironment(t, err)
+		if len(page.Rows) != 1 || len(first.Next) != 32 {
+			t.Fatalf("scene undo page rows %d after %d", len(page.Rows), len(first.Next))
+		}
+		return TreeOperationV1{Pair: TreePairV1{ObsoleteDeletes: page.Rows, ObsoleteConsulted: []ObsoletePageWitnessV1{page.Witness, page.Witness}}}
+	}
+	// Per witness: prefix 32 (entry hash), after 32 (first family key), last 34 (third family key),
+	// index point key 16 and header point key 32. The deleted row is the 33-byte second family key.
+	const prefix, after, last, indexKey, headerKey = 32, 32, 34, 16, 32
+	f := psF(0, 0, 1, 2, 4, 0, 33, 2*(prefix+after+last+indexKey+headerKey))
+	for _, capacity := range []bool{true, false} {
+		sc := psfNew(t)
+		_, undo := psfUndo(t, sc.s)
+		grant := f
+		if capacity {
+			grant--
+		}
+		r := psRun(t, sc.s, reservationFilled(t, psPageGrant+grant), LaneOperation, build)
+		if sc.s.state != storeOPEN {
+			t.Fatalf("scope metadata high-water differs: capacity %v Store %s", capacity, sc.s.state)
+		}
+		r.tuple(t, 1, 1, -1)
+		if capacity && any(r.err) != any(errOperationReservationCapacity) {
+			t.Fatalf("scope metadata high-water differs: one byte below the envelope %v", r.err)
+		}
+		if !capacity {
+			treeNativeError(t, r.err, "update", "InvalidInput", 22, "invalid Update Batch", nil)
+		}
+		psfRaw(t, sc.s, 5, undo[1], []byte{1})
+		psfAuthorityRow(t, sc.s, false)
+	}
+}
+
+// Mode 15 retains the readback abort (thread mismatch); the scope operation keeps that retained
+// ownership, releases its grant and the next operation reuses the terminal refusal without a callback.
+func psfRetained(t *testing.T) {
+	sc := psfNew(t)
+	var r tsResult
+	_, err := fixtureLargeFault(sc.s, 15, 0, tsRootKey(9), func() { r = sc.run(t, sc.o) })
+	mustEnvironment(t, err)
+	if sc.s.state != storePOISONEDTHREAD || sc.s.txn == nil || any(sc.s.terminal) != any(r.err) || r.err == nil {
+		t.Fatalf("scope next operation differs: retained %s %v", sc.s.state, r.err)
+	}
+	// The commit crossed and readback selected NEW before its abort failed; the readback cause is that abort.
+	if cause := psfCrossed(t, r, CommitTruthNew); cause == nil {
+		t.Fatal("scope strict truth differs: retained readback cause missing")
+	}
+	tcPoisonedCause(t, r.err)
+	if reservationLive(sc.o) != 0 {
+		t.Fatalf("scope grant leaked: retained live%d", reservationLive(sc.o))
+	}
+	calls := 0
+	mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+		next := tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return tsPair(9), nil })
+		if any(next.err) != any(r.err) || next.truth != sc.s.terminalTruth || next.truth != r.truth || calls != 0 || sc.s.state != storePOISONEDTHREAD {
+			t.Fatalf("scope next operation differs: %v truth%d stored%d calls%d %s", next.err, next.truth, sc.s.terminalTruth, calls, sc.s.state)
+		}
+		return nil
+	}))
+	// Releasing the retained thread frees the writer lock; the reopened Store shows the committed image.
+	mustEnvironment(t, fixtureLargeRelease(sc.s))
+	sc.image(t, tsReopen(t, sc.s, sc.path), true)
+}
+
+// psfCallbackCleanup crosses each callback application error (plain, wrapped, typed-nil) with a consumed
+// (fixture mode 9: OLD abort reports EIO) and a retained (mode 10: OLD abort THREAD_MISMATCH) cleanup.
+func psfCallbackCleanup(t *testing.T) {
+	marker := errors.New("scope callback marker")
+	var typedNil *nilPointerError
+	for _, mode := range []uint32{9, 10} {
+		for _, application := range []error{marker, fmt.Errorf("scope wrapper: %w", marker), typedNil} {
+			sc := psfNew(t)
+			var r tsResult
+			var kept *Reader
+			evidence, err := fixtureLargeFault(sc.s, mode, 0, tsRootKey(9), func() {
+				mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+					return a.WithReservation(psPageGrant, func() error {
+						r = tsInvoke(sc.s, a, func(rd *Reader) (TreeOperationV1, error) { kept = rd; return TreeOperationV1{}, application })
+						return nil
+					})
+				}))
+			})
+			mustEnvironment(t, err)
+			want := map[uint32]storeState{9: storeCLOSED, 10: storePOISONEDTHREAD}[mode]
+			if evidence.aborts != 1 || evidence.commits != 0 || r.err == nil || !errors.Is(r.err, application) || any(sc.s.terminal) != any(r.err) || sc.s.state != want {
+				t.Fatalf("scope next operation differs: mode%d %v evidence%+v state%s", mode, r.err, evidence, sc.s.state)
+			}
+			if reservationLive(sc.o) != 0 {
+				t.Fatalf("scope grant leaked: mode%d live%d", mode, reservationLive(sc.o))
+			}
+			r.tuple(t, 1, 1, -1)
+			tsExpiredReader(t, kept)
+			psfAbortCause(t, r.err, mode)
+			calls := 0
+			mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+				next := tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return tsPair(9), nil })
+				if any(next.err) != any(r.err) || next.truth != sc.s.terminalTruth || next.truth != r.truth || calls != 0 || sc.s.state != want {
+					t.Fatalf("scope next operation differs: mode%d %v truth%d stored%d calls%d %s", mode, next.err, next.truth, sc.s.terminalTruth, calls, sc.s.state)
+				}
+				return nil
+			}))
+			mustEnvironment(t, fixtureLargeRelease(sc.s))
+		}
+		psfCallbackPanic(t, mode, marker)
+		psfCallbackGoexit(t, mode)
+	}
+}
+
+// psfCleanupTerminal asserts one OLD abort, the mode's terminal state, released grants and a next call
+// that returns the stored terminal without invoking its callback.
+func psfCleanupTerminal(t *testing.T, sc *psfScene, mode uint32, kind string, evidence fixtureLargeEvidence, kept *Reader) {
+	t.Helper()
+	tsExpiredReader(t, kept)
+	want := map[uint32]storeState{9: storeCLOSED, 10: storePOISONEDTHREAD}[mode]
+	if evidence.aborts != 1 || evidence.commits != 0 || sc.s.terminal == nil || sc.s.state != want {
+		t.Fatalf("scope next operation differs: %s mode%d evidence%+v state%s terminal%v", kind, mode, evidence, sc.s.state, sc.s.terminal)
+	}
+	if reservationLive(sc.o) != 0 {
+		t.Fatalf("scope grant leaked: %s mode%d live%d", kind, mode, reservationLive(sc.o))
+	}
+	psfAbortCause(t, sc.s.terminal, mode)
+	calls := 0
+	mustEnvironment(t, sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+		next := tsInvoke(sc.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return tsPair(9), nil })
+		if any(next.err) != any(sc.s.terminal) || next.truth != sc.s.terminalTruth || next.truth != CommitTruthOld || calls != 0 || sc.s.state != want {
+			t.Fatalf("scope next operation differs: %s mode%d %v truth%d stored%d calls%d %s", kind, mode, next.err, next.truth, sc.s.terminalTruth, calls, sc.s.state)
+		}
+		return nil
+	}))
+	mustEnvironment(t, fixtureLargeRelease(sc.s))
+}
+
+// psfAbortCause finds the OLD abort cause each cleanup mode injects: mode 9 consumes with EIO,
+// mode 10 retains with THREAD_MISMATCH.
+func psfAbortCause(t *testing.T, err error, mode uint32) {
+	t.Helper()
+	code := map[uint32]int{9: 5, 10: codeThreadMismatch}[mode]
+	var engine *EngineError
+	if !errors.As(err, &engine) || engine.Operation != "abort" || engine.Code != code {
+		t.Fatalf("scope next operation differs: mode%d cleanup cause %v", mode, err)
+	}
+}
+
+// psfCallbackPanic crosses a callback panic with the mode's cleanup; the panic value reaches the caller.
+func psfCallbackPanic(t *testing.T, mode uint32, marker error) {
+	sc := psfNew(t)
+	var recovered any
+	var kept *Reader
+	evidence, err := fixtureLargeFault(sc.s, mode, 0, tsRootKey(9), func() {
+		defer func() { recovered = recover() }()
+		_ = sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+			return a.WithReservation(psPageGrant, func() error {
+				tsInvoke(sc.s, a, func(rd *Reader) (TreeOperationV1, error) { kept = rd; panic(marker) })
+				return nil
+			})
+		})
+	})
+	mustEnvironment(t, err)
+	if recovered != any(marker) {
+		t.Fatalf("scope next operation differs: panic mode%d recovered %v", mode, recovered)
+	}
+	psfCleanupTerminal(t, sc, mode, "panic", evidence, kept)
+}
+
+// psfCallbackGoexit crosses a callback runtime.Goexit with the mode's cleanup on its own goroutine.
+func psfCallbackGoexit(t *testing.T, mode uint32) {
+	sc := psfNew(t)
+	returned := true
+	var kept *Reader
+	evidence, err := fixtureLargeFault(sc.s, mode, 0, tsRootKey(9), func() {
+		done := make(chan bool)
+		go func() {
+			normal := false
+			defer func() { done <- normal }()
+			_ = sc.o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+				return a.WithReservation(psPageGrant, func() error {
+					tsInvoke(sc.s, a, func(rd *Reader) (TreeOperationV1, error) { kept = rd; runtime.Goexit(); return TreeOperationV1{}, nil })
+					return nil
+				})
+			})
+			normal = true
+		}()
+		returned = <-done
+	})
+	mustEnvironment(t, err)
+	if returned {
+		t.Fatalf("scope next operation differs: Goexit mode%d returned normally", mode)
+	}
+	psfCleanupTerminal(t, sc, mode, "Goexit", evidence, kept)
 }
