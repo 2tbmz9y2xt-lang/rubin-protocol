@@ -1949,6 +1949,43 @@ func TestSetMempoolRejectionDoesNotPublishDARelayState(t *testing.T) {
 	TestSetMempoolCoBindsDARelayState(t)
 }
 
+// installInitialMempool builds the DA relay state between the candidate check and the owner lock and returns its error after the owner check.
+func TestInstallInitialMempoolBuildsDARelayBeforeOwnerLock(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "sync.go", nil, 0)
+	require(t, err == nil, "parse sync.go: %v", err)
+	at, relayErr := map[string][]int{}, ""
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && canonicalStandardPublicationMethod(fn) == "SyncEngine.installInitialMempool" {
+			for i, stmt := range fn.Body.List {
+				ast.Inspect(stmt, func(node ast.Node) bool {
+					switch node := node.(type) {
+					case *ast.CallExpr:
+						name := canonicalStandardPublicationPath(node.Fun, nil)
+						at[name] = append(at[name], i)
+					case *ast.AssignStmt:
+						if call, ok := node.Rhs[0].(*ast.CallExpr); ok && canonicalStandardPublicationPath(call.Fun, nil) == "newDARelayState" {
+							relayErr = canonicalStandardPublicationPath(node.Lhs[len(node.Lhs)-1], nil)
+						}
+					case *ast.ReturnStmt:
+						if len(node.Results) == 1 && relayErr != "" && canonicalStandardPublicationPath(node.Results[0], nil) == relayErr {
+							at["return relay error"] = append(at["return relay error"], i)
+						}
+					}
+					return true
+				})
+			}
+		}
+	}
+	lock, check, candidate := at["owner.mu.Lock"], at["checkInitialMempoolOwnerLocked"], at["mempool.checkNeverUsedForBindingLocked"]
+	require(t, len(lock) == 1 && len(check) == 1 && len(candidate) == 1, "owner lock at %v, owner check at %v, candidate check at %v", lock, check, candidate)
+	for _, name := range []string{"defaultDARelayCaps", "newDARelayState"} {
+		got := at[name]
+		require(t, len(got) == 1 && got[0] > candidate[0] && got[0] < lock[0], "%s called at statements %v, want one call between statements %d and %d", name, got, candidate[0], lock[0])
+	}
+	got := at["return relay error"]
+	require(t, len(got) == 1 && got[0] > check[0], "DA relay build error returned at statements %v, want one return after the owner check at statement %d", got, check[0])
+}
+
 func TestSetMempoolConcurrentCandidatesKeepOneDARelayPair(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	engine := f.unboundEngineOn(t)

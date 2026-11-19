@@ -155,9 +155,7 @@ func advanceDATTLChecked(relay *DARelayState, owner *PendingOutpointOwner) error
 	return daTTLOutsideErr(before, daTTLSnapshot(relay, owner))
 }
 
-// daTTLOutsideErr requires after to equal before outside before's State A and B records, less the removed records'
-// locator rows, charges, entries, claims and outpoint rows, with equal owner counts and one revision per survivor,
-// and then requires daTTLSelectedErr of those records.
+// daTTLOutsideErr requires after to equal before outside before's State A and B records, less the removed records' locator rows, charges, entries, claims and outpoint rows, with equal owner counts and one revision per survivor, and then requires daTTLSelectedErr of those records.
 func daTTLOutsideErr(before, after daTTLImage) error {
 	selected, removed := daTTLSelection(before.view, after.view)
 	wantView, isView := daTTLExpectedView(before.view, selected, removed), daTTLWithoutSelected(after.view, selected)
@@ -178,8 +176,7 @@ func daTTLOutsideErr(before, after daTTLImage) error {
 	return daTTLSelectedErr(before.view, after.view, selected)
 }
 
-// daTTLSelectedErr requires a selected record absent from after to have been at count 1, and a present one to equal
-// its before record one count lower with a distinct revision minted above before's high-water (RUBIN_COMPACT_BLOCKS.md Section 5).
+// daTTLSelectedErr requires a selected record absent from after to have been at count 1, and a present one to equal its before record one count lower with a distinct revision minted above before's high-water (RUBIN_COMPACT_BLOCKS.md Section 5).
 func daTTLSelectedErr(before, after daRelayStateView, selected map[[32]byte]daRelaySetRecord) error {
 	minted := map[uint64]bool{}
 	for daID, was := range selected {
@@ -324,12 +321,10 @@ func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
 		view := daRelayStateSnapshot(f.relay)
 		requireDATTLCount(t, view, r.stateAID, want)
 		requireDATTLCount(t, view, r.stateBID, want)
-		if wantRecords := r.setup.records + 2*uint64(call+1); view.records != wantRecords {
-			t.Fatalf("body call %d: records=%d, want %d (one revision per decreased record)", call+1, view.records, wantRecords)
-		}
-		if _, held := view.prefetchIndexes[r.stateAID]; !held {
-			t.Fatalf("body call %d released the prefetch reservation of a surviving record", call+1)
-		}
+		wantRecords := r.setup.records + 2*uint64(call+1)
+		require(t, view.records == wantRecords, "body call %d: records=%d, want %d (one revision per decreased record)", call+1, view.records, wantRecords)
+		_, held := view.prefetchIndexes[r.stateAID]
+		require(t, held, "body call %d released the prefetch reservation of a surviving record", call+1)
 	}
 	requireDATTLOK(t, runDATTLBodyInGuard(t, f), "body call 3")
 	after := daRelayStateSnapshot(f.relay)
@@ -338,9 +333,7 @@ func TestDATTLCallbackBodyThreeCountedPublications(t *testing.T) {
 	ownerReadyClaimGone(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), tokenA, r.stateA.inputs)
 	ownerReadyClaimGone(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), tokenB, r.stateB.inputs)
 	require(t, after.records == r.setup.records+4, "expiry minted a revision: records=%d, want %d", after.records, r.setup.records+4)
-	if !reflect.DeepEqual(after.sets[r.stateCID], r.base.sets[r.stateCID]) || !reflect.DeepEqual(after.locators, r.base.locators) {
-		t.Fatal("State C record or the locator image changed")
-	}
+	require(t, reflect.DeepEqual(after.sets[r.stateCID], r.base.sets[r.stateCID]) && reflect.DeepEqual(after.locators, r.base.locators), "State C record or the locator image changed")
 	type counters struct{ staged, orphan, commit, complete, pinned uint64 }
 	got := counters{after.stagedBytes, after.orphanBytes, after.commitBytes, after.completeBytes, after.pinnedPayloadBytes}
 	want := counters{r.base.stagedBytes, r.base.orphanBytes, r.base.commitBytes, r.base.completeBytes, r.base.pinnedPayloadBytes}
@@ -369,9 +362,8 @@ func TestDATTLCallbackBodyRefusalChangesNothing(t *testing.T) {
 			row.corrupt(f, r)
 			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			indexBefore := daTTLIndexKeys(f.relay)
-			if err := runDATTLBodyInGuard(t, f); !errors.Is(err, errDARelayImageIncompatible) {
-				t.Fatalf("body: err=%v, want %v", err, errDARelayImageIncompatible)
-			}
+			err := runDATTLBodyInGuard(t, f)
+			require(t, errors.Is(err, errDARelayImageIncompatible), "body: err=%v, want %v", err, errDARelayImageIncompatible)
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 			requireDATTLIndexUnchanged(t, f.relay, indexBefore, true)
 		})
@@ -388,9 +380,8 @@ func daTTLIndexKeys(relay *DARelayState) [][32]byte {
 // requireDATTLIndexUnchanged requires the State A/B bucket's pre-body link order, and exactness if it was exact.
 func requireDATTLIndexUnchanged(t *testing.T, relay *DARelayState, before [][32]byte, exactBefore bool) {
 	t.Helper()
-	if after := daTTLIndexKeys(relay); !slices.Equal(after, before) {
-		t.Fatalf("refusal changed the State A/B index: %x, want %x", after, before)
-	}
+	after := daTTLIndexKeys(relay)
+	require(t, slices.Equal(after, before), "refusal changed the State A/B index: %x, want %x", after, before)
 	if exactBefore {
 		requireDATTLIndexExact(t, relay)
 	}
@@ -399,9 +390,8 @@ func requireDATTLIndexUnchanged(t *testing.T, relay *DARelayState, before [][32]
 // requireDATTLIndexExact pins the State A/B bucket to exactly the present records that are not State C.
 func requireDATTLIndexExact(t *testing.T, relay *DARelayState) {
 	t.Helper()
-	if msg := daTTLIndexMismatch(relay); msg != "" {
-		t.Fatal(msg)
-	}
+	msg := daTTLIndexMismatch(relay)
+	require(t, msg == "", "%s", msg)
 }
 
 func daTTLIndexMismatch(relay *DARelayState) string {
@@ -545,9 +535,7 @@ func TestDATTLCallbackBodyUnboundRelay(t *testing.T) {
 	view := daRelayStateSnapshot(f.relay)
 	requireDATTLCount(t, view, r.stateAID, 2)
 	requireDATTLCount(t, view, r.stateBID, 2)
-	if !reflect.DeepEqual(cloneDAAdmissionOwner(owner), ownerBefore) {
-		t.Fatal("unbound body changed an owner it cannot reach")
-	}
+	require(t, reflect.DeepEqual(cloneDAAdmissionOwner(owner), ownerBefore), "unbound body changed an owner it cannot reach")
 	mustAtomic(t, runDATTLBodyInGuard(t, f))
 	mustAtomic(t, runDATTLBodyInGuard(t, f))
 	require(t, reflect.DeepEqual(daRelayStateSnapshot(f.relay).sets, r.base.sets), "the third unbound body call left %v, want only the unchanged State C record", daRelayStateSnapshot(f.relay).sets)
@@ -672,14 +660,12 @@ func TestDATTLCallbackIndexProductionPaths(t *testing.T) {
 	f.ownerReadyChunk(released, 0, "released", daNonReplayPeer("drop"))
 	requireDATTLIndexExact(t, f.relay)
 	mustAtomic(t, f.relay.ReleasePeerQuotaKey("drop"))
-	if _, present := daRelayStateSnapshot(f.relay).sets[released]; present {
-		t.Fatal("PEER cleanup kept the released record")
-	}
+	_, present := daRelayStateSnapshot(f.relay).sets[released]
+	require(t, !present, "PEER cleanup kept the released record")
 	requireDATTLIndexStep(t, f, "PEER cleanup removal")
 }
 
-// TestDATTLCallbackIndexD1Projection pins the index on the D1 projection: the State A survivor stays, the included
-// State C record and the State B record whose input the final chain spent are removed; O1 is not published.
+// TestDATTLCallbackIndexD1Projection pins the index on the D1 projection: the State A survivor stays, the included State C record and the State B record whose input the final chain spent are removed; O1 is not published.
 func TestDATTLCallbackIndexD1Projection(t *testing.T) {
 	x := canonicalDAOwnerFixtureOver(t, newDANonReplayFixture(t, 10))
 	x.stateC = daRelayTestID(0x33)
@@ -711,13 +697,11 @@ func requireDATTLD1Records(t *testing.T, x *canonicalDAOwnerFixture, want map[[3
 
 func requireDATTLState(t *testing.T, f *daNonReplayFixture, daID [32]byte, want daRelaySetState) {
 	t.Helper()
-	if record, present := daRelayStateSnapshot(f.relay).sets[daID]; !present || record.state != want {
-		t.Fatalf("record %x: present=%v state=%v, want %v", daID[:1], present, record.state, want)
-	}
+	record, present := daRelayStateSnapshot(f.relay).sets[daID]
+	require(t, present && record.state == want, "record %x: present=%v state=%v, want %v", daID[:1], present, record.state, want)
 }
 
-// TestDATTLCallbackStateABBucketPermanent pins one State A/B bucket pointer from construction through a State A
-// admission, the in-guard TTL body emptying it (count 0, nil head) and the next admission.
+// TestDATTLCallbackStateABBucketPermanent pins one State A/B bucket pointer from construction through a State A admission, the in-guard TTL body emptying it (count 0, nil head) and the next admission.
 func TestDATTLCallbackStateABBucketPermanent(t *testing.T) {
 	f := newDANonReplayFixture(t, 2)
 	bucket := f.relay.relations.buckets[daRelayIncompleteKey]
@@ -984,8 +968,7 @@ func TestDATTLCallbackLatchedNewInvokesNothing(t *testing.T) {
 func daTTLEngineRecords(t *testing.T, f *pendingOutpointSyncFixture) (*daNonReplayFixture, [32]byte, [32]byte) {
 	t.Helper()
 	signer := mustNodeMLDSA87Keypair(t)
-	address := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
-	outpoints := make([]consensus.Outpoint, 0, 2)
+	address, outpoints := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes()), make([]consensus.Outpoint, 0, 2)
 	for i := range 2 {
 		op := consensus.Outpoint{Txid: [32]byte{0xd7, byte(i)}}
 		f.engine.chainState.Utxos[op] = consensus.UtxoEntry{Value: 2_000_000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), address...), CreationHeight: 1}
@@ -1000,8 +983,7 @@ func daTTLEngineRecords(t *testing.T, f *pendingOutpointSyncFixture) (*daNonRepl
 	return x, stateA, stateB
 }
 
-// TestDATTLCallbackEndToEndBodyRefusalConsumed: a body refusal under the selection or the lease entry leaves the apply
-// ACCEPTED/NEW with a nil error, the engine unlatched, one lease released and the image unchanged.
+// TestDATTLCallbackEndToEndBodyRefusalConsumed: a body refusal under the selection or the lease entry leaves the apply ACCEPTED/NEW with a nil error, the engine unlatched, one lease released and the image unchanged.
 func TestDATTLCallbackEndToEndBodyRefusalConsumed(t *testing.T) {
 	corruptions := map[string]func(*daNonReplayFixture, [32]byte, [32]byte){
 		"inconsistent stored value": func(x *daNonReplayFixture, _, stateB [32]byte) {
@@ -1110,8 +1092,7 @@ func requireDATTLAppliedImage(t *testing.T, f *daNonReplayFixture, r daTTLCallba
 	requireDATTLCount(t, daRelayStateSnapshot(f.relay), r.stateAID, 1)
 }
 
-// TestDATTLCallbackBodyPanicKeepsWholeImage: a panic before the first or after the last mutation propagates with the
-// DA and owner mutexes released and the complete old or applied image (RUBIN_COMPACT_BLOCKS.md Section 5).
+// TestDATTLCallbackBodyPanicKeepsWholeImage: a panic before the first or after the last mutation propagates with the DA and owner mutexes released and the complete old or applied image (RUBIN_COMPACT_BLOCKS.md Section 5).
 func TestDATTLCallbackBodyPanicKeepsWholeImage(t *testing.T) {
 	for _, stage := range []daTTLStage{daTTLPlanned, daTTLApplied} {
 		t.Run(fmt.Sprintf("stage=%d", stage), func(t *testing.T) {
@@ -1132,8 +1113,7 @@ func TestDATTLCallbackBodyPanicKeepsWholeImage(t *testing.T) {
 	}
 }
 
-// TestDATTLCallbackEndToEndBodyPanic: a body panic under ApplyBlock's selection propagates unrecovered, releases the
-// entry's lease once and the DA mutexes, leaves the old or applied image, and the admission guard stays held.
+// TestDATTLCallbackEndToEndBodyPanic: a body panic under ApplyBlock's selection propagates unrecovered, releases the entry's lease once and the DA mutexes, leaves the old or applied image, and the admission guard stays held.
 func TestDATTLCallbackEndToEndBodyPanic(t *testing.T) {
 	for _, stage := range []daTTLStage{daTTLPlanned, daTTLApplied} {
 		t.Run(fmt.Sprintf("stage=%d", stage), func(t *testing.T) {

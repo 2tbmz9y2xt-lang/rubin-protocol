@@ -836,17 +836,17 @@ func (s *SyncEngine) installInitialMempool(mempool *Mempool, admission PendingOu
 	if err := mempool.checkNeverUsedForBindingLocked(); err != nil {
 		return err
 	}
+	caps := defaultDARelayCaps()
+	caps.stagedBytes = s.cfg.DAMempoolSize
+	daRelay, relayErr := newDARelayState(mempool, caps)
 	owner := mempool.pendingOutpointOwnerLocked()
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
 	if err := checkInitialMempoolOwnerLocked(owner, admission); err != nil {
 		return err
 	}
-	caps := defaultDARelayCaps()
-	caps.stagedBytes = s.cfg.DAMempoolSize
-	daRelay, err := newDARelayState(mempool, caps)
-	if err != nil {
-		return err
+	if relayErr != nil {
+		return relayErr
 	}
 	if mempool.policy.RotationProvider == nil {
 		mempool.policy.RotationProvider = s.cfg.RotationProvider
