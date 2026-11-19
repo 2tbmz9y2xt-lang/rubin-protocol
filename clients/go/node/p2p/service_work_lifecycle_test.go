@@ -1136,8 +1136,8 @@ func TestServiceWorkLifecycleBlockRetry(t *testing.T) {
 	})
 }
 
-// primeDATTLToOne retains one commit at count 3 and relays source blocks 1 and 2 through the peer path,
-// leaving it at count 1.
+// primeDATTLToOne retains one commit, relays source blocks 1 and 2 through the peer path under a held work lease,
+// and requires the commit retained.
 func primeDATTLToOne(t *testing.T, source, h *testHarness, p *peer, daID [32]byte) (*daIngressFixture, []byte, *node.ChainStateConnectSummary) {
 	t.Helper()
 	holdWorkLease(t, p.service)
@@ -1150,12 +1150,12 @@ func primeDATTLToOne(t *testing.T, source, h *testHarness, p *peer, daID [32]byt
 		summary, err = p.processRelayedBlock(blockAtHeight(t, source, height))
 		must(t, err, "processRelayedBlock")
 	}
-	f.requireRetained(commit, "the record at count 1")
+	f.requireRetained(commit, "the record retained after relayed blocks 1 and 2")
 	return f, commit, summary
 }
 
-// TestRelayedBlockPostReturnMakesNoTTLDecrease: the relayed-block post-return effects of an ordinary and a
-// terminal-shaped result decrease no count; the next accepted block expires the record.
+// TestRelayedBlockPostReturnMakesNoTTLDecrease: the primed record is retained after the relayed-block post-return effects
+// of an ordinary and a terminal-shaped result, and relayed block 3 leaves it absent.
 func TestRelayedBlockPostReturnMakesNoTTLDecrease(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -1166,9 +1166,9 @@ func TestRelayedBlockPostReturnMakesNoTTLDecrease(t *testing.T) {
 		_, _ = p.acceptRelayedBlockResult(summary.BlockHash, summary, applyErr)
 		requireEqual(t, h.service.blockSeen.Has(summary.BlockHash), true, "the seen-set entry the post-return effects added")
 	}
-	f.requireRetained(commit, "the record no post-return effect decreased")
+	f.requireRetained(commit, "the record retained after the post-return effects")
 	relayAccepted(t, p, source, 3)
-	f.requireAbsent(commit, "count 1: the next accepted block's in-guard decrease expired the record")
+	f.requireAbsent(commit, "absent after relayed block 3")
 }
 
 // latchDAHarness GENUINELY latches h's engine, which then RETAINS ChainState.admissionMu
@@ -1265,8 +1265,8 @@ func TestLatchedEngineSkipsThePeerQuotaRelease(t *testing.T) {
 	requireEqual(t, h.service.PeerLifecycleExits(), exits+1, "the lifecycle exit the completed teardown recorded")
 }
 
-// TestResolvedOrphanPostReturnMakesNoTTLDecrease: the resolved-orphan entry decreases no count for an ordinary or a
-// terminal-shaped result, and a terminal result stops the walk.
+// TestResolvedOrphanPostReturnMakesNoTTLDecrease: the primed record is retained after the resolved-orphan entry for an
+// ordinary and a terminal-shaped result, a terminal result stops the walk, and relayed block 3 leaves the record absent.
 func TestResolvedOrphanPostReturnMakesNoTTLDecrease(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -1274,9 +1274,9 @@ func TestResolvedOrphanPostReturnMakesNoTTLDecrease(t *testing.T) {
 	f, commit, summary := primeDATTLToOne(t, source, h, p, daRelayTestID(111))
 	requireEqual(t, h.service.acceptResolvedOrphanResult(p, summary.BlockHash, summary.BlockHash, summary, nil), false, "the ordinary resolved-orphan result")
 	requireEqual(t, h.service.acceptResolvedOrphanResult(p, summary.BlockHash, summary.BlockHash, summary, errors.New("storage persistence fault")), true, "the resolved-orphan walk stop a terminal result forces")
-	f.requireRetained(commit, "the record no post-return effect decreased")
+	f.requireRetained(commit, "the record retained after the post-return effects")
 	relayAccepted(t, p, source, 3)
-	f.requireAbsent(commit, "count 1: the next accepted block's in-guard decrease expired the record")
+	f.requireAbsent(commit, "absent after relayed block 3")
 }
 
 // TestAnnounceTxLocalDAWorkLifecycle: the DA arm runs entirely inside AnnounceTx's original

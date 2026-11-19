@@ -149,8 +149,8 @@ func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
 			t.Fatalf("reorg claim binding mismatch: racing NewService did not return within %s", lifecycleWatchdog)
 		}
 		require(t, raceErr != nil && raceErr.Error() == "sync engine DA relay state binding mismatch", "racing NewService error=%v", raceErr)
-		// The refused construction published no binding, so three ACCEPTED/NEW publications leave a
-		// commit at count 3 until the next construction binds and its third decrease expires it.
+		// The refused construction published no binding; requireAbsentBindingDecreasesNothing then requires a commit
+		// retained after three publications under no binding and two after the next construction, and absent after the sixth.
 		require(t, engine.DATTLBindingService() == nil, "refused construction published a binding")
 		sink := &testHarness{chainState: base.chainState, blockStore: base.blockStore, syncEngine: engine, service: &Service{daRelay: engine.DARelayState()}}
 		cfg.Now = time.Now
@@ -492,8 +492,8 @@ func TestProcessRelayedBlockDropsRetainedDAOrphanNotValidAgainstC1(t *testing.T)
 	f.requireAbsent(commit, "the record the canonical transition could not validate against C1")
 }
 
-// TestAnnounceBlockMakesNoDARelayTTLDecrease: an accepted remote or mined block decreases a retained record once in its
-// canonical transition (3 -> 2 -> 1, then removed); post-return effects and AnnounceBlock do not decrease it.
+// TestAnnounceBlockMakesNoDARelayTTLDecrease: a record is retained after two accepted remote blocks with their post-return
+// effects and absent after a mined block; a later record is retained after that block and its AnnounceBlock and absent after the next.
 func TestAnnounceBlockMakesNoDARelayTTLDecrease(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -512,14 +512,14 @@ func TestAnnounceBlockMakesNoDARelayTTLDecrease(t *testing.T) {
 	second := f.commit(daRelayTestID(102), 2)
 	must(t, daRelayTestPeer(h, "127.0.0.1:19112", "127.0.0.1:19112").handleTx(second), "handleTx(second)")
 	relay(2)
-	f.requireRetained(first, "count 1 after two accepted remote blocks and their post-return effects")
+	f.requireRetained(first, "retained after two accepted remote blocks and their post-return effects")
 	mine := newEngineMiner(t, h)
 	mined := mine()
-	f.requireAbsent(first, "the block mined on the engine decreased the record at count 1")
+	f.requireAbsent(first, "absent after the block mined on the engine")
 	must(t, h.service.AnnounceBlock(mined), "AnnounceBlock of the block just mined")
-	f.requireRetained(second, "count 1 after AnnounceBlock of the block just mined")
+	f.requireRetained(second, "retained after the first mined block and its AnnounceBlock")
 	mine()
-	f.requireAbsent(second, "the expired record after the third counted publication")
+	f.requireAbsent(second, "absent after the second mined block")
 }
 
 // The four TestUnregisterPeer rows read the retained image through the replay

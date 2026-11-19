@@ -20,7 +20,7 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
-// selectionProbe applies ACCEPTED/NEW blocks through SyncEngine.ApplyBlock; its commit at count 3 counts decreases.
+// selectionProbe applies ACCEPTED/NEW blocks through SyncEngine.ApplyBlock and probes the retention of its commit.
 type selectionProbe struct {
 	t      *testing.T
 	h      *testHarness
@@ -34,7 +34,7 @@ func newSelectionProbe(t *testing.T, h *testHarness, source *testHarness, id byt
 	t.Helper()
 	f := newDAIngressFixture(t, h)
 	commit := f.commit(daRelayTestID(id), 2)
-	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit at count 3")
+	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit")
 	return &selectionProbe{t: t, h: h, source: source, f: f, commit: commit, next: h.chainState.Height + 1}
 }
 
@@ -124,7 +124,7 @@ func holdWorkLease(t *testing.T, s *Service) func() {
 	return release
 }
 
-// TestDATTLCallbackServiceBinding: through SyncEngine.ApplyBlock over Services on one engine, the latest construction admits, a CLOSED current binding refuses with no fallback, and the identity read follows constructions across Close.
+// TestDATTLCallbackServiceBinding: through SyncEngine.ApplyBlock over Services on one engine, S1's wrapped entry gets no attempt once S2 is bound, the identity read names S2, then S3 after Close(S3), then S4 after Close(S1), and the commit is retained after the third publication and absent after the fourth.
 func TestDATTLCallbackServiceBinding(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xe1)
 	engine, s1 := h.syncEngine, h.service
@@ -141,17 +141,17 @@ func TestDATTLCallbackServiceBinding(t *testing.T) {
 	s4 := newBoundService(t, h.service.cfg)
 	require(t, s1.Close() == nil && engine.DATTLBindingService() == node.DATTLMutationService(s4), "S4 binding")
 	probe.apply()
-	probe.f.requireRetained(probe.commit, "count 1: S2 and S4 admitted, the CLOSED S3 refused with no fallback")
+	probe.f.requireRetained(probe.commit, "retained after the third publication, with S2, the CLOSED S3 and S4 bound in turn")
 	probe.apply()
-	probe.f.requireAbsent(probe.commit, "the fourth publication's admitted decrease expired the record")
+	probe.f.requireAbsent(probe.commit, "absent after the fourth publication")
 }
 
-// TestDATTLCallbackServiceConstructionFailure: a failed construction leaves S1 bound and S1 admits the next decrease.
+// TestDATTLCallbackServiceConstructionFailure: failed constructions leave the binding naming S1, and the commit retained after the second publication is absent after the third.
 func TestDATTLCallbackServiceConstructionFailure(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xe2)
 	probe.apply()
 	probe.apply()
-	probe.f.requireRetained(probe.commit, "count 1 after two decreases admitted by S1")
+	probe.f.requireRetained(probe.commit, "retained after the second publication")
 	for _, row := range []struct {
 		name   string
 		mutate func(*ServiceConfig)
@@ -166,10 +166,10 @@ func TestDATTLCallbackServiceConstructionFailure(t *testing.T) {
 		require(t, h.syncEngine.DATTLBindingService() == node.DATTLMutationService(h.service), "%s: failed construction moved the binding", row.name)
 	}
 	probe.apply()
-	probe.f.requireAbsent(probe.commit, "S1, still bound after the failed constructions, admitted the decrease")
+	probe.f.requireAbsent(probe.commit, "absent after the third publication, with the binding still naming S1")
 }
 
-// TestDATTLCallbackServiceConcurrentConstruction: two constructions race three admitted decreases under -race.
+// TestDATTLCallbackServiceConcurrentConstruction: two constructions race three publications under -race; the commit is retained after the second and absent after the third, and the final binding is one of the two constructions.
 func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xe3)
 	type construction struct {
@@ -190,11 +190,11 @@ func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
 	close(start)
 	probe.apply()
 	probe.apply()
-	probe.f.requireRetained(probe.commit, "count 1 after two racing selections")
+	probe.f.requireRetained(probe.commit, "retained after the second publication")
 	probe.apply()
 	requireJoined(t, "the racing constructions", racing...)
 	close(built)
-	probe.f.requireAbsent(probe.commit, "each of the three racing selections admitted its decrease")
+	probe.f.requireAbsent(probe.commit, "absent after the third publication")
 	services := map[node.DATTLMutationService]bool{}
 	for c := range built {
 		require(t, c.err == nil && c.service != nil, "NewService: %v", c.err)
@@ -324,7 +324,7 @@ func requireRetainedTx(t *testing.T, h *testHarness, raw []byte, want bool, step
 	require(t, err == nil && present == want, "%s: present=%v err=%v, want present=%v", step, present, err, want)
 }
 
-// TestDATTLCallbackEndToEndReorgRequeueNotDecreased: on a peer's lease path a winning reorganization decreases once a State B commit that the sink DA block's publication left at count 2 (retained right after it, expired at the next counted publication), and the requeued commit it creates at count 3 survives the next two counted publications and expires at the third.
+// TestDATTLCallbackEndToEndReorgRequeueNotDecreased: on a peer's lease path, a State B commit admitted before the sink DA block is retained after a winning reorganization and absent after the next publication, and the commit the reorganization requeues is retained after the next two publications and absent after the third.
 func TestDATTLCallbackEndToEndReorgRequeueNotDecreased(t *testing.T) {
 	source, sink := newTestHarness(t, 1, "127.0.0.1:0", nil), newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, sink)
@@ -344,15 +344,15 @@ func TestDATTLCallbackEndToEndReorgRequeueNotDecreased(t *testing.T) {
 		relay(next)
 		next++
 	}
-	requireRetainedTx(t, sink, independent, true, "the State B commit at count 2 decreased once by the reorganization")
+	requireRetainedTx(t, sink, independent, true, "the State B commit retained after the reorganization")
 	requireRetainedTx(t, sink, fixture.commitRaw, true, "the commit requeued by the reorganization")
 	requireRetainedTx(t, sink, fixture.chunkRaw, false, "the chunk whose input the branch spent")
 	relay(next)
-	requireRetainedTx(t, sink, independent, false, "the State B commit at count 1 expired at the first counted publication after the reorganization")
+	requireRetainedTx(t, sink, independent, false, "the State B commit absent after the first publication following the reorganization")
 	relay(next + 1)
-	requireRetainedTx(t, sink, fixture.commitRaw, true, "the requeued commit at count 1 after two counted publications following the requeue")
+	requireRetainedTx(t, sink, fixture.commitRaw, true, "the requeued commit retained after the second publication following the reorganization")
 	relay(next + 2)
-	requireRetainedTx(t, sink, fixture.commitRaw, false, "the requeued commit expired at the third counted publication following the requeue")
+	requireRetainedTx(t, sink, fixture.commitRaw, false, "the requeued commit absent after the third publication following the reorganization")
 }
 
 // TestDATTLCallbackLaterConstructionKeepsFirstHook: a later S2 becomes the binding while the detached-reorg hook stays with S1, so with S1 CLOSED the disconnected commit is not retained; with S1 OPEN it is.
@@ -427,7 +427,7 @@ func newEngineMiner(t *testing.T, h *testHarness) func() []byte {
 	}
 }
 
-// TestDATTLCallbackEndToEndSelection: mined blocks decrease the probed records once through the OPEN current binding (S1, then S2) and not under the CLOSED S1, and S1's held AnnounceBlock decreases none of them, returning "service already closed" once closed.
+// TestDATTLCallbackEndToEndSelection: across mined blocks, S1's retained AnnounceBlock, Close(S1) and S2's binding, three probed records are retained or absent after the listed blocks, and S1's AnnounceBlock returns "service already closed" once S1 is closed.
 func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	probe := newSelectionProbe(t, h, nil, 0xd1)
@@ -436,32 +436,32 @@ func TestDATTLCallbackEndToEndSelection(t *testing.T) {
 	p, f := probe.commit, probe.f
 	must(t, rpcAnnounce(mine()), "AnnounceBlock of mined block 1")
 	b2 := mine()
-	f.requireRetained(p, "count 1 after two mined publications: AnnounceBlock of mined block 1 did not decrease the record")
+	f.requireRetained(p, "retained after mined block 2 and the AnnounceBlock of mined block 1")
 	must(t, rpcAnnounce(b2), "AnnounceBlock of mined block 2")
-	f.requireRetained(p, "AnnounceBlock of mined block 2 decreased the record at count 1 nothing")
+	f.requireRetained(p, "retained after the AnnounceBlock of mined block 2")
 	second := f.commit(daRelayTestID(0xd6), 2)
 	f.admit(second, "127.0.0.1:19112")
 	mine()
-	f.requireAbsent(p, "mined block 3 decreased the record at count 1 once through the bound OPEN S1")
+	f.requireAbsent(p, "absent after mined block 3")
 	third := f.commit(daRelayTestID(0xd7), 2)
 	f.admit(third, "127.0.0.1:19113")
 	mine()
-	f.requireRetained(second, "count 1 after mined blocks 3 and 4")
+	f.requireRetained(second, "retained after mined blocks 3 and 4")
 	must(t, h.service.Close(), "Close(S1)")
 	mine()
-	f.requireRetained(second, "the CLOSED binding S1 refused the decrease of mined block 5")
+	f.requireRetained(second, "retained after mined block 5, mined after Close(S1)")
 	s2 := newBoundService(t, h.service.cfg)
 	require(t, h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S2 binding")
 	b6 := mine()
-	f.requireAbsent(second, "mined block 6 decreased the record at count 1 through S2")
-	f.requireRetained(third, "mined block 6 decreased the record at count 2 once")
+	f.requireAbsent(second, "absent after mined block 6")
+	f.requireRetained(third, "retained after mined block 6")
 	requireClosedRejection(t, rpcAnnounce(b6), "the closed S1's retained AnnounceBlock of mined block 6")
-	f.requireRetained(third, "the closed AnnounceBlock decreased the record at count 1 nothing")
+	f.requireRetained(third, "retained after the closed AnnounceBlock of mined block 6")
 	mine()
-	f.requireAbsent(third, "mined block 7 decreased the record at count 1 through S2")
+	f.requireAbsent(third, "absent after mined block 7")
 }
 
-// TestDATTLCallbackEndToEndLeasePath: one relayed block takes State A X from 2 to 1, removes State B Y and keeps State C Z, while the binding's other OPEN Service S2 records zero entry attempts.
+// TestDATTLCallbackEndToEndLeasePath: on a peer's lease path, State B Y and State A X are retained after their second relayed publication and absent, with their claims released, after their third; State C Z stays byte-equal and the binding's other OPEN Service S2 records zero entry attempts.
 func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
 	source, h, probe := newSourceAndProbe(t, 5, 0xd2)
 	s2 := &wrappedTTLEntry{inner: newBoundService(t, h.service.cfg)}
@@ -496,12 +496,12 @@ func TestDATTLCallbackEndToEndLeasePath(t *testing.T) {
 	}
 	spendY, spendX := spendOf(probe.commit, 9581), spendOf(stateA, 9582)
 	relayAccepted(t, p, source, 2)
-	probe.f.requireRetained(probe.commit, "Y at count 1")
+	probe.f.requireRetained(probe.commit, "Y retained after its second publication")
 	requireClaimed(spendY, "a spend of Y's input while Y holds its claim")
 	requireZ("before the apply")
 	relayAccepted(t, p, source, 3)
 	requireExpired(probe.commit, spendY, "Y")
-	probe.f.requireRetained(stateA, "X at count 1")
+	probe.f.requireRetained(stateA, "X retained after its second publication")
 	requireZ("after the apply")
 	requireClaimed(spendX, "a spend of X's input while X holds its claim")
 	relayAccepted(t, p, source, 4)
@@ -577,7 +577,7 @@ func mineSideBlock(t *testing.T) []byte {
 	return block
 }
 
-// newSideBlockSetup retains the probe commit and a State A chunk at 3, relays heights 1 and 2 through p under a held work lease (both then at 1), and returns the chunk and a side-branch block h does not know.
+// newSideBlockSetup retains the probe commit and a State A chunk, relays heights 1 and 2 through p under a held work lease, requires both retained, and returns the chunk and a side-branch block h does not know.
 func newSideBlockSetup(t *testing.T, id byte) (*testHarness, *testHarness, *peer, *selectionProbe, []byte, []byte, [32]byte) {
 	t.Helper()
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
@@ -590,8 +590,8 @@ func newSideBlockSetup(t *testing.T, id byte) (*testHarness, *testHarness, *peer
 	holdWorkLease(t, h.service)
 	relayAccepted(t, p, source, 1)
 	relayAccepted(t, p, source, 2)
-	probe.f.requireRetained(x, "the State A chunk at count 1 after two counted publications")
-	probe.f.requireRetained(probe.commit, "the State B commit at count 1 after two counted publications")
+	probe.f.requireRetained(x, "the State A chunk retained after two publications")
+	probe.f.requireRetained(probe.commit, "the State B commit retained after two publications")
 	sideHash, err := consensus.BlockHash(sideBlock[:consensus.BLOCK_HEADER_BYTES])
 	must(t, err, "BlockHash(side block)")
 	known, err := h.service.hasBlock(sideHash)
@@ -606,14 +606,14 @@ func relayAccepted(t *testing.T, p *peer, source *testHarness, height uint64) {
 	require(t, err == nil && summary != nil, "processRelayedBlock(%d)=(%+v,%v)", height, summary, err)
 }
 
-// TestDATTLCallbackEndToEndNonAcceptedResults: a stored side block, KNOWN_BLOCK_NOOP, MISSING_PARENT, CONSENSUS_INVALID and DisconnectTip decrease none of the probed records; the next counted publications expire them.
+// TestDATTLCallbackEndToEndNonAcceptedResults: after a stored side block, KNOWN_BLOCK_NOOP, MISSING_PARENT and CONSENSUS_INVALID both probed records are retained with no binding entry attempt, relayed block 3 leaves them absent, DisconnectTip makes no entry attempt, and a later record is retained after block 3, DisconnectTip and the reconnect and absent after block 4.
 func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	source, h, p, probe, x, sideBlock, _ := newSideBlockSetup(t, 0xd3)
 	entry := &wrappedTTLEntry{inner: h.service}
 	h.syncEngine.PublishDATTLBinding(entry)
 	summary, err := h.syncEngine.ApplyBlockWithReorg(sideBlock, nil)
 	require(t, err == nil && summary != nil && len(summary.CanonicalAppliedBlocks) == 0 && h.chainState.Height == 2, "side block=(%+v,%v) height=%d, want stored non-canonical", summary, err, h.chainState.Height)
-	probe.f.requireRetained(x, "the State A chunk at count 1 after the stored side block")
+	probe.f.requireRetained(x, "the State A chunk retained after the stored side block")
 	summary, err = p.processRelayedBlock(blockAtHeight(t, source, 2))
 	require(t, err == nil && summary == nil, "known block replay=(%+v,%v), want KNOWN_BLOCK_NOOP", summary, err)
 	summary, err = p.processRelayedBlock(blockAtHeight(t, source, 5))
@@ -623,25 +623,25 @@ func TestDATTLCallbackEndToEndNonAcceptedResults(t *testing.T) {
 	summary, err = testPeerForService(h.service, "invalid", 5).processRelayedBlock(invalid)
 	var invalidErr *consensus.TxError
 	require(t, errors.As(err, &invalidErr) && invalidErr.Code == consensus.BLOCK_ERR_MERKLE_INVALID && summary == nil && h.chainState.Height == 2, "invalid block=(%+v,%v), want BLOCK_ERR_MERKLE_INVALID", summary, err)
-	probe.f.requireRetained(x, "the State A chunk at count 1 after the replay, the orphan and the invalid block")
-	probe.f.requireRetained(probe.commit, "the State B commit at count 1 after the side block, the replay, the orphan and the invalid block")
+	probe.f.requireRetained(x, "the State A chunk retained after the replay, the orphan and the invalid block")
+	probe.f.requireRetained(probe.commit, "the State B commit retained after the side block, the replay, the orphan and the invalid block")
 	require(t, entry.attempts.Load() == 0, "entry attempts=%d after the direct side block, want 0", entry.attempts.Load())
 	fresh := probe.f.commit(daRelayTestID(0xd8), 2)
 	probe.f.admit(fresh, "127.0.0.1:19112")
 	relayAccepted(t, p, source, 3)
-	probe.f.requireAbsent(x, "the State A chunk the next counted publication expired")
-	probe.f.requireAbsent(probe.commit, "the State B commit the next counted publication expired")
+	probe.f.requireAbsent(x, "the State A chunk absent after relayed block 3")
+	probe.f.requireAbsent(probe.commit, "the State B commit absent after relayed block 3")
 	disconnected, err := h.syncEngine.DisconnectTip()
 	require(t, err == nil && disconnected != nil && h.chainState.Height == 2, "DisconnectTip=(%+v,%v)", disconnected, err)
 	require(t, entry.attempts.Load() == 0, "entry attempts=%d before the reconnect, want 0", entry.attempts.Load())
 	reconnected, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, 3), nil)
 	require(t, err == nil && reconnected != nil, "reconnect(3)=(%+v,%v)", reconnected, err)
-	probe.f.requireRetained(fresh, "count 1: two counted publications around the disconnect")
+	probe.f.requireRetained(fresh, "retained after relayed block 3, DisconnectTip and the reconnect")
 	relayAccepted(t, p, source, 4)
-	probe.f.requireAbsent(fresh, "the record the third counted publication expired")
+	probe.f.requireAbsent(fresh, "absent after relayed block 4")
 }
 
-// TestDATTLCallbackEndToEndStoredSideBlockThroughPeer: a side-branch block a peer relays is stored non-canonical and does not decrease a State A chunk at count 1, which survives it and expires at the next counted publication.
+// TestDATTLCallbackEndToEndStoredSideBlockThroughPeer: a side-branch block a peer relays is stored non-canonical with no binding entry attempt, a State A chunk retained after two publications is still retained after it, and relayed block 3 leaves the chunk and the commit absent.
 func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 	source, h, p, probe, x, sideBlock, sideHash := newSideBlockSetup(t, 0xd4)
 	entry := &wrappedTTLEntry{inner: h.service}
@@ -650,14 +650,14 @@ func TestDATTLCallbackEndToEndStoredSideBlockThroughPeer(t *testing.T) {
 	must(t, err, "processRelayedBlock(side block)")
 	stored, err := h.blockStore.GetBlockByHash(sideHash)
 	require(t, err == nil && bytes.Equal(stored, sideBlock) && h.chainState.Height == 2 && h.chainState.TipHash != sideHash, "side block stored=%v err=%v height=%d, want stored non-canonical", stored != nil, err, h.chainState.Height)
-	probe.f.requireRetained(x, "the State A chunk at count 1 after the stored side block")
+	probe.f.requireRetained(x, "the State A chunk retained after the stored side block")
 	require(t, entry.attempts.Load() == 0, "binding entry attempts=%d, want 0", entry.attempts.Load())
 	relayAccepted(t, p, source, 3)
-	probe.f.requireAbsent(x, "the State A chunk the next counted publication expired")
-	probe.f.requireAbsent(probe.commit, "the State B commit the next counted publication expired")
+	probe.f.requireAbsent(x, "the State A chunk absent after relayed block 3")
+	probe.f.requireAbsent(probe.commit, "the State B commit absent after relayed block 3")
 }
 
-// TestDATTLCallbackEndToEndDrainingBindingRefused: a DRAINING current binding S2 refuses with zero DA effects and no fallback to the OPEN S1; Close(S2) waits for the held lease, and a fresh Service then binds and decreases.
+// TestDATTLCallbackEndToEndDrainingBindingRefused: the DRAINING current binding S2 refuses a direct EnterDATTLMutation with errServiceClosed without running the decrease, the commit is retained after the publication under it, Close(S2) waits for the held lease, and after a fresh construction the next publication leaves the commit absent.
 func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xd5)
 	probe.apply()
@@ -675,7 +675,7 @@ func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	waitDraining(t, s2)
 	requireEntryRefused("EnterDATTLMutation(S2) while DRAINING")
 	probe.apply()
-	probe.f.requireRetained(probe.commit, "the DRAINING binding refused the decrease and nothing fell back to the OPEN S1")
+	probe.f.requireRetained(probe.commit, "retained after the third publication, the one under the DRAINING binding S2")
 	requireStillBlocked(t, closeDone, "Close(S2)")
 	release()
 	requireReturned(t, closeDone, "Close(S2) after the release")
@@ -683,7 +683,7 @@ func TestDATTLCallbackEndToEndDrainingBindingRefused(t *testing.T) {
 	require(t, h.service.workAuthorized() && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "S1 left OPEN and the binding kept naming S2")
 	newBoundService(t, h.service.cfg)
 	probe.apply()
-	probe.f.requireAbsent(probe.commit, "the fresh binding's admitted decrease expired the record at count 1")
+	probe.f.requireAbsent(probe.commit, "absent after the fourth publication, the first after a fresh construction")
 }
 
 // wrappedTTLEntry adds one to attempts per call, runs before, when set, and enters inner.
@@ -738,12 +738,12 @@ func TestDATTLCallbackEndToEndEntryInsideTheHold(t *testing.T) {
 		must(t, <-done, "parked writer after the guard release")
 	}
 	probe.apply()
-	probe.f.requireRetained(probe.commit, "count 1 after two in-hold decreases")
+	probe.f.requireRetained(probe.commit, "retained after the second publication")
 	probe.apply()
-	probe.f.requireAbsent(probe.commit, "the third decrease expired the original record")
-	probe.f.requireRetained(fresh, "the record admitted after the first decrease at count 1")
+	probe.f.requireAbsent(probe.commit, "absent after the third publication")
+	probe.f.requireRetained(fresh, "the record whose admission parked in the first publication's entry, retained after the third publication")
 	probe.apply()
-	probe.f.requireAbsent(fresh, "the fourth counted publication expired the record at count 1")
+	probe.f.requireAbsent(fresh, "absent after the fourth publication")
 }
 
 // TestDATTLCallbackEndToEndPreCommitLatchInvokesNothing: a transition latching before the commit makes no entry attempt.
@@ -756,7 +756,7 @@ func TestDATTLCallbackEndToEndPreCommitLatchInvokesNothing(t *testing.T) {
 	require(t, entry.attempts.Load() == 0, "pre-commit latch entry attempts=%d, want 0", entry.attempts.Load())
 }
 
-// TestDATTLCallbackEndToEndDrainingLease: while S is DRAINING, its worker's nested entry is admitted and decreases once without registering or reading the binding; Close(S) returns only after the worker's lease is released.
+// TestDATTLCallbackEndToEndDrainingLease: while S is DRAINING, its worker's block message applies ACCEPTED/NEW with one binding entry attempt in total, the commit is absent and a later record retained after it, and Close(S) returns only after the worker's lease is released.
 func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 	source, h, probe := newSourceAndProbe(t, 6, 0xe7)
 	probe.apply()
@@ -790,18 +790,18 @@ func TestDATTLCallbackEndToEndDrainingLease(t *testing.T) {
 	requireJoined(t, "the worker's block message", worker)
 	require(t, len(missed) == 0, "%v not observed before the watchdog", missed)
 	require(t, relayErr == nil && summary != nil && summary.BlockHeight == probe.next, "processRelayedBlock=(%+v,%v), want ACCEPTED/NEW at %d", summary, relayErr, probe.next)
-	probe.f.requireAbsent(probe.commit, "the nested entry admitted while DRAINING decreased the record at count 1")
-	probe.f.requireRetained(second, "the nested entry decreased the record at count 2 once")
+	probe.f.requireAbsent(probe.commit, "absent after the worker's publication")
+	probe.f.requireRetained(second, "the later record retained after the worker's publication")
 	require(t, s2.attempts.Load() == 1, "binding entry attempts=%d, want 1", s2.attempts.Load())
 	requireStillBlocked(t, closeDone, "Close(S) while the worker's lease is held")
 	release()
 	requireReturned(t, closeDone, "Close(S) after the worker's lease is released")
 	probe.next = summary.BlockHeight + 1
 	probe.apply()
-	probe.f.requireAbsent(second, "the next counted publication expired the record at count 1")
+	probe.f.requireAbsent(second, "the later record absent after the next publication")
 }
 
-// TestDATTLCallbackEndToEndAbsentBinding: with no Service, three publications do not decrease a State A chunk until a Service binds.
+// TestDATTLCallbackEndToEndAbsentBinding: with no Service and no binding, a State A chunk is retained after three publications and after two more once a Service is constructed, and absent after the third publication after that construction.
 func TestDATTLCallbackEndToEndAbsentBinding(t *testing.T) {
 	source := newTestHarness(t, 7, "127.0.0.1:0", nil)
 	sink, cfg := unclaimedServiceSink(t)
@@ -824,13 +824,13 @@ func TestDATTLCallbackEndToEndAbsentBinding(t *testing.T) {
 	newBoundService(t, cfg)
 	for height := start + 3; height < start+6; height++ {
 		if apply(height); height == start+4 {
-			f.requireRetained(x, "count 1 after two admitted decreases: the absent binding kept count 3")
+			f.requireRetained(x, "retained after the fifth publication, the second after NewService")
 		}
 	}
-	f.requireAbsent(x, "the bound Service's third admitted decrease expired the record")
+	f.requireAbsent(x, "absent after the sixth publication, the third after NewService")
 }
 
-// requireAbsentBindingDecreasesNothing: three publications under no binding keep a commit at 3, so the Service that NewService(cfg) then binds expires it at its third decrease; DisconnectTip restores the tip; returns that Service.
+// requireAbsentBindingDecreasesNothing: a commit is retained after three publications under no binding and two more after NewService(cfg) binds, and absent after the sixth; six DisconnectTip calls restore the tip; returns that Service.
 func requireAbsentBindingDecreasesNothing(t *testing.T, sink *testHarness, cfg ServiceConfig) *Service {
 	t.Helper()
 	source := newTestHarness(t, int(sink.chainState.Height)+7, "127.0.0.1:0", nil)
@@ -850,9 +850,9 @@ func requireAbsentBindingDecreasesNothing(t *testing.T, sink *testHarness, cfg S
 	service, err := NewService(cfg)
 	require(t, err == nil && sink.syncEngine.DATTLBindingService() == node.DATTLMutationService(service), "NewService after the absent-binding publications: %v", err)
 	apply(start+3, start+5)
-	f.requireRetained(commit, "count 1 after two decreases through the bound Service: the absent binding kept count 3")
+	f.requireRetained(commit, "retained after the fifth publication, the second under the bound Service")
 	apply(start+5, start+6)
-	f.requireAbsent(commit, "the bound Service's third decrease expired the record")
+	f.requireAbsent(commit, "absent after the sixth publication, the third under the bound Service")
 	for range 6 {
 		_, err := sink.syncEngine.DisconnectTip()
 		must(t, err, "DisconnectTip back to the starting tip")
@@ -861,7 +861,7 @@ func requireAbsentBindingDecreasesNothing(t *testing.T, sink *testHarness, cfg S
 	return service
 }
 
-// TestDATTLCallbackEndToEndSnapshotBeforePublication: S2 bound after S1's snapshot gets no attempt; S1 admits once.
+// TestDATTLCallbackEndToEndSnapshotBeforePublication: S2 bound inside S1's entry gets no attempt from that publication; S1 gets one attempt and S2 the next two, and the commit is retained after the second publication and absent after the third.
 func TestDATTLCallbackEndToEndSnapshotBeforePublication(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xea)
 	s2 := &wrappedTTLEntry{inner: newBoundService(t, h.service.cfg)}
@@ -870,16 +870,16 @@ func TestDATTLCallbackEndToEndSnapshotBeforePublication(t *testing.T) {
 	s1.before = func() { once.Do(func() { h.syncEngine.PublishDATTLBinding(s2) }) }
 	h.syncEngine.PublishDATTLBinding(s1)
 	probe.apply()
-	require(t, s1.attempts.Load() == 1 && s2.attempts.Load() == 0, "first publication attempts S1=%d S2=%d, want 1 and 0: a second selection or fan-out after the registration reached S2", s1.attempts.Load(), s2.attempts.Load())
+	require(t, s1.attempts.Load() == 1 && s2.attempts.Load() == 0, "first publication attempts S1=%d S2=%d, want 1 and 0", s1.attempts.Load(), s2.attempts.Load())
 	require(t, h.syncEngine.DATTLBindingService() == node.DATTLMutationService(s2), "binding after the publication, want S2")
 	probe.apply()
-	probe.f.requireRetained(probe.commit, "count 1: S1's snapshotted registration and S2's decreased once each")
+	probe.f.requireRetained(probe.commit, "retained after the second publication")
 	probe.apply()
 	require(t, s1.attempts.Load() == 1 && s2.attempts.Load() == 2, "attempts S1=%d S2=%d, want 1 and 2", s1.attempts.Load(), s2.attempts.Load())
-	probe.f.requireAbsent(probe.commit, "the third admitted decrease expired the record")
+	probe.f.requireAbsent(probe.commit, "absent after the third publication")
 }
 
-// TestDATTLCallbackEndToEndNoGuardReacquisition: three watchdog-bounded publications run the body three times.
+// TestDATTLCallbackEndToEndNoGuardReacquisition: three publications return within the watchdog; the first makes one entry attempt, and the commit is retained after the second and absent after the third.
 func TestDATTLCallbackEndToEndNoGuardReacquisition(t *testing.T) {
 	source, h, probe := newSourceAndProbe(t, 4, 0xeb)
 	entry := &wrappedTTLEntry{inner: h.service}
@@ -901,9 +901,9 @@ func TestDATTLCallbackEndToEndNoGuardReacquisition(t *testing.T) {
 	apply(probe.next, blocks[0])
 	require(t, entry.attempts.Load() == 1, "entry attempts=%d, want 1", entry.attempts.Load())
 	apply(probe.next+1, blocks[1])
-	probe.f.requireRetained(probe.commit, "count 1: the first publication's body decreased it")
+	probe.f.requireRetained(probe.commit, "retained after the second publication")
 	apply(probe.next+2, blocks[2])
-	probe.f.requireAbsent(probe.commit, "the third counted publication expired the record")
+	probe.f.requireAbsent(probe.commit, "absent after the third publication")
 }
 
 // closeRaceEntry wraps S1's entry; its one attempt starts the race and records S1's admission and Close(S1)'s return.
@@ -925,7 +925,7 @@ func (c *closeRaceEntry) EnterDATTLMutation(decrease func() error) error {
 	})
 }
 
-// TestDATTLCallbackEndToEndCloseRaceOutcomes: Close(S1) and S2's construction race S1's registration after its snapshot; S1 admits before Close returns or refuses, nothing reaches S2, and S2's later decreases match that outcome.
+// TestDATTLCallbackEndToEndCloseRaceOutcomes: Close(S1) and S2's construction race S1's registration after its snapshot; S1's entry gets one attempt, does not run the decrease after Close(S1) returned, runs it in round 1 and not in even rounds, and the commit is retained after a round's second publication, after its third when S1 did not run the decrease, and absent after its last.
 func TestDATTLCallbackEndToEndCloseRaceOutcomes(t *testing.T) {
 	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
 	var racing []<-chan struct{}
@@ -962,15 +962,15 @@ func TestDATTLCallbackEndToEndCloseRaceOutcomes(t *testing.T) {
 		requireJoined(t, "the racing goroutines", racing...)
 		require(t, entry.attempts == 1 && !entry.afterExit, "round %d: attempts=%d decrease after Close returned=%v", i, entry.attempts, entry.afterExit)
 		require(t, entry.ran == (i == 1) || i > 1 && i%2 == 1, "round %d: S1 admitted=%v, want admitted in round 1, where Close(S1) and S2 start inside the held decrease, and refused in even rounds, where both finish before the registration", i, entry.ran)
-		probe.f.requireRetained(probe.commit, fmt.Sprintf("round %d: one decrease at most from count 2", i))
+		probe.f.requireRetained(probe.commit, fmt.Sprintf("round %d: retained after the second publication", i))
 		service := s2.Load()
 		require(t, service != nil && h.syncEngine.DATTLBindingService() == node.DATTLMutationService(service), "round %d: S2 construction and binding", i)
 		if !entry.ran {
 			probe.apply()
-			probe.f.requireRetained(probe.commit, fmt.Sprintf("round %d: S1 refused with zero effects", i))
+			probe.f.requireRetained(probe.commit, fmt.Sprintf("round %d: retained after the third publication", i))
 		}
 		probe.apply()
-		probe.f.requireAbsent(probe.commit, fmt.Sprintf("round %d: S2's decrease expired the record", i))
+		probe.f.requireAbsent(probe.commit, fmt.Sprintf("round %d: absent after the last publication", i))
 		requireReturned(t, lifecycleClose(service), fmt.Sprintf("round %d: Close(S2)", i))
 	}
 }
