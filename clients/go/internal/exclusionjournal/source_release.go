@@ -2,6 +2,7 @@ package exclusionjournal
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -198,17 +199,13 @@ func (o *SourceOwnerV1) clearReleaseScratch(r *sourceRoot) error {
 }
 
 func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch []byte) error {
-	present, err := o.releaseBacking(r, d, scratch)
-	if err != nil {
-		return err
-	}
-	if !present {
-		return ErrIdentityV1
-	}
-	if err := o.space(r, uint64(len(d.record))); err != nil {
-		return err
+	if present, err := o.releaseBacking(r, d, scratch); err != nil || !present {
+		return cmp.Or(err, ErrIdentityV1)
 	}
 	if err := o.clearReleaseScratch(r); err != nil {
+		return err
+	}
+	if err := o.space(r, uint64(len(d.record))); err != nil {
 		return err
 	}
 	if err := o.writeRelease(r, d.record); err != nil {
