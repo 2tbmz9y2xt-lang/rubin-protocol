@@ -66,8 +66,11 @@ type SourceLimitsV1 struct {
 }
 
 // SourceOwnerV1 binds source operations to one actual Store instance and its protected directory. Each operation holds
-// a Store source borrow and returns its refusal; a copied owner or a changed binding returns ErrIdentityV1, a nil
-// account ErrCapacityV1, an overlapping operation ErrBusyV1 and an account refusal is returned unchanged.
+// a Store source borrow and returns its refusal; a copied owner, a changed binding or a source directory not of mode
+// 0700 returns ErrIdentityV1, a nil account ErrCapacityV1, an overlapping operation ErrBusyV1 and an account refusal is
+// returned unchanged. The census of retained files refuses a misnamed or non-regular entry, an unexpected release record
+// or a counted file that changed length or vanished with ErrIntegrityV1, a counted file of another inode with
+// ErrIdentityV1, a second staging identity with ErrBusyV1 and entries or bytes over the limits with ErrCapacityV1.
 type SourceOwnerV1 struct {
 	store   *policycontrol.Store
 	dir     string

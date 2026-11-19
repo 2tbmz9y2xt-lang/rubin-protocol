@@ -485,8 +485,8 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 
 // PrepareSourceV1 returns an incarnation handle after qualifying and durably publishing the source. A pending release or
 // another identity's staging returns ErrBusyV1 and short files, bytes or space ErrCapacityV1, before the producer runs;
-// a differing existing file or a counted file absent at open returns ErrIntegrityV1; a root moved before success
-// returns ErrIdentityV1. A refusal returns a stage's charge only after its cleanup syncs and keeps a published file charged.
+// differing existing bytes or a counted file absent at open return ErrIntegrityV1, an existing file of another inode than
+// its token or a moved root ErrIdentityV1; a refused stage stays charged until its cleanup syncs, a published file stays.
 func (o *SourceOwnerV1) PrepareSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, producer SourceExporterV1) (prepared *PreparedSourceV1, err error) {
 	err = o.withFiles(account, m, true, func(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage) error {
 		prepared, err = o.prepare(r, m, size, used, func(visit func(SourcePartV1) error) error {
