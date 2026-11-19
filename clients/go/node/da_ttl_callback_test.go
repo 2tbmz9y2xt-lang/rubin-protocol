@@ -716,17 +716,26 @@ func requireDATTLState(t *testing.T, f *daNonReplayFixture, daID [32]byte, want 
 	}
 }
 
-// TestDATTLCallbackEmptiedBucketDropped pins that removing the last State A/B record leaves no empty State A/B bucket.
-func TestDATTLCallbackEmptiedBucketDropped(t *testing.T) {
-	f, r := newDATTLCallbackRecords(t)
-	f.setOwnerReadyTTL(r.stateAID, 1)
-	f.setOwnerReadyTTL(r.stateBID, 1)
-	mustAtomic(t, runDATTLBodyInGuard(t, f))
-	f.relay.mu.Lock()
-	defer f.relay.mu.Unlock()
-	if bucket, present := f.relay.relations.buckets[daRelayIncompleteKey]; present {
-		t.Fatalf("emptied State A/B bucket retained: %+v", bucket)
+// TestDATTLCallbackStateABBucketPermanent pins one State A/B bucket pointer from construction through a State A
+// admission, the in-guard TTL body emptying it (count 0, nil head) and the next admission.
+func TestDATTLCallbackStateABBucketPermanent(t *testing.T) {
+	f := newDANonReplayFixture(t, 2)
+	bucket := f.relay.relations.buckets[daRelayIncompleteKey]
+	require(t, bucket != nil, "no State A/B bucket after construction")
+	requireBucket := func(label string, count uint64) {
+		t.Helper()
+		f.relay.mu.Lock()
+		defer f.relay.mu.Unlock()
+		got := f.relay.relations.buckets[daRelayIncompleteKey]
+		require(t, got == bucket && got.count == count && (got.head == nil) == (count == 0), "%s: State A/B bucket %p %+v, want %p with count %d", label, got, got, bucket, count)
 	}
+	f.ownerReadyChunk([32]byte{0xa7}, 0, "ttl-a", daNonReplayPeer("ttl-peer"))
+	requireBucket("State A admission", 1)
+	f.setOwnerReadyTTL([32]byte{0xa7}, 1)
+	mustAtomic(t, runDATTLBodyInGuard(t, f))
+	requireBucket("emptied by the TTL body", 0)
+	f.ownerReadyChunk([32]byte{0xa8}, 0, "ttl-b", daNonReplayPeer("ttl-peer"))
+	requireBucket("next admission", 1)
 }
 
 // daTTLRecordingService runs beforeAttempt, records the attempt by name and, unless refused, runs decrease once.

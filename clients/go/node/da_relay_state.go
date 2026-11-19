@@ -258,7 +258,8 @@ type daRelayRelationLink struct {
 }
 
 // daRelayIncompleteKey keys the relation bucket that publishRecord links each present State A or
-// State B record row into; incompleteKeys walks only that bucket.
+// State B record row into; incompleteKeys walks only that bucket. newDARelayRelations creates the
+// bucket and no preparation, publication or discard creates, inserts or deletes it.
 var daRelayIncompleteKey = daRelayRelationKey{dimension: 6}
 
 type daRelayRelations struct {
@@ -282,7 +283,7 @@ func newDARelayRelations() daRelayRelations {
 	return daRelayRelations{
 		sets:     make(map[[32]byte]*daRelayRecordRow),
 		locators: make(map[[32]byte]*daRelayLocatorRow),
-		buckets:  make(map[daRelayRelationKey]*daRelayRelationBucket),
+		buckets:  map[daRelayRelationKey]*daRelayRelationBucket{daRelayIncompleteKey: {}},
 	}
 }
 
@@ -362,21 +363,19 @@ func (r *daRelayRelations) prepareRecord(p *daRelayRelationPublication, key [32]
 	for _, member := range old.members {
 		p.keys = append(p.keys, member.keys[:]...)
 	}
-	if old.incomplete.bucket != nil {
-		p.keys = append(p.keys, daRelayIncompleteKey) // discard deletes the emptied State A/B bucket
-	}
 	if present {
 		row.members = r.prepareRecordMembers(p, key, value)
-		r.prepareIncomplete(p, row)
+		r.prepareIncomplete(row)
 	}
 	p.oldRecords = append(p.oldRecords, old)
 	p.newRecords = append(p.newRecords, row)
 }
 
-// prepareIncomplete reserves the State A/B bucket for a present row; publishRecord links it
-// only when the published value is not State C, so a value rewritten after preparation counts.
-func (r *daRelayRelations) prepareIncomplete(p *daRelayRelationPublication, row *daRelayRecordRow) {
-	row.incomplete = daRelayRelationLink{bucket: r.prepareBucket(p, daRelayIncompleteKey), record: row}
+// prepareIncomplete points a present row's link at the State A/B bucket newDARelayRelations
+// created and creates none; publishRecord links it only when the published value is not State C,
+// so a value rewritten after preparation counts.
+func (r *daRelayRelations) prepareIncomplete(row *daRelayRecordRow) {
+	row.incomplete = daRelayRelationLink{bucket: r.buckets[daRelayIncompleteKey], record: row}
 }
 
 // incompleteKeys lists the keys of the rows linked in the State A/B bucket, in link order; the
@@ -609,7 +608,7 @@ func (r *daRelayRelations) cloneRecord(key [32]byte, source *daRelayRecordRow) {
 		r.prepareMember(p, &copy)
 		row.members = append(row.members, &copy)
 	}
-	r.prepareIncomplete(p, row)
+	r.prepareIncomplete(row)
 	r.sets[key] = row
 	p.newRecords = append(p.newRecords, row)
 	r.publish(p)
