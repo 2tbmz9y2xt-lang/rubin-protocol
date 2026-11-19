@@ -170,7 +170,8 @@ func TestDATTLCallbackServiceConstructionFailure(t *testing.T) {
 	probe.f.requireAbsent(probe.commit, "S1, still bound after the failed constructions, admitted the decrease")
 }
 
-// TestDATTLCallbackServiceConcurrentConstruction: two constructions race three admitted decreases under -race.
+// TestDATTLCallbackServiceConcurrentConstruction: two constructions race two admitted decreases under -race; with S1
+// and the earlier construction closed, the next selection reaches the last published binding and decreases.
 func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
 	_, h, probe := newSourceAndProbe(t, 6, 0xe3)
 	type construction struct {
@@ -192,17 +193,18 @@ func TestDATTLCallbackServiceConcurrentConstruction(t *testing.T) {
 	probe.apply()
 	probe.apply()
 	probe.f.requireRetained(probe.commit, "count 1 after two racing selections")
-	probe.apply()
 	requireJoined(t, "the racing constructions", racing...)
 	close(built)
-	probe.f.requireAbsent(probe.commit, "every racing selection admitted its decrease")
-	services := map[node.DATTLMutationService]bool{}
+	services, final := map[node.DATTLMutationService]bool{}, h.syncEngine.DATTLBindingService()
 	for c := range built {
 		require(t, c.err == nil && c.service != nil, "NewService: %v", c.err)
 		services[c.service] = true
 		t.Cleanup(func() { _, exit := startClose(c.service); joinWithin(t, "Close in cleanup", exit) })
+		require(t, node.DATTLMutationService(c.service) == final || c.service.Close() == nil, "Close of the earlier racing construction")
 	}
-	require(t, len(services) == 2 && services[h.syncEngine.DATTLBindingService()], "final binding outside the racing constructions")
+	require(t, len(services) == 2 && services[final] && h.service.Close() == nil, "final binding outside the racing constructions or Close(S1)")
+	probe.apply()
+	probe.f.requireAbsent(probe.commit, "the selection after the race did not reach the last published binding")
 }
 
 // detachedReorgFixture is a sink tip block with one DA commit and chunk and a longer source branch to reorganize onto.
