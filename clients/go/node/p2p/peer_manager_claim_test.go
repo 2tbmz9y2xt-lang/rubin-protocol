@@ -3,8 +3,13 @@ package p2p
 import (
 	"context"
 	"net"
+	"reflect"
+	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
@@ -118,7 +123,7 @@ func requireNotParked(t *testing.T, label string, fragments ...string) {
 }
 
 // closeDrainFrames match a Close started by the test closure frame and parked in a
-// WaitGroup wait; with no Start in flight that wait is the final worker drain.
+// WaitGroup wait; with no Start in flight that wait is loopWG.Wait, the final worker drain.
 func closeDrainFrames(testFrame string) []string {
 	return []string{"[sync.WaitGroup.Wait", "sync.(*WaitGroup).Wait(", "p2p.(*Service).Close(", testFrame}
 }
@@ -262,24 +267,44 @@ type claimResult struct {
 	err     error
 }
 
-// constructConcurrently runs one NewService per cfg on its own goroutine, opens the start
-// gate only after the goroutines have reached it, and returns the results in cfg order.
-func constructConcurrently(cfgs []ServiceConfig) []claimResult {
-	results := make([]claimResult, len(cfgs))
-	start := make(chan struct{})
-	var ready, wg sync.WaitGroup
-	for i, cfg := range cfgs {
-		ready.Add(1)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ready.Done()
-			<-start
-			results[i].service, results[i].err = NewService(cfg)
-		}()
+// peerManagerMutex returns the mu field of pm, the sync.RWMutex that Claim locks.
+func peerManagerMutex(t *testing.T, pm *node.PeerManager) *sync.RWMutex {
+	t.Helper()
+	field := reflect.ValueOf(pm).Elem().FieldByName("mu")
+	require(t, field.IsValid() && field.Type() == reflect.TypeFor[sync.RWMutex](), "node.PeerManager has no sync.RWMutex field mu")
+	return (*sync.RWMutex)(unsafe.Pointer(field.UnsafeAddr()))
+}
+
+// claimWaitFrames match a constructConcurrently goroutine parked on a sync lock inside PeerManager.Claim.
+var claimWaitFrames = []string{"[sync.", "node.(*PeerManager).Claim(", "p2p.NewService(", "p2p.constructConcurrently.func"}
+
+// goroutinesParked counts the goroutines whose stack dump contains the fragments.
+func goroutinesParked(fragments ...string) int {
+	stack := make([]byte, 1<<22)
+	count := 0
+	for g := range strings.SplitSeq(string(stack[:runtime.Stack(stack, true)]), "\n\n") {
+		if !slices.ContainsFunc(fragments, func(f string) bool { return !strings.Contains(g, f) }) {
+			count++
+		}
 	}
-	ready.Wait()
-	close(start)
+	return count
+}
+
+// constructConcurrently locks mu, runs one NewService per cfg on its own goroutine, unlocks mu
+// once len(cfgs) goroutines are parked on a lock inside PeerManager.Claim, and returns the
+// results in cfg order.
+func constructConcurrently(t *testing.T, mu *sync.RWMutex, cfgs []ServiceConfig) []claimResult {
+	t.Helper()
+	results := make([]claimResult, len(cfgs))
+	mu.Lock()
+	unlock := sync.OnceFunc(mu.Unlock)
+	t.Cleanup(unlock)
+	var wg sync.WaitGroup
+	for i, cfg := range cfgs {
+		wg.Go(func() { results[i].service, results[i].err = NewService(cfg) })
+	}
+	waitUntil(t, func() bool { return goroutinesParked(claimWaitFrames...) == len(cfgs) }, "NewService goroutines parked inside PeerManager.Claim")
+	unlock()
 	wg.Wait()
 	return results
 }
@@ -292,7 +317,7 @@ func TestPeerManagerClaimAtomicAcrossConstructions(t *testing.T) {
 		_, cfgs[i] = claimConfig(t, pm)
 	}
 	winners, refused := 0, 0
-	for _, r := range constructConcurrently(cfgs) {
+	for _, r := range constructConcurrently(t, peerManagerMutex(t, pm), cfgs) {
 		if r.err == nil && r.service != nil {
 			winners++
 			t.Cleanup(func() { _ = r.service.Close() })

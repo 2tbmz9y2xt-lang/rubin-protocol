@@ -174,8 +174,8 @@ func (s *Service) startOutboundPeers() {
 // below always reflects final state — either a published listener that
 // Close itself closes, or nil if Start aborted and cleaned up.
 //
-// The first Close releases cfg.PeerManager after the final worker drain and
-// before closeDone is published, so a joined Close returns only after that
+// The Close that owns the teardown releases cfg.PeerManager after loopWG.Wait
+// and before closeDone is closed, so a joined Close returns only after that
 // release and releases nothing itself.
 //
 // Close MUST be invoked only by the external lifecycle owner, never reentrantly
