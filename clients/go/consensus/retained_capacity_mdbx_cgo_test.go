@@ -1006,7 +1006,7 @@ func retainedCapacityAgreeV1(t *testing.T, cold, warm *DirectRetainedProofV1) {
 }
 
 // retainedCapacitySelectedV1 stores raw's header, body and a SideLink naming it at (3,h) and installs a one-row selected side
-// 3 at tip h, both with W_h=h+1: the RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3 work (genesis 1, 1 per all-ff target) only when raw is h above genesis.
+// 3 at tip h, both with W_h=h+1: the RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3 work (genesis 1, 1 per all-ff target, RUBIN_L1_CANONICAL.md Section 23) only when raw is h above genesis.
 func retainedCapacitySelectedV1(t *testing.T, w *btWorld, raw []byte, h uint64) [32]byte {
 	t.Helper()
 	hash := sha3.Sum256(raw[:148])

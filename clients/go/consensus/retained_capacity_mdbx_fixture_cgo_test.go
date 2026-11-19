@@ -599,7 +599,7 @@ func retainedCapacityRollingMergeV1(t *testing.T) {
 }
 
 // retainedCapacityRollingV1 stores the candidate x's body and SideLink (3,1), the 1439 chained selected rows 2..1440
-// (W_h=h+1, RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3) and the OLD authority; it returns the L header deletions the merge owes.
+// (W_h=h+1: the RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3 work, with genesis 1 and 1 per all-ff target by RUBIN_L1_CANONICAL.md Section 23) and the OLD authority; it returns the L header deletions the merge owes.
 func retainedCapacityRollingV1(t *testing.T) (*btWorld, [32]byte, []mdbx.Mutation) {
 	t.Helper()
 	w, _, genesis := riGenesis(t)
