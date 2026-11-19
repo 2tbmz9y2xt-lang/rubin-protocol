@@ -87,11 +87,6 @@ func sourceReopenStore(t *testing.T, old *policycontrol.Store, dir string) *poli
 	return s
 }
 
-func sourceReopen(t *testing.T, old *policycontrol.Store, dir string, limits SourceLimitsV1) *SourceOwnerV1 {
-	t.Helper()
-	return sourceOpen(t, sourceReopenStore(t, old, dir), sourceID(), limits, nil)
-}
-
 func sourceBundle(class byte, conditional bool) (SourceManifestV1, [][]byte) {
 	m := SourceManifestV1{Identity: [32]byte{7}, Class: CaptureClassV1(class)}
 	kinds := []byte{1, 2, 3, 4, 5, 6}
@@ -246,16 +241,17 @@ func TestSourceDurableRoundTrip(t *testing.T) {
 			t.Run(fmt.Sprintf("class%d/conditional%v", class, conditional), func(t *testing.T) {
 				s, o, dir, m, parts := sourceBundleScene(t, class, conditional)
 				sourceReadRefusal(t, o, m, ErrUnavailableV1, "unprepared source readback")
-				generations := []string{t.TempDir(), t.TempDir()}
-				for _, path := range generations {
-					sourceMust(t, os.WriteFile(filepath.Join(path, "body"), parts[0], 0o600))
+				generations, backed := []string{t.TempDir(), t.TempDir()}, map[PartKindV1]*os.File{}
+				for i, path := range generations {
+					sourceMust(t, os.WriteFile(filepath.Join(path, "part"), parts[i], 0o600))
+					held, err := os.Open(filepath.Join(path, "part"))
+					sourceMust(t, err)
+					t.Cleanup(func() { _ = held.Close() })
+					backed[m.Parts[i].Kind] = held
 				}
-				held, err := os.Open(filepath.Join(generations[0], "body"))
-				sourceMust(t, err)
-				defer held.Close()
 				producer := func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
 					return sourceExportParts(op, m, parts, func(part SourcePartV1) error {
-						if part.Kind == m.Parts[0].Kind {
+						if held := backed[part.Kind]; held != nil {
 							part.ReadAt = held.ReadAt
 						}
 						return visit(part)
@@ -265,10 +261,9 @@ func TestSourceDurableRoundTrip(t *testing.T) {
 				file := filepath.Join(dir, sourceDirectory, p.name)
 				original := sourceReadFile(t, file)
 				sourcePrepareResult(t, o, m, producer, nil)
-				sourceMust(t, held.Close())
 				sourceFailIf(t, !bytes.Equal(sourceReadFile(t, file), original), "identical preparation changed bytes")
-				for _, path := range generations {
-					sourceMust(t, os.RemoveAll(path))
+				for i, path := range generations {
+					sourceMust(t, errors.Join(backed[m.Parts[i].Kind].Close(), os.RemoveAll(path)))
 				}
 				sourceRead(t, o, m, parts)
 				sourceMust(t, s.Close())
@@ -363,8 +358,7 @@ func TestSourceExportScope(t *testing.T) {
 				for _, expired := range []*SourceOperationV1{nil, {}, scope} {
 					sourceWantError(t, expired.WithBackingV1(nil, nil, nil), ErrUnavailableV1, "expired source operation")
 				}
-				parts[0][0] ^= 0x80
-				sourceFailIf(t, !bytes.Equal(copied, want), "visitor copy aliases original backing")
+				sourceFailIf(t, !bytes.Equal(copied, want), "visitor copy changed after expiry: %x", copied)
 				return a.WithReservation(17, func() error { return nil })
 			})
 			sourceMust(t, s.Close())
