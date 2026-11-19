@@ -20,15 +20,11 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/policycontrol"
 )
 
-func sourceEntries(t *testing.T, dir string) []string {
+func sourceEntries(t *testing.T, dir string) []os.DirEntry {
 	t.Helper()
 	entries, err := os.ReadDir(filepath.Join(dir, sourceDirectory))
 	sourceMust(t, err)
-	var names []string
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	return names
+	return entries
 }
 
 // sourceHeld returns a check that o's source directory keeps its listing error, entry names, inodes, read errors and exact bytes and o its live tokens, staging debt and pending release.
@@ -830,10 +826,11 @@ func acquiredSourceFrame(t *testing.T, encoded string, size int, want string) (S
 }
 
 func TestSourceCapacityBeforeCopy(t *testing.T) {
+	m, parts := sourceBundle(1, false)
+	size, err := m.SizeV1()
+	sourceMust(t, err)
 	t.Run("statfs-exact-fit", func(t *testing.T) {
-		_, o, _, m, parts := sourceBundleScene(t, 1, false)
-		size, err := m.SizeV1()
-		sourceMust(t, err)
+		_, o, _ := sourceScene(t, sourceLimits())
 		o.ops.statfs = func(_ int, stat *syscall.Statfs_t) error {
 			sourceStatfsFixture(stat, 1, size+o.limits.Overhead)
 			return nil
@@ -841,9 +838,6 @@ func TestSourceCapacityBeforeCopy(t *testing.T) {
 		sourcePrepare(t, o, m, parts)
 		sourceRead(t, o, m, parts)
 	})
-	m, parts := sourceBundle(1, false)
-	size, err := m.SizeV1()
-	sourceMust(t, err)
 	for _, mode := range []string{"bytes", "files", "scans", "statfs-error", "statfs-zero", "statfs-overflow", "statfs-space", "census-name", "census-link", "census-staging", "census-files", "census-bytes", "census-scans"} {
 		t.Run(mode, func(t *testing.T) {
 			limits := sourceLimits()
@@ -997,10 +991,8 @@ func TestSourceSharedCaptureBudget(t *testing.T) {
 		_, o, dir := sourceScene(t, limits)
 		p := sourcePrepare(t, o, m, parts)
 		path := filepath.Join(dir, sourceDirectory, p.name)
-		before, err := os.Stat(path)
-		sourceMust(t, err)
 		data := sourceReadFile(t, path)
-		sourceMust(t, os.Truncate(path, before.Size()-1))
+		sourceMust(t, os.Truncate(path, int64(len(data))-1))
 		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrIntegrityV1)
 		sourceMust(t, os.WriteFile(path, data, 0o600))
 		sourceRead(t, o, m, parts)

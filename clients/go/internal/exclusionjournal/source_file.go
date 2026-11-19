@@ -16,6 +16,7 @@ import (
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
+	"golang.org/x/sys/unix"
 )
 
 type sourceFS struct {
@@ -235,7 +236,7 @@ func (o *SourceOwnerV1) includeAbsent(used sourceUsage, missing int, absentRelea
 }
 
 func (o *SourceOwnerV1) censusFile(r *sourceRoot, name string, used *sourceUsage, missing *int) error {
-	info, err := sourceEntryInfo(r, name)
+	info, err := sourceEntryInfo(r, name, nil)
 	if err != nil {
 		return ErrIntegrityV1
 	}
@@ -260,20 +261,21 @@ func (o *SourceOwnerV1) censusFile(r *sourceRoot, name string, used *sourceUsage
 	return nil
 }
 
-// openSourceFile opens the regular file named by name without blocking. A failed name observation returns unobserved, or its
-// own error when unobserved is nil; a named object that is not a regular file or another opened object ErrIntegrityV1; a failed open ErrUnavailableV1.
+// openSourceFile opens the regular file named by name without following a final symbolic link or blocking. A failed name observation
+// returns unobserved, or its own error when unobserved is nil; a non-regular named object or another opened object ErrIntegrityV1; a failed open ErrUnavailableV1.
 func openSourceFile(r *sourceRoot, name string, unobserved error) (*os.File, error) {
-	named, err := r.Lstat(name)
+	named, err := sourceEntryInfo(r, name, unobserved)
 	if err != nil {
-		return nil, cmp.Or(unobserved, err)
+		return nil, err
 	}
-	if !named.Mode().IsRegular() {
-		return nil, ErrIntegrityV1
+	fd, err := -1, error(unix.EINTR)
+	for errors.Is(err, unix.EINTR) {
+		fd, err = unix.Openat(int(r.pin.Fd()), name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	}
-	f, err := r.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, ErrUnavailableV1
 	}
+	f := os.NewFile(uintptr(fd), name)
 	if info, _ := f.Stat(); !os.SameFile(named, info) {
 		_ = f.Close()
 		return nil, ErrIntegrityV1
@@ -281,12 +283,15 @@ func openSourceFile(r *sourceRoot, name string, unobserved error) (*os.File, err
 	return f, nil
 }
 
-func sourceEntryInfo(r *sourceRoot, name string) (os.FileInfo, error) {
+func sourceEntryInfo(r *sourceRoot, name string, unobserved error) (os.FileInfo, error) {
 	info, err := r.Lstat(name)
-	if err == nil && (!info.Mode().IsRegular() || info.Size() < 0) {
+	if err != nil {
+		return nil, cmp.Or(unobserved, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() < 0 {
 		return nil, ErrIntegrityV1
 	}
-	return info, err
+	return info, nil
 }
 
 func (o *SourceOwnerV1) censusEntry(name string, size uint64, used *sourceUsage) error {
@@ -484,7 +489,7 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 	}
 	if !d.removed {
 		name := ".staging-" + d.name
-		if info, err := sourceEntryInfo(r, name); err == nil {
+		if info, err := sourceEntryInfo(r, name, nil); err == nil {
 			d.size = uint64(max(info.Size(), 0))
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err

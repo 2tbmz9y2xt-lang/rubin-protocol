@@ -185,7 +185,7 @@ func (o *SourceOwnerV1) openRelease(r *sourceRoot) error {
 }
 
 func (o *SourceOwnerV1) clearReleaseScratch(r *sourceRoot) error {
-	info, err := sourceEntryInfo(r, releaseScratch)
+	info, err := sourceEntryInfo(r, releaseScratch, nil)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
