@@ -115,12 +115,12 @@ func (pm *PeerManager) RemovePeer(addr string) {
 	delete(pm.peers, addr)
 }
 
-// Claim marks a free PeerManager as held by one network service and returns
-// nil. On a held PeerManager it returns "peer manager is already claimed" and
-// changes nothing; on a nil receiver it returns "nil peer manager". The check
-// and the mark are one step under the PeerManager mutex, so of concurrent
-// calls on a free PeerManager exactly one returns nil. It neither reads nor
-// changes the peer table, the MaxPeers limit, Count or Snapshot.
+// Claim marks a free PeerManager held and returns nil. On a held PeerManager it
+// returns "peer manager is already claimed" and changes nothing; on a nil
+// receiver it returns "nil peer manager". The check and the mark are one step
+// under the PeerManager mutex, so of concurrent calls on a free PeerManager with
+// no Release among them exactly one returns nil. It neither reads nor changes
+// the peer table, the MaxPeers limit, Count or Snapshot.
 func (pm *PeerManager) Claim() error {
 	if pm == nil {
 		return errors.New("nil peer manager")
@@ -134,9 +134,9 @@ func (pm *PeerManager) Claim() error {
 	return nil
 }
 
-// Release marks the PeerManager free so a later Claim succeeds. On a free
-// PeerManager or a nil receiver it changes nothing. It neither reads nor
-// changes the peer table, the MaxPeers limit, Count or Snapshot.
+// Release marks the PeerManager free. On a free PeerManager or a nil receiver
+// it changes nothing. It neither reads nor changes the peer table, the MaxPeers
+// limit, Count or Snapshot.
 func (pm *PeerManager) Release() {
 	if pm == nil {
 		return
