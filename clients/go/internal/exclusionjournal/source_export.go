@@ -360,22 +360,14 @@ func copyPart(part SourcePartV1, dst io.Writer, scratch []byte) error {
 	for offset := uint64(0); offset < part.Length; {
 		n := min(uint64(len(scratch)), part.Length-offset)
 		chunk := scratch[:n]
-		if err := readPartAt(part, chunk, offset); err != nil {
-			return err
+		read, err := part.ReadAt(chunk, int64(offset))
+		if read != len(chunk) || err != nil {
+			return ErrIntegrityV1
 		}
 		if _, err := dst.Write(chunk); err != nil {
 			return err
 		}
 		offset += n
-	}
-	return nil
-}
-
-// readPartAt fills dst; io.EOF completes the read only when it ends at the part length.
-func readPartAt(part SourcePartV1, dst []byte, offset uint64) error {
-	n, err := part.ReadAt(dst, int64(min(offset, math.MaxInt64)))
-	if n != len(dst) || err != nil && (err != io.EOF || offset+uint64(n) != part.Length) {
-		return ErrIntegrityV1
 	}
 	return nil
 }

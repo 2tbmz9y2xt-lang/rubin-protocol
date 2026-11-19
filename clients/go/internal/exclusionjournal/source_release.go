@@ -251,17 +251,8 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {
 		}
 		d.backingSynced = true
 	}
-	if _, err := r.Lstat(d.name); !errors.Is(err, os.ErrNotExist) {
-		return ErrIdentityV1
-	}
-	present, err := d.marker(r)
-	if err != nil {
+	if err := o.clearReleaseMarker(r, d); err != nil {
 		return err
-	}
-	if present {
-		if err := o.ops.remove(r.Root, releaseFile); err != nil {
-			return err
-		}
 	}
 	if err := o.syncBoundRoot(r); err != nil {
 		return err
@@ -272,6 +263,18 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {
 	delete(o.live, d.name)
 	o.release = nil
 	return nil
+}
+
+// clearReleaseMarker removes a matching release record only after the backing name is observed absent.
+func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) error {
+	if _, err := r.Lstat(d.name); !errors.Is(err, os.ErrNotExist) {
+		return ErrIdentityV1
+	}
+	present, err := d.marker(r)
+	if err != nil || !present {
+		return err
+	}
+	return o.ops.remove(r.Root, releaseFile)
 }
 
 // marker checks the named release record against the saved exact bytes.
