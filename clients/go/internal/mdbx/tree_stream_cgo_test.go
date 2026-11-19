@@ -984,7 +984,7 @@ func TestTreeStreamDirectionRelationV1(t *testing.T) {
 }
 
 func TestTreeStreamResourceLayoutV1(t *testing.T) {
-	// Derived 64-bit layouts (changed and new types), observed before the census below.
+	// Derived 64-bit layouts of the ten listed types, observed before the census below.
 	for _, row := range []struct{ got, want uintptr }{
 		{unsafe.Sizeof(TreeOperationV1{}), 192},
 		{unsafe.Sizeof(treePlanV1{}), 176},
@@ -1063,8 +1063,8 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	if loan != 96 || control != 3669 || control-2709 > 1024 {
 		t.Fatal("selected fixed control increment", control)
 	}
-	// Two 72-byte Pair/operation transports and the 8-byte plan scope field, measured from the
-	// growth of TreePairV1, TreeOperationV1 and treePlanV1 over their baseline sizes 80, 120 and 168.
+	// Two 72-byte Pair/operation transports and the 8-byte plan scope field: 80 and 120 are the TreePairV1 and
+	// TreeOperationV1 sizes without Pair's three 24-byte physical-scope slices, 168 the treePlanV1 size without scope.
 	control += uint64(unsafe.Sizeof(TreePairV1{})) - 80 + uint64(unsafe.Sizeof(TreeOperationV1{})) - 120 + uint64(unsafe.Sizeof(treePlanV1{})) - 168
 	if control != 3821 {
 		t.Fatal("scope fixed control census differs", control)
@@ -4818,7 +4818,7 @@ func TestTreeStreamPhysicalScopeV1(t *testing.T) {
 	t.Run("key-slot-order", psKeySlotOrder)
 	t.Run("owned-capacity", psOwnedCapacity)
 	t.Run("combined-cap", psCombinedCap)
-	t.Run("legacy", psLegacy)
+	t.Run("store-update-and-rank8", psLegacy)
 	t.Run("callback", psCallback)
 }
 
@@ -5065,12 +5065,12 @@ func psShape(t *testing.T) {
 		}
 		psRefused(t, s, r, false, row.name)
 	}
-	// Witnesses with no Mutation or delete refuse with the existing empty-operation refusal.
+	// Witnesses with no Mutation or delete are an empty operation and refuse with "invalid Update Batch".
 	r := psRun(t, s, o, LaneOperation, func(reader *Reader) TreeOperationV1 {
 		return TreeOperationV1{Pair: TreePairV1{ObsoleteConsulted: []ObsoletePageWitnessV1{psScope(t, reader, 9).Witness}}}
 	})
 	psRefused(t, s, r, false, "consulted-only")
-	// Malformed ordinary Pair keeps its own capacity row ahead of the scope shape row.
+	// A malformed ordinary Pair returns its own capacity refusal ahead of the scope shape refusal.
 	consultedGrant := (maxUpdateConsulted + 1) * (uint64(unsafe.Sizeof(ConsultedRow{})) + 16)
 	r = psRunG(t, s, o, TreeOperation, psPageGrant+consultedGrant, func(reader *Reader) TreeOperationV1 {
 		op := psRawDelete(t, 9)(reader)
@@ -5132,7 +5132,7 @@ func psProvenance(t *testing.T) {
 		return tsPair(31)
 	})
 	mustEnvironment(t, r.err)
-	// After callback expiry the row read returns the existing inactive Reader refusal.
+	// After callback expiry the row read refuses with "Reader is not active".
 	if n, err := earlier.Rows[0].ReadAt(make([]byte, 1), 0); n != 0 {
 		t.Fatalf("expired scope row returned %d bytes", n)
 	} else {
@@ -5586,7 +5586,7 @@ func psCombinedCap(t *testing.T) {
 	}
 }
 
-// Legacy format-3 Store.Update still refuses before callback; direct Pair rank 8 stays invalid.
+// Store.Update on a format-3 store refuses before its callback; a Pair Mutation at rank 8 is "invalid Update Batch".
 func psLegacy(t *testing.T) {
 	s, _, o := psStore(t)
 	calls := 0

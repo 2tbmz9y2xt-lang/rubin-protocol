@@ -87,7 +87,7 @@ func (scope *largeImageScope) windowV1() uint64 {
 	return 4 * (scope.maxKey + 1)
 }
 
-// fundV1 covers the window before any typed acquisition; legacy scopes keep their zero-budget path.
+// fundV1 covers the window before any typed acquisition; a scope with a zero databaseID returns nil without a charge.
 func (scope *largeImageScope) fundV1() error {
 	if !scope.typedV1() {
 		return nil

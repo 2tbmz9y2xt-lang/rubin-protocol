@@ -8738,7 +8738,7 @@ func TestTreeStreamPhysicalScopeNativeV1(t *testing.T) {
 		runtime.KeepAlive(left)
 		runtime.KeepAlive(right)
 		if err := (&largeImageScope{}).fundV1(); err != nil {
-			t.Fatal("legacy scope funded", err)
+			t.Fatal("zero-value scope funded", err)
 		}
 		// Typed nil budget with a zero seal refuses with zero large-image interceptor calls, pair-read gets
 		// and payload comparisons; a positive seal over the same body selector makes interceptor calls and

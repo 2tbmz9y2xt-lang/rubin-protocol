@@ -49,7 +49,7 @@ type TreePairV1 struct {
 	// only; LargeConsulted holds plain (Kind, Hash) selector values. For all three nil and empty are
 	// equivalent, and they are read only after the callback. Any nonempty field makes the operation a physical-scope Pair, which needs a
 	// LaneOperation account, no primitives, Proof, HeaderSlot, EntryInventory or ContextConsulted,
-	// zero PrepaidReadBytes, PreserveReplayObservations false and at least one Mutation or ObsoleteDeletes row. After the ordinary Pair checks, which keep their own refusals,
+	// zero PrepaidReadBytes, PreserveReplayObservations false and at least one Mutation or ObsoleteDeletes row. After the ordinary Pair checks, which return their own refusals,
 	// the refusals are, in order: any other shape is "invalid Update Batch"; more than 2391106
 	// deletes plus witnesses, more than 2880 selectors or more than 1440 of one kind is "Update Batch
 	// exceeds bound"; a token not from this operation's Reader is "invalid Update Batch"; after the
@@ -72,7 +72,7 @@ type TreePairV1 struct {
 	// first write, where a difference refuses with "OLD/write snapshot mismatch" and stage Prewrite, and at the
 	// final image before commit, where it refuses with "final update image mismatch" and stage
 	// WriteStartedDefinitelyPrecommit; both are StateMismatch/update/-30779 with truth OLD, index -1 and the Store
-	// consumed or retained under the existing owner. After a possibly crossed commit the readback reports OLD when
+	// CLOSED, or POISONED_THREAD or CLOSE_BLOCKED when an abort or the close is retained. After a possibly crossed commit the readback reports OLD when
 	// the ORIGINAL OLD image holds, otherwise NEW when the planned image holds, otherwise UNKNOWN, and either image
 	// holds only while these domains are unchanged. A difference does not end the comparison: a later read error
 	// or refused charge in it is returned instead. Before the first write the comparison raises the operation's
