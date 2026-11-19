@@ -901,6 +901,7 @@ func TestSourceLimitsAndIdentity(t *testing.T) {
 
 func testSourceDirectoryMode(t *testing.T) {
 	dir := t.TempDir()
+	sourceMust(t, os.Chmod(dir, 0o700))
 	s, err := policycontrol.Create(dir, sourceID(), policycontrol.NewInstallationProof{Identity: sourceID()})
 	sourceMust(t, err)
 	defer s.Close()
