@@ -4937,7 +4937,7 @@ func daOwnerFileFuncs(t *testing.T, path string) map[string]*ast.FuncDecl {
 	return functions
 }
 
-// ownerReadyRemovalSelectors drives one row through both owner-ready removal roots (live behind the exported wrappers).
+// ownerReadyRemovalSelectors drives one row through the in-guard TTL body (live behind the canonical transition) and the owner-ready peer release (live behind ReleasePeerQuotaKey).
 var ownerReadyRemovalSelectors = []struct {
 	name string
 	run  func(*DARelayState) error
@@ -5538,10 +5538,10 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 			f, id := newDANonReplayFixture(t, 2), [32]byte{0xc6}
 			f.completeReplayPinned(id)
 			f.mutateRelay(func(s *DARelayState) { row.corrupt(s, id) })
-			if selector.name == ownerReadyTTLSelector && strings.HasPrefix(row.name, "C ") {
-				// A stray State C charge breaks the stored totals the State A/B records alone contribute.
+			if selector.name == ownerReadyTTLSelector && strings.HasPrefix(row.name, "C ") { // a stray charge no State A/B record implies breaks the stored-totals check
 				before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-				require(t, errors.Is(selector.run(f.relay), errDARelayImageIncompatible), "%s on the ttl tick was not refused", row.name)
+				err := selector.run(f.relay)
+				require(t, errors.Is(err, errDARelayImageIncompatible) && strings.Contains(err.Error(), "records imply"), "%s on the ttl tick: err=%v, want the stored-totals refusal", row.name, err)
 				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
 				continue
 			}
@@ -5630,7 +5630,7 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 					t.Fatalf("%s canonical err=%v, want canonical terminal", row.name, err)
 				}
 			}
-			if selector.name == ownerReadyTTLSelector { // the TTL body never visits a State C record
+			if selector.name == ownerReadyTTLSelector { // the TTL body accepts the listed State C record defects and changes nothing
 				requireDATTLSkipsStateC(t, f, selector.run, row.name)
 				continue
 			}
@@ -5692,8 +5692,8 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 			f.completeReplayPinned(id)
 			record := daRelayStateSnapshot(f.relay).sets[id]
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { row.corrupt(claimCorruptionTarget{o, record}) })
-			if selector.name == ownerReadyTTLSelector { // the TTL body never visits State C claims
-				requireDATTLSkipsStateC(t, f, selector.run, "State C claims")
+			if selector.name == ownerReadyTTLSelector { // the TTL body accepts the listed State C claim defects and changes nothing
+				requireDATTLSkipsStateC(t, f, selector.run, row.name)
 				continue
 			}
 			requireOwnerReadySentinel(t, f, selector.run, errDARelayImageIncompatible, "cleanup accepted inconsistent C claims: "+row.name+" "+selector.name)
@@ -5752,8 +5752,8 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 		for _, selector := range ownerReadyRemovalSelectors {
 			f := buildDuplicateInputs(t, role)
 			f.mutateRelay(func(s *DARelayState) { s.mempool = nil })
-			if selector.name == ownerReadyTTLSelector { // the TTL body never visits State C claims
-				requireDATTLSkipsStateC(t, f, selector.run, "State C claims")
+			if selector.name == ownerReadyTTLSelector { // the TTL body accepts the unbound State C member's duplicate inputs and changes nothing
+				requireDATTLSkipsStateC(t, f, selector.run, "unbound coherent duplicate "+role+" inputs")
 				continue
 			}
 			requireOwnerReadySentinel(t, f, selector.run, errDARelayImageIncompatible, "unbound coherent duplicate "+role+" inputs on "+selector.name)
@@ -6313,8 +6313,7 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 			before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			err := selector.run(f.relay)
 			var terminal *canonicalDATerminalError
-			// The in-guard TTL body refuses with its image-incompatible class; the peer-release
-			// selectors refuse with the clone path's terminal class.
+			// The ttl tick refuses with the image-incompatible class, the peer release with the canonical terminal class.
 			isTerminal := errors.As(err, &terminal)
 			refused := isTerminal != (selector.name == ownerReadyTTLSelector) && (isTerminal || errors.Is(err, errDARelayImageIncompatible))
 			if !refused || !strings.Contains(err.Error(), "staged retained bytes") {
@@ -6410,12 +6409,12 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 			requireOwnerReadyTerminal(t, f, ownerReadyDropRelease, row.detail, row.name)
 		})
 	}
-	// FIRST-ERROR ORDER over an image carrying TWO defects on different axes. The ttl selector refuses it with errDARelayImageIncompatible and changes nothing; on the peer release the closure is
+	// FIRST-ERROR ORDER over an image carrying TWO defects on different axes. The ttl tick checks it record by record in da_id order; on the peer release the closure is
 	// canonicalDARetainedImageClosed, which is RECORD-major: it decides the lower da_id's locator
 	// bijection AND its accounting before reading the higher one, so the accounting refusal is the
 	// sole result. A closure that walked every record's locators first and every record's
 	// accounting second would report the higher da_id's locator refusal instead, and this row's
-	// evidence string, asserted on the peer release, is what separates the two orders — the earlier two-record row (0xdb, 0xdd)
+	// evidence string on the peer release, and on the ttl tick the bare errDARelayImageIncompatible of the lower da_id's per-da_id bytes check where its locator check returns errDARelayLocatorMismatch, is what separates the two orders — the earlier two-record row (0xdb, 0xdd)
 	// carries one defect, so both orders answer it identically. Both records are provenance "keep",
 	// leaving the preflight as the only arm the peer release can refuse on.
 	for _, selector := range ownerReadyRemovalSelectors {
@@ -6430,10 +6429,8 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 				row.chunkIndex++                                // still one row, no longer the one the record implies
 				s.relations.putLocator(indexedTx.txid, row)
 			})
-			if selector.name == ownerReadyTTLSelector { // the TTL body refuses the two-defect image and changes nothing
-				before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-				require(t, errors.Is(selector.run(f.relay), errDARelayImageIncompatible), "a two-defect image on the ttl tick was not refused")
-				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
+			if selector.name == ownerReadyTTLSelector {
+				requireOwnerReadySentinel(t, f, selector.run, errDARelayImageIncompatible, "a two-defect image on the ttl tick")
 				return
 			}
 			requireOwnerReadyTerminal(t, f, selector.run, fmt.Sprintf("per-da_id orphan bytes for %x", accounted),

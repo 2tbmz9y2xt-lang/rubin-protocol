@@ -87,7 +87,7 @@ const ownerReadyTTLSelector = "ttl tick"
 func requireDATTLSkipsStateC(t *testing.T, f *daNonReplayFixture, run func(*DARelayState) error, label string) {
 	t.Helper()
 	before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-	require(t, run(f.relay) == nil, "%s: the in-guard TTL body refused a State C defect it must not visit", label)
+	require(t, run(f.relay) == nil, "%s: the in-guard TTL body refused a defect outside the State A and State B records", label)
 	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
 }
 

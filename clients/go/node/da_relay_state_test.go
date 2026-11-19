@@ -720,7 +720,7 @@ func TestDARelayAdvanceOrphanTTLExpiresOrphanChunksAtomically(t *testing.T) {
 		t.Fatalf("expiry left peer-b bytes=%d", got)
 	}
 	if err := advanceDATTLInGuard(state); err != nil {
-		t.Fatalf("public ttl advance: %v", err)
+		t.Fatalf("in-guard ttl advance: %v", err)
 	}
 	if expired, err = state.advanceOrphanTTL(); err != nil || len(expired) != 0 {
 		t.Fatalf("second ttl advance expired=%+v err=%v, want no-op", expired, err)
