@@ -65,7 +65,9 @@ type SourceLimitsV1 struct {
 	Bytes, Files, Scans, RAM, Headers, Descriptors, Overhead uint64
 }
 
-// SourceOwnerV1 binds source operations to one actual Store instance and its protected directory.
+// SourceOwnerV1 binds source operations to one actual Store instance and its protected directory. Each operation holds
+// a Store source borrow and returns its refusal; a copied owner or a changed binding returns ErrIdentityV1, a nil
+// account ErrCapacityV1, an overlapping operation ErrBusyV1 and an account refusal is returned unchanged.
 type SourceOwnerV1 struct {
 	store   *policycontrol.Store
 	dir     string
@@ -100,7 +102,10 @@ const (
 	bundleHeader    = 4 + 97 + 32 + 32 + 1 + 1
 )
 
-// NewSourceOwnerV1 claims the Store's protected source directory and accounts for retained files.
+// NewSourceOwnerV1 claims the Store's protected source directory and accounts for retained files. A binding other than
+// expected or a source directory not of mode 0700 returns ErrIdentityV1, invalid limits or a nil account ErrCapacityV1
+// and a second owner on the same open Store ErrBusyV1; a borrow refusal returns unchanged and a failed construction
+// leaves the claim retryable.
 func NewSourceOwnerV1(store *policycontrol.Store, expected policycontrol.Identity, limits SourceLimitsV1, account *mdbx.OperationAccount) (*SourceOwnerV1, error) {
 	b, err := store.BorrowSourceAuthorityV1()
 	if err != nil {
@@ -183,7 +188,7 @@ var (
 	}
 )
 
-// SizeV1 validates the closed manifest and returns its exact encoded length before allocation.
+// SizeV1 validates the closed manifest and returns its exact encoded length before allocation, or ErrIntegrityV1.
 func (m SourceManifestV1) SizeV1() (uint64, error) {
 	rules := sourcePartsByClass[m.Class]
 	if rules == nil || len(m.Parts) != len(rules) || m.Identity == [32]byte{} ||

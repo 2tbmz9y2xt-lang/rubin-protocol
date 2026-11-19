@@ -87,7 +87,7 @@ func TestSourceCodecCorpus(t *testing.T) {
 				calls := 0
 				sourceAccount(t, func(a *mdbx.OperationAccount) error {
 					err := o.WithCapturedSourceV1(a, m, func(SourcePartV1) error { calls++; return nil })
-					sourceFailIf(t, any(err) != any(ErrIntegrityV1) || calls != 0, "malformed source: length=%d error=%v calls=%d", len(b), err, calls)
+					sourceFailIf(t, any(err) != any(ErrIntegrityV1) || calls != 0 || !bytes.Equal(sourceReadFile(t, path), b), "malformed source: length=%d error=%v calls=%d", len(b), err, calls)
 					return nil
 				})
 			}
@@ -1189,8 +1189,9 @@ func TestSourceDirectoryChangeBeforeCopy(t *testing.T) {
 
 func testSourceMovedDuringExport(t *testing.T, reuse bool) {
 	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	var token *sourceIncarnation
 	if reuse {
-		sourcePrepare(t, o, m, parts)
+		token = sourcePrepare(t, o, m, parts).incarnation
 	}
 	root, moved := filepath.Join(dir, sourceDirectory), filepath.Join(dir, "moved")
 	producer := sourceAfterFirstPart(m, parts, func() error {
@@ -1198,7 +1199,10 @@ func testSourceMovedDuringExport(t *testing.T, reuse bool) {
 		return os.Mkdir(root, 0o700)
 	})
 	sourcePrepareResult(t, o, m, producer, ErrIdentityV1)
-	sourcePresence(t, moved, m.name(o.id), true)
+	name := m.name(o.id)
+	sourceFailIf(t, o.live[name] != token || (o.debt == nil) != reuse || !reuse && (o.debt.name != name || o.debt.staging),
+		"moved root changed the retained owner: token=%v debt=%+v", o.live[name], o.debt)
+	sourcePresence(t, moved, name, true)
 	sourceFileCount(t, dir, 0, "replacement directory acquired backing")
 	sourceMust(t, os.Remove(root))
 	sourceMust(t, os.Rename(moved, root))

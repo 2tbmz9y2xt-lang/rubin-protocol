@@ -11,25 +11,32 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
-// SourceExporterV1 visits each original immutable part synchronously, in manifest order.
+// SourceExporterV1 delivers each manifest part once, in order, from inside its single WithBackingV1 use.
+// A delivery outside that use, nested in another delivery, extra, of another kind or length or with a nil
+// ReadAt fails the export with ErrIntegrityV1, as does a nil return with parts missing. After the first refusal each
+// later delivery returns it, after expiry ErrUnavailableV1; a reached visitor panic is re-raised after expiry.
 type SourceExporterV1 func(operation *SourceOperationV1, visit func(SourcePartV1) error) error
 
-// SourceOperationV1 bounds synchronous source backing on the live operation account.
+// SourceOperationV1 bounds synchronous source backing on the live operation account; a nil, zero or expired operation refuses with ErrUnavailableV1.
 type SourceOperationV1 struct{ cursor *exportCursor }
 
 // SourceOriginV1 describes either a complete immutable allocation or the exact size of a new allocation after admission.
+// Bytes is non-empty with len equal to cap and disjoint from other origins; PlannedBytes needs nil Bytes and at most math.MaxInt.
 type SourceOriginV1 struct {
 	Bytes        []byte
 	PlannedBytes uint64
 }
 
-// SourceViewV1 names a range in an origin. Origin -1 names an empty part.
+// SourceViewV1 names a range in an origin. Origin -1 names an empty part with zero Offset and Length.
+// Length equals its manifest part length and the range lies inside the origin.
 type SourceViewV1 struct {
 	Origin         int
 	Offset, Length uint64
 }
 
-// SourcePartV1 is an exact bounded part. ReadAt is valid only during its visitor call.
+// SourcePartV1 is an exact bounded part. ReadAt is valid only during its visitor call and returns ErrUnavailableV1
+// afterwards; a negative offset or a range ending past Length returns ErrIntegrityV1 before any read. During
+// PrepareSourceV1 a producer ReadAt that fills less than len(dst) or returns an error fails with ErrIntegrityV1.
 type SourcePartV1 struct {
 	Kind   PartKindV1
 	Length uint64
@@ -143,7 +150,7 @@ type exportCursor struct {
 	panicked any
 }
 
-// LimitsV1 returns the active source ceilings or refuses after expiry.
+// LimitsV1 returns the active source ceilings, or ErrUnavailableV1 after expiry.
 func (op *SourceOperationV1) LimitsV1() (SourceLimitsV1, error) {
 	if op == nil || op.cursor == nil {
 		return SourceLimitsV1{}, ErrUnavailableV1
@@ -158,6 +165,9 @@ func (op *SourceOperationV1) LimitsV1() (SourceLimitsV1, error) {
 }
 
 // WithBackingV1 funds one synchronous delivery from complete disjoint immutable allocations with exact part views.
+// A second call, a nil use, more than nine origins, an invalid origin or not one valid view per manifest part fails the
+// export with ErrIntegrityV1, an overflowing or over-RAM charge with ErrCapacityV1 and an account refusal unchanged,
+// before use runs; after a refusal it returns that refusal. The error of use becomes the export result.
 func (op *SourceOperationV1) WithBackingV1(origins []SourceOriginV1, views []SourceViewV1, use func() error) error {
 	if op == nil || op.cursor == nil {
 		return ErrUnavailableV1
@@ -324,6 +334,8 @@ func (c *exportCursor) waitBacking() {
 }
 
 // WithSourceExportV1 holds source authority during export and expires readers and callbacks on exit.
+// An invalid manifest, nil producer or nil visit returns ErrIntegrityV1 and a manifest over Bytes or Scans ErrCapacityV1;
+// otherwise the first recorded delivery, backing or visitor refusal wins over the producer's own return.
 func (o *SourceOwnerV1) WithSourceExportV1(account *mdbx.OperationAccount, m SourceManifestV1, producer SourceExporterV1, visit func(SourcePartV1) error) error {
 	return o.withManifest(account, m, false, func(_ *sourceRoot, admitted SourceManifestV1, _ uint64) error {
 		return o.export(account, admitted, producer, visit)

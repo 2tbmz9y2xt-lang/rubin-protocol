@@ -31,6 +31,11 @@ type sourceRelease struct {
 }
 
 // ReleaseUnpublishedSourceV1 removes an unpublished incarnation and holds its charge through directory sync.
+// A false proof, a stale or foreign handle, a nil handle without a reopened release record, changed backing bytes or a
+// record that differs from the saved bytes returns ErrIntegrityV1; staging debt or another pending release ErrBusyV1;
+// absent backing, backing of another inode or shape, or an entry at the released name before the record clears
+// ErrIdentityV1; too little space for the record ErrCapacityV1.
+// A refusal keeps the reached state and full charge, and a retry resumes at that step.
 func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccount, p *PreparedSourceV1, neverReferenced bool) error {
 	return o.operation(account, func() error {
 		if err := o.releaseAdmission(p, neverReferenced); err != nil {

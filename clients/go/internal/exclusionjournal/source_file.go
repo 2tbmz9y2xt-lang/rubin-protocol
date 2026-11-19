@@ -424,7 +424,9 @@ func fileExporter(f *os.File, m SourceManifestV1, header int) func(func(SourcePa
 	}
 }
 
-// WithCapturedSourceV1 opens and qualifies the retained file before visiting its parts.
+// WithCapturedSourceV1 opens and qualifies the retained file before visiting its parts. A capture held by staging or
+// release returns ErrBusyV1, a nil visit or unqualified bytes ErrIntegrityV1, a file other than the live token's
+// ErrIdentityV1 and an unopenable name ErrUnavailableV1.
 func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, visit func(SourcePartV1) error) error {
 	return o.withFiles(account, m, false, func(r *sourceRoot, m SourceManifestV1, size uint64, _ sourceUsage) error {
 		name := m.name(o.id)
@@ -481,7 +483,10 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 	return nil
 }
 
-// PrepareSourceV1 returns an incarnation handle after qualifying and durably publishing the source.
+// PrepareSourceV1 returns an incarnation handle after qualifying and durably publishing the source. A pending release or
+// another identity's staging returns ErrBusyV1 and short files, bytes or space ErrCapacityV1, before the producer runs;
+// a differing existing file or a counted file absent at open returns ErrIntegrityV1; a root moved before success
+// returns ErrIdentityV1. A refusal returns a stage's charge only after its cleanup syncs and keeps a published file charged.
 func (o *SourceOwnerV1) PrepareSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, producer SourceExporterV1) (prepared *PreparedSourceV1, err error) {
 	err = o.withFiles(account, m, true, func(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage) error {
 		prepared, err = o.prepare(r, m, size, used, func(visit func(SourcePartV1) error) error {
