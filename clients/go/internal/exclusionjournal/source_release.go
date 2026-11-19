@@ -31,11 +31,6 @@ type sourceRelease struct {
 }
 
 // ReleaseUnpublishedSourceV1 removes an unpublished incarnation and holds its charge through directory sync.
-// A false proof, a stale or foreign handle, a nil handle without a reopened release record, changed backing bytes or a
-// record that differs from the saved bytes returns ErrIntegrityV1; staging debt or another pending release ErrBusyV1;
-// backing absent before the record is durable, backing of another inode or shape, or an entry at the released name
-// before the record clears ErrIdentityV1; too little space for the record ErrCapacityV1.
-// A refusal keeps the reached state and full charge, and a retry resumes at that step.
 func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccount, p *PreparedSourceV1, neverReferenced bool) error {
 	return o.operation(account, func() error {
 		if err := o.releaseAdmission(p, neverReferenced); err != nil {
@@ -96,19 +91,11 @@ func (o *SourceOwnerV1) releaseRecord(d *sourceRelease) []byte {
 }
 
 func readRelease(r *sourceRoot) ([]byte, error) {
-	named, err := sourceEntryInfo(r, releaseFile)
+	f, err := openSourceFile(r, releaseFile, nil)
 	if err != nil {
 		return nil, err
 	}
-	f, err := openSourceFile(r, releaseFile)
-	if err != nil {
-		return nil, ErrIntegrityV1
-	}
 	defer f.Close()
-	info, _ := f.Stat()
-	if !os.SameFile(named, info) {
-		return nil, ErrIntegrityV1
-	}
 	record := make([]byte, releaseMax+1)
 	n, err := io.ReadFull(f, record)
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
@@ -172,7 +159,7 @@ func (o *SourceOwnerV1) releaseManifest(header []byte) (SourceManifestV1, error)
 }
 
 func (o *SourceOwnerV1) releaseBacking(r *sourceRoot, d *sourceRelease, scratch []byte) (bool, error) {
-	f, err := openSourceFile(r, d.name)
+	f, err := openSourceFile(r, d.name, nil)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}

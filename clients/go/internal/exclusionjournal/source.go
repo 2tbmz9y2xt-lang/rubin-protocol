@@ -65,12 +65,7 @@ type SourceLimitsV1 struct {
 	Bytes, Files, Scans, RAM, Headers, Descriptors, Overhead uint64
 }
 
-// SourceOwnerV1 binds source operations to one actual Store instance and its protected directory. Each operation holds
-// a Store source borrow and returns its refusal; a copied owner, a changed binding or a source directory not of mode
-// 0700 returns ErrIdentityV1, a nil account ErrCapacityV1, an overlapping operation ErrBusyV1 and an account refusal is
-// returned unchanged. The census of retained files refuses a misnamed or non-regular entry, an unexpected release record
-// or a counted file that changed length or vanished with ErrIntegrityV1, a counted file of another inode with
-// ErrIdentityV1, a second staging identity with ErrBusyV1 and entries or bytes over the limits with ErrCapacityV1.
+// SourceOwnerV1 binds source operations to one actual Store instance and its protected directory.
 type SourceOwnerV1 struct {
 	store   *policycontrol.Store
 	dir     string
@@ -105,10 +100,7 @@ const (
 	bundleHeader    = 4 + 97 + 32 + 32 + 1 + 1
 )
 
-// NewSourceOwnerV1 claims the Store's protected source directory and accounts for retained files. A binding other than
-// expected or a source directory not of mode 0700 returns ErrIdentityV1, invalid limits or a nil account ErrCapacityV1
-// and a second owner on the same open Store ErrBusyV1; a borrow refusal returns unchanged and a failed construction
-// leaves the claim retryable.
+// NewSourceOwnerV1 claims the Store's protected source directory and accounts for retained files.
 func NewSourceOwnerV1(store *policycontrol.Store, expected policycontrol.Identity, limits SourceLimitsV1, account *mdbx.OperationAccount) (*SourceOwnerV1, error) {
 	b, err := store.BorrowSourceAuthorityV1()
 	if err != nil {

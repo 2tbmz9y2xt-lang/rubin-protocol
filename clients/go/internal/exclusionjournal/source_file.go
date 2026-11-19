@@ -2,6 +2,7 @@ package exclusionjournal
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -256,9 +257,23 @@ func (o *SourceOwnerV1) censusFile(r *sourceRoot, name string, used *sourceUsage
 	return nil
 }
 
-// openSourceFile opens a named entry without following links or blocking on non-regular objects.
-func openSourceFile(r *sourceRoot, name string) (*os.File, error) {
-	return r.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+// openSourceFile opens the regular file named by name without blocking. A failed name observation returns unobserved,
+// or its own error when unobserved is nil; a failed open returns ErrUnavailableV1 and an opened object that is not the
+// named regular file ErrIntegrityV1.
+func openSourceFile(r *sourceRoot, name string, unobserved error) (*os.File, error) {
+	named, err := r.Lstat(name)
+	if err != nil {
+		return nil, cmp.Or(unobserved, err)
+	}
+	f, err := r.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, ErrUnavailableV1
+	}
+	if info, _ := f.Stat(); !os.SameFile(named, info) || !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, ErrIntegrityV1
+	}
+	return f, nil
 }
 
 func sourceEntryInfo(r *sourceRoot, name string) (os.FileInfo, error) {
@@ -394,7 +409,7 @@ func (o *SourceOwnerV1) qualify(f *os.File, m SourceManifestV1, size uint64, scr
 
 func (o *SourceOwnerV1) sourceFileHeader(f *os.File, m SourceManifestV1, size uint64, expected *sourceIncarnation, shapeError error) (filelock.IdentityV1, []byte, error) {
 	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() != int64(min(size, math.MaxInt64)) {
+	if err != nil || info.Size() != int64(min(size, math.MaxInt64)) {
 		return filelock.IdentityV1{}, nil, shapeError
 	}
 	file := filelock.FileIdentityV1(info)
@@ -424,9 +439,7 @@ func fileExporter(f *os.File, m SourceManifestV1, header int) func(func(SourcePa
 	}
 }
 
-// WithCapturedSourceV1 opens and qualifies the retained file before visiting its parts. A capture held by staging or
-// release returns ErrBusyV1, a nil visit or unqualified bytes ErrIntegrityV1, a file other than the live token's
-// ErrIdentityV1 and an unopenable name ErrUnavailableV1.
+// WithCapturedSourceV1 opens and qualifies the retained file before visiting its parts.
 func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, visit func(SourcePartV1) error) error {
 	return o.withFiles(account, m, false, func(r *sourceRoot, m SourceManifestV1, size uint64, _ sourceUsage) error {
 		name := m.name(o.id)
@@ -436,9 +449,9 @@ func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m S
 		if visit == nil {
 			return ErrIntegrityV1
 		}
-		f, err := openSourceFile(r, name)
+		f, err := openSourceFile(r, name, ErrUnavailableV1)
 		if err != nil {
-			return ErrUnavailableV1
+			return err
 		}
 		defer f.Close()
 		if _, err := o.qualify(f, m, size, make([]byte, scratchBytes), o.live[name], ErrIntegrityV1); err != nil {
@@ -483,10 +496,7 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 	return nil
 }
 
-// PrepareSourceV1 returns an incarnation handle after qualifying and durably publishing the source. A pending release or
-// another identity's staging returns ErrBusyV1 and short files, bytes or space ErrCapacityV1, before the producer runs;
-// differing existing bytes or a counted file absent at open return ErrIntegrityV1, an existing file of another inode than
-// its token or a moved root ErrIdentityV1; a refused stage stays charged until its cleanup syncs, a published file stays.
+// PrepareSourceV1 returns an incarnation handle after qualifying and durably publishing the source.
 func (o *SourceOwnerV1) PrepareSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, producer SourceExporterV1) (prepared *PreparedSourceV1, err error) {
 	err = o.withFiles(account, m, true, func(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage) error {
 		prepared, err = o.prepare(r, m, size, used, func(visit func(SourcePartV1) error) error {
@@ -502,7 +512,7 @@ func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, 
 	if o.debt != nil && o.debt.name != name {
 		return nil, ErrBusyV1
 	}
-	f, err := openSourceFile(r, name)
+	f, err := openSourceFile(r, name, nil)
 	if err == nil {
 		defer f.Close()
 		return o.reuse(r, f, m, name, size, used.stage, produce)

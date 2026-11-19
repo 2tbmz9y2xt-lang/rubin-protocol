@@ -334,8 +334,6 @@ func (c *exportCursor) waitBacking() {
 }
 
 // WithSourceExportV1 holds source authority during export and expires readers and callbacks on exit.
-// An invalid manifest, nil producer or nil visit returns ErrIntegrityV1 and a manifest over Bytes or Scans ErrCapacityV1;
-// otherwise the first recorded delivery, backing or visitor refusal wins over the producer's own return.
 func (o *SourceOwnerV1) WithSourceExportV1(account *mdbx.OperationAccount, m SourceManifestV1, producer SourceExporterV1, visit func(SourcePartV1) error) error {
 	return o.withManifest(account, m, false, func(_ *sourceRoot, admitted SourceManifestV1, _ uint64) error {
 		return o.export(account, admitted, producer, visit)

@@ -356,8 +356,9 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 	for _, stage := range []string{"write", "file-sync", "close", "rename", "rename-visible", "intent-sync", "unlink", "unlink-reopen-competing-prepare", "unlink-sync", "marker-clear", "final-sync"} {
 		t.Run(stage, func(t *testing.T) { testSourceReleaseStage(t, stage) })
 	}
-	t.Run("changed-content", func(t *testing.T) { testSourceReleaseIncarnation(t, false) })
-	t.Run("changed-inode", func(t *testing.T) { testSourceReleaseIncarnation(t, true) })
+	for _, mode := range []string{"changed-content", "changed-inode", "linked-backing"} {
+		t.Run(mode, func(t *testing.T) { testSourceReleaseIncarnation(t, mode) })
+	}
 	t.Run("scratch-link", testSourceReleaseScratchLink)
 	t.Run("backing-reappears", testSourceReleaseBackingReappears)
 	for _, stage := range []string{"pending-absent", "pending-visible", "clear-present", "clear-absent"} {
@@ -530,14 +531,14 @@ func assertSourceReleaseCharge(t *testing.T, o *SourceOwnerV1, m SourceManifestV
 	})
 }
 
-func testSourceReleaseIncarnation(t *testing.T, replacement bool) {
+func testSourceReleaseIncarnation(t *testing.T, mode string) {
 	s, o, dir, m, parts := sourceBundleScene(t, 1, false)
 	p := sourcePrepare(t, o, m, parts)
 	root := filepath.Join(dir, sourceDirectory)
 	path, marker := filepath.Join(root, p.name), filepath.Join(root, releaseFile)
 	original := sourceReadFile(t, path)
 	changed := slices.Clone(original)
-	if !replacement {
+	if mode == "changed-content" {
 		end := len(changed) - sha256.Size
 		changed[end-1] ^= 1
 		footer := sha256.Sum256(changed[:end])
@@ -555,12 +556,15 @@ func testSourceReleaseIncarnation(t *testing.T, replacement bool) {
 	o = sourceReopen(t, s, dir, sourceLimits())
 	record := sourceReadFile(t, marker)
 	want := ErrIntegrityV1
-	if replacement {
-		original := filepath.Join(t.TempDir(), "original")
+	if mode != "changed-content" {
+		moved := map[bool]string{false: filepath.Join(t.TempDir(), "original"), true: filepath.Join(root, "moved")}[mode == "linked-backing"]
 		o.ops.dirSync = func(r *sourceRoot) error {
 			o.ops.dirSync = syncSourceRoot
 			sourceMust(t, syncSourceRoot(r))
-			sourceMust(t, os.Rename(path, original))
+			sourceMust(t, os.Rename(path, moved))
+			if mode == "linked-backing" {
+				return os.Symlink("moved", path)
+			}
 			return os.WriteFile(path, changed, 0o600)
 		}
 		want = ErrIdentityV1
@@ -586,6 +590,13 @@ func testSourceReleaseIncarnation(t *testing.T, replacement bool) {
 	sourceReleaseResult(t, o, nil, true, want)
 	sourceFailIf(t, !bytes.Equal(sourceReadFile(t, path), changed) || !bytes.Equal(sourceReadFile(t, marker), record),
 		"refused release changed backing or intent")
+	if mode == "linked-backing" {
+		r, err := o.root(false)
+		sourceMust(t, err)
+		defer r.Close()
+		_, err = openSourceFile(r, p.name, ErrUnavailableV1)
+		sourceWantError(t, err, ErrIntegrityV1, "open through a link at the backing name")
+	}
 }
 
 func testSourceReleaseStage(t *testing.T, stage string) {
