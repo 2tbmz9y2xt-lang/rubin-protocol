@@ -94,7 +94,7 @@ func (o *SourceOwnerV1) currentRoot() error {
 
 func createSourceRoot(parent *os.Root) error {
 	if err := parent.Mkdir(sourceDirectory, 0o700); !errors.Is(err, os.ErrExist) {
-		if err = cmp.Or(err, parent.Chmod(sourceDirectory, 0o700)); err != nil {
+		if err := cmp.Or(err, parent.Chmod(sourceDirectory, 0o700)); err != nil {
 			return err
 		}
 	}
