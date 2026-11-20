@@ -838,12 +838,17 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 		_, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		marker := filepath.Join(root, releaseFile)
-		o.ops.dirSync = func(pin *os.File) error {
-			if err := pin.Sync(); err != nil {
+		o.ops.remove = func(r *os.Root, name string) error {
+			if err := r.Remove(name); err != nil {
 				return err
 			}
-			if o.release != nil && o.release.clearAttempted {
-				return os.WriteFile(marker, []byte("independent marker"), 0o600)
+			if name == releaseFile {
+				o.ops.dirSync = func(pin *os.File) error {
+					if err := pin.Sync(); err != nil {
+						return err
+					}
+					return os.WriteFile(marker, []byte("independent marker"), 0o600)
+				}
 			}
 			return nil
 		}

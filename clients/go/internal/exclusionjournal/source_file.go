@@ -70,8 +70,6 @@ func (op sourceNameOp) run(r *sourceRoot, from, to string) error {
 	return op(r, from, to)
 }
 
-func linkSource(r *sourceRoot, from, to string) error { return r.Link(from, to) }
-
 func detachSource(r *sourceRoot, from, to string) error {
 	return renameSourceExclusive(int(r.pin.Fd()), from, to)
 }
@@ -641,17 +639,9 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 }
 
 func (o *SourceOwnerV1) unlinkStage(r *sourceRoot, d *sourceDebt) error {
-	if !d.held {
-		if err := o.claimStage(r, d); err != nil {
-			return err
-		}
-	}
-	info, err := sourceEntryInfo(r, d.leaf(), nil)
+	info, err := o.ownedStageInfo(r, d)
 	if err != nil {
 		return err
-	}
-	if d.file != (filelock.IdentityV1{}) && d.file != filelock.FileIdentityV1(info) {
-		return ErrIdentityV1
 	}
 	if err := o.release.canonicalVacant(r); err != nil {
 		return err
@@ -662,12 +652,13 @@ func (o *SourceOwnerV1) unlinkStage(r *sourceRoot, d *sourceDebt) error {
 	return o.ops.remove(r.Root, d.leaf())
 }
 
-func (o *SourceOwnerV1) claimStage(r *sourceRoot, d *sourceDebt) error {
-	err := o.moveStage(r, d)
-	if err != nil && d.held {
-		_ = o.restoreStage(r, d)
+// privateInfo accepts an observed stage or the private file just created by this owner.
+func (d *sourceDebt) privateInfo(r *sourceRoot) (os.FileInfo, error) {
+	info, err := sourceEntryInfo(r, d.leaf(), nil)
+	if err == nil && d.file != (filelock.IdentityV1{}) && d.file != filelock.FileIdentityV1(info) {
+		return nil, ErrIdentityV1
 	}
-	return err
+	return info, err
 }
 
 func (r *sourceRoot) pinStage(d *sourceDebt) error {
@@ -691,20 +682,25 @@ func (r *sourceRoot) closeStagePin() {
 	r.stagePin = nil
 }
 
-func (o *SourceOwnerV1) moveStage(r *sourceRoot, d *sourceDebt) error {
+// ownedStageInfo keeps the original pinned through qualification of the moved stage.
+func (o *SourceOwnerV1) ownedStageInfo(r *sourceRoot, d *sourceDebt) (os.FileInfo, error) {
+	if d.held {
+		return d.privateInfo(r)
+	}
 	if err := r.pinStage(d); err != nil {
-		return err
+		return nil, err
 	}
 	defer r.closeStagePin()
 	if err := o.ops.namespace(detachSource, r, d.leaf(), heldStagePrefix+d.name); err != nil {
-		return err
+		return nil, err
 	}
 	d.held = true
-	moved, err := sourceEntryInfo(r, d.leaf(), nil)
-	if err == nil && filelock.FileIdentityV1(moved) == d.file {
-		return nil
+	info, err := d.privateInfo(r)
+	if err != nil {
+		r.closeStagePin()
+		_ = o.restoreStage(r, d)
 	}
-	return cmp.Or(err, ErrIdentityV1)
+	return info, err
 }
 
 func (o *SourceOwnerV1) restoreStage(r *sourceRoot, d *sourceDebt) error {
@@ -824,12 +820,8 @@ func (o *SourceOwnerV1) finishFile(f *os.File) error {
 
 // finishPinned closes the synced file and keeps its inode alive through the final name check.
 func (o *SourceOwnerV1) finishPinned(r *sourceRoot, name string, f *os.File, expected filelock.IdentityV1) (*os.File, error) {
-	pin, err := openSourceAt(int(r.pin.Fd()), name, unix.O_NONBLOCK)
-	if err != nil {
-		return nil, cmp.Or(o.finishFile(f), ErrIdentityV1)
-	}
-	info, statErr := pin.Stat()
-	if finishErr := o.finishFile(f); finishErr != nil || statErr != nil || filelock.FileIdentityV1(info) != expected {
+	pin, pinErr := r.pinFile(name, ErrIdentityV1, &expected)
+	if finishErr := o.finishFile(f); finishErr != nil || pinErr != nil {
 		_ = pin.Close()
 		return nil, cmp.Or(finishErr, ErrIdentityV1)
 	}
@@ -901,7 +893,7 @@ const (
 
 // linkVisible qualifies the destination before removing the source alias.
 func (o *SourceOwnerV1) linkVisible(r *sourceRoot, from, to string, expected filelock.IdentityV1) (sourceVisibility, error) {
-	err := o.ops.namespace(linkSource, r, from, to)
+	err := o.ops.namespace((*sourceRoot).Link, r, from, to)
 	if errors.Is(err, os.ErrExist) {
 		return sourceNotVisible, ErrIntegrityV1
 	}

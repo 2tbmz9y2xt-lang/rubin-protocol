@@ -23,18 +23,25 @@ const (
 	releaseMax      = releasePrefix + bundleHeader + 6*9 + sha256.Size
 )
 
+type releasePhase uint8
+
+const (
+	releaseBackingPending releasePhase = iota
+	releaseBackingGone
+	releaseBackingDurable
+	releaseMarkerClearing
+)
+
 type sourceRelease struct {
 	sourceIncarnation
-	name           string
-	manifest       SourceManifestV1
-	record         []byte
-	reopened       bool
-	pending        bool
-	backingSynced  bool
-	clearAttempted bool
-	unlinked       bool
-	unlinkFailure  error
-	markerFile     filelock.IdentityV1
+	name          string
+	manifest      SourceManifestV1
+	record        []byte
+	reopened      bool
+	pending       bool
+	phase         releasePhase
+	unlinkFailure error
+	markerFile    filelock.IdentityV1
 }
 
 // ReleaseUnpublishedSourceV1 holds the source charge through durable removal (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
@@ -281,7 +288,7 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	if present, err := o.releaseBacking(r, d, scratch); err != nil || !present {
 		return cmp.Or(err, ErrIdentityV1)
 	}
-	if err := o.checkReleaseStages(r, d, true); err != nil {
+	if err := o.checkStage(r, d, true); err != nil {
 		return err
 	}
 	if err := o.clearReleaseScratch(r); err != nil {
@@ -373,7 +380,7 @@ func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) erro
 	if err != nil {
 		return err
 	}
-	if !present && !d.clearAttempted {
+	if !present && d.phase != releaseMarkerClearing {
 		return ErrIntegrityV1
 	}
 	if err := o.checkStage(r, d, false); err != nil || !present {
@@ -382,7 +389,7 @@ func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) erro
 	if err := o.removeMarkerAlias(r); err != nil {
 		return err
 	}
-	d.clearAttempted = true
+	d.phase = releaseMarkerClearing
 	return o.ops.remove(r.Root, releaseFile)
 }
 
@@ -455,7 +462,7 @@ func (o *SourceOwnerV1) releaseIntent(r *sourceRoot, d *sourceRelease, scratch [
 }
 
 func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scratch []byte) error {
-	if d.backingSynced {
+	if d.phase >= releaseBackingDurable {
 		return nil
 	}
 	r.backingPin, r.backingErr = r.pinFile(d.name, ErrIdentityV1, &d.file)
@@ -477,7 +484,7 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 	if err := o.ops.dirSync(r.pin); err != nil {
 		return err
 	}
-	d.backingSynced = true
+	d.phase = releaseBackingDurable
 	return nil
 }
 
@@ -497,16 +504,16 @@ func (d *sourceRelease) canonicalVacant(r *sourceRoot) error {
 }
 
 func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name string, scratch []byte) error {
-	if err := o.checkReleaseStages(r, d, name != ""); err != nil {
+	if err := o.checkStage(r, d, name != ""); err != nil {
 		return err
 	}
 	if err := o.removeMarkerAlias(r); err != nil {
 		return err
 	}
-	if (name == "") != d.unlinked {
+	if (name != "") != (d.phase == releaseBackingPending) {
 		return ErrIdentityV1
 	}
-	if d.unlinked {
+	if name == "" {
 		return nil
 	}
 	if name != releaseDetached {
@@ -526,21 +533,23 @@ func (o *SourceOwnerV1) checkStage(r *sourceRoot, d *sourceRelease, backingPrese
 	if o.debt.matchesKey(key) {
 		key = o.debt.name
 	}
-	_, info, err := d.stageAlias(r, key)
-	if errors.Is(err, os.ErrNotExist) {
+	stage, err := r.stageAlias(key)
+	if !errors.Is(err, os.ErrNotExist) {
+		if err != nil {
+			return ErrIntegrityV1
+		}
+		if !backingPresent || stage.file != d.file {
+			return ErrBusyV1
+		}
+	}
+	if !backingPresent {
 		return nil
 	}
-	if err != nil {
-		return ErrIntegrityV1
-	}
-	if !backingPresent || filelock.FileIdentityV1(info) != d.file {
-		return ErrBusyV1
-	}
-	return nil
+	return d.checkStageSpelling(r, stage, err, o.debt)
 }
 
-func (d *sourceRelease) stageAlias(r *sourceRoot, key string) (sourceDebt, os.FileInfo, error) {
-	stage := sourceDebt{name: key, file: d.file, held: true}
+func (r *sourceRoot) stageAlias(key string) (sourceDebt, error) {
+	stage := sourceDebt{name: key, held: true}
 	info, err := sourceEntryInfo(r, stage.leaf(), nil)
 	if errors.Is(err, os.ErrNotExist) {
 		stage.held = false
@@ -548,7 +557,8 @@ func (d *sourceRelease) stageAlias(r *sourceRoot, key string) (sourceDebt, os.Fi
 	} else if err == nil {
 		err = stageSlotVacant(r, key, syscall.EEXIST)
 	}
-	return stage, info, err
+	stage.file = filelock.FileIdentityV1(info)
+	return stage, err
 }
 
 // unlinkDetached pins and qualifies the private file before removing its last link.
@@ -586,10 +596,6 @@ func sourceLinks(f *os.File) (uint64, error) {
 	if err != nil {
 		return 0, ErrUnavailableV1
 	}
-	return sourceInfoLinks(info)
-}
-
-func sourceInfoLinks(info os.FileInfo) (uint64, error) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return 0, ErrUnavailableV1
@@ -604,20 +610,16 @@ func (d *sourceRelease) sharedStageKey(debt sourceDebt) string {
 	return ""
 }
 
-func (stage sourceDebt) canClaimAs(observed string) bool {
-	return stage.held || stage.name == observed && validHeldStageKey(observed)
-}
-
-func (o *SourceOwnerV1) checkReleaseStages(r *sourceRoot, d *sourceRelease, backingPresent bool) error {
-	if err := o.checkStage(r, d, backingPresent); err != nil || !backingPresent {
-		return err
-	}
-	observed := d.sharedStageKey(o.debt)
+// checkStageSpelling reuses the same entry unless the recorded alias has a different name.
+func (d *sourceRelease) checkStageSpelling(r *sourceRoot, stage sourceDebt, err error, debt sourceDebt) error {
+	observed := d.sharedStageKey(debt)
 	if validHeldStageKey(observed) {
 		return nil
 	}
-	stage, info, err := d.stageAlias(r, cmp.Or(observed, d.name))
-	if err == nil && filelock.FileIdentityV1(info) == d.file && !stage.canClaimAs(observed) {
+	if key := cmp.Or(observed, d.name); stage.name != key {
+		stage, err = r.stageAlias(key)
+	}
+	if err == nil && stage.file == d.file && !stage.held {
 		return ErrIdentityV1
 	}
 	return nil
@@ -625,13 +627,21 @@ func (o *SourceOwnerV1) checkReleaseStages(r *sourceRoot, d *sourceRelease, back
 
 func (o *SourceOwnerV1) requireBackingLinks(r *sourceRoot, d *sourceRelease, f *os.File, want uint64) error {
 	links, err := sourceLinks(f)
-	if err == nil && links != want {
-		err = ErrIdentityV1
+	if err == nil && links == want {
+		return nil
 	}
-	if err != nil {
-		return o.restoreBacking(r, d, err)
+	return o.restoreBacking(r, d, cmp.Or(err, ErrIdentityV1))
+}
+
+// singleBackingLink retires the shared stage charge once the backing has exactly one link.
+func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os.File) error {
+	if err := o.dropReleaseAlias(r, d, f); err != nil {
+		return err
 	}
-	if want == 1 && d.sharedStageKey(o.debt) != "" {
+	if err := o.requireBackingLinks(r, d, f, 1); err != nil {
+		return err
+	}
+	if d.sharedStageKey(o.debt) != "" {
 		if !o.debt.unlinkTried {
 			return o.restoreBacking(r, d, ErrIdentityV1)
 		}
@@ -640,24 +650,23 @@ func (o *SourceOwnerV1) requireBackingLinks(r *sourceRoot, d *sourceRelease, f *
 	return nil
 }
 
-// singleBackingLink removes only a qualified staging alias before the last unlink.
-func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os.File) error {
+func (o *SourceOwnerV1) dropReleaseAlias(r *sourceRoot, d *sourceRelease, f *os.File) error {
 	observed := d.sharedStageKey(o.debt)
-	stage, info, err := d.stageAlias(r, cmp.Or(observed, d.name))
+	stage, err := r.stageAlias(cmp.Or(observed, d.name))
 	if errors.Is(err, os.ErrNotExist) {
-		return o.requireBackingLinks(r, d, f, 1)
+		return nil
 	}
-	if err != nil || filelock.FileIdentityV1(info) != d.file {
+	if err != nil || stage.file != d.file {
 		return o.restoreBacking(r, d, ErrIdentityV1)
 	}
 	if err := o.requireBackingLinks(r, d, f, 2); err != nil {
 		return err
 	}
-	return o.removeReleaseStage(r, d, f, stage, observed)
+	return o.removeReleaseStage(r, d, stage, observed)
 }
 
-func (o *SourceOwnerV1) removeReleaseStage(r *sourceRoot, d *sourceRelease, f *os.File, stage sourceDebt, observed string) error {
-	if !stage.canClaimAs(observed) {
+func (o *SourceOwnerV1) removeReleaseStage(r *sourceRoot, d *sourceRelease, stage sourceDebt, observed string) error {
+	if !stage.held && !validHeldStageKey(observed) {
 		return ErrIdentityV1
 	}
 	if o.debt.name != "" && o.debt.name != stage.name {
@@ -669,16 +678,13 @@ func (o *SourceOwnerV1) removeReleaseStage(r *sourceRoot, d *sourceRelease, f *o
 		return err
 	}
 	o.debt.removed = true
-	if err := d.canonicalVacant(r); err != nil {
-		return err
-	}
-	return o.requireBackingLinks(r, d, f, 1)
+	return d.canonicalVacant(r)
 }
 
 // afterUnlink allows another unlink only while the original private entry is identifiable.
 func (d *sourceRelease) afterUnlink(r *sourceRoot, links uint64, err error) error {
 	if err == nil && links == 0 {
-		d.unlinked = true
+		d.phase = releaseBackingGone
 		return nil
 	}
 	failure := cmp.Or(err, ErrIdentityV1)

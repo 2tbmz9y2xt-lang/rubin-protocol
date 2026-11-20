@@ -185,8 +185,9 @@ func (o *SourceOwnerV1) openReleaseBacking(r *sourceRoot) error {
 	if err != nil || present {
 		return err
 	}
-	o.release.unlinked = !o.debt.matchesKey(o.release.name)
-	if !o.release.unlinked && o.debt.held {
+	if !o.debt.matchesKey(o.release.name) {
+		o.release.phase = releaseBackingGone
+	} else if o.debt.held {
 		return ErrBusyV1
 	}
 	return nil
