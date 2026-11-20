@@ -480,9 +480,6 @@ func (o *SourceOwnerV1) unlinkDetached(r *sourceRoot, d *sourceRelease, scratch 
 		return o.restoreBacking(r, d, err)
 	}
 	if err := o.singleBackingLink(r, d, f); err != nil {
-		if err == ErrIdentityV1 || err == ErrIntegrityV1 {
-			return o.restoreBacking(r, d, err)
-		}
 		return err
 	}
 	removeErr := o.ops.remove(r.Root, releaseDetached)
@@ -514,24 +511,27 @@ func sourceInfoLinks(info os.FileInfo) (uint64, error) {
 	return uint64(stat.Nlink), nil
 }
 
-func requireSourceLinks(f *os.File, want uint64) error {
+func (o *SourceOwnerV1) requireBackingLinks(r *sourceRoot, d *sourceRelease, f *os.File, want uint64) error {
 	links, err := sourceLinks(f)
 	if err == nil && links != want {
-		return ErrIdentityV1
+		err = ErrIdentityV1
 	}
-	return err
+	if err != nil {
+		return o.restoreBacking(r, d, err)
+	}
+	return nil
 }
 
 // singleBackingLink removes only a qualified staging alias before the last unlink.
 func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os.File) error {
 	stage, info, err := d.stageAlias(r)
 	if errors.Is(err, os.ErrNotExist) {
-		return requireSourceLinks(f, 1)
+		return o.requireBackingLinks(r, d, f, 1)
 	}
 	if err != nil || filelock.FileIdentityV1(info) != d.file {
-		return ErrIdentityV1
+		return o.restoreBacking(r, d, ErrIdentityV1)
 	}
-	if err := requireSourceLinks(f, 2); err != nil {
+	if err := o.requireBackingLinks(r, d, f, 2); err != nil {
 		return err
 	}
 	if o.debt.name != "" && o.debt.name != stage.name {
@@ -543,7 +543,7 @@ func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os
 		return err
 	}
 	o.debt.removed = true
-	return requireSourceLinks(f, 1)
+	return o.requireBackingLinks(r, d, f, 1)
 }
 
 // afterUnlink records only the observed link count on the held descriptor.
