@@ -259,9 +259,16 @@ func (o *SourceOwnerV1) censusFile(logical string, info os.FileInfo, used *sourc
 
 // openSourceFile checks that a nonblocking, no-follow open pins the observed regular file.
 func openSourceFile(r *sourceRoot, name string, unobserved error) (*os.File, error) {
+	return r.pinFile(name, unobserved, nil)
+}
+
+func (r *sourceRoot) pinFile(name string, unobserved error, expected *filelock.IdentityV1) (*os.File, error) {
 	named, err := sourceEntryInfo(r, name, unobserved)
 	if err != nil {
 		return nil, err
+	}
+	if expected != nil && filelock.FileIdentityV1(named) != *expected {
+		return nil, ErrIdentityV1
 	}
 	f, err := openSourceAt(int(r.pin.Fd()), name, unix.O_NONBLOCK)
 	if err != nil {
@@ -646,6 +653,9 @@ func (o *SourceOwnerV1) unlinkStage(r *sourceRoot, d *sourceDebt) error {
 	if d.file != (filelock.IdentityV1{}) && d.file != filelock.FileIdentityV1(info) {
 		return ErrIdentityV1
 	}
+	if err := o.release.canonicalVacant(r); err != nil {
+		return err
+	}
 	d.file = filelock.FileIdentityV1(info)
 	d.size = uint64(max(info.Size(), 0))
 	d.unlinkTried = true
@@ -664,17 +674,9 @@ func (r *sourceRoot) pinStage(d *sourceDebt) error {
 	if d == nil || d.held || r.stagePin != nil || r.stageErr != nil {
 		return r.stageErr
 	}
-	f, err := openSourceFile(r, d.leaf(), nil)
-	if err != nil {
-		return err
-	}
-	info, err := f.Stat()
-	if err != nil || filelock.FileIdentityV1(info) != d.file {
-		_ = f.Close()
-		return cmp.Or(err, ErrIdentityV1)
-	}
+	f, err := r.pinFile(d.leaf(), nil, &d.file)
 	r.stagePin = f
-	return nil
+	return err
 }
 
 // observeStage withholds credit on failure and reports the cause if cleanup is reached.

@@ -50,10 +50,10 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 				if err := o.releaseCensus(r); err != nil {
 					return err
 				}
-				if o.debt.matchesKey(p.name) && o.debt.backing != p.name {
+				d = &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
+				if o.debt.matchesKey(p.name) && d.sharedStageKey(o.debt) == "" {
 					return ErrBusyV1
 				}
-				d = &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
 				d.record = o.releaseRecord(d)
 			}
 			return o.continueRelease(r, d, scratch)
@@ -111,7 +111,7 @@ func readRelease(r *sourceRoot) ([]byte, filelock.IdentityV1, error) {
 func readReleaseFile(f *os.File) ([]byte, filelock.IdentityV1, error) {
 	info, err := f.Stat()
 	if err != nil {
-		return nil, filelock.IdentityV1{}, err
+		return nil, filelock.IdentityV1{}, ErrIntegrityV1
 	}
 	record := make([]byte, releaseMax+1)
 	n, err := io.ReadFull(f, record)
@@ -369,7 +369,7 @@ func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) erro
 	if !d.backingAbsent(r) {
 		return ErrIdentityV1
 	}
-	present, err := d.marker(r)
+	present, err := d.checkMarker(readRelease(r))
 	if err != nil {
 		return err
 	}
@@ -404,15 +404,10 @@ func (d *sourceRelease) backingAbsent(r *sourceRoot) bool {
 	return true
 }
 
-func (d *sourceRelease) marker(r *sourceRoot) (bool, error) {
-	record, id, err := readRelease(r)
+func (d *sourceRelease) checkMarker(record []byte, id filelock.IdentityV1, err error) (bool, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
-	return d.checkMarker(record, id, err)
-}
-
-func (d *sourceRelease) checkMarker(record []byte, id filelock.IdentityV1, err error) (bool, error) {
 	if err != nil || !bytes.Equal(record, d.record) || id != d.markerFile {
 		return false, ErrIntegrityV1
 	}
@@ -463,7 +458,7 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 	if d.backingSynced {
 		return nil
 	}
-	r.backingPin, r.backingErr = d.pinCanonical(r)
+	r.backingPin, r.backingErr = r.pinFile(d.name, ErrIdentityV1, &d.file)
 	defer r.backingPin.Close()
 	if err := o.releaseIntent(r, d, scratch); err != nil {
 		return err
@@ -486,17 +481,18 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 	return nil
 }
 
-// pinCanonical holds the observed inode across marker publication and detachment.
-func (d *sourceRelease) pinCanonical(r *sourceRoot) (*os.File, error) {
-	f, err := openSourceFile(r, d.name, ErrIdentityV1)
-	if err != nil {
-		return nil, err
+func (d *sourceRelease) canonicalVacant(r *sourceRoot) error {
+	if d == nil {
+		return nil
 	}
-	info, err := f.Stat()
-	if err != nil {
-		return f, err
+	info, err := sourceEntryInfo(r, d.name, nil)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	return f, d.match(info)
+	if err != nil {
+		return ErrIntegrityV1
+	}
+	return cmp.Or(d.match(info), ErrIdentityV1)
 }
 
 func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name string, scratch []byte) error {
@@ -556,6 +552,9 @@ func (d *sourceRelease) stageAlias(r *sourceRoot, key string) (sourceDebt, os.Fi
 
 // unlinkDetached pins and qualifies the private file before removing its last link.
 func (o *SourceOwnerV1) unlinkDetached(r *sourceRoot, d *sourceRelease, scratch []byte) error {
+	if err := d.canonicalVacant(r); err != nil {
+		return err
+	}
 	f, err := openSourceFile(r, releaseDetached, nil)
 	_ = r.backingPin.Close()
 	if err != nil {
@@ -598,7 +597,7 @@ func sourceInfoLinks(info os.FileInfo) (uint64, error) {
 }
 
 func (d *sourceRelease) sharedStageKey(debt sourceDebt) string {
-	if debt.backing == d.name && debt.file == d.file {
+	if debt.backing != "" && debt.file == d.file {
 		return debt.name
 	}
 	return ""
@@ -609,7 +608,7 @@ func (stage sourceDebt) canClaimAs(observed string) bool {
 }
 
 func (o *SourceOwnerV1) checkReleaseStages(r *sourceRoot, d *sourceRelease, backingPresent bool) error {
-	if err := o.checkStage(r, d, backingPresent); err != nil {
+	if err := o.checkStage(r, d, backingPresent); err != nil || !backingPresent {
 		return err
 	}
 	observed := d.sharedStageKey(o.debt)
@@ -669,6 +668,9 @@ func (o *SourceOwnerV1) removeReleaseStage(r *sourceRoot, d *sourceRelease, f *o
 		return err
 	}
 	o.debt.removed = true
+	if err := d.canonicalVacant(r); err != nil {
+		return err
+	}
 	return o.requireBackingLinks(r, d, f, 1)
 }
 

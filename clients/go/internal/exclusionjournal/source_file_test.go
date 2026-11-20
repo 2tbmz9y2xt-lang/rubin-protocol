@@ -807,6 +807,7 @@ func testSourceUnfundedBacking(t *testing.T, o *SourceOwnerV1, m SourceManifestV
 
 func TestSourceReleaseOnlyRetry(t *testing.T) {
 	t.Run("stage-spelling", testSourceReleaseSpelling)
+	t.Run("canonical-refilled", testSourceRefilledCanonical)
 	sourceModes(t, []string{"published-marker-pin", "retry-marker-pin"}, func(t *testing.T, mode string) {
 		_, o, dir, _, _, p := sourcePreparedBundle(t)
 		if mode == "retry-marker-pin" {
@@ -1076,7 +1077,7 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 }
 
 func testSourceReleaseSpelling(t *testing.T) {
-	sourceModes(t, []string{"mixed-alias", "same-key-file", "pending-absent-file", "pending-cross-key", "late-alias", "unrelated-file", "fresh-mixed-file"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"mixed-alias", "mixed-alias-another-name", "same-key-file", "pending-absent-file", "pending-cross-key", "late-alias", "unrelated-file", "fresh-mixed-file"}, func(t *testing.T, mode string) {
 		s, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		key := sourceForeign(m).name(o.id)
@@ -1114,6 +1115,10 @@ func testSourceReleaseSpelling(t *testing.T) {
 			}
 		default:
 			sourceMust(t, os.Link(filepath.Join(root, p.name), stage))
+		}
+		if mode == "mixed-alias-another-name" {
+			sourceMust(t, os.Link(stage, filepath.Join(root, key)))
+			files, used = 2, 2*size
 		}
 		if mode == "unrelated-file" || mode == "fresh-mixed-file" {
 			preserved := sourcePreservedEntry(t, stage)
@@ -1162,6 +1167,48 @@ func testSourceReleaseSpelling(t *testing.T) {
 			sourceReleaseResult(t, fresh, nil, true, nil)
 			sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "resumed release retained an entry")
 		}
+	})
+}
+
+func testSourceRefilledCanonical(t *testing.T) {
+	sourceModes(t, []string{"detach", "stage-claim", "stage-unlink"}, func(t *testing.T, phase string) {
+		s, o, dir, m, parts, p := sourcePreparedBundle(t)
+		root := filepath.Join(dir, sourceDirectory)
+		canonical := filepath.Join(root, p.name)
+		original := sourceLstat(t, canonical)
+		contents := sourceReadFile(t, canonical)
+		sourceMust(t, os.Link(canonical, filepath.Join(root, publicStagePrefix+p.name)))
+		refill := func() { sourceMust(t, syscall.Mkfifo(canonical, 0o600)) }
+		o.ops.namespace = func(op sourceNameOp, r *sourceRoot, from, to string) error {
+			err := op(r, from, to)
+			if err == nil && (phase == "detach" && to == releaseDetached || phase == "stage-claim" && to == heldStagePrefix+p.name) {
+				refill()
+			}
+			return err
+		}
+		o.ops.remove = func(r *os.Root, name string) error {
+			err := r.Remove(name)
+			if err == nil && phase == "stage-unlink" && name == heldStagePrefix+p.name {
+				refill()
+			}
+			return err
+		}
+		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
+		backing := filepath.Join(root, releaseDetached)
+		sourceUnchangedEntry(t, backing, original)
+		sourceFailIf(t, !bytes.Equal(sourceReadFile(t, backing), contents), "release changed detached bytes")
+		sourceFailIf(t, sourceLstat(t, canonical).Mode()&os.ModeNamedPipe == 0, "release changed the refilled name")
+		sourcePresence(t, root, publicStagePrefix+p.name, phase == "detach")
+		sourcePresence(t, root, heldStagePrefix+p.name, phase == "stage-claim")
+		marker := sourcePreservedEntry(t, filepath.Join(root, releaseFile))
+		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+		marker()
+		sourceMust(t, os.Remove(canonical))
+		fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
+		size, err := m.SizeV1()
+		sourceMust(t, err)
+		assertSourceReleaseCharge(t, fresh, m, 1, size)
+		sourceReleaseResult(t, fresh, nil, true, nil)
 	})
 }
 
