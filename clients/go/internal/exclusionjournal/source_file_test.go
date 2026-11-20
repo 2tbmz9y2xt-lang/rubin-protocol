@@ -299,6 +299,7 @@ func TestSourceDurabilityFailures(t *testing.T) {
 }
 
 func TestSourcePartialCleanupRetry(t *testing.T) {
+	t.Run("stage-observation", testSourceStageObservation)
 	t.Run("claimed-stage", testSourceStageClaim)
 	t.Run("public-alias-after-private-unlink", func(t *testing.T) {
 		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
@@ -398,6 +399,59 @@ func TestSourcePartialCleanupRetry(t *testing.T) {
 	o.ops = realSourceFS
 	sourcePrepareAndRead(t, o, m, parts)
 	sourcePresence(t, root, stage, false)
+}
+
+func testSourceStageObservation(t *testing.T) {
+	sourceModes(t, []string{"logical-capacity", "disk-capacity", "producer", "reuse-producer", "reuse-integrity"}, func(t *testing.T, mode string) {
+		m, parts := sourceBundle(1, false)
+		size, err := m.SizeV1()
+		sourceMust(t, err)
+		limits := sourceLimits()
+		if mode == "logical-capacity" {
+			limits.Bytes = size + 1
+		}
+		_, o, dir := sourceScene(t, limits)
+		root, key := filepath.Join(dir, sourceDirectory), m.name(o.id)
+		if strings.HasPrefix(mode, "reuse-") {
+			sourcePrepare(t, o, m, parts)
+		}
+		if mode == "logical-capacity" {
+			sourceMust(t, os.WriteFile(filepath.Join(root, sourceForeign(m).name(o.id)), []byte("other"), 0o600))
+		}
+		if mode == "reuse-integrity" {
+			path := filepath.Join(root, key)
+			b := sourceReadFile(t, path)
+			b[len(b)-1] ^= 1
+			sourceMust(t, os.WriteFile(path, b, 0o600))
+		}
+		stage := filepath.Join(root, publicStagePrefix+key)
+		sourceMust(t, os.WriteFile(stage, []byte{1}, 0o600))
+		if mode == "disk-capacity" {
+			o.ops.statfs = func(_ int, s *syscall.Statfs_t) error {
+				sourceStatfsFixture(s, 1, limits.Overhead+size-1)
+				return nil
+			}
+		}
+		producerErr := errors.New("producer refused")
+		want := map[string]error{"logical-capacity": ErrCapacityV1, "disk-capacity": ErrCapacityV1, "producer": producerErr, "reuse-producer": producerErr, "reuse-integrity": ErrIntegrityV1}[mode]
+		wantCalls := 0
+		if want == producerErr {
+			wantCalls = 1
+		}
+		sourceAccount(t, func(a *mdbx.OperationAccount) {
+			sourceMust(t, o.withFiles(a, m, true, func(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage) error {
+				sourceMust(t, os.Rename(stage, filepath.Join(dir, "observed")))
+				calls := 0
+				token, err := o.prepare(r, m, size, used, func(func(SourcePartV1) error) error {
+					calls++
+					return producerErr
+				})
+				sourceWantError(t, err, want, "prepare after staging name disappeared")
+				sourceFailIf(t, token != nil || calls != wantCalls, "unexpected prepare token or producer calls %d", calls)
+				return nil
+			}))
+		})
+	})
 }
 
 func testSourceStageClaim(t *testing.T) {
@@ -1106,7 +1160,7 @@ func testSourceDetachedRelease(t *testing.T) {
 }
 
 func testSourcePendingCensus(t *testing.T) {
-	for _, mode := range []string{"short", "foreign", "foreign-short", "fifo", "private-with-fifo", "private-with-foreign", "private-first-qualified-pair", "canonical-first-qualified-pair"} {
+	for _, mode := range []string{"short", "foreign", "foreign-short", "foreign-with-scratch", "fifo", "private-with-fifo", "private-with-foreign", "private-first-qualified-pair", "canonical-first-qualified-pair"} {
 		t.Run(mode, func(t *testing.T) {
 			s, o, dir, m, _, p := sourcePreparedBundle(t)
 			root := filepath.Join(dir, sourceDirectory)
@@ -1123,7 +1177,12 @@ func testSourcePendingCensus(t *testing.T) {
 			switch mode {
 			case "short":
 				sourceMust(t, os.Truncate(path, 1))
-			case "foreign", "foreign-short":
+			case "foreign", "foreign-short", "foreign-with-scratch":
+				if mode == "foreign-with-scratch" {
+					path := filepath.Join(root, releaseScratch)
+					sourceMust(t, os.WriteFile(path, []byte("independent"), 0o600))
+					defer sourcePreservedEntry(t, path)()
+				}
 				sourceMust(t, os.Rename(path, filepath.Join(t.TempDir(), "prior")))
 				if mode == "foreign-short" {
 					original = original[:1]

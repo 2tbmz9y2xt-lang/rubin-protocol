@@ -13,6 +13,7 @@ type sourceRoot struct {
 	*os.Root
 	pin      *os.File
 	stagePin *os.File
+	stageErr error
 }
 
 const sourceInitDirectory = "." + sourceDirectory + ".init"

@@ -661,8 +661,8 @@ func (o *SourceOwnerV1) claimStage(r *sourceRoot, d *sourceDebt) error {
 }
 
 func (r *sourceRoot) pinStage(d *sourceDebt) error {
-	if d == nil || d.held || r.stagePin != nil {
-		return nil
+	if d == nil || d.held || r.stagePin != nil || r.stageErr != nil {
+		return r.stageErr
 	}
 	f, err := openSourceFile(r, d.leaf(), nil)
 	if err != nil {
@@ -675,6 +675,15 @@ func (r *sourceRoot) pinStage(d *sourceDebt) error {
 	}
 	r.stagePin = f
 	return nil
+}
+
+// observeStage withholds credit on failure and reports the cause if cleanup is reached.
+func (r *sourceRoot) observeStage(d *sourceDebt) *sourceDebt {
+	if err := r.pinStage(d); err != nil {
+		r.stageErr = err
+		return nil
+	}
+	return d
 }
 
 func (r *sourceRoot) closeStagePin() {
@@ -722,14 +731,11 @@ func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, 
 	if o.debt.name != "" && o.debt.name != name {
 		return nil, ErrBusyV1
 	}
-	if err := r.pinStage(used.observedStage); err != nil {
-		return nil, err
-	}
 	defer r.closeStagePin()
 	f, err := openSourceFile(r, name, nil)
 	if err == nil {
 		defer f.Close()
-		return o.reuse(r, f, m, name, size, produce)
+		return o.reuse(r, f, m, name, size, used.observedStage, produce)
 	}
 	if !errors.Is(err, os.ErrNotExist) || o.live[name] != nil {
 		return nil, ErrIntegrityV1
@@ -749,7 +755,7 @@ func (o *SourceOwnerV1) admitPublication(r *sourceRoot, size uint64, used source
 	if used.files >= o.limits.Files || size > o.limits.Bytes-used.bytes {
 		return false, ErrCapacityV1
 	}
-	return o.space(r, size, used.observedStage)
+	return o.space(r, size, r.observeStage(used.observedStage))
 }
 
 func (o *SourceOwnerV1) prepared(r *sourceRoot, m SourceManifestV1, name string, observed sourceIncarnation) (*PreparedSourceV1, error) {
@@ -934,12 +940,13 @@ func (w *compareSourceWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func (o *SourceOwnerV1) reuse(r *sourceRoot, f *os.File, m SourceManifestV1, name string, size uint64, produce func(func(SourcePartV1) error) error) (*PreparedSourceV1, error) {
+func (o *SourceOwnerV1) reuse(r *sourceRoot, f *os.File, m SourceManifestV1, name string, size uint64, stage *sourceDebt, produce func(func(SourcePartV1) error) error) (*PreparedSourceV1, error) {
 	scratch := make([]byte, scratchBytes)
 	observed, err := o.qualify(f, m, size, scratch, o.live[name], ErrIntegrityV1)
 	if err != nil {
 		return nil, err
 	}
+	r.observeStage(stage)
 	w := &compareSourceWriter{file: f, offset: int64(len(m.header(o.id))), scratch: scratch[scratchBytes/2:]}
 	start := func() error { return o.reconcile(r) }
 	compared := sha256.New()

@@ -405,9 +405,9 @@ func (o *SourceOwnerV1) releaseIntent(r *sourceRoot, d *sourceRelease, scratch [
 	if o.release == nil {
 		return o.persistRelease(r, d, scratch)
 	}
-	pin, err := openSourceFile(r, releaseScratch, nil)
+	pin, err := openSourceFile(r, releaseFile, nil)
 	if err != nil {
-		pin, _ = openSourceFile(r, releaseFile, nil)
+		pin, _ = openSourceFile(r, releaseScratch, nil)
 	}
 	present, err := o.syncedMarker(r, d, pin)
 	_ = pin.Close()
