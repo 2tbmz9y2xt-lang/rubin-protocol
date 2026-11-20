@@ -87,7 +87,7 @@ func sourceFault(o *SourceOwnerV1, stage string, cause error, observe func()) {
 	case "rename":
 		o.ops.rename = func(*os.Root, string, string) error { return fail() }
 	case "parent-sync":
-		o.ops.dirSync = func(*sourceRoot) error { return fail() }
+		o.ops.dirSync = fileOp
 	case "unlink", "unlink-reopen-competing-prepare":
 		o.ops.remove = func(*os.Root, string) error { return fail() }
 	case "statfs":
@@ -232,7 +232,7 @@ func TestSourcePartAndAssuranceRefusals(t *testing.T) {
 			sourceFailIf(t, late == nil, "producer did not receive a source callback")
 			sourceWantError(t, late(SourcePartV1{}), ErrUnavailableV1, "expired callback")
 		}
-		sourceFailIf(t, len(sourceEntries(t, dir)) != 0 || o.debt != nil, "part refusal lost cleanup ownership")
+		sourceFailIf(t, len(sourceEntries(t, dir)) != 0 || o.debt.name != "", "part refusal lost cleanup ownership")
 	})
 }
 
@@ -279,8 +279,8 @@ func TestSourceDurabilityFailures(t *testing.T) {
 			want := map[bool]error{false: cause, true: ErrCapacityV1}[stage == "statfs"]
 			sourcePrepareResult(t, o, m, sourceProducer(m, parts), want)
 			sourceFailIf(t, !failed, "durability operation did not reach %s", stage)
-			sourceFailIf(t, stage == "parent-sync" && (o.debt == nil || o.debt.staging || len(sourceEntries(t, dir)) != 1), "renamed backing lost its owner")
-			sourceFailIf(t, stage != "parent-sync" && (o.debt != nil || len(sourceEntries(t, dir)) != 0), "unpublished cleanup was not completed")
+			sourceFailIf(t, stage == "parent-sync" && (o.debt.name == "" || o.debt.staging || len(sourceEntries(t, dir)) != 1), "renamed backing lost its owner")
+			sourceFailIf(t, stage != "parent-sync" && (o.debt.name != "" || len(sourceEntries(t, dir)) != 0), "unpublished cleanup was not completed")
 			if mode == stage+"/reopentrue" {
 				o = sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
 			}
@@ -315,7 +315,7 @@ func TestSourcePartialCleanupRetry(t *testing.T) {
 	}
 	sourceAccount(t, func(a *mdbx.OperationAccount) {
 		p, err := o.PrepareSourceV1(a, m, producer)
-		sourceFailIf(t, p != nil || !errors.Is(err, cause) || !errors.Is(err, cleanup) || errors.Is(err, later) || o.debt == nil || !o.debt.staging,
+		sourceFailIf(t, p != nil || !errors.Is(err, cause) || !errors.Is(err, cleanup) || errors.Is(err, later) || o.debt.name == "" || !o.debt.staging,
 			"partial owner: %v/%v %+v", p, err, o.debt)
 	})
 	staging := filepath.Join(dir, sourceDirectory, ".staging-"+m.name(o.id))
@@ -404,9 +404,9 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 		o.ops.remove = func(r *os.Root, name string) error {
 			if name == p.name {
 				unlinks++
-				o.ops.dirSync = func(r *sourceRoot) error {
-					o.ops.dirSync = syncSourceRoot
-					err := syncSourceRoot(r)
+				o.ops.dirSync = func(pin *os.File) error {
+					o.ops.dirSync = (*os.File).Sync
+					err := pin.Sync()
 					sourceMust(t, os.WriteFile(path, entry, 0o600))
 					return err
 				}
@@ -478,7 +478,7 @@ func testSourceReleaseInconclusive(t *testing.T, stage string) {
 		}
 		return r.Remove(name)
 	}
-	o.ops.dirSync = func(r *sourceRoot) error { syncs++; return syncSourceRoot(r) }
+	o.ops.dirSync = func(pin *os.File) error { syncs++; return pin.Sync() }
 	sourceReleaseResult(t, o, p, true, nil)
 	wantRenames, wantUnlinks, wantSyncs := min(reclaimed, 1), 1, 3+reclaimed
 	if !backing {
@@ -524,9 +524,9 @@ func testSourceReleaseIncarnation(t *testing.T, mode string) {
 	want := ErrIntegrityV1
 	if mode != "changed-content" {
 		moved := map[bool]string{false: filepath.Join(t.TempDir(), "original"), true: filepath.Join(root, "moved")}[mode == "linked-backing"]
-		o.ops.dirSync = func(r *sourceRoot) error {
-			o.ops.dirSync = syncSourceRoot
-			sourceMust(t, syncSourceRoot(r))
+		o.ops.dirSync = func(pin *os.File) error {
+			o.ops.dirSync = (*os.File).Sync
+			sourceMust(t, pin.Sync())
 			sourceMust(t, os.Rename(path, moved))
 			if mode == "linked-backing" {
 				return os.Symlink("moved", path)
@@ -659,12 +659,12 @@ func sourceReleaseWithFault(t *testing.T, o *SourceOwnerV1, p *PreparedSourceV1,
 		return true, false
 	}
 	calls, failAt := 0, map[string]int{"intent-sync": 1, "unlink-sync": 2, "final-sync": 3}[stage]
-	o.ops.dirSync = func(r *sourceRoot) error {
+	o.ops.dirSync = func(pin *os.File) error {
 		calls++
 		if calls == failAt {
 			return cause
 		}
-		return r.pin.Sync()
+		return pin.Sync()
 	}
 	return true, stage == "intent-sync"
 }
@@ -691,9 +691,9 @@ func TestSourceReopenRequiresDirectorySync(t *testing.T) {
 	defer func() { realSourceFS = saved }()
 	calls := 0
 	cause := errors.New("source directory sync")
-	realSourceFS.dirSync = func(r *sourceRoot) error {
+	realSourceFS.dirSync = func(pin *os.File) error {
 		calls++
-		info, err := r.pin.Stat()
+		info, err := pin.Stat()
 		sourceFailIf(t, err != nil || !os.SameFile(child, info), "source directory pin: %v", err)
 		return cause
 	}
@@ -767,7 +767,7 @@ func TestSourceNoOverwriteAndDistinctCopies(t *testing.T) {
 			return os.WriteFile(path, original, 0o600)
 		})
 		sourcePrepareResult(t, owner, m, producer, ErrIntegrityV1)
-		sourceFailIf(t, !bytes.Equal(sourceReadFile(t, path), original) || len(sourceEntries(t, dir)) != 1 || owner.debt != nil,
+		sourceFailIf(t, !bytes.Equal(sourceReadFile(t, path), original) || len(sourceEntries(t, dir)) != 1 || owner.debt.name != "",
 			"name collision changed existing bytes or retained staging")
 	})
 	t.Run("stale-prepared", func(t *testing.T) {
@@ -1128,7 +1128,7 @@ func TestSourceStagingRestartAndAmbiguousRename(t *testing.T) {
 			o.ops.rename = renameSourceFault(t, cause, mode != "unobserved-staged", mode != "renamed")
 			o.ops.remove = func(_ *os.Root, name string) error { return os.Remove(filepath.Join(dir, sourceDirectory, name)) }
 			sourcePrepareResult(t, o, m, sourceProducer(m, parts), cause)
-			sourceFailIf(t, o.debt == nil || o.debt.staging, "ambiguous publication debt: %+v", o.debt)
+			sourceFailIf(t, o.debt.name == "" || o.debt.staging, "ambiguous publication debt: %+v", o.debt)
 			sourceFailIf(t, len(sourceEntries(t, dir)) != 1, "ambiguous publication lost backing")
 		} else {
 			sourceMust(t, os.WriteFile(filepath.Join(dir, sourceDirectory, ".staging-"+m.name(o.id)), []byte{1, 2, 3}, 0o600))
@@ -1181,7 +1181,7 @@ func testSourceMovedDuringExport(t *testing.T, reuse bool) {
 	})
 	sourcePrepareResult(t, o, m, producer, ErrIdentityV1)
 	name := m.name(o.id)
-	sourceFailIf(t, o.live[name] != token || (o.debt == nil) != reuse || !reuse && (o.debt.name != name || o.debt.staging),
+	sourceFailIf(t, o.live[name] != token || (o.debt.name == "") != reuse || !reuse && (o.debt.name != name || o.debt.staging),
 		"moved root changed the retained owner: token=%v debt=%+v", o.live[name], o.debt)
 	sourcePresence(t, moved, name, true)
 	sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "replacement directory acquired backing")
@@ -1265,7 +1265,7 @@ func TestSourcePreparationPanicRetainsCleanup(t *testing.T) {
 	producer := sourceAfterFirstPart(m, parts, func() error { panic(cause) })
 	sourceAccount(t, func(a *mdbx.OperationAccount) {
 		caught := catchSourcePanic(func() { _, _ = o.PrepareSourceV1(a, m, producer) })
-		sourceFailIf(t, caught != any(cause) || o.debt == nil || !o.debt.staging || !bytes.Equal(parts[0], original) || cleanupCalls != 1,
+		sourceFailIf(t, caught != any(cause) || o.debt.name == "" || !o.debt.staging || !bytes.Equal(parts[0], original) || cleanupCalls != 1,
 			"panic owner: %v %+v, cleanup calls=%d", caught, o.debt, cleanupCalls)
 		sourceMust(t, a.WithReservation(mdbx.TreeLaneMaxBytes, func() error { return nil }))
 	})

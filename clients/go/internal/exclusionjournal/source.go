@@ -74,7 +74,7 @@ type SourceOwnerV1 struct {
 	limits  SourceLimitsV1
 	busy    atomic.Bool
 	ops     sourceFS
-	debt    *sourceDebt
+	debt    sourceDebt
 	release *sourceRelease
 	live    map[string]*sourceIncarnation
 }

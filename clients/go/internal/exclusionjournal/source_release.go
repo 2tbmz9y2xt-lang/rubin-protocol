@@ -40,7 +40,12 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 		return o.withRoot(o.bindRoot, func(r *sourceRoot) error {
 			scratch := make([]byte, scratchBytes)
 			if o.release == nil {
-				if err := o.beginRelease(r, p, scratch); err != nil {
+				if _, err := o.census(r); err != nil {
+					return err
+				}
+				d := &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
+				d.record = o.releaseRecord(d)
+				if err := o.persistRelease(r, d, scratch); err != nil {
 					return err
 				}
 			}
@@ -53,7 +58,7 @@ func (o *SourceOwnerV1) releaseAdmission(p *PreparedSourceV1, proof bool) error 
 	if !proof || !o.hasReleaseAuthority(p) {
 		return ErrIntegrityV1
 	}
-	if p != nil && (o.debt != nil || o.release != nil && o.release.name != p.name) {
+	if p != nil && (o.debt.name != "" || o.release != nil && o.release.name != p.name) {
 		return ErrBusyV1
 	}
 	return nil
@@ -64,15 +69,6 @@ func (o *SourceOwnerV1) hasReleaseAuthority(p *PreparedSourceV1) bool {
 		return o.release != nil && o.release.reopened
 	}
 	return p.incarnation != nil && o.live[p.name] == p.incarnation
-}
-
-func (o *SourceOwnerV1) beginRelease(r *sourceRoot, p *PreparedSourceV1, scratch []byte) error {
-	if _, err := o.census(r); err != nil {
-		return err
-	}
-	d := &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
-	d.record = o.releaseRecord(d)
-	return o.persistRelease(r, d, scratch)
 }
 
 func (o *SourceOwnerV1) releaseRecord(d *sourceRelease) []byte {
@@ -185,7 +181,7 @@ func (o *SourceOwnerV1) clearReleaseScratch(r *sourceRoot) error {
 	if err := o.ops.remove(r.Root, releaseScratch); err != nil {
 		return err
 	}
-	return o.ops.dirSync(r)
+	return o.ops.dirSync(r.pin)
 }
 
 func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch []byte) error {
@@ -296,5 +292,5 @@ func (o *SourceOwnerV1) removeReleasedBacking(r *sourceRoot, d *sourceRelease, s
 			return err
 		}
 	}
-	return o.ops.dirSync(r)
+	return o.ops.dirSync(r.pin)
 }

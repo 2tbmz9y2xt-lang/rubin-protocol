@@ -26,7 +26,7 @@ type sourceFS struct {
 	chmod           func(*os.File, os.FileMode) error
 	rename          func(*os.Root, string, string) error
 	remove          func(*os.Root, string) error
-	dirSync         func(*sourceRoot) error
+	dirSync         func(*os.File) error
 }
 type sourceDebt struct {
 	name             string
@@ -36,10 +36,10 @@ type sourceDebt struct {
 
 type sourceUsage struct {
 	files, bytes uint64
-	stage        *sourceDebt
+	stage        sourceDebt
 }
 
-var realSourceFS = sourceFS{statfs: syscall.Fstatfs, write: (*os.File).Write, fileSync: (*os.File).Sync, close: (*os.File).Close, chmod: (*os.File).Chmod, rename: (*os.Root).Rename, remove: (*os.Root).Remove, dirSync: syncSourceRoot}
+var realSourceFS = sourceFS{statfs: syscall.Fstatfs, write: (*os.File).Write, fileSync: (*os.File).Sync, close: (*os.File).Close, chmod: (*os.File).Chmod, rename: (*os.Root).Rename, remove: (*os.Root).Remove, dirSync: (*os.File).Sync}
 
 type sourceRoot struct {
 	*os.Root
@@ -47,8 +47,6 @@ type sourceRoot struct {
 }
 
 const sourceInitDirectory = "." + sourceDirectory + ".init"
-
-func (r *sourceRoot) Close() error { return errors.Join(r.pin.Close(), r.Root.Close()) }
 
 func (o *SourceOwnerV1) withRoot(open func(*os.Root) (*os.Root, error), use func(*sourceRoot) error) error {
 	parent, err := o.parentRoot()
@@ -60,13 +58,13 @@ func (o *SourceOwnerV1) withRoot(open func(*os.Root) (*os.Root, error), use func
 	if err != nil {
 		return err
 	}
+	defer r.Close()
 	pin, err := r.Open(".")
 	if err != nil {
-		_ = r.Close()
 		return ErrUnavailableV1
 	}
+	defer pin.Close()
 	root := &sourceRoot{Root: r, pin: pin}
-	defer root.Close()
 	held, _ := pin.Stat()
 	if !os.SameFile(o.info, held) || held.Mode() != os.ModeDir|0o700 {
 		return ErrIdentityV1
@@ -201,11 +199,9 @@ func (o *SourceOwnerV1) openSourceRoot() error {
 	})
 }
 
-func syncSourceRoot(r *sourceRoot) error { return r.pin.Sync() }
-
 // syncBoundRoot makes namespace changes durable and verifies current root reachability.
 func (o *SourceOwnerV1) syncBoundRoot(r *sourceRoot) error {
-	if err := o.ops.dirSync(r); err != nil {
+	if err := o.ops.dirSync(r.pin); err != nil {
 		return err
 	}
 	return o.currentRoot()
@@ -251,7 +247,7 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry) (sourc
 
 func (o *SourceOwnerV1) includeAbsent(used sourceUsage, missing int, absentRelease *sourceRelease) (sourceUsage, error) {
 	var absentBytes uint64
-	if o.debt != nil && o.debt.removed {
+	if o.debt.removed {
 		used.files++
 		absentBytes = o.debt.size
 		used.stage = o.debt
@@ -318,7 +314,7 @@ func openSourceFile(r *sourceRoot, name string, unobserved error) (*os.File, err
 
 func openSourceAt(parent int, name string, flags int) (*os.File, error) {
 	fd, err := -1, error(unix.EINTR)
-	for err == unix.EINTR {
+	for errors.Is(err, unix.EINTR) {
 		fd, err = unix.Openat(parent, name, flags|unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	}
 	if err != nil {
@@ -347,7 +343,7 @@ func (o *SourceOwnerV1) censusEntry(name string, size uint64, used *sourceUsage)
 	if !staging {
 		return nil
 	}
-	if d := o.debt; d != nil {
+	if d := o.debt; d.name != "" {
 		if d.name != name {
 			return ErrBusyV1
 		}
@@ -355,7 +351,7 @@ func (o *SourceOwnerV1) censusEntry(name string, size uint64, used *sourceUsage)
 			return ErrIntegrityV1
 		}
 	}
-	o.debt = &sourceDebt{name: name, size: size, staging: true}
+	o.debt = sourceDebt{name: name, size: size, staging: true}
 	used.stage = o.debt
 	return nil
 }
@@ -497,7 +493,7 @@ func fileExporter(f *os.File, m SourceManifestV1, header int) func(func(SourcePa
 func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, visit func(SourcePartV1) error) error {
 	return o.withFiles(account, m, false, func(r *sourceRoot, m SourceManifestV1, size uint64, _ sourceUsage) error {
 		name := m.name(o.id)
-		if o.debt != nil && o.debt.name == name || o.release != nil && o.release.name == name {
+		if o.debt.name == name || o.release != nil && o.release.name == name {
 			return ErrBusyV1
 		}
 		if visit == nil {
@@ -527,8 +523,8 @@ func (o *SourceOwnerV1) withFiles(account *mdbx.OperationAccount, m SourceManife
 
 // reconcile returns disk charges only after unlink and parent synchronization both succeed.
 func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
-	d := o.debt
-	if d == nil {
+	d := &o.debt
+	if d.name == "" {
 		return nil
 	}
 	if !d.removed {
@@ -543,10 +539,10 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 		}
 		d.removed = true
 	}
-	if err := o.ops.dirSync(r); err != nil {
+	if err := o.ops.dirSync(r.pin); err != nil {
 		return err
 	}
-	o.debt = nil
+	o.debt = sourceDebt{}
 	return nil
 }
 
@@ -563,7 +559,7 @@ func (o *SourceOwnerV1) PrepareSourceV1(account *mdbx.OperationAccount, m Source
 
 func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage, produce func(func(SourcePartV1) error) error) (*PreparedSourceV1, error) {
 	name := m.name(o.id)
-	if o.debt != nil && o.debt.name != name {
+	if o.debt.name != "" && o.debt.name != name {
 		return nil, ErrBusyV1
 	}
 	f, err := openSourceFile(r, name, nil)
@@ -581,7 +577,7 @@ func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, 
 }
 
 func (o *SourceOwnerV1) admitPublication(r *sourceRoot, size uint64, used sourceUsage) error {
-	if used.stage != nil {
+	if used.stage.name != "" {
 		used.files--
 		used.bytes -= used.stage.size
 	}
@@ -592,14 +588,14 @@ func (o *SourceOwnerV1) admitPublication(r *sourceRoot, size uint64, used source
 }
 
 func (o *SourceOwnerV1) prepared(r *sourceRoot, m SourceManifestV1, name string, observed sourceIncarnation) (*PreparedSourceV1, error) {
-	if err := o.ops.dirSync(r); err != nil {
+	if err := o.ops.dirSync(r.pin); err != nil {
 		return nil, err
 	}
 	info, err := r.Lstat(name)
 	if err != nil || observed.file != filelock.FileIdentityV1(info) || o.currentRoot() != nil {
 		return nil, ErrIdentityV1
 	}
-	o.debt = nil
+	o.debt = sourceDebt{}
 	token := cmp.Or(o.live[name], &observed)
 	o.live[name] = token
 	return &PreparedSourceV1{manifest: m, name: name, incarnation: token}, nil
@@ -612,7 +608,7 @@ func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, 
 			return
 		}
 		_ = w.file.Close()
-		if o.debt != nil && o.debt.staging {
+		if o.debt.staging {
 			if cleanup := o.reconcile(r); cleanup != nil {
 				err = errors.Join(err, cleanup)
 			}
@@ -653,7 +649,7 @@ func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m Source
 			return err
 		}
 		w.file = f
-		o.debt = &sourceDebt{name: name, size: size, staging: true}
+		o.debt = sourceDebt{name: name, size: size, staging: true}
 		_, err = out.Write(m.header(o.id))
 		return cmp.Or(err, o.ops.chmod(f, 0o600))
 	}
@@ -706,7 +702,7 @@ func (w *compareSourceWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func (o *SourceOwnerV1) reuse(r *sourceRoot, f *os.File, m SourceManifestV1, name string, size uint64, stage *sourceDebt, produce func(func(SourcePartV1) error) error) (*PreparedSourceV1, error) {
+func (o *SourceOwnerV1) reuse(r *sourceRoot, f *os.File, m SourceManifestV1, name string, size uint64, stage sourceDebt, produce func(func(SourcePartV1) error) error) (*PreparedSourceV1, error) {
 	scratch := make([]byte, scratchBytes)
 	observed, err := o.qualify(f, m, size, scratch, o.live[name], ErrIntegrityV1)
 	if err != nil {
@@ -714,7 +710,7 @@ func (o *SourceOwnerV1) reuse(r *sourceRoot, f *os.File, m SourceManifestV1, nam
 	}
 	w := &compareSourceWriter{file: f, offset: int64(len(m.header(o.id))), scratch: scratch[scratchBytes/2:]}
 	var start func() error
-	if stage != nil {
+	if stage.name != "" {
 		start = func() error { return o.reconcile(r) }
 	}
 	if err := stream(m, produce, w, scratch[:scratchBytes/2], start); err != nil {

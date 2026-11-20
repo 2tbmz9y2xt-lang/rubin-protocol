@@ -377,7 +377,7 @@ func testSourceExportScope(t *testing.T, row sourceExportCase) {
 			return nil
 		}
 		escaped, copied = part, buf
-		if row.name == "success" {
+		if !row.finalPart {
 			assertSourceLiveExport(t, s, dir, operation, part)
 		}
 		if row.visitorPanic != nil {
@@ -395,7 +395,7 @@ func testSourceExportScope(t *testing.T, row sourceExportCase) {
 		}
 		sourceFailIf(t, caught != wantCaught || outer != any(wantPanic) || any(got) != any(row.result) || calls != wantCalls,
 			"export result=%v caught=%v panic=%v deliveries=%d", got, caught, outer, calls)
-		n, err := escaped.ReadAt(make([]byte, 1), 0)
+		n, err := escaped.ReadAt(make([]byte, len(copied)), 0)
 		sourceFailIf(t, n != 0 || any(err) != any(ErrUnavailableV1), "escaped read: %d/%v", n, err)
 		_, err = operation.LimitsV1()
 		sourceWantError(t, err, ErrUnavailableV1, "expired source limits")
