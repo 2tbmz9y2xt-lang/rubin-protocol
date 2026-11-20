@@ -212,10 +212,7 @@ func (inc *sourceIncarnation) match(info os.FileInfo) error {
 func (o *SourceOwnerV1) openRelease(r *sourceRoot) error {
 	record, id, err := readRelease(r)
 	if errors.Is(err, os.ErrNotExist) {
-		if _, err := o.release.location(r); err != nil {
-			return err
-		}
-		return o.clearReleaseScratch(r)
+		return nil
 	}
 	if err != nil {
 		return ErrIntegrityV1

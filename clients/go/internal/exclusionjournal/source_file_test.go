@@ -2214,12 +2214,30 @@ func testSourceHeldBackingCharge(t *testing.T) {
 }
 
 func testSourceHeldRestartRefusal(t *testing.T) {
-	sourceModes(t, []string{"occupied", "occupied-alias", "excess", "malformed", "nonregular", "invalid-backing"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"occupied", "occupied-alias", "excess", "malformed", "nonregular", "invalid-backing", "absent-backing", "scratch-at-scan-limit"}, func(t *testing.T, mode string) {
 		s, o, dir, m, parts := sourceBundleScene(t, 1, false)
 		root, key := filepath.Join(dir, sourceDirectory), m.name(o.id)
 		held, public := filepath.Join(root, ".stage-hold-"+key), filepath.Join(root, ".staging-"+key)
 		want := ErrIntegrityV1
+		limits := sourceLimits()
 		switch mode {
+		case "scratch-at-scan-limit", "malformed":
+			scratch := filepath.Join(root, releaseScratch)
+			sourceMust(t, os.WriteFile(scratch, []byte("unpublished"), 0o600))
+			defer sourcePreservedEntry(t, scratch)()
+			if mode == "malformed" {
+				held += "x"
+			} else {
+				limits.Files, limits.Scans = 1, 2
+				want = ErrCapacityV1
+			}
+			sourceMust(t, os.WriteFile(held, nil, 0o600))
+		case "absent-backing":
+			p := sourcePrepare(t, o, m, parts)
+			sourceReleaseWithFault(t, o, p, "marker-clear", syscall.EIO)
+			defer sourcePreservedEntry(t, filepath.Join(root, releaseFile))()
+			sourceMust(t, os.WriteFile(held, []byte("independent"), 0o600))
+			want = ErrBusyV1
 		case "invalid-backing":
 			p := sourcePrepare(t, o, m, parts)
 			sourceReleaseWithFault(t, o, p, "intent-sync", syscall.EIO)
@@ -2231,9 +2249,6 @@ func testSourceHeldRestartRefusal(t *testing.T) {
 			sourceMust(t, os.Link(backing, held))
 			defer sourcePreservedEntry(t, filepath.Join(root, releaseFile))()
 			defer sourcePreservedEntry(t, backing)()
-		case "malformed":
-			held += "x"
-			sourceMust(t, os.WriteFile(held, nil, 0o600))
 		case "nonregular":
 			sourceMust(t, os.Symlink(".", held))
 		default:
@@ -2252,7 +2267,7 @@ func testSourceHeldRestartRefusal(t *testing.T) {
 			defer sourcePreservedEntry(t, other)()
 		}
 		defer sourcePreservedEntry(t, held)()
-		sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), want)
+		sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), limits, want)
 		if mode != "occupied" && mode != "occupied-alias" {
 			sourcePresence(t, root, filepath.Base(public), false)
 		}

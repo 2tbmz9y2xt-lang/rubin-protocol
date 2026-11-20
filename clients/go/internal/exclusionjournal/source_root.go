@@ -171,14 +171,20 @@ func (o *SourceOwnerV1) openSourceRoot() error {
 
 func (o *SourceOwnerV1) openReleaseBacking(r *sourceRoot) error {
 	if o.release == nil {
-		return nil
+		return o.clearReleaseScratch(r)
 	}
 	if !o.manifestFits(o.release.manifest, o.release.size) {
 		return ErrCapacityV1
 	}
 	present, err := o.releaseBacking(r, o.release, make([]byte, scratchBytes))
-	o.release.unlinked = err == nil && !present && o.debt.name != o.release.name
-	return err
+	if err != nil || present {
+		return err
+	}
+	o.release.unlinked = o.debt.name != o.release.name
+	if !o.release.unlinked && o.debt.held {
+		return ErrBusyV1
+	}
+	return nil
 }
 
 // syncBoundRoot makes namespace changes durable and verifies current root reachability.
