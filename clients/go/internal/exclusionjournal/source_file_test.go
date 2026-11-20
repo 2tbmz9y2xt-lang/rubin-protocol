@@ -1077,11 +1077,11 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 }
 
 func testSourceReleaseSpelling(t *testing.T) {
-	sourceModes(t, []string{"mixed-alias", "mixed-alias-another-name", "same-key-file", "pending-absent-file", "pending-cross-key", "late-alias", "unrelated-file", "fresh-mixed-file"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"mixed-alias", "mixed-alias-another-name", "same-key-file", "same-key-before-content", "pending-absent-file", "pending-cross-key", "late-alias", "unrelated-file", "fresh-mixed-file"}, func(t *testing.T, mode string) {
 		s, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		key := sourceForeign(m).name(o.id)
-		if mode == "same-key-file" || mode == "pending-absent-file" {
+		if strings.HasPrefix(mode, "same-key-") || mode == "pending-absent-file" {
 			key = p.name
 		}
 		key = strings.ToUpper(key[:32]) + key[32:]
@@ -1104,9 +1104,15 @@ func testSourceReleaseSpelling(t *testing.T) {
 		}
 		files, used, want := uint64(1), size, ErrIdentityV1
 		switch mode {
-		case "same-key-file", "pending-absent-file", "unrelated-file", "fresh-mixed-file":
+		case "same-key-file", "same-key-before-content", "pending-absent-file", "unrelated-file", "fresh-mixed-file":
 			sourceMust(t, os.WriteFile(stage, []byte{17}, 0o600))
 			files, used, want = 2, size+1, ErrBusyV1
+			if mode == "same-key-before-content" {
+				path := filepath.Join(root, p.name)
+				data := sourceReadFile(t, path)
+				data[len(data)-1] ^= 1
+				sourceMust(t, os.WriteFile(path, data, 0o600))
+			}
 		case "late-alias":
 			o.ops.namespace = func(op sourceNameOp, r *sourceRoot, from, to string) error {
 				sourceFailIf(t, from != p.name || to != releaseDetached, "unexpected namespace operation on a late stage")
@@ -1135,8 +1141,20 @@ func testSourceReleaseSpelling(t *testing.T) {
 			return
 		}
 		if mode != "late-alias" {
-			assertSourceReleaseCharge(t, o, m, files, used)
-			unchanged := sourceHeld(t, o)
+			var unchanged func(string)
+			if mode == "pending-cross-key" {
+				marker := sourcePreservedEntry(t, filepath.Join(root, releaseFile))
+				alias := sourcePreservedEntry(t, stage)
+				backing := sourcePreservedEntry(t, filepath.Join(root, p.name))
+				unchanged = func(string) {
+					marker()
+					alias()
+					backing()
+				}
+			} else {
+				assertSourceReleaseCharge(t, o, m, files, used)
+				unchanged = sourceHeld(t, o)
+			}
 			o.ops.namespace = func(sourceNameOp, *sourceRoot, string, string) error {
 				t.Fatal("refused release changed a name")
 				return nil
@@ -1151,6 +1169,7 @@ func testSourceReleaseSpelling(t *testing.T) {
 			}
 			sourceReleaseResult(t, o, p, true, want)
 			unchanged("refused release")
+			assertSourceReleaseCharge(t, o, m, files, used)
 		} else {
 			preserved := sourcePreservedEntry(t, filepath.Join(root, releaseFile))
 			before := sourceLstat(t, filepath.Join(root, p.name))
