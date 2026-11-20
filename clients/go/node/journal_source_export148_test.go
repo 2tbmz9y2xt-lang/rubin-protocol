@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -64,12 +65,11 @@ func newJournalHeaderEvidence(t *testing.T, class byte, count, extent int, suppl
 	t.Helper()
 	owner, oldest, tip := hcBase(t, hcLim())
 	recs := []HeaderCandidateRecord148V1{oldest, tip}[2-count:]
-	absent := exclusionjournal.SourceViewV1{Origin: -1}
 	e := journalHeaderEvidence{manifest: exclusionjournal.SourceManifestV1{Class: exclusionjournal.CaptureClassV1(class), Identity: [32]byte{19}}}
 	e.input = JournalHeaderPathInput148V1{
 		Owner: owner, Incarnation: 7, Version: owner.VersionV1(), Height: 11, AttachmentHeight: 9,
 		Hash: tip.Hash, AttachmentHash: hcRoot, Provenance: hcProvA, HasExpected: true, Expected: tip.Raw,
-		DurableExtent: uint64(extent), Path: absent, Durable: absent, OriginalProjection: absent,
+		DurableExtent: uint64(extent), OriginalProjection: exclusionjournal.SourceViewV1{Origin: -1},
 	}
 	var path, durable []byte
 	for i, r := range recs {
@@ -79,8 +79,7 @@ func newJournalHeaderEvidence(t *testing.T, class byte, count, extent int, suppl
 			durable = append(durable, r.Raw[:]...)
 		}
 	}
-	e.input.Path = e.origin(path)
-	e.input.Durable = e.origin(durable)
+	e.input.Path, e.input.Durable = e.origin(path), e.origin(durable)
 	projection := journalHeaderProjection(t, e.input, recs, uint64(extent))
 	if supplied {
 		e.input.OriginalProjection = e.origin(projection)
@@ -325,7 +324,7 @@ func journalHeaderAssertShape(t *testing.T, e journalHeaderEvidence, want error)
 	t.Helper()
 	defer e.preserve(t)()
 	export, err := NewJournalHeaderPathSource148V1(e.manifest, e.input)
-	if export != nil || err != want {
+	if export != nil || any(err) != any(want) {
 		t.Fatalf("preflight: producer=%v err=%v, want %v", export != nil, err, want)
 	}
 	journalHeaderGuards(t, e.input.Owner)
@@ -338,7 +337,10 @@ func journalHeaderPointRefusals(t *testing.T) {
 		edit func(*testing.T, *journalHeaderEvidence)
 	}{
 		{"nil-provider", nil, func(_ *testing.T, e *journalHeaderEvidence) { e.input.Owner = nil }},
-		{"unestablished", nil, func(t *testing.T, e *journalHeaderEvidence) { e.input.Owner = hcNew(t, hcLim()); e.input.Version = e.input.Owner.VersionV1() }},
+		{"unestablished", nil, func(t *testing.T, e *journalHeaderEvidence) {
+			e.input.Owner = hcNew(t, hcLim())
+			e.input.Version = e.input.Owner.VersionV1()
+		}},
 		{"closed", nil, func(_ *testing.T, e *journalHeaderEvidence) { e.input.Owner.CloseV1() }},
 		{"unknown", nil, journalHeaderUnknown},
 		{"stale", nil, func(_ *testing.T, e *journalHeaderEvidence) { e.input.Version--; e.input.Origins[1].Bytes[6] ^= 1 }},
@@ -363,12 +365,8 @@ func journalHeaderPointRefusals(t *testing.T) {
 			supplied := c.name != "stale" && c.name != "wrong-raw-hash" && c.name != "short-durable"
 			e := newJournalHeaderEvidence(t, 1, 2, 1, supplied)
 			c.edit(t, &e)
-			want := c.want
-			if want == nil {
-				want = exclusionjournal.ErrUnavailableV1
-			}
 			journalHeaderAccount(t, func(a *mdbx.OperationAccount) error {
-				journalHeaderAssertRefusal(t, source, a, e, want, 1)
+				journalHeaderAssertRefusal(t, source, a, e, cmp.Or(c.want, exclusionjournal.ErrUnavailableV1), 1)
 				if c.name == "closed" && e.input.Owner.VersionV1() != e.input.Version {
 					t.Fatalf("closed version=%d, want %d", e.input.Owner.VersionV1(), e.input.Version)
 				}
@@ -398,7 +396,7 @@ func journalHeaderAssertRefusal(t *testing.T, source *exclusionjournal.SourceOwn
 		calls++
 		return export(op, visit)
 	}, func(exclusionjournal.SourcePartV1) error { visits++; return nil })
-	if err != want || calls != exporterCalls || visits != 0 {
+	if any(err) != any(want) || calls != exporterCalls || visits != 0 {
 		t.Fatalf("refusal=%v, want %v; exporter=%d, want %d; visits=%d", err, want, calls, exporterCalls, visits)
 	}
 	journalHeaderGuards(t, e.input.Owner)
@@ -531,12 +529,12 @@ func journalHeaderPrepareRefusal(t *testing.T) {
 	e.input.Owner.CloseV1()
 	journalHeaderAccount(t, func(a *mdbx.OperationAccount) error {
 		prepared, err := source.PrepareSourceV1(a, e.manifest, e.producer(t))
-		if prepared != nil || err != exclusionjournal.ErrUnavailableV1 {
+		if prepared != nil || any(err) != any(exclusionjournal.ErrUnavailableV1) {
 			t.Fatalf("closed prepare: handle=%v err=%v", prepared != nil, err)
 		}
 		journalHeaderGuards(t, e.input.Owner)
 		err = source.WithCapturedSourceV1(a, e.manifest, func(exclusionjournal.SourcePartV1) error { t.Fatal("closed source retained"); return nil })
-		if err != exclusionjournal.ErrUnavailableV1 {
+		if any(err) != any(exclusionjournal.ErrUnavailableV1) {
 			t.Fatalf("closed source readback: %v", err)
 		}
 		return journalHeaderSibling(t, source, a)
@@ -567,7 +565,7 @@ func journalHeaderVisitorOutcome(t *testing.T) {
 					return cause
 				})
 			}()
-			if result != cause || attempts != 1 || visits != 1 || (cause == nil && panicked != &e) || (cause != nil && panicked != nil) {
+			if any(result) != any(cause) || attempts != 1 || visits != 1 || (cause == nil && panicked != &e) || (cause != nil && panicked != nil) {
 				t.Fatalf("visitor result=%v panic=%v forwarding=%d visits=%d", result, panicked, attempts, visits)
 			}
 			journalHeaderGuards(t, e.input.Owner)

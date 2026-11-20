@@ -116,7 +116,7 @@ func (e journalReplayEvidence) assertPart(t *testing.T, p exclusionjournal.Sourc
 
 func journalReplayExpired(t *testing.T, p exclusionjournal.SourcePartV1) {
 	t.Helper()
-	if n, err := p.ReadAt(nil, 0); n != 0 || err != exclusionjournal.ErrUnavailableV1 {
+	if n, err := p.ReadAt(nil, 0); n != 0 || any(err) != any(exclusionjournal.ErrUnavailableV1) {
 		t.Fatalf("escaped read: %d/%v", n, err)
 	}
 }
@@ -151,7 +151,7 @@ func TestJournalSourceExportExactAndScoped(t *testing.T) {
 			}
 			journalReplayExpired(t, prior)
 			for _, op := range []*exclusionjournal.SourceOperationV1{nil, {}, operation} {
-				if err := export(op, func(exclusionjournal.SourcePartV1) error { t.Fatal("inactive operation visited"); return nil }); err != exclusionjournal.ErrUnavailableV1 {
+				if err := export(op, func(exclusionjournal.SourcePartV1) error { t.Fatal("inactive operation visited"); return nil }); any(err) != any(exclusionjournal.ErrUnavailableV1) {
 					t.Fatalf("inactive operation: %v", err)
 				}
 			}
@@ -214,7 +214,9 @@ func journalReplayBadShapes(t *testing.T, source *exclusionjournal.SourceOwnerV1
 			}
 		}},
 		{"wrong-origin-index", false, func(e *journalReplayEvidence) { e.views[1].Origin = 4 }},
-		{"clipped-origin", false, func(e *journalReplayEvidence) { e.origins[0].Bytes = append(make([]byte, 0, 97), e.origins[0].Bytes...) }},
+		{"clipped-origin", false, func(e *journalReplayEvidence) {
+			e.origins[0].Bytes = append(make([]byte, 0, 97), e.origins[0].Bytes...)
+		}},
 		{"empty-origin", false, func(e *journalReplayEvidence) { e.origins[2].Bytes = nil }},
 		{"duplicate-origin", false, func(e *journalReplayEvidence) { e.origins[1] = e.origins[0] }},
 		{"overlap-origin", false, func(e *journalReplayEvidence) { e.origins[1].Bytes = e.origins[0].Bytes[2:95:95] }},
@@ -235,7 +237,7 @@ func journalReplayBadShapes(t *testing.T, source *exclusionjournal.SourceOwnerV1
 				if err == nil {
 					err = source.WithSourceExportV1(a, bad.manifest, export, func(exclusionjournal.SourcePartV1) error { t.Fatal("malformed input delivered"); return nil })
 				}
-				if err != exclusionjournal.ErrIntegrityV1 {
+				if any(err) != any(exclusionjournal.ErrIntegrityV1) {
 					t.Fatalf("malformed input: %v", err)
 				}
 				return journalReplaySibling(t, source, a, newJournalReplayEvidence(1, ""))
@@ -247,7 +249,7 @@ func journalReplayBadShapes(t *testing.T, source *exclusionjournal.SourceOwnerV1
 		recovery.Parts = append(recovery.Parts, exclusionjournal.SourcePartSpecV1{Kind: kind, Length: 1})
 	}
 	views := slices.Repeat([]exclusionjournal.SourceViewV1{{Length: 1}}, 5)
-	if export, err := withJournalReplaySourceExportV1(recovery, []exclusionjournal.SourceOriginV1{{Bytes: []byte{1}}}, views); export != nil || err != exclusionjournal.ErrIntegrityV1 {
+	if export, err := withJournalReplaySourceExportV1(recovery, []exclusionjournal.SourceOriginV1{{Bytes: []byte{1}}}, views); export != nil || any(err) != any(exclusionjournal.ErrIntegrityV1) {
 		t.Fatalf("recovery replay constructor: export=%v err=%v", export != nil, err)
 	}
 }
@@ -279,11 +281,11 @@ func journalReplayFirstResult(t *testing.T, source *exclusionjournal.SourceOwner
 				return cause
 			})
 		}()
-		if attempts != 1 || visits != 1 || result != cause || (cause == nil && panicked != panicValue) || (cause != nil && panicked != nil) {
+		if attempts != 1 || visits != 1 || any(result) != any(cause) || (cause == nil && panicked != panicValue) || (cause != nil && panicked != nil) {
 			t.Fatalf("first result=%v panic=%v forwarding=%d visits=%d", result, panicked, attempts, visits)
 		}
 		journalReplayExpired(t, saved)
-		if _, err := operation.LimitsV1(); err != exclusionjournal.ErrUnavailableV1 {
+		if _, err := operation.LimitsV1(); any(err) != any(exclusionjournal.ErrUnavailableV1) {
 			t.Fatalf("escaped operation: %v", err)
 		}
 		return journalReplaySibling(t, source, a, e)
@@ -343,7 +345,7 @@ func journalReplayFunding(t *testing.T, source *exclusionjournal.SourceOwnerV1, 
 				}
 				return err
 			})
-			if short != 0 && (err != capacity || calls != 0) || short == 0 && (err != nil || calls != 6) {
+			if short != 0 && (any(err) != any(capacity) || calls != 0) || short == 0 && (err != nil || calls != 6) {
 				t.Fatalf("funding short=%d: %v visits=%d", short, err, calls)
 			}
 		}
