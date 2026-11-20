@@ -580,6 +580,10 @@ func testSourceReleaseStage(t *testing.T, stage string) {
 	if visible {
 		sourcePrepareRefusal(t, o, foreign, parts, ErrBusyV1)
 	}
+	if stage == "final-sync" {
+		o.ops.dirSync = func(*os.File) error { return cause }
+		sourceReleaseResult(t, o, p, true, cause)
+	}
 	store := sourceReopenStore(t, s, dir)
 	if spare {
 		narrow, record, backed := limits, sourceReadFile(t, filepath.Join(root, releaseFile)), sourceReadFile(t, filepath.Join(root, p.name))
@@ -1118,6 +1122,10 @@ func TestSourceBoundedMaximumCopy(t *testing.T) {
 	})
 	sourceFailIf(t, maximum == 0 || maximum > 65536, "copy scratch=%d", maximum)
 	sourceRead(t, o, m, parts)
+	maximum = 0
+	sourcePrepareResult(t, o, m, producer, nil)
+	sourceFailIf(t, maximum <= 0, "reuse did not read source parts")
+	sourceFailIf(t, maximum > 32768, "reuse copy scratch=%d", maximum)
 }
 
 func TestSourceStagingRestartAndAmbiguousRename(t *testing.T) {

@@ -66,7 +66,7 @@ func (o *SourceOwnerV1) withRoot(open func(*os.Root) (*os.Root, error), use func
 	defer pin.Close()
 	root := &sourceRoot{Root: r, pin: pin}
 	held, _ := pin.Stat()
-	if !os.SameFile(o.info, held) || held.Mode() != os.ModeDir|0o700 {
+	if !os.SameFile(o.info, held) || held.Mode() != o.info.Mode() {
 		return ErrIdentityV1
 	}
 	return use(root)
