@@ -591,7 +591,7 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 	t.Run("pending-independent-stage", func(t *testing.T) {
 		for _, stage := range []string{"intent-sync", "unlink", "unlink-sync", "marker-clear"} {
 			t.Run(stage, func(t *testing.T) {
-				_, o, dir, m, parts, p := sourcePreparedBundle(t)
+				s, o, dir, m, parts, p := sourcePreparedBundle(t)
 				sourceReleaseWithFault(t, o, p, stage, errors.New("pending"))
 				root := filepath.Join(dir, sourceDirectory)
 				temp := filepath.Join(root, ".staging-"+p.name)
@@ -605,6 +605,10 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 				sourceMust(t, err)
 				assertSourceReleaseCharge(t, o, m, 2, size+11)
 				sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+				fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
+				sourceReleaseResult(t, fresh, nil, true, ErrBusyV1)
+				assertSourceReleaseCharge(t, fresh, m, 2, size+11)
+				sourceFailIf(t, !bytes.Equal(sourceReadFile(t, temp), []byte("independent")), "release changed independent stage")
 			})
 		}
 	})

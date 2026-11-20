@@ -309,7 +309,7 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {
 	if !d.backingAbsent(r) {
 		return ErrIdentityV1
 	}
-	if err := d.checkStage(r); err != nil {
+	if err := d.checkStage(r, false); err != nil {
 		return err
 	}
 	if o.debt.name == d.name && o.debt.file == d.file {
@@ -332,7 +332,7 @@ func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) erro
 	if !present && !d.clearAttempted {
 		return ErrIntegrityV1
 	}
-	if err := d.checkStage(r); err != nil || !present {
+	if err := d.checkStage(r, false); err != nil || !present {
 		return err
 	}
 	if err := o.removeMarkerAlias(r); err != nil {
@@ -415,7 +415,7 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 }
 
 func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name string, scratch []byte) error {
-	if err := d.checkStage(r); err != nil {
+	if err := d.checkStage(r, name != ""); err != nil {
 		return err
 	}
 	if err := o.removeMarkerAlias(r); err != nil {
@@ -436,7 +436,7 @@ func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name stri
 }
 
 // checkStage preserves an independent stage for the same capture.
-func (d *sourceRelease) checkStage(r *sourceRoot) error {
+func (d *sourceRelease) checkStage(r *sourceRoot, backingPresent bool) error {
 	info, err := sourceEntryInfo(r, ".staging-"+d.name, nil)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -444,7 +444,7 @@ func (d *sourceRelease) checkStage(r *sourceRoot) error {
 	if err != nil {
 		return ErrIntegrityV1
 	}
-	if filelock.FileIdentityV1(info) != d.file {
+	if !backingPresent || filelock.FileIdentityV1(info) != d.file {
 		return ErrBusyV1
 	}
 	return nil
