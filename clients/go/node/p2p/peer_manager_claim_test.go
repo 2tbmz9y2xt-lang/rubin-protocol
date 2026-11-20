@@ -3,13 +3,9 @@ package p2p
 import (
 	"context"
 	"net"
-	"reflect"
-	"runtime"
-	"slices"
-	"strings"
 	"sync"
 	"testing"
-	"unsafe"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
@@ -66,10 +62,14 @@ func startServing(t *testing.T, s *Service) {
 func startWithInboundPeer(t *testing.T, s *Service) (string, net.Conn) {
 	t.Helper()
 	startServing(t, s)
-	remote, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", s.Addr())
+	deadline := time.Now().Add(lifecycleWatchdog)
+	dialer := net.Dialer{Deadline: deadline}
+	remote, err := dialer.DialContext(t.Context(), "tcp", s.Addr())
 	must(t, err, "dial")
 	t.Cleanup(func() { _ = remote.Close() })
+	must(t, remote.SetDeadline(deadline), "set handshake deadline")
 	must(t, completeRemoteHandshake(remote, s.cfg.PeerRuntimeConfig, testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 0)), "remote handshake")
+	must(t, remote.SetDeadline(time.Time{}), "clear handshake deadline")
 	addr := remote.LocalAddr().String()
 	waitUntil(t, func() bool { return snapshotHas(s.cfg.PeerManager, addr) }, "inbound peer registered")
 	return addr, remote
@@ -240,26 +240,35 @@ func TestPeerManagerClaimRollbackOnDARelayRefusal(t *testing.T) {
 }
 
 func TestPeerManagerClaimEarlierRefusalsTakeNoClaim(t *testing.T) {
-	pm := freshPeerManager()
-	_, cfg := claimConfig(t, pm)
+	_, cfg := claimConfig(t, freshPeerManager())
 	for _, tc := range []struct {
 		want   string
 		mutate func(*ServiceConfig)
 	}{
 		{"bind address is required", func(c *ServiceConfig) { c.BindAddr = "" }},
+		{"nil peer manager", func(c *ServiceConfig) { c.PeerManager = nil }},
 		{"nil sync engine", func(c *ServiceConfig) { c.SyncEngine = nil }},
-		{errInboundBlockBudgetRange.Error(), func(c *ServiceConfig) { c.InboundBlockBudgetBytes = maxInboundBlockBudgetBytes + 1 }},
+		{"nil blockstore", func(c *ServiceConfig) { c.BlockStore = nil }},
+		{"nil tx metadata func", func(c *ServiceConfig) { c.TxMetadataFunc = nil }},
+		{"inbound block budget must be zero or between 1073741824 and 8589934592 bytes", func(c *ServiceConfig) { c.InboundBlockBudgetBytes = maxInboundBlockBudgetBytes + 1 }},
 	} {
-		bad := cfg
-		tc.mutate(&bad)
-		service, err := NewService(bad)
-		require(t, service == nil && err != nil && err.Error() == tc.want, "NewService=(%p,%v), want %q", service, err, tc.want)
+		t.Run(tc.want, func(t *testing.T) {
+			bad := cfg
+			tc.mutate(&bad)
+			requireEarlyClaimRefusal(t, bad, tc.want, "free PeerManager")
+			s1 := requireClaimFree(t, cfg, "construction after the earlier refusal")
+			requireEarlyClaimRefusal(t, bad, tc.want, "held PeerManager")
+			require(t, cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(s1), "earlier refusal changed the DA TTL binding")
+			requireClaimRefused(t, cfg, "retry with the held PeerManager")
+			require(t, cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(s1), "retry changed the DA TTL binding")
+		})
 	}
-	nilPM := cfg
-	nilPM.PeerManager = nil
-	service, err := NewService(nilPM)
-	require(t, service == nil && err != nil && err.Error() == "nil peer manager", "nil PeerManager: NewService=(%p,%v)", service, err)
-	requireClaimFree(t, cfg, "construction after the earlier refusals")
+}
+
+func requireEarlyClaimRefusal(t *testing.T, cfg ServiceConfig, want, label string) {
+	t.Helper()
+	service, err := NewService(cfg)
+	require(t, service == nil && err != nil && err.Error() == want, "%s: NewService=(%p,%v), want %q", label, service, err, want)
 }
 
 type claimResult struct {
@@ -267,45 +276,25 @@ type claimResult struct {
 	err     error
 }
 
-// peerManagerMutex returns the mu field of pm, the sync.RWMutex that Claim locks.
-func peerManagerMutex(t *testing.T, pm *node.PeerManager) *sync.RWMutex {
+// constructConcurrently releases the constructors together and collects their results.
+func constructConcurrently(t *testing.T, cfgs []ServiceConfig) []claimResult {
 	t.Helper()
-	field := reflect.ValueOf(pm).Elem().FieldByName("mu")
-	require(t, field.IsValid() && field.Type() == reflect.TypeFor[sync.RWMutex](), "node.PeerManager has no sync.RWMutex field mu")
-	return (*sync.RWMutex)(unsafe.Pointer(field.UnsafeAddr()))
-}
-
-// claimWaitFrames match a constructConcurrently goroutine parked on a sync lock inside PeerManager.Claim.
-var claimWaitFrames = []string{"[sync.", "node.(*PeerManager).Claim(", "p2p.NewService(", "p2p.constructConcurrently.func"}
-
-// goroutinesParked counts the goroutines whose stack dump contains the fragments.
-func goroutinesParked(fragments ...string) int {
-	stack := make([]byte, 1<<22)
-	count := 0
-	for g := range strings.SplitSeq(string(stack[:runtime.Stack(stack, true)]), "\n\n") {
-		if !slices.ContainsFunc(fragments, func(f string) bool { return !strings.Contains(g, f) }) {
-			count++
+	start := make(chan struct{})
+	results := make([]claimResult, len(cfgs))
+	done := make([]<-chan struct{}, len(cfgs))
+	for i, cfg := range cfgs {
+		done[i] = goDone(func() {
+			<-start
+			results[i].service, results[i].err = NewService(cfg)
+		})
+	}
+	close(start)
+	requireJoined(t, "NewService constructors", done...)
+	for _, result := range results {
+		if result.service != nil {
+			t.Cleanup(func() { _ = result.service.Close() })
 		}
 	}
-	return count
-}
-
-// constructConcurrently locks mu, runs one NewService per cfg on its own goroutine, unlocks mu
-// once len(cfgs) goroutines are parked on a lock inside PeerManager.Claim, and returns the
-// results in cfg order.
-func constructConcurrently(t *testing.T, mu *sync.RWMutex, cfgs []ServiceConfig) []claimResult {
-	t.Helper()
-	results := make([]claimResult, len(cfgs))
-	mu.Lock()
-	unlock := sync.OnceFunc(mu.Unlock)
-	t.Cleanup(unlock)
-	var wg sync.WaitGroup
-	for i, cfg := range cfgs {
-		wg.Go(func() { results[i].service, results[i].err = NewService(cfg) })
-	}
-	waitUntil(t, func() bool { return goroutinesParked(claimWaitFrames...) == len(cfgs) }, "NewService goroutines parked inside PeerManager.Claim")
-	unlock()
-	wg.Wait()
 	return results
 }
 
@@ -317,10 +306,9 @@ func TestPeerManagerClaimAtomicAcrossConstructions(t *testing.T) {
 		_, cfgs[i] = claimConfig(t, pm)
 	}
 	winners, refused := 0, 0
-	for _, r := range constructConcurrently(t, peerManagerMutex(t, pm), cfgs) {
+	for _, r := range constructConcurrently(t, cfgs) {
 		if r.err == nil && r.service != nil {
 			winners++
-			t.Cleanup(func() { _ = r.service.Close() })
 			continue
 		}
 		require(t, r.service == nil && r.err != nil && r.err.Error() == errPeerManagerClaimed, "NewService=(%p,%v), want %q", r.service, r.err, errPeerManagerClaimed)
