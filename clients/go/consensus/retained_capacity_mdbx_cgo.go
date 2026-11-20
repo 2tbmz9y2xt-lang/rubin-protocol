@@ -192,7 +192,7 @@ func retainedRelationV1(read *retainedReadV1, op *mdbx.TreeOperationV1) error {
 
 // retainedRoleRelationV1 binds the sole primitive to the fresh CURRENT role:
 // its coverage database is the role origin and its height is the role's next
-// height j (DIRECT 3759, h=H_old+1). It runs once the role data exists.
+// height j (h=H_old+1). It runs once the role data exists.
 func retainedRoleRelationV1(read *retainedReadV1, op *mdbx.TreeOperationV1) error {
 	p := &op.Primitives[0]
 	if p.Coverage.DatabaseID != read.origin.database || p.Height != read.roles[0].j {
@@ -564,7 +564,7 @@ func (f *retainedFiniteV1) mutationV1(m *mdbx.Mutation) (bool, bool) {
 }
 
 // wLinkV1 admits only the deletion of the cleared side's SideLink at x's
-// height; restV1 requires it exactly for a W row x (MP 1480-1483, 2559-2561).
+// height; restV1 requires it exactly for a W row x (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3).
 func (f *retainedFiniteV1) wLinkV1(m *mdbx.Mutation) bool {
 	s := f.read.authority.Authority.SelectedSide
 	if s == nil || !f.changedV1() || f.planned.Authority.SelectedSide != nil {
@@ -637,7 +637,7 @@ func (f *retainedFiniteV1) obsoleteV1(old retainedArtifactV1) (retainedArtifactV
 // obsolete projection as the last owner. Obsolete namespaces are untouched and
 // the Pair changes no header but a deleted one and x's, whose planned keep owns
 // every kind, so the planned image keeps OLD's projection unless the Pair
-// deletes the header it needs (MP 1717, 2550-2557).
+// deletes the header it needs.
 func (f *retainedFiniteV1) unionsV1(oldK, plannedK retainedArtifactV1, deleted uint8) (old, planned retainedOwnersV1, err error) {
 	if old, err = f.read.unionV1(oldK); err != nil {
 		return old, planned, err
@@ -872,7 +872,7 @@ func (read *retainedReadV1) indexOfV1(hash [32]byte, limit uint64) (bool, error)
 
 // promiseV1 admits only the descriptor changes of a direct op: unchanged
 // profile, next generation, excluded branch, BLOCKS and GENERATION spans,
-// nonregressing B (MP 1288-1290; L_body, not B, decides BLOCKS), a U increase
+// nonregressing B (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3; L_body, not B, decides BLOCKS), a U increase
 // U0->U1 that creates or extends exactly UNDO(CURRENT,U0,U1-1,U0), and the
 // optional plan; it reports a W/L transfer.
 func (f *retainedFiniteV1) promiseV1() (bool, error) {
@@ -896,18 +896,18 @@ func retainedPromiseFixedV1(o, p *mdbx.StorageAuthorityV1) bool {
 }
 
 // retainedExcludedSameV1 requires an unchanged excluded_invalid_branch slot:
-// it is never automatically cleared or overwritten (MP 1855-1857), and any
+// it is never automatically cleared or overwritten (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4), and any
 // other change is an effect this owner does not support.
 func retainedExcludedSameV1(x, y *mdbx.InvalidBranchV1) bool {
 	return x == y || x != nil && y != nil && x.FirstInvalidHeight == y.FirstInvalidHeight && x.FirstInvalidBlockHash == y.FirstInvalidBlockHash && bytes.Equal(x.ExactConsensusError, y.ExactConsensusError)
 }
 
 // optionalPlanV1 admits unchanged optional descriptors, or the W/L transfer
-// of a live selected side (MP 3018-3058): side cleared, detached suffix
+// of a live selected side: side cleared, detached suffix
 // unchanged and L appended as, or merged into, the side generation's SIDE
-// span, whose SideLinks keep their association (MP 1473-1478, 2672-2674).
-// From the rolling-prepared OLD shape (MP 1422-1426) L merges into the pending
-// SIDE with first and next kept (MP 2539-2541); a W row breaks the adjacency.
+// span, whose SideLinks keep their association (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3).
+// From the rolling-prepared OLD shape (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3) L merges into the pending
+// SIDE with first and next kept; a W row breaks the adjacency.
 func (f *retainedFiniteV1) optionalPlanV1() (bool, error) {
 	o, p := f.read.authority.Authority, f.planned.Authority
 	if !retainedDetachedEqualV1(o.DetachedSuffix, p.DetachedSuffix) {

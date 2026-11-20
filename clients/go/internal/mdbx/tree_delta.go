@@ -26,7 +26,7 @@ import (
 // that copy fit treeControlBytesV1, which L5a charges before treeStoredBodyV1 and newTreeRecorderV1 (D14-2, D25, D28).
 const treeControlBytesV1 uint64 = 4096 // C: L1 per-primitive control objects (recorder, delta, key scratch, 2 leaves iterators, treeStoredBodyV1's 32-byte block copy)
 
-// Event kinds of the closed grammar (BLOCK 3016) and the descriptor flag bits.
+// Event kinds of the closed grammar and the descriptor flag bits.
 const (
 	treeSpendV1  uint8 = 1
 	treeCreateV1 uint8 = 2
@@ -54,7 +54,7 @@ type treeDescV1 struct {
 // against the measured struct size by TestTreeDeltaControlBoundV1); the array below is its compile-time guard descSize <= 128.
 const treeDescSizeV1 uint64 = 104
 
-var _ [128 - treeDescSizeV1]struct{} // descSize <= 128 (D6-6 E1, BLOCK 3063)
+var _ [128 - treeDescSizeV1]struct{} // descSize <= 128 (D6-6 E1)
 
 type treeRecorderV1 struct {
 	mu                             sync.Mutex
@@ -197,7 +197,7 @@ func treePermuteV1(descs []treeDescV1, n uint32) {
 	}
 }
 
-// treeUTXOValueOKV1 is the DecodeUTXOValue acceptance check (schema.go:194-209) without the covenant-data copy.
+// treeUTXOValueOKV1 is the DecodeUTXOValue acceptance check without the covenant-data copy.
 func treeUTXOValueOKV1(b []byte) bool {
 	if len(b) < 20 || len(b) > 65_560 {
 		return false
@@ -209,7 +209,7 @@ func treeUTXOValueOKV1(b []byte) bool {
 	return b[len(b)-1] <= 1
 }
 
-// treeUndoValueOKV1 is the validateUndoValue acceptance check (schema.go:347-356) without allocation (S6c).
+// treeUndoValueOKV1 is the validateUndoValue acceptance check without allocation (S6c).
 func treeUndoValueOKV1(key, value []byte) bool {
 	if key[32] == 0 {
 		return len(value) == 33 && value[0] == 1
@@ -311,7 +311,7 @@ func (d *treeDeltaV1) buildManifestV1() {
 	binary.BigEndian.PutUint32(d.keys.manifest[29:], d.spent)
 }
 
-// utxoKeyV1 writes UTXOKey(Generation, txid, vout) (schema.go:159-167) into d.keys.utxo.
+// utxoKeyV1 writes UTXOKey(Generation, txid, vout) into d.keys.utxo.
 func (d *treeDeltaV1) utxoKeyV1(e *treeDescV1) []byte {
 	binary.BigEndian.PutUint64(d.keys.utxo[:], d.rec.prim.generation)
 	copy(d.keys.utxo[8:], e.txid[:])
@@ -319,7 +319,7 @@ func (d *treeDeltaV1) utxoKeyV1(e *treeDescV1) []byte {
 	return d.keys.utxo[:]
 }
 
-// entryKeyV1 writes UndoEntryKey(Block, txid, txIndex, inputIndex, vout) (schema.go:273-282) into d.keys.entry.
+// entryKeyV1 writes UndoEntryKey(Block, txid, txIndex, inputIndex, vout) into d.keys.entry.
 func (d *treeDeltaV1) entryKeyV1(e *treeDescV1) []byte {
 	copy(d.keys.entry[:], d.keys.block[:])
 	d.keys.entry[32] = 1

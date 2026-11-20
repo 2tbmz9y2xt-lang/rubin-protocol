@@ -122,7 +122,7 @@ func TestReplayRecoveryFixtureIdentityWidth(t *testing.T) {
 }
 
 // R41b: a D2 width defect of an active canonical row above height 0 is the Reader's integrity error returned before
-// the step is cleared, so it carries recovery_artifact (RE L613-616, L657-660); a defect at height 0 is R44's.
+// the step is cleared, so it carries recovery_artifact; a defect at height 0 is R44's.
 func TestReplayRecoveryFixtureDirectWalkWidth(t *testing.T) {
 	w := newReplayWorld(t, 5)
 	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 2, logicalMDBXMust(mdbx.HeightKey(1, 3)), make([]byte, 103)) == nil, "seed")

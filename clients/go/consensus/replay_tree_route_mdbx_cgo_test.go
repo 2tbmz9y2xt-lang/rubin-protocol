@@ -501,7 +501,7 @@ func rtEntryWorld(t *testing.T, edit func(e *mdbx.TreeAuthorityV1)) (*q148World,
 	return w, s, &q148View{inv: q148Complete([][32]byte{s.tip()}, s.headers)}
 }
 
-// rtBinding is the target image binding from AUTH 1034-1062: database {7}, commitment 1, the target's chain and
+// rtBinding is the target image binding: database {7}, commitment 1, the target's chain and
 // genesis, PRE_GENESIS, the empty-tree digest sha3-256("RUBIN_UTXO_TREE_V1\x00"), Top empty, FULL_HISTORY.
 func rtBinding(t *testing.T, chain, genesis [32]byte) []byte {
 	t.Helper()
@@ -846,7 +846,7 @@ func TestReplayTreeDirectAbsence(t *testing.T) {
 // X2 maximal envelope: the E plan copies every input envelope field it does not set (treeEntryBatch), so an
 // ExcludedInvalidBranch with an ExactConsensusError sized to make the planned envelope exactly MaxMetadataBytes is the
 // largest plan; it commits through A under an owner at MinReservationLimit with no other live charge (the account
-// ceiling LANE_MAX bounds OWN plus the step-5 charge, operation_reservation.go:127).
+// ceiling LANE_MAX bounds OWN plus the step-5 charge, (*operationReservationState).admits).
 func TestReplayTreeEntryAccountFitMaximal(t *testing.T) {
 	s := newQ148Seq(t, POW_LIMIT, 1<<30)
 	s.extend(t, 3, 2*TARGET_BLOCK_INTERVAL, false)
@@ -1473,8 +1473,8 @@ func TestReplayWholeTargetContext(t *testing.T) {
 	image := rtImageReplay([]byte{0xa1})
 	slotted := rtWhole()
 	slotted.Authority.ExcludedInvalidBranch = rtTuple(12, 0x12, "BLOCK_ERR_WEIGHT_EXCEEDED")
-	// A GENESIS_REPLAY cursor of one kind at height 0 has exactly one legal hash (tree_authority.go:326,
-	// authority_descriptors.go:64-70), so the cursor kind row also changes the hash: PRE_GENESIS versus APPLIED at the
+	// A GENESIS_REPLAY cursor of one kind at height 0 has exactly one legal hash (validTreeSource,
+	// validReplayFor), so the cursor kind row also changes the hash: PRE_GENESIS versus APPLIED at the
 	// genesis hash.
 	preGenesis := rtWhole()
 	preGenesis.Authority.Replay.Cursor = mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorPreGenesisV1}

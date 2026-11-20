@@ -374,7 +374,7 @@ func buildTestBlock(t *testing.T, coinbaseP2PKValue uint64) (blockBytes []byte, 
 	return
 }
 
-// TestConnectBlockParallelSigVerify_TxValidationError_MissingUTXO covers lines 118-119:
+// TestConnectBlockParallelSigVerify_TxValidationError_MissingUTXO covers:
 // a valid block with a non-coinbase tx referencing a UTXO not in the state.
 func TestConnectBlockParallelSigVerify_TxValidationError_MissingUTXO(t *testing.T) {
 	height := uint64(1)
@@ -393,7 +393,7 @@ func TestConnectBlockParallelSigVerify_TxValidationError_MissingUTXO(t *testing.
 	}
 }
 
-// TestConnectBlockParallelSigVerify_CoinbaseValueBound covers lines 136-137:
+// TestConnectBlockParallelSigVerify_CoinbaseValueBound covers:
 // a block where coinbase value exceeds subsidy + fees.
 func TestConnectBlockParallelSigVerify_CoinbaseValueBound(t *testing.T) {
 	height := uint64(1)

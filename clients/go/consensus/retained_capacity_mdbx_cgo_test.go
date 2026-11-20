@@ -85,7 +85,7 @@ func TestRetainedCapacityMDBX(t *testing.T) {
 // D2/D23 "equal digest roles distinct": in the actual empty pair both role bindings carry the same
 // empty RootDigest (riEmptyRole); the roles stay two (generations 1 and 2, fresh 32*2), each owning
 // its empty Tree(0)=32 (TREE root32), so Ret(pre) is 64, not one shared 32. A Proof over two equal
-// role terms replaces only CURRENT and keeps the LAG term (D1 1613).
+// role terms replaces only CURRENT and keeps the LAG term.
 func retainedCapacityEqualDigestV1(t *testing.T) {
 	w := riNew(t)
 	err := riContext(t, w, nil, func(read *retainedReadV1) error {
@@ -335,9 +335,8 @@ func retainedCapacityApplyMatrixV1(t *testing.T) {
 		{mdbx.CommitTruthOld, mdbx.UpdateStageCommitMayHaveCrossed, 0, boom, false, errRetainedApplyAPIV1, false},
 		{mdbx.CommitTruthOld, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, 0, boom, false, nil, false},
 		// Definite attempted OLD: updateNativeCommit maps RESULT_TRUE/PANIC/EPERM/...
-		// to OLD with the commit EngineError at the section's reached stage
-		// (internal/mdbx/mdbx_cgo.go:2135-2140, tree_truth_cgo.go:523), which is
-		// WriteStarted once a Pair row was put (mdbx_cgo.go:1881,1901); index -1.
+		// to OLD with the commit EngineError at the section's reached stage, which is
+		// WriteStarted once a Pair row was put (updateNativePut, updateNativeDeletes); index -1.
 		{mdbx.CommitTruthOld, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, -1, definiteOld, false, nil, false},
 		{mdbx.CommitTruthOld, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, -1, definiteOld, true, nil, false},
 	} {
@@ -379,7 +378,7 @@ func retainedCapacityClearedV1(a *RetainedAccountingV1) bool {
 	return !a.valid && a.exactRet == 0 && a.binding == (mdbx.MutationBindingV1{}) && a.complete == [2]retainedCompleteV1{}
 }
 
-// retainedCapacityPlanV1 sorts op's Pair into the (rank, key) order native admission requires (tree_stream_cgo.go:18-19)
+// retainedCapacityPlanV1 sorts op's Pair into the (rank, key) order native admission requires (TreePairV1)
 // and runs one Plan inside an actual operation account and View Reader; budget is the extra grant the caller holds around Plan.
 func retainedCapacityPlanV1(t *testing.T, w *btWorld, a *RetainedAccountingV1, dst *DirectRetainedProofV1, op *mdbx.TreeOperationV1, budget uint64) (result error) {
 	t.Helper()
@@ -446,7 +445,7 @@ func retainedCapacityChildV1(t *testing.T, w *btWorld) ([32]byte, [32]byte) {
 }
 
 // retainedCapacityIndexV1 is x's planned CURRENT canonical index and owner insert, the only Pair source of x's planned canonical
-// identity; W_h=h+1 is the MP 2817 work (genesis 1, 1 per all-ff target) only when x is h above genesis; Plan never reads it.
+// identity; W_h=h+1 is the work (genesis 1, 1 per all-ff target) only when x is h above genesis; Plan never reads it.
 func retainedCapacityIndexV1(g, h uint64, x, parent [32]byte) []mdbx.Mutation {
 	index, _ := mdbx.HeightKey(g, h)
 	owner, _ := mdbx.CanonicalOwnerKey(g, x)
@@ -610,7 +609,7 @@ func TestRetainedCapacityMDBXFinite(t *testing.T) {
 			op.Pair.Mutations = append(op.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[3], Key: x[:], AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 148)})
 		},
 		// A Pair state, x-keyed undo, tree-node, counter or root meta row of the CURRENT generation g=1: native
-		// admission refuses each for every covered direct op (internal/mdbx/tree_stream_cgo.go:582-584, 655-691).
+		// admission refuses each for every covered direct op (treePairIdentityV1, treePairOwnedV1 and treePairMetaOwnedV1).
 		"state_row":     row(btMutation(1, append(g, make([]byte, 36)...), one)),
 		"undo_row":      row(btMutation(5, append(x[:], 0, 0, 0, 1), one)),
 		"tree_node_row": row(btMutation(8, node, one)),
@@ -733,9 +732,9 @@ func TestRetainedCapacityMDBXOptionalPlan(t *testing.T) {
 	}
 }
 
-// D2/D15/D17 rolling merge: from the rolling-prepared OLD shape (MP 1422-1426: one-slot side
+// D2/D15/D17 rolling merge: from the rolling-prepared OLD shape (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3: one-slot side
 // [f,tip], pending SIDE(g,f-1,f-1,f-1)) the W/L transfer with W empty merges L into that span,
-// SIDE(g,f-1,tip,f-1), and every other SIDE descriptor is refused (MP 2539-2541). "witness" is the
+// SIDE(g,f-1,tip,f-1), and every other SIDE descriptor is refused. "witness" is the
 // RUB-1594 A1 tuple: H_old=F=0, rows 2..1440, SIDE(7,1,1,1), candidate at 1. Both rows are legal
 // direct pre-states: H_old=F, candidate at F+1 below f, so W is empty with no read. A second
 // planned SIDE span is shown refused here although DecodeTreeAuthorityV1 refuses it before the
@@ -783,8 +782,8 @@ func TestRetainedCapacityMDBXRollingMerge(t *testing.T) {
 }
 
 // The promise transfer admits only the exact UNDO span of a U increase. Each OLD and planned authority is NONE/STABLE
-// without spans or PRUNE_GC/STABLE with them (MP 1844) and decodes; gap_extend's OLD, whose last UNDO span ends below
-// U0-1 (MP 1327-1328), is the structural-only rejected case the decoder still accepts.
+// without spans or PRUNE_GC/STABLE with them and decodes; gap_extend's OLD, whose last UNDO span ends below
+// U0-1 (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3), is the structural-only case the decoder still accepts.
 func TestRetainedCapacityMDBXPromise(t *testing.T) {
 	var read retainedReadV1
 	read.roles[0].generation = 1
@@ -804,7 +803,7 @@ func TestRetainedCapacityMDBXPromise(t *testing.T) {
 		"no_span":   {nil, nil, 12, false},
 		"wider":     {nil, []mdbx.CleanupSpanV1{undo(9, 9, 11)}, 12, false},
 		"regressed": {nil, nil, 9, false},
-		// UNDO(1,4,9,5)->(1,4,8,5) with U 10->9 passes spansV1; only the nonregressing U (MP 1288-1290) refuses it.
+		// UNDO(1,4,9,5)->(1,4,8,5) with U 10->9 passes spansV1; only the nonregressing U (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3) refuses it.
 		"u_regressed_span": {[]mdbx.CleanupSpanV1{undo(4, 5, 9)}, []mdbx.CleanupSpanV1{undo(4, 5, 8)}, 9, false},
 		"gap_extend":       {[]mdbx.CleanupSpanV1{undo(4, 5, 8)}, []mdbx.CleanupSpanV1{undo(4, 5, 11)}, 12, false},
 		"drained_old":      {[]mdbx.CleanupSpanV1{undo(4, 5, 9)}, []mdbx.CleanupSpanV1{undo(4, 6, 9)}, 10, false},
@@ -822,7 +821,7 @@ func TestRetainedCapacityMDBXPromise(t *testing.T) {
 	}
 }
 
-// retainedCapacitySpansV1 sets NONE without spans, otherwise PRUNE_GC with them (MP 1844).
+// retainedCapacitySpansV1 sets NONE without spans, otherwise PRUNE_GC with them.
 func retainedCapacitySpansV1(a *mdbx.StorageAuthorityV1, spans []mdbx.CleanupSpanV1) {
 	a.Phase, a.Cleanup = mdbx.StoragePhaseNoneV1, nil
 	if len(spans) != 0 {
@@ -830,15 +829,15 @@ func retainedCapacitySpansV1(a *mdbx.StorageAuthorityV1, spans []mdbx.CleanupSpa
 	}
 }
 
-// W/L transfer (MP 3018-3037): side F=0=H_old holds x@1 (MP 2984-2986) and its child y@2 (298 bytes each). The op publishes
-// x at 1 on the route of MP 3723-3726 (a longer descendant chain applied one D=0,C=1 commit or one bounded phase at a time; y
-// as the winner is C=2 ORDINARY_APPLY, MP 3736-3740): W={x}, L={y}, side cleared, SIDE(3,2,2,2) owing L, SideLink (3,1) and y's
-// unowned header deleted (MP 2550-2557): x's header delta 0, y's 148 leaves E, its body and link stay owed; a Pair that keeps that
-// header leaves the same E (no owner keeps it after the transfer, MP 3169). Deleting L's link or y's body is refused.
-// On the lawful-retention OLD (healthy y@1, x's sibling, MP 3047-3058) a W-less SideLink (3,1) deletion (side cleared, with or without SIDE) and y's owned body deletion are refused; the side is kept.
+// W/L transfer: side F=0=H_old holds x@1 and its child y@2 (298 bytes each). The op publishes
+// x at 1 on the route (a longer descendant chain applied one D=0,C=1 commit or one bounded phase at a time; y
+// as the winner is C=2 ORDINARY_APPLY): W={x}, L={y}, side cleared, SIDE(3,2,2,2) owing L, SideLink (3,1) and y's
+// unowned header deleted: x's header delta 0, y's 148 leaves E, its body and link stay owed; a Pair that keeps that
+// header leaves the same E (no owner keeps it after the transfer). Deleting L's link or y's body is refused.
+// On the lawful-retention OLD (healthy y@1, x's sibling) a W-less SideLink (3,1) deletion (side cleared, with or without SIDE) and y's owned body deletion are refused; the side is kept.
 func TestRetainedCapacityMDBXLeavingSide(t *testing.T) {
 	wl, leave := retainedCapacityWLSideV1(t)
-	// G7 (D15, MP 1717, 2550-2557): in wo obsolete generation 5 also projects y; deleting y's header ends that projection in the
+	// G7 (D15): in wo obsolete generation 5 also projects y; deleting y's header ends that projection in the
 	// planned image, so y's header leaves E with its projection-owned (here absent) undo family while SIDE keeps its body.
 	wo, leaveO := retainedCapacityWLSideV1(t)
 	retainedCapacityObsoleteYV1(t, wo, [32]byte(leaveO.Key), 2)
@@ -882,7 +881,7 @@ func retainedCapacityObsoleteYV1(t *testing.T, w *btWorld, y [32]byte, h uint64)
 	})
 }
 
-// retainedCapacityWLSideV1 installs the side F=0, rows x@1 and its child y@2; returns y's leaving header deletion (MP 2550-2557).
+// retainedCapacityWLSideV1 installs the side F=0, rows x@1 and its child y@2; returns y's leaving header deletion.
 func retainedCapacityWLSideV1(t *testing.T) (*btWorld, mdbx.Mutation) {
 	t.Helper()
 	w, _, genesis := riGenesis(t)
@@ -905,7 +904,7 @@ func retainedCapacityWLOpV1(t *testing.T, w *btWorld, f, l uint64, m ...mdbx.Mut
 
 // retainedCapacityKeptSideV1: a changed planned authority (U+1) that keeps
 // OLD's selected side, or OLD without a side, admits no SideLink deletion at x's
-// height; links stay byte-identical (MP 1483-1485). The bare op proves.
+// height; links stay byte-identical (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3). The bare op proves.
 func retainedCapacityKeptSideV1(t *testing.T, w *btWorld) {
 	t.Helper()
 	defer func() {
@@ -1007,7 +1006,7 @@ func retainedCapacityAgreeV1(t *testing.T, cold, warm *DirectRetainedProofV1) {
 }
 
 // retainedCapacitySelectedV1 stores raw's header, body and a SideLink naming it at (3,h) and installs a one-row selected side
-// 3 at tip h, both with W_h=h+1: the MP 1462-1464, 2817 work (genesis 1, 1 per all-ff target) only when raw is h above genesis.
+// 3 at tip h, both with W_h=h+1: the RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3 work (genesis 1, 1 per all-ff target, RUBIN_L1_CANONICAL.md Section 23) only when raw is h above genesis.
 func retainedCapacitySelectedV1(t *testing.T, w *btWorld, raw []byte, h uint64) [32]byte {
 	t.Helper()
 	hash := sha3.Sum256(raw[:148])
@@ -1070,9 +1069,9 @@ func TestRetainedCapacityMDBXWPromotion(t *testing.T) {
 	if err := retainedCapacityPlanV1(t, w, a, dst, op, 8192); err != nil || !dst.prepared || dst.add != 148 || dst.remove != 148 || dst.undo.oldOwned || !dst.undo.postOwned {
 		t.Fatalf("W promotion: %v add=%d remove=%d undo=%+v", err, dst.add, dst.remove, dst.undo)
 	}
-	// Only a present-before deletion of SideLink(3,1) is the W publication
-	// (MP 2559-2561); an overwrite, a before-absent or unknown-kind effect or
-	// another key is refused (MP 1473-1474).
+	// Only a present-before deletion of SideLink(3,1) is the W publication;
+	// an overwrite, a before-absent or unknown-kind effect or
+	// another key is refused.
 	overwrite, absent, unknown := link, link, link
 	overwrite.AfterKind, overwrite.Literal = mdbx.AfterLiteral, mdbx.ChainValue(x, genesis, [40]byte{39: 2})
 	absent.BeforePresent, unknown.AfterKind = false, 0
@@ -1261,7 +1260,7 @@ func TestRetainedCapacityMDBXBodyWindow(t *testing.T) {
 
 // Span-order residual: a decodable authority holds at most one SIDE span
 // (validSpanOrder: strictly increasing kinds), so a planned SIDE span never
-// sorts beside a second one. The rolling-prepared OLD shape (MP 1422-1426)
+// sorts beside a second one. The rolling-prepared OLD shape (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3)
 // encodes, and appending L beside its pending span does not.
 func TestRetainedCapacityMDBXSideOrder(t *testing.T) {
 	w, _, _ := riGenesis(t)

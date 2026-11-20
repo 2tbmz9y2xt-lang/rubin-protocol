@@ -63,7 +63,7 @@ func TestRetainedCapacityMDBXCommitOutcomes(t *testing.T) {
 	t.Run("T18_w_row_beside_pending_side", retainedCapacityWBesidePendingV1)
 	t.Run("D4_native_frame_R_boundaries", retainedCapacityNativeBoundsV1)
 	t.Run("T19_rolling_merge_full_plan_proof", retainedCapacityRollingMergeV1)
-	// D15 (MP 1717, 2550-2557, 3169): the W/L op (side) or the bare op deletes y's header (x's child at 2), or the W/L Pair keeps it. Obsolete generation 5 projecting y at h (0:
+	// D15: the W/L op (side) or the bare op deletes y's header (x's child at 2), or the W/L Pair keeps it. Obsolete generation 5 projecting y at h (0:
 	// none) with y's family (manifest h, 2*(36+20)) owns, at its own height and fields, each kind no stronger owner holds; the deletion ends it: the selected y's header and family
 	// leave E beside x's W header 148 (F14_2: obsolete height 3, side row 2); the unowned y's header, body 298 and family leave E as the producer's cold Ret drops them (F14_1).
 	for name, c := range map[string]struct {
@@ -252,7 +252,7 @@ func retainedCapacityReopenV1(t *testing.T) {
 // child x (Pair without a header-x row) contributes 0 to the pre 1077 and +148 once to the post
 // 1596 (native_fixture_recipe); the slot inserts x and a fresh enumeration agrees. D14 "Proof nil
 // then HeaderSlot error": a different stored row x makes the native slot refuse after an accepted
-// Proof with StateMismatch -30779 "tree header slot differs" (RUB-1750, tree_stream_cgo.go:117-127)
+// Proof with StateMismatch -30779 "tree header slot differs" (TreeOperationV1.HeaderSlot)
 // at OLD/Prewrite/-1 with no write; Apply returns nil and invalidates.
 func retainedCapacityHeaderSlotV1(t *testing.T) {
 	for _, differ := range []bool{false, true} {
@@ -314,9 +314,9 @@ func retainedCapacityHeaderSlotV1(t *testing.T) {
 }
 
 // T18 (rejected_cases): a W row beside the rolling-prepared pending SIDE. The stored selected side of generation 3 has one
-// row at 5 (F 4, f 5) whose SideLink names x; the OLD authority in this read carries the pending SIDE(3,4,4,4) (MP 1422-1426).
-// The shape is structural-only (MP 2984-2986, 3047-3056, 1408-1411), and so is x's stored work 6: x is genesis's child
-// (MP 2817 work 2); the read checks only 0<W<=2^288. restV1 reads the actual SideLink through optionalAtV1, finds x as W,
+// row at 5 (F 4, f 5) whose SideLink names x; the OLD authority in this read carries the pending SIDE(3,4,4,4) (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3).
+// The shape is structural-only, and so is x's stored work 6: x is genesis's child
+// (work 2); the read checks only 0<W<=2^288. restV1 reads the actual SideLink through optionalAtV1, finds x as W,
 // and the L merge is refused; the same read with a non-W block admits the merge SIDE(3,4,5,4) (selectivity control).
 func retainedCapacityWBesidePendingV1(t *testing.T) {
 	w, _, genesis := riGenesis(t)
@@ -563,11 +563,11 @@ func retainedCapacityLagKeptV1(t *testing.T, w *btWorld, rolesBefore [2]retained
 }
 
 // T19 (D2/D15/D17): the rolling-prepared OLD shape of the RUB-1594 A1 witness: H_old=F=0, live
-// one-slot selected side [2,1440] (1439 rows, f 2 >= F+2, MP 1408-1411) and pending SIDE(3,1,1,1)
-// owing the candidate x at f-1 (MP 1422-1426). The direct op at 1 has W empty and merges L=[2,1440]
-// into SIDE(3,1,1440,1) with first and next kept (MP 2539-2541, DIRECT 3800-3805), and the full
+// one-slot selected side [2,1440] (1439 rows, f 2 >= F+2, RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3) and pending SIDE(3,1,1,1)
+// owing the candidate x at f-1 (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3). The direct op at 1 has W empty and merges L=[2,1440]
+// into SIDE(3,1,1440,1) with first and next kept, and the full
 // Plan/Proof path accepts it. x's header is the canonical +148; each of the 1439 L headers leaves the selected
-// owner (SIDE body only) and is deleted in the Pair (MP 2550-2557), so remove is 148*1439; bodies stay owned. SIDE(3,2,1440,2)
+// owner (SIDE body only) and is deleted in the Pair, so remove is 148*1439; bodies stay owned. SIDE(3,2,1440,2)
 // and SIDE(3,1,1440,2) are refused.
 func retainedCapacityRollingMergeV1(t *testing.T) {
 	for name, c := range map[string]struct {
@@ -599,7 +599,7 @@ func retainedCapacityRollingMergeV1(t *testing.T) {
 }
 
 // retainedCapacityRollingV1 stores the candidate x's body and SideLink (3,1), the 1439 chained selected rows 2..1440
-// (W_h=h+1, MP 1462-1464, 2817) and the OLD authority; it returns the L header deletions the merge owes (MP 2550-2557).
+// (W_h=h+1: the RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3 work, with genesis 1 and 1 per all-ff target by RUBIN_L1_CANONICAL.md Section 23) and the OLD authority; it returns the L header deletions the merge owes.
 func retainedCapacityRollingV1(t *testing.T) (*btWorld, [32]byte, []mdbx.Mutation) {
 	t.Helper()
 	w, _, genesis := riGenesis(t)
@@ -723,7 +723,7 @@ func retainedCapacityCallbackRefusalV1(t *testing.T) {
 // key a Pair row or the slot hash, is no Plan control and no E term: the op proves once with the nil-window pre 1077 and
 // post 1596, commits NEW/nil/CommitMayHaveCrossed/-1, caches 1596, and the cold Ret after reopen is 1596. E2: a window
 // naming the absent index row (1,2), no Pair target, gets the native EngineStateMismatch "canonical context OLD image is
-// incomplete" (canonical_context_cgo.go:87) at OLD/Prewrite/-1 with Proof not entered; the completed pre 1077 cached by
+// incomplete" (contextImageShape) at OLD/Prewrite/-1 with Proof not entered; the completed pre 1077 cached by
 // that Plan is marked 1077+7, Apply without the clean witness returns nil and clears the cache (Ret 0, zero binding), and
 // the next nil-window Plan reconstructs the cold 1077 once on the open Store, not the marked kept value.
 func retainedCapacityContextWindowV1(t *testing.T) {
@@ -965,9 +965,9 @@ func retainedCapacityOptionalRawV1(t *testing.T) []byte {
 
 // retainedCapacityOptionalFrameV1 commits the recipe child x1 at 1 and returns its child x at 2
 // (unowned body, a third 89-byte entry) beside a detached entry (1,y) on y, x1's sibling under
-// genesis (the reorg genesis->y to genesis->x1: F=0, H_new=1>F, MP 3039-3044, 3736). The SIDE(4,1,1,1)
+// genesis (the reorg genesis->y to genesis->x1: F=0, H_new=1>F). The SIDE(4,1,1,1)
 // whose SideLink names the same y mirrors the merged producer recipe riOptional "detached+SIDE"
-// (retained_image_mdbx_cgo_test.go:447). y's header is stored; its body is absent (bodyLen 0),
+// (riOptional). y's header is stored; its body is absent (bodyLen 0),
 // malformed (149) or healthy (298).
 func retainedCapacityOptionalFrameV1(t *testing.T, bodyLen int) (*btWorld, []byte, [32]byte, [32]byte, []byte) {
 	t.Helper()
