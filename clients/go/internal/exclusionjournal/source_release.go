@@ -48,7 +48,7 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 				if _, err := o.census(r, false); err != nil {
 					return err
 				}
-				if o.debt.name == p.name && !o.debt.alias {
+				if o.debt.name == p.name && o.debt.backing != p.name {
 					return ErrBusyV1
 				}
 				d := &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
@@ -306,10 +306,7 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {
 	if err := o.syncBoundRoot(r); err != nil {
 		return err
 	}
-	if !d.backingAbsent(r) {
-		return ErrIdentityV1
-	}
-	if err := d.checkStage(r, false); err != nil {
+	if err := d.confirmClear(r); err != nil {
 		return err
 	}
 	if o.debt.name == d.name && o.debt.file == d.file {
@@ -318,6 +315,16 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {
 	delete(o.live, d.name)
 	o.release = nil
 	return nil
+}
+
+func (d *sourceRelease) confirmClear(r *sourceRoot) error {
+	if !d.backingAbsent(r) {
+		return ErrIdentityV1
+	}
+	if _, err := r.Lstat(releaseFile); !errors.Is(err, os.ErrNotExist) {
+		return ErrIntegrityV1
+	}
+	return d.checkStage(r, false)
 }
 
 // clearReleaseMarker removes a matching release record only after the backing name is observed absent.
@@ -473,7 +480,10 @@ func (o *SourceOwnerV1) unlinkDetached(r *sourceRoot, d *sourceRelease, scratch 
 		return o.restoreBacking(r, d, err)
 	}
 	if err := o.singleBackingLink(r, d, f); err != nil {
-		return o.restoreBacking(r, d, err)
+		if err == ErrIdentityV1 || err == ErrIntegrityV1 {
+			return o.restoreBacking(r, d, err)
+		}
+		return err
 	}
 	removeErr := o.ops.remove(r.Root, releaseDetached)
 	links, statErr := sourceLinks(f)
@@ -527,7 +537,7 @@ func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os
 	if o.debt.name != "" && o.debt.name != stage.name {
 		return ErrBusyV1
 	}
-	stage.staging, stage.alias, stage.size = true, true, d.size
+	stage.staging, stage.backing, stage.size = true, d.name, d.size
 	o.debt = stage
 	if err := o.unlinkStage(r, &o.debt); err != nil {
 		return err

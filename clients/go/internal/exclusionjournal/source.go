@@ -138,7 +138,8 @@ func (l SourceLimitsV1) valid() bool {
 		return false
 	}
 	working := l.WorkingBytesV1()
-	return l.Descriptors >= 4 && l.Files < l.Scans && working <= l.RAM && l.retainedRAM() <= l.RAM-working
+	available := min(l.RAM, uint64(math.MaxInt))
+	return l.Descriptors >= 4 && l.Files < l.Scans && working <= available && l.retainedRAM() <= available-working
 }
 
 // WorkingBytesV1 bounds copy scratch, window digests, directory metadata and operation state.
