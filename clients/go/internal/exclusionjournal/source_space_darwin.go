@@ -14,6 +14,6 @@ func chmodSourceInit(parent int) error {
 	return unix.Fchmodat(parent, sourceInitDirectory, 0o700, unix.AT_SYMLINK_NOFOLLOW)
 }
 
-func renameSourceInit(parent int) error {
-	return unix.RenameatxNp(parent, sourceInitDirectory, parent, sourceDirectory, unix.RENAME_EXCL)
+func renameSourceExclusive(parent int, from, to string) error {
+	return unix.RenameatxNp(parent, from, parent, to, unix.RENAME_EXCL)
 }

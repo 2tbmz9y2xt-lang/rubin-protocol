@@ -22,6 +22,163 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/policycontrol"
 )
 
+// TestSourceVerifiedReadWindows changes backing after qualification and before a partial read.
+func TestSourceVerifiedReadWindows(t *testing.T) {
+	t.Run("visitor-lifetime-and-funding", func(t *testing.T) {
+		s, o, dir, m, parts, _ := sourcePreparedBundle(t)
+		exact := uint64(65536+4096) + 512*o.limits.Scans + 32*(o.limits.Bytes/65536+6)
+		limits := o.limits
+		limits.RAM = exact + limits.retainedRAM()
+		o = sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), limits, nil)
+		visitorErr := errors.New("visitor result")
+		var escaped SourcePartV1
+		sourceAccount(t, func(a *mdbx.OperationAccount) {
+			sourceMust(t, a.WithReservation(mdbx.TreeLaneMaxBytes-exact+1, func() error {
+				err := o.WithCapturedSourceV1(a, m, func(SourcePartV1) error { t.Fatal("unfunded read entered visitor"); return nil })
+				sourceFailIf(t, !mdbx.IsOperationReservationCapacity(err), "unfunded read: %v", err)
+				return nil
+			}))
+			sourceMust(t, a.WithReservation(mdbx.TreeLaneMaxBytes-exact, func() error {
+				err := o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error { escaped = part; return visitorErr })
+				sourceWantError(t, err, visitorErr, "visitor result")
+				func() {
+					defer func() { sourceFailIf(t, recover() != visitorErr, "readback changed visitor panic") }()
+					_ = o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error { escaped = part; panic(visitorErr) })
+				}()
+				n, err := escaped.ReadAt(make([]byte, 1), 0)
+				sourceFailIf(t, n != 0 || err != ErrUnavailableV1, "expired retained reader: %d/%v", n, err)
+				return a.WithReservation(exact, func() error { return nil })
+			}))
+		})
+		sourceRead(t, o, m, parts)
+	})
+	t.Run("invalid-assurance-before-visit", func(t *testing.T) {
+		s, o, dir, m, parts := sourceBundleScene(t, 1, false)
+		p := sourcePrepare(t, o, m, parts)
+		path := filepath.Join(dir, sourceDirectory, p.name)
+		image := sourceReadFile(t, path)
+		offset := len(m.header(o.id)) + len(parts[0]) + len(parts[1]) + len(parts[2])
+		image[offset] = 0
+		end := len(image) - 32
+		digest := sha256.Sum256(image[:end])
+		copy(image[end:], digest[:])
+		sourceMust(t, os.WriteFile(path, image, 0o600))
+		fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
+		sourceReadRefusal(t, fresh, m, ErrIntegrityV1, "malformed retained assurance")
+	})
+	for _, result := range []error{nil, errors.New("visitor result"), fmt.Errorf("wrapped: %w", io.EOF)} {
+		t.Run(fmt.Sprint(result), func(t *testing.T) {
+			_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+			parts[0] = bytes.Repeat([]byte{0x21}, 65536+37)
+			m.Parts[0].Length = uint64(len(parts[0]))
+			p := sourcePrepare(t, o, m, parts)
+			f, err := os.OpenFile(filepath.Join(dir, sourceDirectory, p.name), os.O_RDWR, 0)
+			sourceMust(t, err)
+			defer f.Close()
+			base := int64(len(m.header(o.id)))
+			var visits int
+			sourceAccount(t, func(a *mdbx.OperationAccount) {
+				err := o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error {
+					visits++
+					var intact [4]byte
+					n, readErr := part.ReadAt(intact[:], 65534)
+					sourceFailIf(t, readErr != nil || n != 4 || !bytes.Equal(intact[:], parts[0][65534:65538]), "intact crossing: %x/%d/%v", intact, n, readErr)
+					_, err := f.WriteAt([]byte{0x20}, base+65536+36)
+					sourceMust(t, err)
+					buf := [4]byte{0xfe, 0xfe, 0xfe, 0xfe}
+					n, readErr = part.ReadAt(buf[:], 65534)
+					sourceFailIf(t, readErr != ErrIntegrityV1 || n != 2 || buf != [4]byte{0x21, 0x21, 0xfe, 0xfe}, "changed crossing: %x/%d/%v", buf, n, readErr)
+					n, readErr = part.ReadAt(buf[:1], 0)
+					sourceFailIf(t, n != 0 || readErr != ErrIntegrityV1, "read after failed window: %d/%v", n, readErr)
+					return result
+				})
+				sourceWantError(t, err, ErrIntegrityV1, "changed retained window")
+			})
+			sourceFailIf(t, visits != 1, "visits after changed window: %d", visits)
+			_, err = f.WriteAt([]byte{0x21}, base+65536+36)
+			sourceMust(t, err)
+			sourceRead(t, o, m, parts)
+		})
+	}
+}
+
+func TestSourceProducerEndReads(t *testing.T) {
+	t.Run("conditional-field", func(t *testing.T) {
+		_, o, dir, m, parts := sourceBundleScene(t, 1, true)
+		called := false
+		producer := sourceMappedProducer(m, parts, func(p SourcePartV1, visit func(SourcePartV1) error) error {
+			if p.Kind == OriginalAssuranceV1 {
+				read := p.ReadAt
+				p.ReadAt = func(b []byte, off int64) (int, error) {
+					n, err := read(b, off)
+					if off == 1 && len(b) == 8 {
+						called = true
+						return n, io.EOF
+					}
+					return n, err
+				}
+			}
+			return visit(p)
+		})
+		sourcePrepareResult(t, o, m, producer, ErrIntegrityV1)
+		sourceFailIf(t, !called || len(sourceEntries(t, dir)) != 0, "partial conditional read reached publication")
+	})
+	for _, kind := range []PartKindV1{BoundBodyV1, OriginalAssuranceV1} {
+		for _, mode := range []string{"end", "early", "short", "short-nil", "wrapped", "other"} {
+			t.Run(fmt.Sprintf("%d/%s", kind, mode), func(t *testing.T) {
+				for _, reuse := range []bool{false, true} {
+					_, o, _, m, parts := sourceBundleScene(t, 1, kind == OriginalAssuranceV1 && mode == "early")
+					parts[0] = bytes.Repeat([]byte{1}, 65537)
+					m.Parts[0].Length = uint64(len(parts[0]))
+					if reuse {
+						sourcePrepare(t, o, m, parts)
+					}
+					fired := false
+					produce := sourceMappedProducer(m, parts, func(p SourcePartV1, v func(SourcePartV1) error) error {
+						if p.Kind == kind {
+							read := p.ReadAt
+							p.ReadAt = func(dst []byte, off int64) (int, error) {
+								n, err := read(dst, off)
+								end := uint64(off)+uint64(n) == p.Length
+								if end == (mode != "early") {
+									fired = true
+									return sourceEndResult(mode, n)
+								}
+								return n, err
+							}
+						}
+						return v(p)
+					})
+					var want error
+					if mode != "end" {
+						want = ErrIntegrityV1
+					}
+					sourcePrepareResult(t, o, m, produce, want)
+					sourceFailIf(t, !fired, "producer read case was not reached")
+					if reuse || want == nil {
+						sourceRead(t, o, m, parts)
+					}
+				}
+			})
+		}
+	}
+}
+
+func sourceEndResult(mode string, n int) (int, error) {
+	switch mode {
+	case "short":
+		return n - 1, io.EOF
+	case "short-nil":
+		return n - 1, nil
+	case "wrapped":
+		return n, fmt.Errorf("part: %w", io.EOF)
+	case "other":
+		return n, io.ErrUnexpectedEOF
+	default:
+		return n, io.EOF
+	}
+}
+
 func sourceID() policycontrol.Identity {
 	return policycontrol.Identity{InstallationID: [32]byte{1}, ChainID: [32]byte{2}, GenesisHash: [32]byte{3}, Profile: 1}
 }

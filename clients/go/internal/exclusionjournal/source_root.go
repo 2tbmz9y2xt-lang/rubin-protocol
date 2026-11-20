@@ -111,7 +111,7 @@ func publishSourceRoot(parent int) (*os.File, os.FileInfo, error) {
 	if err := pin.Sync(); err != nil {
 		return pin, nil, err
 	}
-	return pin, info, renameSourceInit(parent)
+	return pin, info, renameSourceExclusive(parent, sourceInitDirectory, sourceDirectory)
 }
 
 // openSourceInit replaces only an empty directory at the reserved name and pins the replacement.
@@ -162,7 +162,8 @@ func (o *SourceOwnerV1) openSourceRoot() error {
 		if !o.manifestFits(o.release.manifest, o.release.size) {
 			return ErrCapacityV1
 		}
-		_, err := o.releaseBacking(r, o.release, make([]byte, scratchBytes))
+		present, err := o.releaseBacking(r, o.release, make([]byte, scratchBytes))
+		o.release.unlinked = err == nil && !present && o.debt.name != o.release.name
 		return err
 	})
 }

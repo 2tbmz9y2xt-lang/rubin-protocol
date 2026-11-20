@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	releaseFile    = ".release"
-	releaseScratch = ".release-scratch"
-	releasePrefix  = 4 + 16 + 16 + 8 + 32
-	releaseMax     = releasePrefix + bundleHeader + 6*9 + sha256.Size
+	releaseFile     = ".release"
+	releaseScratch  = ".release-scratch"
+	releaseDetached = ".release-backing"
+	releasePrefix   = 4 + 16 + 16 + 8 + 32
+	releaseMax      = releasePrefix + bundleHeader + 6*9 + sha256.Size
 )
 
 type sourceRelease struct {
@@ -29,6 +30,9 @@ type sourceRelease struct {
 	reopened      bool
 	pending       bool
 	backingSynced bool
+	unlinked      bool
+	unlinkFailure error
+	markerFile    filelock.IdentityV1
 }
 
 // ReleaseUnpublishedSourceV1 holds the source charge through durable removal (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
@@ -42,6 +46,9 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 			if o.release == nil {
 				if _, err := o.census(r); err != nil {
 					return err
+				}
+				if o.debt.name == p.name && !o.debt.alias {
+					return ErrBusyV1
 				}
 				d := &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
 				d.record = o.releaseRecord(d)
@@ -58,7 +65,7 @@ func (o *SourceOwnerV1) releaseAdmission(p *PreparedSourceV1, proof bool) error 
 	if !proof || !o.hasReleaseAuthority(p) {
 		return ErrIntegrityV1
 	}
-	if p != nil && (o.debt.name != "" || o.release != nil && o.release.name != p.name) {
+	if p != nil && o.release != nil && o.release.name != p.name {
 		return ErrBusyV1
 	}
 	return nil
@@ -81,18 +88,22 @@ func (o *SourceOwnerV1) releaseRecord(d *sourceRelease) []byte {
 	return append(record, digest[:]...)
 }
 
-func readRelease(r *sourceRoot) ([]byte, error) {
+func readRelease(r *sourceRoot) ([]byte, filelock.IdentityV1, error) {
 	f, err := openSourceFile(r, releaseFile, nil)
 	if err != nil {
-		return nil, err
+		return nil, filelock.IdentityV1{}, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, filelock.IdentityV1{}, err
+	}
 	record := make([]byte, releaseMax+1)
 	n, err := io.ReadFull(f, record)
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
-		return nil, ErrIntegrityV1
+		return nil, filelock.IdentityV1{}, ErrIntegrityV1
 	}
-	return record[:n], nil
+	return record[:n], filelock.FileIdentityV1(info), nil
 }
 
 func (o *SourceOwnerV1) decodeRelease(record []byte) (*sourceRelease, error) {
@@ -146,28 +157,81 @@ func (o *SourceOwnerV1) releaseManifest(header []byte) (SourceManifestV1, uint64
 }
 
 func (o *SourceOwnerV1) releaseBacking(r *sourceRoot, d *sourceRelease, scratch []byte) (bool, error) {
-	f, err := openSourceFile(r, d.name, nil)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+	name, err := d.location(r)
+	if err != nil || name == "" {
+		return false, err
 	}
+	f, err := openSourceFile(r, name, nil)
 	if err != nil {
-		return false, ErrIdentityV1
+		return false, err
 	}
 	defer f.Close()
 	_, err = o.qualify(f, d.manifest, d.size, scratch, &d.sourceIncarnation, ErrIdentityV1)
 	return true, err
 }
 
+// location checks the public name before the private name for a pending intent.
+func (d *sourceRelease) location(r *sourceRoot) (string, error) {
+	if d == nil {
+		if _, err := r.Lstat(releaseDetached); !errors.Is(err, os.ErrNotExist) {
+			return "", ErrIntegrityV1
+		}
+		return "", nil
+	}
+	var location string
+	for _, name := range [...]string{d.name, releaseDetached} {
+		info, err := sourceEntryInfo(r, name, nil)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", ErrIntegrityV1
+		}
+		if filelock.FileIdentityV1(info) != d.file {
+			return "", ErrIdentityV1
+		}
+		if uint64(info.Size()) != d.size {
+			return "", ErrIntegrityV1
+		}
+		if location != "" {
+			return "", ErrIdentityV1
+		}
+		location = name
+	}
+	return location, nil
+}
+
 func (o *SourceOwnerV1) openRelease(r *sourceRoot) error {
-	record, err := readRelease(r)
+	record, id, err := readRelease(r)
 	if errors.Is(err, os.ErrNotExist) {
+		if _, err := o.release.location(r); err != nil {
+			return err
+		}
 		return o.clearReleaseScratch(r)
 	}
 	if err != nil {
 		return ErrIntegrityV1
 	}
 	o.release, err = o.decodeRelease(record)
+	if err != nil {
+		return err
+	}
+	o.release.markerFile = id
+	_, err = releaseScratchAlias(r)
 	return err
+}
+
+// releaseScratchAlias recognizes the second name of the visible marker.
+func releaseScratchAlias(r *sourceRoot) (bool, error) {
+	scratch, err := sourceEntryInfo(r, releaseScratch, nil)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	marker, markerErr := sourceEntryInfo(r, releaseFile, nil)
+	if err != nil || markerErr != nil || !os.SameFile(scratch, marker) {
+		return false, ErrIntegrityV1
+	}
+	return true, nil
 }
 
 func (o *SourceOwnerV1) clearReleaseScratch(r *sourceRoot) error {
@@ -191,31 +255,37 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	if err := o.clearReleaseScratch(r); err != nil {
 		return err
 	}
-	if err := o.space(r, uint64(len(d.record))); err != nil {
+	if err := o.space(r, uint64(len(d.record)), sourceDebt{}); err != nil {
 		return err
 	}
-	if err := o.writeRelease(r, d.record); err != nil {
+	id, err := o.writeRelease(r, d.record)
+	if err != nil {
 		return err
 	}
-	possiblyVisible, err := o.renameVisible(r, releaseScratch, releaseFile)
-	if possiblyVisible {
+	visibility, err := o.linkVisible(r, releaseScratch, releaseFile, id)
+	if visibility != sourceNotVisible {
+		d.markerFile = id
 		d.pending = err != nil
 		o.release = d
 	}
 	return err
 }
 
-func (o *SourceOwnerV1) writeRelease(r *sourceRoot, record []byte) error {
+func (o *SourceOwnerV1) writeRelease(r *sourceRoot, record []byte) (filelock.IdentityV1, error) {
 	f, err := r.OpenFile(releaseScratch, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return err
+		return filelock.IdentityV1{}, err
 	}
 	defer f.Close()
 	w := sourceFileWriter{o: o, file: f}
 	if _, err := w.Write(record); err != nil {
-		return err
+		return filelock.IdentityV1{}, err
 	}
-	return cmp.Or(o.ops.chmod(f, 0o600), o.finishFile(f))
+	info, err := f.Stat()
+	if err != nil {
+		return filelock.IdentityV1{}, err
+	}
+	return filelock.FileIdentityV1(info), cmp.Or(o.ops.chmod(f, 0o600), o.finishFile(f))
 }
 
 func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {
@@ -232,8 +302,14 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {
 	if err := o.syncBoundRoot(r); err != nil {
 		return err
 	}
-	if _, err := r.Lstat(d.name); !errors.Is(err, os.ErrNotExist) {
+	if !d.backingAbsent(r) {
 		return ErrIdentityV1
+	}
+	if err := d.checkStage(r); err != nil {
+		return err
+	}
+	if o.debt.name == d.name && o.debt.file == d.file {
+		o.debt = sourceDebt{}
 	}
 	delete(o.live, d.name)
 	o.release = nil
@@ -242,22 +318,49 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {
 
 // clearReleaseMarker removes a matching release record only after the backing name is observed absent.
 func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) error {
-	if _, err := r.Lstat(d.name); !errors.Is(err, os.ErrNotExist) {
+	if !d.backingAbsent(r) {
 		return ErrIdentityV1
 	}
 	present, err := d.marker(r)
-	if err != nil || !present {
+	if err != nil {
+		return err
+	}
+	if err := d.checkStage(r); err != nil || !present {
+		return err
+	}
+	if err := o.removeMarkerAlias(r); err != nil {
 		return err
 	}
 	return o.ops.remove(r.Root, releaseFile)
 }
 
+// removeMarkerAlias clears the temporary name only when it shares the visible marker inode.
+func (o *SourceOwnerV1) removeMarkerAlias(r *sourceRoot) error {
+	alias, err := releaseScratchAlias(r)
+	if err != nil || !alias {
+		return err
+	}
+	return o.ops.remove(r.Root, releaseScratch)
+}
+
+func (d *sourceRelease) backingAbsent(r *sourceRoot) bool {
+	for _, name := range [...]string{d.name, releaseDetached} {
+		if _, err := r.Lstat(name); !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+	}
+	return true
+}
+
 func (d *sourceRelease) marker(r *sourceRoot) (bool, error) {
-	record, err := readRelease(r)
-	if !errors.Is(err, os.ErrNotExist) && !bytes.Equal(record, d.record) {
+	record, id, err := readRelease(r)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil || !bytes.Equal(record, d.record) || id != d.markerFile {
 		return false, ErrIntegrityV1
 	}
-	return err == nil, nil
+	return true, nil
 }
 
 // releaseIntent syncs the named record and verifies it against the saved bytes.
@@ -283,14 +386,124 @@ func (o *SourceOwnerV1) removeReleasedBacking(r *sourceRoot, d *sourceRelease, s
 		return err
 	}
 	d.pending = false
-	present, err := o.releaseBacking(r, d, scratch)
+	if d.unlinkFailure != nil {
+		return d.unlinkFailure
+	}
+	name, err := d.location(r)
 	if err != nil {
 		return err
 	}
-	if present {
-		if err := o.ops.remove(r.Root, d.name); err != nil {
+	if err := d.checkStage(r); err != nil {
+		return err
+	}
+	if err := o.removeMarkerAlias(r); err != nil {
+		return err
+	}
+	if name == "" && !d.unlinked {
+		return ErrIdentityV1
+	}
+	if name != "" {
+		if d.unlinked {
+			return ErrIdentityV1
+		}
+		if err := o.detachBacking(r, d, name, scratch); err != nil {
 			return err
 		}
 	}
 	return o.ops.dirSync(r.pin)
+}
+
+// checkStage preserves an independent stage for the same capture.
+func (d *sourceRelease) checkStage(r *sourceRoot) error {
+	info, err := sourceEntryInfo(r, ".staging-"+d.name, nil)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return ErrIntegrityV1
+	}
+	if filelock.FileIdentityV1(info) != d.file {
+		return ErrBusyV1
+	}
+	return nil
+}
+
+// detachBacking pins and qualifies the private file before removing its last link.
+func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name string, scratch []byte) error {
+	if name != releaseDetached {
+		if err := o.ops.namespace(detachSource, r, name, releaseDetached); err != nil {
+			return err
+		}
+	}
+	f, err := openSourceFile(r, releaseDetached, nil)
+	if err != nil {
+		return o.restoreBacking(r, d, err)
+	}
+	defer f.Close()
+	if _, err := o.qualify(f, d.manifest, d.size, scratch, &d.sourceIncarnation, ErrIntegrityV1); err != nil {
+		return o.restoreBacking(r, d, err)
+	}
+	if err := o.singleBackingLink(r, d, f); err != nil {
+		return o.restoreBacking(r, d, err)
+	}
+	removeErr := o.ops.remove(r.Root, releaseDetached)
+	links, statErr := sourceLinks(f)
+	return cmp.Or(removeErr, d.afterUnlink(r, links, statErr))
+}
+
+// restoreBacking preserves the qualification error if the canonical slot was refilled.
+func (o *SourceOwnerV1) restoreBacking(r *sourceRoot, d *sourceRelease, cause error) error {
+	if err := o.ops.namespace(detachSource, r, releaseDetached, d.name); err == nil {
+		_ = o.ops.dirSync(r.pin)
+	}
+	return cause
+}
+
+func sourceLinks(f *os.File) (uint64, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return 0, ErrUnavailableV1
+	}
+	return uint64(info.Sys().(*syscall.Stat_t).Nlink), nil
+}
+
+// singleBackingLink removes only a qualified staging alias before the last unlink.
+func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os.File) error {
+	name := ".staging-" + d.name
+	info, err := sourceEntryInfo(r, name, nil)
+	links, statErr := sourceLinks(f)
+	if statErr != nil {
+		return statErr
+	}
+	if errors.Is(err, os.ErrNotExist) && links == 1 {
+		return nil
+	}
+	if err != nil || filelock.FileIdentityV1(info) != d.file || links != 2 {
+		return ErrIdentityV1
+	}
+	if err := o.ops.remove(r.Root, name); err != nil {
+		return err
+	}
+	links, err = sourceLinks(f)
+	if err == nil && links != 1 {
+		return ErrIdentityV1
+	}
+	return err
+}
+
+// afterUnlink records only the observed link count on the held descriptor.
+func (d *sourceRelease) afterUnlink(r *sourceRoot, links uint64, err error) error {
+	if err != nil {
+		d.unlinkFailure = err
+		return err
+	}
+	if links == 0 {
+		d.unlinked = true
+		return nil
+	}
+	info, statErr := sourceEntryInfo(r, releaseDetached, nil)
+	if statErr != nil || filelock.FileIdentityV1(info) != d.file {
+		d.unlinkFailure = ErrIdentityV1
+	}
+	return ErrIdentityV1
 }
