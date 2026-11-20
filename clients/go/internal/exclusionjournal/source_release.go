@@ -546,19 +546,16 @@ func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os
 	return o.requireBackingLinks(r, d, f, 1)
 }
 
-// afterUnlink records only the observed link count on the held descriptor.
+// afterUnlink allows another unlink only while the original private entry is identifiable.
 func (d *sourceRelease) afterUnlink(r *sourceRoot, links uint64, err error) error {
-	if err != nil {
-		d.unlinkFailure = err
-		return err
-	}
-	if links == 0 {
+	if err == nil && links == 0 {
 		d.unlinked = true
 		return nil
 	}
+	failure := cmp.Or(err, ErrIdentityV1)
 	info, statErr := sourceEntryInfo(r, releaseDetached, nil)
 	if statErr != nil || filelock.FileIdentityV1(info) != d.file {
-		d.unlinkFailure = ErrIdentityV1
+		d.unlinkFailure = failure
 	}
-	return ErrIdentityV1
+	return failure
 }
