@@ -81,42 +81,54 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry) (sourc
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		switch name {
-		case releaseFile:
-			if o.release == nil {
-				return sourceUsage{}, ErrIntegrityV1
-			}
-			if _, err := releaseScratchAlias(r); err != nil {
-				return sourceUsage{}, err
-			}
-			continue
-		case releaseScratch:
-			continue
-		}
-		logical := name
-		if name == releaseDetached && backing == releaseDetached {
-			logical = o.release.name
-		}
-		if err := o.censusFile(r, name, logical, backing, &used, &missing); err != nil {
+		if err := o.countEntry(r, name, backing, &used, &missing); err != nil {
 			return sourceUsage{}, err
 		}
-		if absentRelease != nil && name == backing {
+		if name == backing {
 			absentRelease = nil
 		}
 	}
 	return o.includeAbsent(used, missing, absentRelease)
 }
 
-func (o *SourceOwnerV1) includeAbsent(used sourceUsage, missing int, absentRelease *sourceRelease) (sourceUsage, error) {
-	var absentBytes uint64
-	if o.debt.unlinkTried && used.stage.name == "" {
-		o.debt.removed = true
+func (o *SourceOwnerV1) countEntry(r *sourceRoot, name, backing string, used *sourceUsage, missing *int) error {
+	logical := name
+	switch name {
+	case releaseFile:
+		if o.release == nil {
+			return ErrIntegrityV1
+		}
+		_, err := releaseScratchAlias(r)
+		return err
+	case releaseScratch:
+		return nil
+	case releaseDetached:
+		if backing != releaseDetached {
+			return ErrIntegrityV1
+		}
+		logical = o.release.name
 	}
-	if o.debt.removed && !o.debt.alias {
+	info, err := sourceEntryInfo(r, name, nil)
+	if err != nil {
+		return ErrIntegrityV1
+	}
+	return o.censusFile(r, logical, backing, info, used, missing)
+}
+
+func (d *sourceDebt) absentStage(used *sourceUsage) uint64 {
+	if d.unlinkTried && used.stage.name == "" {
+		d.removed = true
+	}
+	if d.removed && !d.alias {
 		used.files++
-		absentBytes = o.debt.size
-		used.stage = o.debt
+		used.stage = *d
+		return d.size
 	}
+	return 0
+}
+
+func (o *SourceOwnerV1) includeAbsent(used sourceUsage, missing int, absentRelease *sourceRelease) (sourceUsage, error) {
+	absentBytes := o.debt.absentStage(&used)
 	if absentRelease != nil {
 		used.files++
 		absentBytes += absentRelease.size
@@ -134,25 +146,18 @@ func (o *SourceOwnerV1) includeAbsent(used sourceUsage, missing int, absentRelea
 	return used, nil
 }
 
-func (o *SourceOwnerV1) censusFile(r *sourceRoot, name, logical, pending string, used *sourceUsage, missing *int) error {
-	info, err := sourceEntryInfo(r, name, nil)
-	if err != nil {
-		return ErrIntegrityV1
-	}
+func (o *SourceOwnerV1) censusFile(r *sourceRoot, logical, pending string, info os.FileInfo, used *sourceUsage, missing *int) error {
 	size := uint64(max(info.Size(), 0))
 	if token := o.live[logical]; token != nil {
-		if token.file != filelock.FileIdentityV1(info) {
-			return ErrIdentityV1
-		}
-		if size != token.size {
-			return ErrIntegrityV1
+		if err := token.match(info); err != nil {
+			return err
 		}
 		*missing -= 1
 	}
 	if err := o.censusEntry(logical, info); err != nil {
 		return err
 	}
-	if stage, ok := strings.CutPrefix(name, ".staging-"); ok {
+	if stage, ok := strings.CutPrefix(logical, ".staging-"); ok {
 		err := o.observeStage(r, stage, pending, info)
 		used.stage = o.debt
 		if err != nil || used.stage.alias {
@@ -244,7 +249,7 @@ func (o *SourceOwnerV1) censusEntry(name string, info os.FileInfo) error {
 			return ErrIdentityV1
 		}
 	}
-	o.debt = sourceDebt{name: name, size: uint64(info.Size()), file: file, staging: true}
+	o.debt = sourceDebt{name: name, size: uint64(max(info.Size(), 0)), file: file, staging: true}
 	return nil
 }
 
@@ -270,7 +275,7 @@ func (d sourceDebt) diskCredit(r *sourceRoot) uint64 {
 	if err != nil || d.file != filelock.FileIdentityV1(info) {
 		return 0
 	}
-	return min(d.size, uint64(info.Size()))
+	return min(d.size, uint64(max(info.Size(), 0)))
 }
 
 func assurance(part SourcePartV1) error {
@@ -487,15 +492,15 @@ func (w *sourceWindows) part(f *os.File, base int64, spec SourcePartSpecV1, hash
 		}
 		copied := 0
 		for len(dst) > 0 {
-			index := uint64(off) / scratchBytes
+			index := off / scratchBytes
 			start := index * scratchBytes
-			buf := w.scratch[:min(uint64(scratchBytes), spec.Length-start)]
-			n, err := f.ReadAt(buf, base+int64(start))
+			buf := w.scratch[:min(int64(scratchBytes), int64(min(spec.Length, math.MaxInt64))-start)]
+			n, err := f.ReadAt(buf, base+start)
 			if n != len(buf) || err != nil || sha256.Sum256(buf) != hashes[index] {
 				w.failure = ErrIntegrityV1
 				return copied, w.failure
 			}
-			n = copy(dst, buf[uint64(off)-start:])
+			n = copy(dst, buf[off-start:])
 			dst, off, copied = dst[n:], off+int64(n), copied+n
 		}
 		return copied, nil
@@ -519,17 +524,7 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 		return nil
 	}
 	if !d.removed {
-		name := ".staging-" + d.name
-		if info, err := sourceEntryInfo(r, name, nil); err == nil {
-			if d.file != filelock.FileIdentityV1(info) {
-				return ErrIdentityV1
-			}
-			d.size = uint64(max(info.Size(), 0))
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		d.unlinkTried = true
-		if err := o.ops.remove(r.Root, name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := o.unlinkStage(r); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		d.removed = true
@@ -539,6 +534,21 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 	}
 	o.debt = sourceDebt{}
 	return nil
+}
+
+func (o *SourceOwnerV1) unlinkStage(r *sourceRoot) error {
+	d := &o.debt
+	name := ".staging-" + d.name
+	info, err := sourceEntryInfo(r, name, nil)
+	if err != nil {
+		return err
+	}
+	if d.file != filelock.FileIdentityV1(info) {
+		return ErrIdentityV1
+	}
+	d.size = uint64(max(info.Size(), 0))
+	d.unlinkTried = true
+	return o.ops.remove(r.Root, name)
 }
 
 // PrepareSourceV1 returns a handle after durable publication (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
@@ -707,8 +717,8 @@ func (o *SourceOwnerV1) linkVisible(r *sourceRoot, from, to string, expected fil
 	if err != nil {
 		return sourceVisible, err
 	}
-	source, statErr := r.Lstat(from)
-	if statErr != nil || !os.SameFile(info, source) {
+	source, _ := r.Lstat(from)
+	if !os.SameFile(info, source) {
 		return sourceVisible, ErrIdentityV1
 	}
 	return sourceVisible, o.ops.remove(r.Root, from)

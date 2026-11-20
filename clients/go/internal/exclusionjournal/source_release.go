@@ -187,11 +187,8 @@ func (d *sourceRelease) location(r *sourceRoot) (string, error) {
 		if err != nil {
 			return "", ErrIntegrityV1
 		}
-		if filelock.FileIdentityV1(info) != d.file {
-			return "", ErrIdentityV1
-		}
-		if uint64(info.Size()) != d.size {
-			return "", ErrIntegrityV1
+		if err := d.match(info); err != nil {
+			return "", err
 		}
 		if location != "" {
 			return "", ErrIdentityV1
@@ -199,6 +196,16 @@ func (d *sourceRelease) location(r *sourceRoot) (string, error) {
 		location = name
 	}
 	return location, nil
+}
+
+func (inc *sourceIncarnation) match(info os.FileInfo) error {
+	if filelock.FileIdentityV1(info) != inc.file {
+		return ErrIdentityV1
+	}
+	if uint64(max(info.Size(), 0)) != inc.size {
+		return ErrIntegrityV1
+	}
+	return nil
 }
 
 func (o *SourceOwnerV1) openRelease(r *sourceRoot) error {
@@ -290,11 +297,8 @@ func (o *SourceOwnerV1) writeRelease(r *sourceRoot, record []byte) (filelock.Ide
 
 func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {
 	d := o.release
-	if !d.backingSynced {
-		if err := o.removeReleasedBacking(r, d, scratch); err != nil {
-			return err
-		}
-		d.backingSynced = true
+	if err := o.syncReleasedBacking(r, d, scratch); err != nil {
+		return err
 	}
 	if err := o.clearReleaseMarker(r, d); err != nil {
 		return err
@@ -381,7 +385,10 @@ func (o *SourceOwnerV1) releaseIntent(r *sourceRoot, d *sourceRelease, scratch [
 	return o.releaseIntent(r, d, scratch)
 }
 
-func (o *SourceOwnerV1) removeReleasedBacking(r *sourceRoot, d *sourceRelease, scratch []byte) error {
+func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scratch []byte) error {
+	if d.backingSynced {
+		return nil
+	}
 	if err := o.releaseIntent(r, d, scratch); err != nil {
 		return err
 	}
@@ -393,24 +400,35 @@ func (o *SourceOwnerV1) removeReleasedBacking(r *sourceRoot, d *sourceRelease, s
 	if err != nil {
 		return err
 	}
+	if err := o.detachBacking(r, d, name, scratch); err != nil {
+		return err
+	}
+	if err := o.ops.dirSync(r.pin); err != nil {
+		return err
+	}
+	d.backingSynced = true
+	return nil
+}
+
+func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name string, scratch []byte) error {
 	if err := d.checkStage(r); err != nil {
 		return err
 	}
 	if err := o.removeMarkerAlias(r); err != nil {
 		return err
 	}
-	if name == "" && !d.unlinked {
+	if (name == "") != d.unlinked {
 		return ErrIdentityV1
 	}
-	if name != "" {
-		if d.unlinked {
-			return ErrIdentityV1
-		}
-		if err := o.detachBacking(r, d, name, scratch); err != nil {
+	if d.unlinked {
+		return nil
+	}
+	if name != releaseDetached {
+		if err := o.ops.namespace(detachSource, r, name, releaseDetached); err != nil {
 			return err
 		}
 	}
-	return o.ops.dirSync(r.pin)
+	return o.unlinkDetached(r, d, scratch)
 }
 
 // checkStage preserves an independent stage for the same capture.
@@ -428,13 +446,8 @@ func (d *sourceRelease) checkStage(r *sourceRoot) error {
 	return nil
 }
 
-// detachBacking pins and qualifies the private file before removing its last link.
-func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name string, scratch []byte) error {
-	if name != releaseDetached {
-		if err := o.ops.namespace(detachSource, r, name, releaseDetached); err != nil {
-			return err
-		}
-	}
+// unlinkDetached pins and qualifies the private file before removing its last link.
+func (o *SourceOwnerV1) unlinkDetached(r *sourceRoot, d *sourceRelease, scratch []byte) error {
 	f, err := openSourceFile(r, releaseDetached, nil)
 	if err != nil {
 		return o.restoreBacking(r, d, err)
@@ -464,31 +477,38 @@ func sourceLinks(f *os.File) (uint64, error) {
 	if err != nil {
 		return 0, ErrUnavailableV1
 	}
-	return uint64(info.Sys().(*syscall.Stat_t).Nlink), nil
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, ErrUnavailableV1
+	}
+	return uint64(stat.Nlink), nil
+}
+
+func requireSourceLinks(f *os.File, want uint64) error {
+	links, err := sourceLinks(f)
+	if err == nil && links != want {
+		return ErrIdentityV1
+	}
+	return err
 }
 
 // singleBackingLink removes only a qualified staging alias before the last unlink.
 func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os.File) error {
 	name := ".staging-" + d.name
 	info, err := sourceEntryInfo(r, name, nil)
-	links, statErr := sourceLinks(f)
-	if statErr != nil {
-		return statErr
+	if errors.Is(err, os.ErrNotExist) {
+		return requireSourceLinks(f, 1)
 	}
-	if errors.Is(err, os.ErrNotExist) && links == 1 {
-		return nil
-	}
-	if err != nil || filelock.FileIdentityV1(info) != d.file || links != 2 {
+	if err != nil || filelock.FileIdentityV1(info) != d.file {
 		return ErrIdentityV1
+	}
+	if err := requireSourceLinks(f, 2); err != nil {
+		return err
 	}
 	if err := o.ops.remove(r.Root, name); err != nil {
 		return err
 	}
-	links, err = sourceLinks(f)
-	if err == nil && links != 1 {
-		return ErrIdentityV1
-	}
-	return err
+	return requireSourceLinks(f, 1)
 }
 
 // afterUnlink records only the observed link count on the held descriptor.

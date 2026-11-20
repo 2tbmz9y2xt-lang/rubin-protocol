@@ -42,11 +42,11 @@ func TestSourceVerifiedReadWindows(t *testing.T) {
 				err := o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error { escaped = part; return visitorErr })
 				sourceWantError(t, err, visitorErr, "visitor result")
 				func() {
-					defer func() { sourceFailIf(t, recover() != visitorErr, "readback changed visitor panic") }()
+					defer func() { sourceFailIf(t, recover() != any(visitorErr), "readback changed visitor panic") }()
 					_ = o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error { escaped = part; panic(visitorErr) })
 				}()
 				n, err := escaped.ReadAt(make([]byte, 1), 0)
-				sourceFailIf(t, n != 0 || err != ErrUnavailableV1, "expired retained reader: %d/%v", n, err)
+				sourceFailIf(t, n != 0 || any(err) != any(ErrUnavailableV1), "expired retained reader: %d/%v", n, err)
 				return a.WithReservation(exact, func() error { return nil })
 			}))
 		})
@@ -87,9 +87,9 @@ func TestSourceVerifiedReadWindows(t *testing.T) {
 					sourceMust(t, err)
 					buf := [4]byte{0xfe, 0xfe, 0xfe, 0xfe}
 					n, readErr = part.ReadAt(buf[:], 65534)
-					sourceFailIf(t, readErr != ErrIntegrityV1 || n != 2 || buf != [4]byte{0x21, 0x21, 0xfe, 0xfe}, "changed crossing: %x/%d/%v", buf, n, readErr)
+					sourceFailIf(t, any(readErr) != any(ErrIntegrityV1) || n != 2 || buf != [4]byte{0x21, 0x21, 0xfe, 0xfe}, "changed crossing: %x/%d/%v", buf, n, readErr)
 					n, readErr = part.ReadAt(buf[:1], 0)
-					sourceFailIf(t, n != 0 || readErr != ErrIntegrityV1, "read after failed window: %d/%v", n, readErr)
+					sourceFailIf(t, n != 0 || any(readErr) != any(ErrIntegrityV1), "read after failed window: %d/%v", n, readErr)
 					return result
 				})
 				sourceWantError(t, err, ErrIntegrityV1, "changed retained window")
