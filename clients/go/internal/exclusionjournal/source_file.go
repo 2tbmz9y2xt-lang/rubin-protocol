@@ -57,9 +57,8 @@ func stageSlotVacant(r *sourceRoot, key string, occupied error) error {
 }
 
 type sourceUsage struct {
-	files, bytes              uint64
-	stage                     sourceDebt
-	stageBacked, stageCharged bool
+	files, bytes            uint64
+	stageSeen, stageCharged bool
 }
 
 type sourceNameOp func(*sourceRoot, string, string) error
@@ -103,6 +102,7 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, reopen
 	if err := o.censusStages(r, entries, reopening, &used); err != nil {
 		return sourceUsage{}, err
 	}
+	used.stageCharged = o.debt.name != ""
 	for _, entry := range entries {
 		name := entry.Name()
 		if isStageLeaf(name) {
@@ -137,7 +137,7 @@ func (o *SourceOwnerV1) censusStages(r *sourceRoot, entries []os.DirEntry, reope
 		if err := o.censusStage(entry.Name(), info); err != nil {
 			return err
 		}
-		used.stage = o.debt
+		used.stageSeen = true
 	}
 	return nil
 }
@@ -191,31 +191,41 @@ func (o *SourceOwnerV1) countEntry(r *sourceRoot, name, backing string, used *so
 	return o.censusFile(logical, info, used, missing)
 }
 
-func (d *sourceDebt) stageCharge(used *sourceUsage, absentRelease *sourceRelease) uint64 {
-	if d.name == "" {
-		return 0
+// countBacking charges the capture once even when its inode also carries the stage.
+func (used *sourceUsage) countBacking(name string, file filelock.IdentityV1, debt *sourceDebt, stageSeenTogether bool) {
+	used.files++
+	if file != debt.file {
+		return
 	}
-	if d.unlinkTried && used.stage.name == "" {
+	if stageSeenTogether && (debt.backing == "" || name == debt.name) {
+		debt.backing = name
+	}
+	if name == debt.backing {
+		used.stageCharged = false
+	}
+}
+
+func (d *sourceDebt) stageCharge(used *sourceUsage) uint64 {
+	if d.unlinkTried && !used.stageSeen {
 		d.removed = true
 	}
-	used.stage = *d
-	if used.stageBacked || absentRelease != nil && d.backing == absentRelease.name && d.file == absentRelease.file {
+	if !used.stageCharged {
 		return 0
 	}
 	used.files++
-	used.stageCharged = true
 	return d.size
 }
 
 func (o *SourceOwnerV1) includeAbsent(used sourceUsage, missing int, absentRelease *sourceRelease) (sourceUsage, error) {
-	absentBytes := o.debt.stageCharge(&used, absentRelease)
+	var absentBytes uint64
 	if absentRelease != nil {
-		used.files++
-		absentBytes += absentRelease.size
+		used.countBacking(absentRelease.name, absentRelease.file, &o.debt, false)
+		absentBytes = absentRelease.size
 		if o.live[absentRelease.name] != nil {
 			missing--
 		}
 	}
+	absentBytes += o.debt.stageCharge(&used)
 	if absentBytes > o.limits.Bytes-used.bytes || used.files > o.limits.Files {
 		return sourceUsage{}, ErrCapacityV1
 	}
@@ -237,26 +247,12 @@ func (o *SourceOwnerV1) censusFile(logical string, info os.FileInfo, used *sourc
 	if !validSourceKey(logical) {
 		return ErrIntegrityV1
 	}
-	o.debt.observeBacking(logical, info, used)
+	used.countBacking(logical, filelock.FileIdentityV1(info), &o.debt, used.stageSeen)
 	if size > o.limits.Bytes-used.bytes {
 		return ErrCapacityV1
 	}
-	used.files++
 	used.bytes += size
 	return nil
-}
-
-// observeBacking attributes a stage alias to an already charged file.
-func (d *sourceDebt) observeBacking(name string, info os.FileInfo, used *sourceUsage) {
-	if d.name == "" || d.file != filelock.FileIdentityV1(info) {
-		return
-	}
-	if used.stage.name != "" && (d.backing == "" || name == d.name) {
-		d.backing = name
-	}
-	if name == d.backing {
-		used.stageBacked = true
-	}
 }
 
 // openSourceFile checks that a nonblocking, no-follow open pins the observed regular file.
@@ -713,7 +709,7 @@ func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, 
 	f, err := openSourceFile(r, name, nil)
 	if err == nil {
 		defer f.Close()
-		return o.reuse(r, f, m, name, size, used.stage, produce)
+		return o.reuse(r, f, m, name, size, produce)
 	}
 	if !errors.Is(err, os.ErrNotExist) || o.live[name] != nil {
 		return nil, ErrIntegrityV1
@@ -728,12 +724,12 @@ func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, 
 func (o *SourceOwnerV1) admitPublication(r *sourceRoot, size uint64, used sourceUsage) (bool, error) {
 	if used.stageCharged {
 		used.files--
-		used.bytes -= used.stage.size
+		used.bytes -= o.debt.size
 	}
 	if used.files >= o.limits.Files || size > o.limits.Bytes-used.bytes {
 		return false, ErrCapacityV1
 	}
-	return o.space(r, size, used.stage)
+	return o.space(r, size, o.debt)
 }
 
 func (o *SourceOwnerV1) prepared(r *sourceRoot, m SourceManifestV1, name string, observed sourceIncarnation) (*PreparedSourceV1, error) {
@@ -901,17 +897,14 @@ func (w *compareSourceWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func (o *SourceOwnerV1) reuse(r *sourceRoot, f *os.File, m SourceManifestV1, name string, size uint64, stage sourceDebt, produce func(func(SourcePartV1) error) error) (*PreparedSourceV1, error) {
+func (o *SourceOwnerV1) reuse(r *sourceRoot, f *os.File, m SourceManifestV1, name string, size uint64, produce func(func(SourcePartV1) error) error) (*PreparedSourceV1, error) {
 	scratch := make([]byte, scratchBytes)
 	observed, err := o.qualify(f, m, size, scratch, o.live[name], ErrIntegrityV1)
 	if err != nil {
 		return nil, err
 	}
 	w := &compareSourceWriter{file: f, offset: int64(len(m.header(o.id))), scratch: scratch[scratchBytes/2:]}
-	var start func() error
-	if stage.name != "" {
-		start = func() error { return o.reconcile(r) }
-	}
+	start := func() error { return o.reconcile(r) }
 	compared := sha256.New()
 	_, _ = compared.Write(m.header(o.id))
 	if err := stream(m, produce, io.MultiWriter(w, compared), scratch[:scratchBytes/2], start, true); err != nil {
@@ -919,6 +912,9 @@ func (o *SourceOwnerV1) reuse(r *sourceRoot, f *os.File, m SourceManifestV1, nam
 	}
 	if !bytes.Equal(compared.Sum(nil), observed.footer[:]) {
 		return nil, ErrIntegrityV1
+	}
+	if _, err := o.qualify(f, m, size, scratch, &observed, ErrIntegrityV1); err != nil {
+		return nil, err
 	}
 	if err := o.finishFile(f); err != nil {
 		return nil, err

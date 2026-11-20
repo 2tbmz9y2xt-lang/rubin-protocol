@@ -1492,6 +1492,7 @@ func TestSourceReopenRequiresDirectorySync(t *testing.T) {
 
 func TestSourceNoOverwriteAndDistinctCopies(t *testing.T) {
 	t.Run("digest-binding", testSourceDigestBinding)
+	t.Run("reuse-after-producer", testSourceReuseAfterProducer)
 	t.Run("link-collision", testSourceLinkCollision)
 	_, o, dir, m, parts, p := sourcePreparedBundle(t)
 	path := filepath.Join(dir, sourceDirectory, p.name)
@@ -1607,6 +1608,40 @@ func testSourceDigestBinding(t *testing.T) {
 			sourcePresence(t, filepath.Join(dir, sourceDirectory), name, reuse)
 		})
 	}
+}
+
+func testSourceReuseAfterProducer(t *testing.T) {
+	sourceModes(t, []string{"payload", "resealed", "producer"}, func(t *testing.T, mode string) {
+		_, o, dir, m, parts, p := sourcePreparedBundle(t)
+		path := filepath.Join(dir, sourceDirectory, p.name)
+		original := sourceReadFile(t, path)
+		offset := len(m.header(o.id))
+		changed := sourceResealed(original, offset)
+		if mode == "payload" {
+			copy(changed[len(changed)-sha256.Size:], original[len(original)-sha256.Size:])
+		}
+		final := changed
+		supplied := parts
+		if mode == "producer" {
+			final = original
+			supplied = slices.Clone(parts)
+			supplied[0] = slices.Clone(parts[0])
+			supplied[0][0] ^= 1
+		}
+		calls := 0
+		producer := func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
+			calls++
+			if mode == "producer" {
+				sourceMust(t, os.WriteFile(path, changed, 0o600))
+			}
+			sourceMust(t, sourceExportParts(op, m, supplied, visit))
+			return os.WriteFile(path, final, 0o600)
+		}
+		o.ops.fileSync = func(*os.File) error { t.Fatal("changed reuse reached file sync"); return nil }
+		sourcePrepareResult(t, o, m, producer, ErrIntegrityV1)
+		sourceFailIf(t, calls != 1 || !bytes.Equal(sourceReadFile(t, path), final),
+			"reuse called producer %d times or changed the retained file", calls)
+	})
 }
 
 func testSourceLinkCollision(t *testing.T) {
