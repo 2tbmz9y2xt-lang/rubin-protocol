@@ -1176,6 +1176,67 @@ func TestSourceDirectoryChangeBeforeCopy(t *testing.T) {
 	sourcePrepare(t, o, m, parts)
 }
 
+func TestSourceInstallationChangeDuringPrepare(t *testing.T) {
+	sourceModes(t, []string{"missing", "replaced"}, func(t *testing.T, mode string) {
+		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+		held := sourceHeld(t, o)
+		moved := filepath.Join(t.TempDir(), "original")
+		source, retained := filepath.Join(dir, sourceDirectory), filepath.Join(moved, sourceDirectory)
+		o.ops.statfs = func(fd int, stat *syscall.Statfs_t) error {
+			sourceMust(t, syscall.Fstatfs(fd, stat))
+			sourceMust(t, os.Rename(dir, moved))
+			if mode == "replaced" {
+				sourceMust(t, os.Mkdir(dir, 0o700))
+				sourceMust(t, os.Rename(retained, source))
+			}
+			return nil
+		}
+		sourcePrepareResult(t, o, m, func(*SourceOperationV1, func(SourcePartV1) error) error {
+			t.Fatal("producer entered after installation changed")
+			return nil
+		}, ErrCapacityV1)
+		err := o.withRoot(o.bindRoot, func(*sourceRoot) error {
+			t.Fatal("used a root after installation changed")
+			return nil
+		})
+		sourceWantError(t, err, ErrIdentityV1, "reopen installation")
+		if mode == "replaced" {
+			sourceMust(t, os.Rename(source, retained))
+			sourceMust(t, os.Remove(dir))
+		}
+		sourceMust(t, os.Rename(moved, dir))
+		held("refused preparation")
+		o.ops = realSourceFS
+		sourcePrepareAndRead(t, o, m, parts)
+	})
+}
+
+func TestSourceRefusesUnusableDirectoryHandle(t *testing.T) {
+	sourceModes(t, []string{"closed", "replacement"}, func(t *testing.T, mode string) {
+		_, o, _, m, parts := sourceBundleScene(t, 1, false)
+		held := sourceHeld(t, o)
+		want := ErrUnavailableV1
+		if mode == "replacement" {
+			want = ErrIdentityV1
+		}
+		err := o.withRoot(func(parent *os.Root) (*os.Root, error) {
+			if mode == "replacement" {
+				return os.OpenRoot(t.TempDir())
+			}
+			r, err := o.bindRoot(parent)
+			sourceMust(t, err)
+			sourceMust(t, r.Close())
+			return r, nil
+		}, func(*sourceRoot) error {
+			t.Fatal("used an unavailable or unrelated directory handle")
+			return nil
+		})
+		sourceWantError(t, err, want, "pin source directory")
+		held("refused directory handle")
+		sourcePrepareAndRead(t, o, m, parts)
+	})
+}
+
 func testSourceMovedDuringExport(t *testing.T, reuse bool) {
 	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 	var token *sourceIncarnation
