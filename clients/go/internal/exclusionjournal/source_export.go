@@ -1,6 +1,7 @@
 package exclusionjournal
 
 import (
+	"cmp"
 	"io"
 	"math"
 	"reflect"
@@ -11,32 +12,25 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
-// SourceExporterV1 delivers each manifest part once, in order, from inside its single WithBackingV1 use.
-// A delivery outside that use, nested in another delivery, extra, of another kind or length or with a nil
-// ReadAt fails the export with ErrIntegrityV1, as does a nil return with parts missing. After the first refusal each
-// later delivery returns it, after expiry ErrUnavailableV1; a reached visitor panic is re-raised after expiry.
+// SourceExporterV1 delivers the exact manifest once, in order, within WithBackingV1.
 type SourceExporterV1 func(operation *SourceOperationV1, visit func(SourcePartV1) error) error
 
 // SourceOperationV1 bounds synchronous source backing on the live operation account; a nil, zero or expired operation refuses with ErrUnavailableV1.
 type SourceOperationV1 struct{ cursor *exportCursor }
 
-// SourceOriginV1 describes either a complete immutable allocation or the exact size of a new allocation after admission.
-// Bytes is non-empty with len equal to cap and disjoint from other origins; PlannedBytes needs nil Bytes and at most math.MaxInt.
+// SourceOriginV1 names a complete nonempty allocation or a planned allocation of at most math.MaxInt bytes.
 type SourceOriginV1 struct {
 	Bytes        []byte
 	PlannedBytes uint64
 }
 
-// SourceViewV1 names a range in an origin. Origin -1 names an empty part with zero Offset and Length.
-// Length equals its manifest part length and the range lies inside the origin.
+// SourceViewV1 binds an exact part range to its origin. Origin -1 denotes an empty part without backing.
 type SourceViewV1 struct {
 	Origin         int
 	Offset, Length uint64
 }
 
-// SourcePartV1 is an exact bounded part. ReadAt is valid only during its visitor call and returns ErrUnavailableV1
-// afterwards; a negative offset or a range ending past Length returns ErrIntegrityV1 before any read. During
-// PrepareSourceV1 a producer ReadAt that fills less than len(dst) or returns an error fails with ErrIntegrityV1.
+// SourcePartV1 exposes one bounded ReadAt until its visitor returns.
 type SourcePartV1 struct {
 	Kind   PartKindV1
 	Length uint64
@@ -101,17 +95,11 @@ func backingBytes(m SourceManifestV1, origins []SourceOriginV1, views []SourceVi
 }
 
 func (v SourceViewV1) fits(origins []SourceOriginV1, expected uint64) bool {
-	if v.Length != expected {
-		return false
-	}
-	if v.Origin == -1 {
-		return v == SourceViewV1{Origin: -1}
-	}
 	if v.Origin < 0 || v.Origin >= len(origins) {
-		return false
+		return expected == 0 && v == (SourceViewV1{Origin: -1})
 	}
 	length := origins[v.Origin].length()
-	return v.Offset <= length && v.Length <= length-v.Offset
+	return v.Length == expected && v.Offset <= length && v.Length <= length-v.Offset
 }
 
 func (o SourceOriginV1) length() uint64 { return max(uint64(len(o.Bytes)), o.PlannedBytes) }
@@ -122,214 +110,159 @@ func (o SourceOriginV1) valid(previous []SourceOriginV1) bool {
 	}
 	start := uint64(reflect.ValueOf(o.Bytes).Pointer())
 	length := uint64(len(o.Bytes))
-	return length != 0 && len(o.Bytes) == cap(o.Bytes) && length <= math.MaxUint64-start && !overlapsOrigin(start, start+length, previous)
-}
-
-func overlapsOrigin(start, end uint64, origins []SourceOriginV1) bool {
-	for _, origin := range origins {
+	return length != 0 && len(o.Bytes) == cap(o.Bytes) && length <= math.MaxUint64-start && !slices.ContainsFunc(previous, func(origin SourceOriginV1) bool {
 		other := uint64(reflect.ValueOf(origin.Bytes).Pointer())
-		if start < other+uint64(len(origin.Bytes)) && other < end {
-			return true
-		}
-	}
-	return false
+		return start < other+uint64(len(origin.Bytes)) && other < start+length
+	})
 }
 
 type exportCursor struct {
-	mu       sync.Mutex
-	delivery sync.Mutex
+	lifetime     sync.RWMutex
+	mu, delivery sync.Mutex
+	*exportState
+}
+
+type exportState struct {
 	manifest SourceManifestV1
 	account  *mdbx.OperationAccount
 	limits   SourceLimitsV1
 	visit    func(SourcePartV1) error
-	done     chan struct{}
-	active   bool
-	sealed   bool
-	next     int
+	used     bool
+	active   atomic.Bool
 	failure  error
 	panicked any
 }
 
-// LimitsV1 returns the active source ceilings, or ErrUnavailableV1 after expiry.
-func (op *SourceOperationV1) LimitsV1() (SourceLimitsV1, error) {
-	if op == nil || op.cursor == nil {
-		return SourceLimitsV1{}, ErrUnavailableV1
+// pin keeps the backing state alive until the caller releases the lifetime read lock.
+func (op *SourceOperationV1) pin() *exportCursor {
+	if op == nil || op.cursor == nil || !op.cursor.lifetime.TryRLock() {
+		return nil
 	}
 	c := op.cursor
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.sealed {
+	if c.exportState == nil {
+		c.lifetime.RUnlock()
+		return nil
+	}
+	return c
+}
+
+// LimitsV1 returns the active source ceilings, or ErrUnavailableV1 after expiry.
+func (op *SourceOperationV1) LimitsV1() (SourceLimitsV1, error) {
+	c := op.pin()
+	if c == nil {
 		return SourceLimitsV1{}, ErrUnavailableV1
 	}
+	defer c.lifetime.RUnlock()
 	return c.limits, nil
 }
 
-// WithBackingV1 funds one synchronous delivery from complete disjoint immutable allocations with exact part views.
-// A second call, a nil use, more than nine origins, an invalid origin or not one valid view per manifest part fails the
-// export with ErrIntegrityV1, an overflowing or over-RAM charge with ErrCapacityV1 and an account refusal unchanged,
-// before use runs; after a refusal it returns that refusal. The error of use becomes the export result.
+// WithBackingV1 admits one synchronous delivery from bounded, disjoint allocations before calling use.
 func (op *SourceOperationV1) WithBackingV1(origins []SourceOriginV1, views []SourceViewV1, use func() error) error {
-	if op == nil || op.cursor == nil {
+	c := op.pin()
+	if c == nil {
 		return ErrUnavailableV1
 	}
-	c := op.cursor
-	charge, err := c.beginBacking(origins, views, use)
+	defer c.lifetime.RUnlock()
+	var charge uint64
+	err := c.update(func(s *exportState) error {
+		if s.used || use == nil {
+			return ErrIntegrityV1
+		}
+		s.used = true
+		var err error
+		charge, err = backingBytes(s.manifest, origins, views)
+		if charge > s.limits.RAM-s.limits.WorkingBytesV1()-s.limits.retainedRAM() {
+			return ErrCapacityV1
+		}
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	defer close(c.done)
-	err = c.account.WithReservation(charge, func() error {
-		c.mu.Lock()
-		c.active = true
-		c.mu.Unlock()
+	return c.settle(c.account.WithReservation(charge, func() error {
+		c.active.Store(true)
 		defer func() {
 			c.delivery.Lock()
-			defer c.delivery.Unlock()
-			c.mu.Lock()
-			c.active = false
-			c.mu.Unlock()
+			c.active.Store(false)
+			c.delivery.Unlock()
 		}()
 		return use()
-	})
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.fail(err)
+	}))
 }
 
-func (c *exportCursor) beginBacking(origins []SourceOriginV1, views []SourceViewV1, use func() error) (uint64, error) {
+// update changes a live cursor only while it has no recorded failure.
+func (c *exportCursor) update(change func(*exportState) error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch {
-	case c.sealed:
-		return 0, ErrUnavailableV1
-	case c.failure != nil:
-		return 0, c.failure
-	case c.done != nil, use == nil:
-		return 0, c.fail(ErrIntegrityV1)
-	}
-	charge, err := backingBytes(c.manifest, origins, views)
-	if err == nil && charge > c.limits.RAM-c.limits.WorkingBytesV1()-c.limits.retainedRAM() {
-		err = ErrCapacityV1
-	}
-	if err != nil {
-		return 0, c.fail(err)
-	}
-	c.done = make(chan struct{})
-	return charge, nil
-}
-
-func (c *exportCursor) fail(err error) error {
-	if c.failure == nil {
-		c.failure = err
+	case c.exportState == nil:
+		return ErrUnavailableV1
+	case c.failure == nil:
+		c.failure = change(c.exportState)
 	}
 	return c.failure
 }
 
-func (o *SourceOwnerV1) export(account *mdbx.OperationAccount, m SourceManifestV1, producer SourceExporterV1, visit func(SourcePartV1) error) error {
+func (c *exportCursor) settle(err error) error {
+	return c.update(func(*exportState) error { return err })
+}
+
+func (o *SourceOwnerV1) export(account *mdbx.OperationAccount, m SourceManifestV1, producer SourceExporterV1, visit func(SourcePartV1) error) (result error) {
 	if producer == nil || visit == nil {
 		return ErrIntegrityV1
 	}
-	cursor := &exportCursor{manifest: m, account: account, limits: o.limits, visit: visit}
-	defer cursor.expire()
-	return cursor.result(producer(&SourceOperationV1{cursor}, cursor.part))
+	cursor := &exportCursor{exportState: &exportState{manifest: m, account: account, limits: o.limits, visit: visit}}
+	defer cursor.finish(&result)
+	return producer(&SourceOperationV1{cursor}, cursor.part)
 }
 
 func (c *exportCursor) part(part SourcePartV1) error {
 	if !c.delivery.TryLock() {
-		return c.partResult(ErrIntegrityV1)
+		return c.settle(ErrIntegrityV1)
 	}
 	defer c.delivery.Unlock()
-	visit, err := c.acceptPart(part)
+	var visit func(SourcePartV1) error
+	err := c.update(func(s *exportState) error {
+		parts := s.manifest.Parts
+		if !s.active.Load() || len(parts) == 0 || part.ReadAt == nil || parts[0] != (SourcePartSpecV1{Kind: part.Kind, Length: part.Length}) {
+			return ErrIntegrityV1
+		}
+		visit, s.manifest.Parts = s.visit, parts[1:]
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	err = visitPart(part, func(scoped SourcePartV1) error {
+	return c.settle(visitPart(part, func(scoped SourcePartV1) error {
 		defer c.preservePanic()
-		return c.partResult(visit(scoped))
-	})
-	return c.partResult(err)
+		return c.settle(visit(scoped))
+	}))
 }
 
-// preservePanic keeps the visitor's panic observable if the producer recovers it.
 func (c *exportCursor) preservePanic() {
 	if value := recover(); value != nil {
 		c.mu.Lock()
 		c.panicked = value
-		_ = c.fail(ErrIntegrityV1)
+		c.failure = cmp.Or(c.failure, ErrIntegrityV1)
 		c.mu.Unlock()
 		panic(value) //nolint:forbidigo // Propagate the original visitor panic.
 	}
 }
 
-func (c *exportCursor) partResult(err error) error {
+// finish drains admitted backing, settles the first failure and invalidates the cursor.
+func (c *exportCursor) finish(result *error) {
+	c.lifetime.Lock()
+	defer c.lifetime.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.visit == nil {
-		return ErrUnavailableV1
+	s := c.exportState
+	c.exportState = nil
+	*result = cmp.Or(s.failure, *result)
+	if *result == nil && len(s.manifest.Parts) != 0 {
+		*result = ErrIntegrityV1
 	}
-	return c.fail(err)
-}
-
-func (c *exportCursor) acceptPart(part SourcePartV1) (func(SourcePartV1) error, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.visit == nil {
-		return nil, ErrUnavailableV1
-	}
-	if c.failure != nil {
-		return nil, c.failure
-	}
-	if !c.active || c.next >= len(c.manifest.Parts) || part.ReadAt == nil {
-		return nil, c.fail(ErrIntegrityV1)
-	}
-	actual := SourcePartSpecV1{Kind: part.Kind, Length: part.Length}
-	if actual != c.manifest.Parts[c.next] {
-		return nil, c.fail(ErrIntegrityV1)
-	}
-	c.next++
-	return c.visit, nil
-}
-
-func (c *exportCursor) result(err error) error {
-	c.waitBacking()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.failure != nil {
-		return c.failure
-	}
-	if err != nil {
-		return err
-	}
-	if c.next != len(c.manifest.Parts) {
-		return ErrIntegrityV1
-	}
-	return nil
-}
-
-// expire clears the cursor and then repanics a reached visitor panic over any producer outcome.
-func (c *exportCursor) expire() {
-	c.waitBacking()
-	c.mu.Lock()
-	panicked := c.panicked
-	c.visit = nil
-	c.account = nil
-	c.manifest = SourceManifestV1{}
-	c.failure = nil
-	c.panicked = nil
-	c.next = 0
-	c.mu.Unlock()
-	if panicked != nil {
-		panic(panicked) //nolint:forbidigo // Propagate the original visitor panic.
-	}
-}
-
-func (c *exportCursor) waitBacking() {
-	c.mu.Lock()
-	c.sealed = true
-	done := c.done
-	c.mu.Unlock()
-	if done != nil {
-		<-done
+	if s.panicked != nil {
+		panic(s.panicked) //nolint:forbidigo // Propagate the original visitor panic.
 	}
 }
 
@@ -353,12 +286,7 @@ func (o *SourceOwnerV1) withManifest(account *mdbx.OperationAccount, m SourceMan
 			return ErrCapacityV1
 		}
 		m.Parts = slices.Clone(m.Parts)
-		r, err := o.root(false)
-		if err != nil {
-			return err
-		}
-		defer r.Close()
-		return use(r, m, size)
+		return o.withRoot(o.bindRoot, func(r *sourceRoot) error { return use(r, m, size) })
 	})
 }
 

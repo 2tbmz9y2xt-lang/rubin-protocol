@@ -46,20 +46,32 @@ type sourceRoot struct {
 	pin *os.File
 }
 
+const sourceInitDirectory = "." + sourceDirectory + ".init"
+
 func (r *sourceRoot) Close() error { return errors.Join(r.pin.Close(), r.Root.Close()) }
 
-func (o *SourceOwnerV1) root(create bool) (*sourceRoot, error) {
+func (o *SourceOwnerV1) withRoot(open func(*os.Root) (*os.Root, error), use func(*sourceRoot) error) error {
 	parent, err := o.parentRoot()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer parent.Close()
-	if create {
-		if err := createSourceRoot(parent); err != nil {
-			return nil, err
-		}
+	r, err := open(parent)
+	_ = parent.Close()
+	if err != nil {
+		return err
 	}
-	return o.bindRoot(parent)
+	pin, err := r.Open(".")
+	if err != nil {
+		_ = r.Close()
+		return ErrUnavailableV1
+	}
+	root := &sourceRoot{Root: r, pin: pin}
+	defer root.Close()
+	held, _ := pin.Stat()
+	if !os.SameFile(o.info, held) || held.Mode() != os.ModeDir|0o700 {
+		return ErrIdentityV1
+	}
+	return use(root)
 }
 
 func (o *SourceOwnerV1) parentRoot() (*os.Root, error) {
@@ -75,7 +87,6 @@ func (o *SourceOwnerV1) parentRoot() (*os.Root, error) {
 	return parent, nil
 }
 
-// currentRoot checks that the held roots remain reachable through their admitted names.
 func (o *SourceOwnerV1) currentRoot() error {
 	parent, err := o.parentRoot()
 	if err != nil {
@@ -93,73 +104,101 @@ func (o *SourceOwnerV1) currentRoot() error {
 	return nil
 }
 
-func createSourceRoot(parent *os.Root) error {
-	if err := parent.Mkdir(sourceDirectory, 0o700); !errors.Is(err, os.ErrExist) {
-		if err := cmp.Or(err, parent.Chmod(sourceDirectory, 0o700)); err != nil {
-			return err
-		}
+func (o *SourceOwnerV1) createSourceRoot(parent *os.Root) (*os.Root, error) {
+	leaf, err := sourceRootInfo(parent)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, ErrIdentityV1
 	}
 	f, err := parent.Open(".")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return errors.Join(f.Sync(), f.Close())
+	var pin *os.File
+	if leaf == nil {
+		pin, leaf, err = publishSourceRoot(int(f.Fd()))
+	}
+	defer pin.Close()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := errors.Join(f.Sync(), f.Close()); err != nil {
+		return nil, err
+	}
+	o.info = leaf
+	return o.bindRoot(parent)
 }
 
-func (o *SourceOwnerV1) bindRoot(parent *os.Root) (*sourceRoot, error) {
-	leaf, err := sourceRootInfo(parent)
+// publishSourceRoot syncs and publishes the empty directory and returns its open pin.
+func publishSourceRoot(parent int) (*os.File, os.FileInfo, error) {
+	pin, err := openSourceInit(parent)
 	if err != nil {
+		return nil, nil, err
+	}
+	info, err := pin.Stat()
+	if err != nil || info.Mode() != os.ModeDir|0o700 {
+		return pin, nil, ErrIdentityV1
+	}
+	if _, err := pin.ReadDir(1); err != io.EOF {
+		return pin, nil, ErrIdentityV1
+	}
+	if err := pin.Sync(); err != nil {
+		return pin, nil, err
+	}
+	return pin, info, renameSourceInit(parent)
+}
+
+// openSourceInit replaces only an empty directory at the reserved name and pins the replacement.
+func openSourceInit(parent int) (*os.File, error) {
+	if err := unix.Unlinkat(parent, sourceInitDirectory, unix.AT_REMOVEDIR); err != nil && err != unix.ENOENT {
+		return nil, ErrIdentityV1
+	}
+	if err := unix.Mkdirat(parent, sourceInitDirectory, 0o700); err != nil {
 		return nil, err
+	}
+	if err := chmodSourceInit(parent); err != nil {
+		return nil, err
+	}
+	return openSourceAt(parent, sourceInitDirectory, unix.O_DIRECTORY)
+}
+
+func (o *SourceOwnerV1) bindRoot(parent *os.Root) (*os.Root, error) {
+	leaf, _ := sourceRootInfo(parent)
+	if !os.SameFile(o.info, leaf) {
+		return nil, ErrIdentityV1
 	}
 	r, err := parent.OpenRoot(sourceDirectory)
 	if err != nil {
 		return nil, ErrUnavailableV1
 	}
-	pin, err := r.Open(".")
-	if err != nil {
-		_ = r.Close()
-		return nil, ErrUnavailableV1
-	}
-	root := &sourceRoot{Root: r, pin: pin}
-	held, _ := pin.Stat()
-	if !os.SameFile(leaf, held) || held.Mode() != leaf.Mode() || o.info != nil && !os.SameFile(o.info, held) {
-		_ = root.Close()
-		return nil, ErrIdentityV1
-	}
-	o.info = held
-	return root, nil
+	return r, nil
 }
 
 func sourceRootInfo(parent *os.Root) (os.FileInfo, error) {
 	info, err := parent.Lstat(sourceDirectory)
-	if err != nil || info.Mode() != os.ModeDir|0o700 {
+	if err == nil && info.Mode() != os.ModeDir|0o700 {
 		return nil, ErrIdentityV1
 	}
-	return info, nil
+	return info, err
 }
 
 func (o *SourceOwnerV1) openSourceRoot() error {
-	r, err := o.root(true)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-	if err := o.ops.dirSync(r); err != nil {
-		return err
-	}
-	if err := o.openRelease(r); err != nil {
-		return err
-	}
-	if _, err = o.census(r); err != nil {
-		return err
-	}
-	if o.release != nil {
+	return o.withRoot(o.createSourceRoot, func(r *sourceRoot) error {
+		if err := o.syncBoundRoot(r); err != nil {
+			return err
+		}
+		if err := o.openRelease(r); err != nil {
+			return err
+		}
+		if _, err := o.census(r); err != nil || o.release == nil {
+			return err
+		}
 		if !o.manifestFits(o.release.manifest, o.release.size) {
 			return ErrCapacityV1
 		}
-		_, err = o.releaseBacking(r, o.release, make([]byte, scratchBytes))
-	}
-	return err
+		_, err := o.releaseBacking(r, o.release, make([]byte, scratchBytes))
+		return err
+	})
 }
 
 func syncSourceRoot(r *sourceRoot) error { return r.pin.Sync() }
@@ -172,7 +211,6 @@ func (o *SourceOwnerV1) syncBoundRoot(r *sourceRoot) error {
 	return o.currentRoot()
 }
 
-// census accounts for retained files and pending cleanup.
 func (o *SourceOwnerV1) census(r *sourceRoot) (sourceUsage, error) {
 	f, err := r.Open(".")
 	if err != nil {
@@ -261,26 +299,32 @@ func (o *SourceOwnerV1) censusFile(r *sourceRoot, name string, used *sourceUsage
 	return nil
 }
 
-// openSourceFile opens the regular file named by name without following a final symbolic link or blocking. A failed name observation
-// returns unobserved, or its own error when unobserved is nil; a non-regular named object or another opened object ErrIntegrityV1; a failed open ErrUnavailableV1.
+// openSourceFile checks that a nonblocking, no-follow open pins the observed regular file.
 func openSourceFile(r *sourceRoot, name string, unobserved error) (*os.File, error) {
 	named, err := sourceEntryInfo(r, name, unobserved)
 	if err != nil {
 		return nil, err
 	}
-	fd, err := -1, error(unix.EINTR)
-	for errors.Is(err, unix.EINTR) {
-		fd, err = unix.Openat(int(r.pin.Fd()), name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	}
+	f, err := openSourceAt(int(r.pin.Fd()), name, unix.O_NONBLOCK)
 	if err != nil {
 		return nil, ErrUnavailableV1
 	}
-	f := os.NewFile(uintptr(fd), name)
 	if info, _ := f.Stat(); !os.SameFile(named, info) {
 		_ = f.Close()
 		return nil, ErrIntegrityV1
 	}
 	return f, nil
+}
+
+func openSourceAt(parent int, name string, flags int) (*os.File, error) {
+	fd, err := -1, error(unix.EINTR)
+	for err == unix.EINTR {
+		fd, err = unix.Openat(parent, name, flags|unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
 }
 
 func sourceEntryInfo(r *sourceRoot, name string, unobserved error) (os.FileInfo, error) {
@@ -380,13 +424,13 @@ func stream(m SourceManifestV1, produce func(func(SourcePartV1) error) error, ds
 				return err
 			}
 		}
+		out := dst
 		if part.Kind == AcquiredBlockBytesV1 {
 			acquired := sha256.New()
-			err := copyPart(part, io.MultiWriter(dst, acquired), scratch)
-			copy(digest[:], acquired.Sum(nil))
-			return err
+			out = io.MultiWriter(dst, acquired)
+			defer func() { copy(digest[:], acquired.Sum(nil)) }()
 		}
-		return copyPart(part, dst, scratch)
+		return copyPart(part, out, scratch)
 	})
 	if err != nil {
 		return err
@@ -449,7 +493,7 @@ func fileExporter(f *os.File, m SourceManifestV1, header int) func(func(SourcePa
 	}
 }
 
-// WithCapturedSourceV1 opens and qualifies the retained file before visiting its parts.
+// WithCapturedSourceV1 qualifies retained bytes before visiting (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
 func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, visit func(SourcePartV1) error) error {
 	return o.withFiles(account, m, false, func(r *sourceRoot, m SourceManifestV1, size uint64, _ sourceUsage) error {
 		name := m.name(o.id)
@@ -506,7 +550,7 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 	return nil
 }
 
-// PrepareSourceV1 returns an incarnation handle after qualifying and durably publishing the source.
+// PrepareSourceV1 returns a handle after durable publication (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
 func (o *SourceOwnerV1) PrepareSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, producer SourceExporterV1) (prepared *PreparedSourceV1, err error) {
 	err = o.withFiles(account, m, true, func(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage) error {
 		prepared, err = o.prepare(r, m, size, used, func(visit func(SourcePartV1) error) error {
@@ -556,11 +600,8 @@ func (o *SourceOwnerV1) prepared(r *sourceRoot, m SourceManifestV1, name string,
 		return nil, ErrIdentityV1
 	}
 	o.debt = nil
-	token := o.live[name]
-	if token == nil {
-		token = &observed
-		o.live[name] = token
-	}
+	token := cmp.Or(o.live[name], &observed)
+	o.live[name] = token
 	return &PreparedSourceV1{manifest: m, name: name, incarnation: token}, nil
 }
 
@@ -603,7 +644,19 @@ func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m Source
 	scratch := make([]byte, scratchBytes)
 	hash := sha256.New()
 	out := io.MultiWriter(w, hash)
-	start := func() error { return o.startBundle(r, w, out, m, name, size) }
+	start := func() error {
+		if err := o.reconcile(r); err != nil {
+			return err
+		}
+		f, err := r.OpenFile(".staging-"+name, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
+			return err
+		}
+		w.file = f
+		o.debt = &sourceDebt{name: name, size: size, staging: true}
+		_, err = out.Write(m.header(o.id))
+		return cmp.Or(err, o.ops.chmod(f, 0o600))
+	}
 	if err := stream(m, produce, out, scratch, start); err != nil {
 		return sourceIncarnation{}, err
 	}
@@ -611,20 +664,6 @@ func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m Source
 		return sourceIncarnation{}, err
 	}
 	return o.qualify(w.file, m, size, scratch, nil, ErrIntegrityV1)
-}
-
-func (o *SourceOwnerV1) startBundle(r *sourceRoot, w *sourceFileWriter, out io.Writer, m SourceManifestV1, name string, size uint64) error {
-	if err := o.reconcile(r); err != nil {
-		return err
-	}
-	f, err := r.OpenFile(".staging-"+name, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return err
-	}
-	w.file = f
-	o.debt = &sourceDebt{name: name, size: size, staging: true}
-	_, err = out.Write(m.header(o.id))
-	return cmp.Or(err, o.ops.chmod(f, 0o600))
 }
 
 type sourceFileWriter struct {

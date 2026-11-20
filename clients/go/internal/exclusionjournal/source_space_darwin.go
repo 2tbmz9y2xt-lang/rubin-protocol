@@ -1,8 +1,19 @@
 package exclusionjournal
 
-import "syscall"
+import (
+	"syscall"
 
-// sourceSpaceUnit returns the native unit of the available-block count.
+	"golang.org/x/sys/unix"
+)
+
 func sourceSpaceUnit(stat *syscall.Statfs_t) uint64 {
 	return uint64(stat.Bsize)
+}
+
+func chmodSourceInit(parent int) error {
+	return unix.Fchmodat(parent, sourceInitDirectory, 0o700, unix.AT_SYMLINK_NOFOLLOW)
+}
+
+func renameSourceInit(parent int) error {
+	return unix.RenameatxNp(parent, sourceInitDirectory, parent, sourceDirectory, unix.RENAME_EXCL)
 }

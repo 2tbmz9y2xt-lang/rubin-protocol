@@ -53,25 +53,23 @@ type SourcePartSpecV1 struct {
 	Length uint64
 }
 
-// SourceManifestV1 fixes original identity, class, acquired-byte digest and ordered census.
+// SourceManifestV1 fixes original identity and ordered parts (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
 type SourceManifestV1 struct {
 	Identity, AcquiredDigest [32]byte
 	Class                    CaptureClassV1
 	Parts                    []SourcePartSpecV1
 }
 
-// SourceLimitsV1 are positive finite ceilings over the shared retained-source census and each operation.
+// SourceLimitsV1 bounds retained backing and operations (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
 type SourceLimitsV1 struct {
 	Bytes, Files, Scans, RAM, Headers, Descriptors, Overhead uint64
 }
 
 // SourceOwnerV1 binds source operations to one actual Store instance and its protected directory.
 type SourceOwnerV1 struct {
+	sourceBinding
 	store   *policycontrol.Store
-	dir     string
-	id      policycontrol.Identity
 	info    os.FileInfo
-	parent  filelock.IdentityV1
 	self    *SourceOwnerV1
 	limits  SourceLimitsV1
 	busy    atomic.Bool
@@ -81,7 +79,13 @@ type SourceOwnerV1 struct {
 	live    map[string]*sourceIncarnation
 }
 
-// PreparedSourceV1 identifies qualified durable backing for a source incarnation.
+type sourceBinding struct {
+	dir    string
+	id     policycontrol.Identity
+	parent filelock.IdentityV1
+}
+
+// PreparedSourceV1 identifies qualified backing (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
 type PreparedSourceV1 struct {
 	manifest    SourceManifestV1
 	name        string
@@ -114,7 +118,7 @@ func NewSourceOwnerV1(store *policycontrol.Store, expected policycontrol.Identit
 	if !limits.valid() || account == nil {
 		return nil, ErrCapacityV1
 	}
-	o := &SourceOwnerV1{store: store, dir: dir, id: id, parent: parent, limits: limits, ops: realSourceFS, live: make(map[string]*sourceIncarnation)}
+	o := &SourceOwnerV1{store: store, sourceBinding: sourceBinding{dir, id, parent}, limits: limits, ops: realSourceFS, live: make(map[string]*sourceIncarnation)}
 	o.self = o
 	err = account.WithReservation(limits.WorkingBytesV1(), func() error {
 		return b.WithSourceOwnerClaimV1(o.openSourceRoot)
@@ -148,7 +152,8 @@ func (o *SourceOwnerV1) operation(account *mdbx.OperationAccount, use func() err
 		return err
 	}
 	defer b.ReleaseV1()
-	if !o.matchesBinding(b) {
+	dir, id, parent, err := b.BindingV1()
+	if err != nil || (sourceBinding{dir, id, parent}) != o.sourceBinding {
 		return ErrIdentityV1
 	}
 	if !o.busy.CompareAndSwap(false, true) {
@@ -161,35 +166,25 @@ func (o *SourceOwnerV1) operation(account *mdbx.OperationAccount, use func() err
 	return account.WithReservation(o.limits.WorkingBytesV1(), use)
 }
 
-func (o *SourceOwnerV1) matchesBinding(b *policycontrol.SourceAuthorityBorrowV1) bool {
-	dir, id, parent, err := b.BindingV1()
-	return err == nil && id == o.id && dir == o.dir && parent == o.parent
-}
-
-type sourcePartRule struct {
-	kind    PartKindV1
-	minimum uint64
-}
-
 var (
-	boundSourceParts   = []sourcePartRule{{BoundBodyV1, 1}, {ObservedResultV1, 1}, {HistoricalContextV1, 1}, {OriginalAssuranceV1, 1}, {ParentPathV1, 1}, {AcceptedPrefixV1, 0}}
-	sourcePartsByClass = map[CaptureClassV1][]sourcePartRule{
-		RejectionV1:              boundSourceParts,
-		AcceptanceV1:             boundSourceParts,
+	boundSourceMinimums   = []SourcePartSpecV1{{BoundBodyV1, 1}, {ObservedResultV1, 1}, {HistoricalContextV1, 1}, {OriginalAssuranceV1, 1}, {ParentPathV1, 1}, {AcceptedPrefixV1, 0}}
+	sourceMinimumsByClass = map[CaptureClassV1][]SourcePartSpecV1{
+		RejectionV1:              boundSourceMinimums,
+		AcceptanceV1:             boundSourceMinimums,
 		RecoveryCoreImpossibleV1: {{AcquiredBlockBytesV1, 1}, {ExpectedHeaderPathV1, 1}, {HistoricalContextV1, 1}, {OriginalAssuranceV1, 1}, {AcquisitionPositionV1, 1}},
 	}
 )
 
 // SizeV1 validates the closed manifest and returns its exact encoded length before allocation, or ErrIntegrityV1.
 func (m SourceManifestV1) SizeV1() (uint64, error) {
-	rules := sourcePartsByClass[m.Class]
-	if rules == nil || len(m.Parts) != len(rules) || m.Identity == [32]byte{} ||
+	minimums := sourceMinimumsByClass[m.Class]
+	if minimums == nil || len(m.Parts) != len(minimums) || m.Identity == [32]byte{} ||
 		(m.Class == RecoveryCoreImpossibleV1) != (m.AcquiredDigest != [32]byte{}) {
 		return 0, ErrIntegrityV1
 	}
-	total := uint64(bundleHeader + sha256.Size + 9*len(rules))
+	total := uint64(bundleHeader + sha256.Size + 9*len(minimums))
 	for i, p := range m.Parts {
-		if !p.fits(rules[i], math.MaxInt64-total) {
+		if !p.fits(minimums[i], math.MaxInt64-total) {
 			return 0, ErrIntegrityV1
 		}
 		total += p.Length
@@ -197,8 +192,8 @@ func (m SourceManifestV1) SizeV1() (uint64, error) {
 	return total, nil
 }
 
-func (p SourcePartSpecV1) fits(rule sourcePartRule, remaining uint64) bool {
-	return p.Kind == rule.kind && p.Length >= rule.minimum && p.Length <= remaining
+func (p SourcePartSpecV1) fits(minimum SourcePartSpecV1, remaining uint64) bool {
+	return p.Kind == minimum.Kind && p.Length >= minimum.Length && p.Length <= remaining
 }
 
 func (m SourceManifestV1) header(id policycontrol.Identity) []byte {

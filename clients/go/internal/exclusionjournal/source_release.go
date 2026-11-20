@@ -31,24 +31,21 @@ type sourceRelease struct {
 	backingSynced bool
 }
 
-// ReleaseUnpublishedSourceV1 removes an unpublished incarnation and holds its charge through directory sync.
+// ReleaseUnpublishedSourceV1 holds the source charge through durable removal (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
 func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccount, p *PreparedSourceV1, neverReferenced bool) error {
 	return o.operation(account, func() error {
 		if err := o.releaseAdmission(p, neverReferenced); err != nil {
 			return err
 		}
-		r, err := o.root(false)
-		if err != nil {
-			return err
-		}
-		defer r.Close()
-		scratch := make([]byte, scratchBytes)
-		if o.release == nil {
-			if err := o.beginRelease(r, p, scratch); err != nil {
-				return err
+		return o.withRoot(o.bindRoot, func(r *sourceRoot) error {
+			scratch := make([]byte, scratchBytes)
+			if o.release == nil {
+				if err := o.beginRelease(r, p, scratch); err != nil {
+					return err
+				}
 			}
-		}
-		return o.continueRelease(r, scratch)
+			return o.continueRelease(r, scratch)
+		})
 	})
 }
 
@@ -66,8 +63,7 @@ func (o *SourceOwnerV1) hasReleaseAuthority(p *PreparedSourceV1) bool {
 	if p == nil {
 		return o.release != nil && o.release.reopened
 	}
-	token := o.live[p.name]
-	return token != nil && token == p.incarnation
+	return p.incarnation != nil && o.live[p.name] == p.incarnation
 }
 
 func (o *SourceOwnerV1) beginRelease(r *sourceRoot, p *PreparedSourceV1, scratch []byte) error {
@@ -82,9 +78,7 @@ func (o *SourceOwnerV1) beginRelease(r *sourceRoot, p *PreparedSourceV1, scratch
 func (o *SourceOwnerV1) releaseRecord(d *sourceRelease) []byte {
 	root := filelock.FileIdentityV1(o.info)
 	record := append(make([]byte, 0, releaseMax), 'S', 'R', 'V', 1)
-	for _, field := range [...]uint64{root[0], root[1], d.file[0], d.file[1], d.size} {
-		record = binary.LittleEndian.AppendUint64(record, field)
-	}
+	record, _ = binary.Append(record, binary.LittleEndian, [...]uint64{root[0], root[1], d.file[0], d.file[1], d.size})
 	record = append(record, d.footer[:]...)
 	record = append(record, d.manifest.header(o.id)...)
 	digest := sha256.Sum256(record)
@@ -110,53 +104,49 @@ func (o *SourceOwnerV1) decodeRelease(record []byte) (*sourceRelease, error) {
 		return nil, ErrIntegrityV1
 	}
 	end := len(record) - sha256.Size
-	digest := sha256.Sum256(record[:end])
-	if !bytes.Equal(digest[:], record[end:]) {
+	if sha256.Sum256(record[:end]) != [sha256.Size]byte(record[end:]) {
 		return nil, ErrIntegrityV1
 	}
-	if filelock.FileIdentityV1(o.info) != releaseIdentity(record[4:]) {
+	var identity [5]uint64
+	_, _ = binary.Decode(record[4:], binary.LittleEndian, &identity)
+	if filelock.FileIdentityV1(o.info) != (filelock.IdentityV1{identity[0], identity[1]}) {
 		return nil, ErrIdentityV1
 	}
-	header := record[releasePrefix:end]
-	m, err := o.releaseManifest(header)
+	m, size, err := o.releaseManifest(record[releasePrefix:end])
 	if err != nil {
 		return nil, err
 	}
 	d := &sourceRelease{name: m.name(o.id), manifest: m, record: record, reopened: true}
-	d.file = releaseIdentity(record[20:])
-	d.size = binary.LittleEndian.Uint64(record[36:])
+	d.file = filelock.IdentityV1{identity[2], identity[3]}
+	d.size = identity[4]
 	copy(d.footer[:], record[44:releasePrefix])
-	if size, _ := m.SizeV1(); size != d.size || d.file == (filelock.IdentityV1{}) {
+	if size != d.size || d.file == (filelock.IdentityV1{}) {
 		return nil, ErrIntegrityV1
 	}
 	return d, nil
 }
 
-func releaseIdentity(record []byte) filelock.IdentityV1 {
-	return filelock.IdentityV1{binary.LittleEndian.Uint64(record), binary.LittleEndian.Uint64(record[8:])}
-}
-
-func (o *SourceOwnerV1) releaseManifest(header []byte) (SourceManifestV1, error) {
+func (o *SourceOwnerV1) releaseManifest(header []byte) (SourceManifestV1, uint64, error) {
 	const identityOffset = bundleHeader - 66
 	var m SourceManifestV1
 	if !bytes.Equal(header[:4], []byte{'S', 'C', 'V', 1}) {
-		return m, ErrIntegrityV1
+		return m, 0, ErrIntegrityV1
 	}
 	if !bytes.Equal(header[4:identityOffset], m.header(o.id)[4:identityOffset]) {
-		return m, ErrIdentityV1
+		return m, 0, ErrIdentityV1
 	}
 	copy(m.Identity[:], header[identityOffset:])
 	copy(m.AcquiredDigest[:], header[identityOffset+32:])
 	m.Class = CaptureClassV1(header[bundleHeader-2])
 	count := int(header[bundleHeader-1])
 	if len(header) != bundleHeader+9*count {
-		return m, ErrIntegrityV1
+		return m, 0, ErrIntegrityV1
 	}
 	for offset := bundleHeader; offset < len(header); offset += 9 {
 		m.Parts = append(m.Parts, SourcePartSpecV1{PartKindV1(header[offset]), binary.LittleEndian.Uint64(header[offset+1:])})
 	}
-	_, err := m.SizeV1()
-	return m, err
+	size, err := m.SizeV1()
+	return m, size, err
 }
 
 func (o *SourceOwnerV1) releaseBacking(r *sourceRoot, d *sourceRelease, scratch []byte) (bool, error) {
@@ -266,7 +256,6 @@ func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) erro
 	return o.ops.remove(r.Root, releaseFile)
 }
 
-// marker checks the named release record against the saved exact bytes.
 func (d *sourceRelease) marker(r *sourceRoot) (bool, error) {
 	record, err := readRelease(r)
 	if !errors.Is(err, os.ErrNotExist) && !bytes.Equal(record, d.record) {
