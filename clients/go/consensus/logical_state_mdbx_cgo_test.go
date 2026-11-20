@@ -814,6 +814,13 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	var listed struct{ GoFiles, CgoFiles, IgnoredGoFiles, TestGoFiles []string }
 	out, err := exec.CommandContext(t.Context(), "go", "list", "-e", "-json", ".").Output()
 	logicalMDBXAssert(t, err == nil && json.Unmarshal(out, &listed) == nil, "go list: %v", err)
+	logicalMDBXAssert(t, slices.Contains(listed.GoFiles, "journal_source_export_mdbx_cgo.go") && slices.Contains(listed.TestGoFiles, "journal_source_export_mdbx_cgo_test.go"), "journal source ordinary build membership")
+	for _, name := range []string{"journal_source_export_mdbx_cgo.go", "journal_source_export_mdbx_cgo_test.go"} {
+		source, readErr := os.ReadFile(name)
+		logicalMDBXAssert(t, readErr == nil, "read %s: %v", name, readErr)
+		expression, parseErr := constraint.Parse(strings.SplitN(string(source), "\n", 2)[0])
+		logicalMDBXAssert(t, parseErr == nil && expression.String() == logicalMDBXConstraint, "journal source build constraint: %s/%v/%v", name, expression, parseErr)
+	}
 	logicalMDBXAssert(t, slices.Contains(listed.GoFiles, "replay_pair_mdbx_cgo.go") && slices.Contains(listed.TestGoFiles, "replay_pair_mdbx_cgo_test.go"), "replay pair ordinary build membership")
 	replayFixture, replayReadErr := os.ReadFile("replay_pair_mdbx_fixture_cgo_test.go")
 	logicalMDBXAssert(t, replayReadErr == nil, "replay pair fixture read: %v", replayReadErr)
