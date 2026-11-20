@@ -47,10 +47,10 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 			scratch := make([]byte, scratchBytes)
 			d := o.release
 			if d == nil {
-				if _, err := o.census(r, false); err != nil {
+				if err := o.releaseCensus(r); err != nil {
 					return err
 				}
-				if strings.EqualFold(o.debt.name, p.name) && o.debt.backing != p.name {
+				if o.debt.matchesKey(p.name) && o.debt.backing != p.name {
 					return ErrBusyV1
 				}
 				d = &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
@@ -60,6 +60,17 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 		})
 	})
 }
+
+func (o *SourceOwnerV1) releaseCensus(r *sourceRoot) error {
+	if r.releaseScanned {
+		return nil
+	}
+	_, err := o.census(r, false)
+	r.releaseScanned = err == nil
+	return err
+}
+
+func (d sourceDebt) matchesKey(name string) bool { return strings.EqualFold(d.name, name) }
 
 func (o *SourceOwnerV1) releaseAdmission(p *PreparedSourceV1, proof bool) error {
 	if !proof || !o.hasReleaseAuthority(p) {
@@ -320,7 +331,7 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, d *sourceRelease, scratch
 	if err := o.syncBoundRoot(r); err != nil {
 		return err
 	}
-	if err := d.confirmClear(r); err != nil {
+	if err := o.confirmClear(r, d); err != nil {
 		return err
 	}
 	delete(o.live, d.name)
@@ -328,14 +339,14 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, d *sourceRelease, scratch
 	return nil
 }
 
-func (d *sourceRelease) confirmClear(r *sourceRoot) error {
+func (o *SourceOwnerV1) confirmClear(r *sourceRoot, d *sourceRelease) error {
 	if !d.backingAbsent(r) {
 		return ErrIdentityV1
 	}
 	if _, err := r.Lstat(releaseFile); !errors.Is(err, os.ErrNotExist) {
 		return ErrIntegrityV1
 	}
-	return d.checkStage(r, false)
+	return o.checkStage(r, d, false)
 }
 
 // clearReleaseMarker removes a matching release record only after the backing name is observed absent.
@@ -350,7 +361,7 @@ func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) erro
 	if !present && !d.clearAttempted {
 		return ErrIntegrityV1
 	}
-	if err := d.checkStage(r, false); err != nil || !present {
+	if err := o.checkStage(r, d, false); err != nil || !present {
 		return err
 	}
 	if err := o.removeMarkerAlias(r); err != nil {
@@ -450,7 +461,7 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 }
 
 func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name string, scratch []byte) error {
-	if err := d.checkStage(r, name != ""); err != nil {
+	if err := o.checkStage(r, d, name != ""); err != nil {
 		return err
 	}
 	if err := o.checkAliasSpelling(r, d); err != nil {
@@ -474,8 +485,15 @@ func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name stri
 }
 
 // checkStage preserves an independent stage for the same capture.
-func (d *sourceRelease) checkStage(r *sourceRoot, backingPresent bool) error {
-	_, info, err := d.stageAlias(r, d.name)
+func (o *SourceOwnerV1) checkStage(r *sourceRoot, d *sourceRelease, backingPresent bool) error {
+	if err := o.releaseCensus(r); err != nil {
+		return err
+	}
+	key := d.name
+	if o.debt.matchesKey(key) {
+		key = o.debt.name
+	}
+	_, info, err := d.stageAlias(r, key)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}

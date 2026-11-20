@@ -402,6 +402,22 @@ func TestSourcePartialCleanupRetry(t *testing.T) {
 }
 
 func testSourceStageObservation(t *testing.T) {
+	t.Run("funded-producer-refusal", func(t *testing.T) {
+		_, o, dir, m, _ := sourceBundleScene(t, 1, false)
+		root := filepath.Join(dir, sourceDirectory)
+		path := filepath.Join(root, publicStagePrefix+m.name(o.id))
+		sourceMust(t, os.WriteFile(path, []byte("partial"), 0o600))
+		before := sourceLstat(t, path)
+		unchanged := sourcePreservedEntry(t, path)
+		want := errors.New("producer stopped before its first part")
+		sourcePrepareResult(t, o, m, func(*SourceOperationV1, func(SourcePartV1) error) error {
+			sourceFailIf(t, !sourceHasOpenFile(t, before), "producer started without the observed stage")
+			return want
+		}, want)
+		unchanged()
+		sourceFailIf(t, sourceHasOpenFile(t, before), "producer refusal retained an open stage")
+		assertSourceReleaseCharge(t, o, m, 1, uint64(before.Size()))
+	})
 	sourceModes(t, []string{"logical-capacity", "disk-capacity", "producer", "reuse-producer", "reuse-integrity"}, func(t *testing.T, mode string) {
 		m, parts := sourceBundle(1, false)
 		size, err := m.SizeV1()
@@ -446,9 +462,11 @@ func testSourceStageObservation(t *testing.T) {
 			sourceMust(t, o.withFiles(a, m, true, func(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage) error {
 				sourceMust(t, os.Rename(stage, aside))
 				calls := 0
-				token, err := o.prepare(r, m, size, used, func(func(SourcePartV1) error) error {
-					calls++
-					return producerErr
+				token, err := o.prepare(r, m, size, used, func(visit func(SourcePartV1) error) error {
+					return o.export(a, m, func(*SourceOperationV1, func(SourcePartV1) error) error {
+						calls++
+						return producerErr
+					}, visit)
 				})
 				sourceWantError(t, err, want, "prepare after staging name disappeared")
 				sourceFailIf(t, token != nil || calls != wantCalls, "unexpected prepare token or producer calls %d", calls)
@@ -932,12 +950,17 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 		sourceFailIf(t, o.release == nil || o.release.size != size || o.live[p.name] != p.incarnation, "refused clear returned capture charge")
 	})
 	t.Run("pending-independent-stage", func(t *testing.T) {
-		for _, fault := range []string{"intent-sync", "unlink", "unlink-sync", "marker-clear", "unlink-sync-after-alias", "marker-clear-after-alias"} {
+		for _, fault := range []string{"intent-sync", "unlink", "unlink-sync", "marker-clear", "unlink-sync-after-alias", "marker-clear-after-alias", "uppercase-intent-sync", "uppercase-marker-clear"} {
 			t.Run(fault, func(t *testing.T) {
 				s, o, dir, m, parts, p := sourcePreparedBundle(t)
 				root := filepath.Join(dir, sourceDirectory)
-				temp := filepath.Join(root, ".staging-"+p.name)
-				stage, alias := strings.CutSuffix(fault, "-after-alias")
+				key := p.name
+				stage, upper := strings.CutPrefix(fault, "uppercase-")
+				if upper {
+					key = strings.ToUpper(key)
+				}
+				temp := filepath.Join(root, publicStagePrefix+key)
+				stage, alias := strings.CutSuffix(stage, "-after-alias")
 				if alias {
 					sourceMust(t, os.Link(filepath.Join(root, p.name), temp))
 				}
@@ -956,6 +979,11 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 				sourceReleaseResult(t, fresh, nil, true, ErrBusyV1)
 				assertSourceReleaseCharge(t, fresh, m, 2, size+11)
 				sourceFailIf(t, !bytes.Equal(sourceReadFile(t, temp), []byte("independent")), "release changed independent stage")
+				if upper && stage == "marker-clear" {
+					sourceMust(t, os.Remove(temp))
+					sourceReleaseResult(t, fresh, nil, true, ErrIdentityV1)
+					sourcePresence(t, root, releaseFile, true)
+				}
 			})
 		}
 	})
@@ -1038,13 +1066,15 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 }
 
 func testSourceReleaseSpelling(t *testing.T) {
-	sourceModes(t, []string{"mixed-alias", "same-key-file", "pending-cross-key", "late-alias", "unrelated-file"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"mixed-alias", "same-key-file", "pending-cross-key", "late-alias", "unrelated-file", "fresh-mixed-file"}, func(t *testing.T, mode string) {
 		s, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
-		key := strings.ToUpper(sourceForeign(m).name(o.id))
+		key := sourceForeign(m).name(o.id)
 		if mode == "same-key-file" {
-			key = strings.ToUpper(p.name)
+			key = p.name
 		}
+		key = strings.ToUpper(key[:32]) + key[32:]
+		sourceFailIf(t, key == strings.ToLower(key) || key == strings.ToUpper(key), "fixture needs both cases of hex letters")
 		if mode == "late-alias" {
 			key = p.name
 		}
@@ -1057,7 +1087,7 @@ func testSourceReleaseSpelling(t *testing.T) {
 		}
 		files, used, want := uint64(1), size, ErrIdentityV1
 		switch mode {
-		case "same-key-file", "unrelated-file":
+		case "same-key-file", "unrelated-file", "fresh-mixed-file":
 			sourceMust(t, os.WriteFile(stage, []byte{17}, 0o600))
 			files, used, want = 2, size+1, ErrBusyV1
 		case "late-alias":
@@ -1069,13 +1099,17 @@ func testSourceReleaseSpelling(t *testing.T) {
 		default:
 			sourceMust(t, os.Link(filepath.Join(root, p.name), stage))
 		}
-		if mode == "unrelated-file" {
+		if mode == "unrelated-file" || mode == "fresh-mixed-file" {
 			preserved := sourcePreservedEntry(t, stage)
-			sourceReleaseResult(t, o, p, true, nil)
-			fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
-			assertSourceReleaseCharge(t, fresh, m, 1, 1)
-			entries := sourceEntries(t, dir)
-			sourceFailIf(t, len(entries) != 1 || entries[0].Name() != publicStagePrefix+key, "legacy stage spelling changed")
+			if mode == "fresh-mixed-file" {
+				fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
+				assertSourceReleaseCharge(t, fresh, m, 2, size+1)
+			} else {
+				sourceReleaseResult(t, o, p, true, nil)
+				assertSourceReleaseCharge(t, o, m, 1, 1)
+			}
+			found := slices.ContainsFunc(sourceEntries(t, dir), func(e os.DirEntry) bool { return e.Name() == publicStagePrefix+key })
+			sourceFailIf(t, !found, "legacy stage spelling changed")
 			preserved()
 			return
 		}

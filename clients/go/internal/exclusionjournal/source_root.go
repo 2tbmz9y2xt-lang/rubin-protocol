@@ -11,9 +11,10 @@ import (
 
 type sourceRoot struct {
 	*os.Root
-	pin      *os.File
-	stagePin *os.File
-	stageErr error
+	pin            *os.File
+	stagePin       *os.File
+	stageErr       error
+	releaseScanned bool
 }
 
 const sourceInitDirectory = "." + sourceDirectory + ".init"
@@ -182,7 +183,7 @@ func (o *SourceOwnerV1) openReleaseBacking(r *sourceRoot) error {
 	if err != nil || present {
 		return err
 	}
-	o.release.unlinked = o.debt.name != o.release.name
+	o.release.unlinked = !o.debt.matchesKey(o.release.name)
 	if !o.release.unlinked && o.debt.held {
 		return ErrBusyV1
 	}
