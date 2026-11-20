@@ -102,7 +102,7 @@ func TestSourceVerifiedReadWindows(t *testing.T) {
 	}
 }
 
-func TestSourceProducerEndReads(t *testing.T) {
+func testSourceProducerEndReads(t *testing.T) {
 	t.Run("conditional-field", func(t *testing.T) {
 		_, o, dir, m, parts := sourceBundleScene(t, 1, true)
 		called := false

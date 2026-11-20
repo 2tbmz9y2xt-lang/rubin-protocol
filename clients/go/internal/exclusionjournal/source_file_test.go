@@ -13,6 +13,8 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -182,6 +184,7 @@ func TestSourceManifestRefusals(t *testing.T) {
 }
 
 func TestSourcePartAndAssuranceRefusals(t *testing.T) {
+	t.Run("producer-end-reads", testSourceProducerEndReads)
 	invalidAssurance := map[string][]byte{
 		"full-extra":        {1, 1},
 		"conditional-short": {2, 1},
@@ -458,6 +461,29 @@ func testSourceStageClaim(t *testing.T) {
 }
 
 func testSourceStageSpace(t *testing.T) {
+	t.Run("returned-after-census", func(t *testing.T) {
+		_, o, dir, m, _ := sourceBundleScene(t, 1, false)
+		size, err := m.SizeV1()
+		sourceMust(t, err)
+		path := filepath.Join(dir, sourceDirectory, publicStagePrefix+m.name(o.id))
+		aside := filepath.Join(dir, "staged-file")
+		data := bytes.Repeat([]byte{42}, 128)
+		sourceMust(t, os.WriteFile(path, data, 0o600))
+		preserved := sourcePreservedEntry(t, path)
+		assertSourceReleaseCharge(t, o, m, 1, uint64(len(data)))
+		sourceMust(t, os.Rename(path, aside))
+		o.ops.statfs = func(_ int, s *syscall.Statfs_t) error {
+			sourceMust(t, os.Rename(aside, path))
+			sourceStatfsFixture(s, 1, o.limits.Overhead+size-1)
+			return nil
+		}
+		sourcePrepareResult(t, o, m, func(*SourceOperationV1, func(SourcePartV1) error) error {
+			t.Fatal("stage missing at census admitted the producer")
+			return nil
+		}, ErrCapacityV1)
+		preserved()
+		assertSourceReleaseCharge(t, o, m, 1, uint64(len(data)))
+	})
 	sourceModes(t, []string{"other-capture-link", "external-stage-link"}, func(t *testing.T, mode string) {
 		_, o, dir, other, parts, p := sourcePreparedBundle(t)
 		m := sourceForeign(other)
@@ -826,12 +852,16 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 		sourceFailIf(t, o.release == nil || o.release.size != size || o.live[p.name] != p.incarnation, "refused clear returned capture charge")
 	})
 	t.Run("pending-independent-stage", func(t *testing.T) {
-		for _, stage := range []string{"intent-sync", "unlink", "unlink-sync", "marker-clear"} {
-			t.Run(stage, func(t *testing.T) {
+		for _, fault := range []string{"intent-sync", "unlink", "unlink-sync", "marker-clear", "unlink-sync-after-alias", "marker-clear-after-alias"} {
+			t.Run(fault, func(t *testing.T) {
 				s, o, dir, m, parts, p := sourcePreparedBundle(t)
-				sourceReleaseWithFault(t, o, p, stage, errors.New("pending"))
 				root := filepath.Join(dir, sourceDirectory)
 				temp := filepath.Join(root, ".staging-"+p.name)
+				stage, alias := strings.CutSuffix(fault, "-after-alias")
+				if alias {
+					sourceMust(t, os.Link(filepath.Join(root, p.name), temp))
+				}
+				sourceReleaseWithFault(t, o, p, stage, errors.New("pending"))
 				sourceMust(t, os.WriteFile(temp, []byte("independent"), 0o600))
 				o.ops = realSourceFS
 				sourceReleaseResult(t, o, p, true, ErrBusyV1)
@@ -1115,7 +1145,32 @@ func testSourcePendingCensus(t *testing.T) {
 }
 
 func testSourceBackingLinks(t *testing.T) {
-	sourceModes(t, []string{"extra", "after-unlink", "late-unlink-error", "stage-alias", "stage-distinct"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"alias-remove-before", "alias-remove-after"}, func(t *testing.T, mode string) {
+		_, o, dir, m, parts, p := sourcePreparedBundle(t)
+		root, key := filepath.Join(dir, sourceDirectory), sourceForeign(m).name(o.id)
+		held := heldStagePrefix + key
+		sourceMust(t, os.Link(filepath.Join(root, p.name), filepath.Join(root, publicStagePrefix+key)))
+		o.ops.remove = func(r *os.Root, name string) error {
+			if name != held {
+				return r.Remove(name)
+			}
+			if mode == "alias-remove-after" {
+				sourceMust(t, r.Remove(name))
+			}
+			return syscall.EIO
+		}
+		sourceReleaseResult(t, o, p, true, syscall.EIO)
+		sourcePresence(t, root, held, mode == "alias-remove-before")
+		sourcePresence(t, root, releaseDetached, true)
+		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+		size, err := m.SizeV1()
+		sourceMust(t, err)
+		assertSourceReleaseCharge(t, o, m, 1, size)
+		o.ops = realSourceFS
+		sourceReleaseResult(t, o, p, true, nil)
+		assertSourceReleaseCharge(t, o, m, 0, 0)
+	})
+	sourceModes(t, []string{"extra", "after-unlink", "late-unlink-error", "stage-alias", "other-key-alias", "stage-distinct"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		original := filepath.Join(root, p.name)
@@ -1140,7 +1195,10 @@ func testSourceBackingLinks(t *testing.T) {
 				}
 				return r.Remove(name)
 			}
-		case "stage-alias":
+		case "stage-alias", "other-key-alias":
+			if mode == "other-key-alias" {
+				stage = filepath.Join(root, publicStagePrefix+sourceForeign(m).name(o.id))
+			}
 			sourceMust(t, os.Link(original, stage))
 			f, err := os.Open(original)
 			sourceMust(t, err)
@@ -2122,16 +2180,17 @@ func testSourceHeldRestart(t *testing.T) {
 }
 
 func testSourceHeldBackingCharge(t *testing.T) {
-	sourceModes(t, []string{"other-capture", "pending-release"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"other-capture", "pending-release", "pending-other-key"}, func(t *testing.T, mode string) {
 		s, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root, stageKey := filepath.Join(dir, sourceDirectory), p.name
 		backing := filepath.Join(root, p.name)
-		if mode == "pending-release" {
+		if mode != "other-capture" {
 			sourceReleaseWithFault(t, o, p, "intent-sync", syscall.EIO)
 			detached := filepath.Join(root, releaseDetached)
 			sourceMust(t, os.Rename(backing, detached))
 			backing = detached
-		} else {
+		}
+		if mode != "pending-release" {
 			stageKey = sourceForeign(m).name(o.id)
 		}
 		public := filepath.Join(root, ".staging-"+stageKey)
@@ -2142,7 +2201,7 @@ func testSourceHeldBackingCharge(t *testing.T) {
 		fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), limits, nil)
 		sourceUnchangedEntry(t, public, before)
 		assertSourceReleaseCharge(t, fresh, m, 1, limits.Bytes)
-		if mode == "pending-release" {
+		if mode != "other-capture" {
 			sourceReleaseResult(t, fresh, nil, true, nil)
 			sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "release retained an alias")
 			return
@@ -2260,6 +2319,46 @@ func testSourceHeldRestoreIO(t *testing.T) {
 }
 
 func testSourceProtectedPublication(t *testing.T) {
+	sourceModes(t, []string{"pin-on-publish", "pin-on-reuse"}, func(t *testing.T, mode string) {
+		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+		if mode == "pin-on-reuse" {
+			sourcePrepare(t, o, m, parts)
+		}
+		path := filepath.Join(dir, sourceDirectory, m.name(o.id))
+		checked := false
+		o.ops.dirSync = func(f *os.File) error {
+			original := sourceLstat(t, path).Sys().(*syscall.Stat_t)
+			sourceMust(t, os.Remove(path))
+			entries, err := os.ReadDir("/dev/fd")
+			sourceMust(t, err)
+			for _, entry := range entries {
+				fd, err := strconv.Atoi(entry.Name())
+				var held syscall.Stat_t
+				if err == nil && syscall.Fstat(fd, &held) == nil && held.Dev == original.Dev && held.Ino == original.Ino {
+					checked = true
+					return f.Sync()
+				}
+			}
+			t.Fatal("last source name removed with no descriptor holding the original inode")
+			return nil
+		}
+		sourcePrepareResult(t, o, m, sourceProducer(m, parts), ErrIdentityV1)
+		sourceFailIf(t, !checked, "directory sync did not observe the qualified source")
+	})
+	t.Run("final-name-lost", func(t *testing.T) {
+		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+		name := m.name(o.id)
+		size, err := m.SizeV1()
+		sourceMust(t, err)
+		root := filepath.Join(dir, sourceDirectory)
+		o.ops.dirSync = func(f *os.File) error {
+			sourceMust(t, os.Remove(filepath.Join(root, name)))
+			return f.Sync()
+		}
+		sourcePrepareResult(t, o, m, sourceProducer(m, parts), ErrIdentityV1)
+		sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "publication left a directory entry")
+		assertSourceReleaseCharge(t, o, m, 1, size)
+	})
 	sourceModes(t, []string{"public-before-link", "link-error", "public-before-token"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 		root, key := filepath.Join(dir, sourceDirectory), m.name(o.id)

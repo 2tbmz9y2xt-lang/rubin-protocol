@@ -262,7 +262,7 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	if err := o.clearReleaseScratch(r); err != nil {
 		return err
 	}
-	if _, err := o.space(r, uint64(len(d.record)), sourceDebt{}); err != nil {
+	if _, err := o.space(r, uint64(len(d.record)), nil); err != nil {
 		return err
 	}
 	id, err := o.writeRelease(r, d.record)
@@ -308,9 +308,6 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {
 	}
 	if err := d.confirmClear(r); err != nil {
 		return err
-	}
-	if o.debt.name == d.name && o.debt.file == d.file {
-		o.debt = sourceDebt{}
 	}
 	delete(o.live, d.name)
 	o.release = nil
@@ -444,7 +441,7 @@ func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name stri
 
 // checkStage preserves an independent stage for the same capture.
 func (d *sourceRelease) checkStage(r *sourceRoot, backingPresent bool) error {
-	_, info, err := d.stageAlias(r)
+	_, info, err := d.stageAlias(r, d.name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -457,14 +454,14 @@ func (d *sourceRelease) checkStage(r *sourceRoot, backingPresent bool) error {
 	return nil
 }
 
-func (d *sourceRelease) stageAlias(r *sourceRoot) (sourceDebt, os.FileInfo, error) {
-	stage := sourceDebt{name: d.name, file: d.file, held: true}
+func (d *sourceRelease) stageAlias(r *sourceRoot, key string) (sourceDebt, os.FileInfo, error) {
+	stage := sourceDebt{name: key, file: d.file, held: true}
 	info, err := sourceEntryInfo(r, stage.leaf(), nil)
 	if errors.Is(err, os.ErrNotExist) {
 		stage.held = false
 		info, err = sourceEntryInfo(r, stage.leaf(), nil)
 	} else if err == nil {
-		err = stageSlotVacant(r, d.name, syscall.EEXIST)
+		err = stageSlotVacant(r, key, syscall.EEXIST)
 	}
 	return stage, info, err
 }
@@ -511,6 +508,13 @@ func sourceInfoLinks(info os.FileInfo) (uint64, error) {
 	return uint64(stat.Nlink), nil
 }
 
+func (d *sourceRelease) sharedStageKey(debt sourceDebt) string {
+	if debt.backing == d.name && debt.file == d.file {
+		return debt.name
+	}
+	return ""
+}
+
 func (o *SourceOwnerV1) requireBackingLinks(r *sourceRoot, d *sourceRelease, f *os.File, want uint64) error {
 	links, err := sourceLinks(f)
 	if err == nil && links != want {
@@ -519,12 +523,18 @@ func (o *SourceOwnerV1) requireBackingLinks(r *sourceRoot, d *sourceRelease, f *
 	if err != nil {
 		return o.restoreBacking(r, d, err)
 	}
+	if want == 1 && d.sharedStageKey(o.debt) != "" {
+		if !o.debt.unlinkTried {
+			return o.restoreBacking(r, d, ErrIdentityV1)
+		}
+		o.debt = sourceDebt{}
+	}
 	return nil
 }
 
 // singleBackingLink removes only a qualified staging alias before the last unlink.
 func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os.File) error {
-	stage, info, err := d.stageAlias(r)
+	stage, info, err := d.stageAlias(r, cmp.Or(d.sharedStageKey(o.debt), d.name))
 	if errors.Is(err, os.ErrNotExist) {
 		return o.requireBackingLinks(r, d, f, 1)
 	}
