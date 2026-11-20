@@ -279,15 +279,19 @@ func (d sourceDebt) diskCredit(r *sourceRoot) uint64 {
 	if err != nil || d.file != filelock.FileIdentityV1(info) {
 		return 0
 	}
+	return min(d.size, uint64(max(info.Size(), 0)), singleLinkAllocatedBytes(info))
+}
+
+func singleLinkAllocatedBytes(info os.FileInfo) uint64 {
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || st.Nlink != 1 || st.Blocks <= 0 {
+	if !ok || st == nil || st.Nlink != 1 || st.Blocks <= 0 {
 		return 0
 	}
 	overflow, allocated := bits.Mul64(uint64(st.Blocks), 512)
 	if overflow != 0 {
 		return 0
 	}
-	return min(d.size, uint64(max(info.Size(), 0)), allocated)
+	return allocated
 }
 
 func assurance(part SourcePartV1) error {
