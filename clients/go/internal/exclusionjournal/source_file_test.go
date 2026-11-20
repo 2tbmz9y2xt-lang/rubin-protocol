@@ -1082,6 +1082,33 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 }
 
 func testSourceReleaseSpelling(t *testing.T) {
+	t.Run("unqualified-cross-key", func(t *testing.T) {
+		_, o, dir, m, parts, p := sourcePreparedBundle(t)
+		root := filepath.Join(dir, sourceDirectory)
+		backing := filepath.Join(root, p.name)
+		stage := filepath.Join(root, publicStagePrefix+strings.ToUpper(sourceForeign(m).name(o.id)))
+		sourceMust(t, os.Link(backing, stage))
+		sourceRead(t, o, m, parts)
+		sourceMust(t, os.Remove(stage))
+		unchanged := sourcePreservedEntry(t, backing)
+		o.ops.dirSync = func(pin *os.File) error {
+			o.ops.dirSync = (*os.File).Sync
+			sourceMust(t, pin.Sync())
+			return os.Symlink(p.name, stage)
+		}
+		o.ops.namespace = func(op sourceNameOp, r *sourceRoot, from, to string) error {
+			sourceFailIf(t, to == releaseDetached, "unqualified stage allowed backing detachment")
+			return op(r, from, to)
+		}
+		sourceReleaseResult(t, o, p, true, ErrIdentityV1)
+		unchanged()
+		sourcePresence(t, root, releaseFile, true)
+		sourcePresence(t, root, releaseDetached, false)
+		target, err := os.Readlink(stage)
+		sourceMust(t, err)
+		sourceFailIf(t, target != p.name, "stage link target changed to %q", target)
+		sourcePrepareRefusal(t, o, m, parts, ErrBusyV1)
+	})
 	sourceModes(t, []string{"mixed-alias", "mixed-alias-another-name", "same-key-file", "same-key-before-content", "pending-absent-file", "pending-cross-key", "late-alias", "unrelated-file", "fresh-mixed-file"}, func(t *testing.T, mode string) {
 		s, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)

@@ -47,6 +47,7 @@ func TestSourceVerifiedReadWindows(t *testing.T) {
 				}()
 				n, err := escaped.ReadAt(make([]byte, 1), 0)
 				sourceFailIf(t, n != 0 || any(err) != any(ErrUnavailableV1), "expired retained reader: %d/%v", n, err)
+				sourceReadOn(t, a, o, m, parts)
 				return a.WithReservation(exact, func() error { return nil })
 			}))
 		})
@@ -350,18 +351,23 @@ func sourceAfterFirstPart(m SourceManifestV1, parts [][]byte, after func() error
 
 func sourceRead(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, want [][]byte, beforeFirst ...func()) {
 	t.Helper()
+	sourceAccount(t, func(a *mdbx.OperationAccount) {
+		sourceReadOn(t, a, o, m, want, beforeFirst...)
+	})
+}
+
+func sourceReadOn(t *testing.T, a *mdbx.OperationAccount, o *SourceOwnerV1, m SourceManifestV1, want [][]byte, beforeFirst ...func()) {
+	t.Helper()
 	kinds := map[bool][]byte{false: {1, 2, 3, 4, 5, 6}, true: {7, 8, 3, 4, 9}}[m.Class == 3]
 	i := 0
-	sourceAccount(t, func(a *mdbx.OperationAccount) {
-		sourceMust(t, o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error {
-			if i == 0 && len(beforeFirst) != 0 {
-				beforeFirst[0]()
-			}
-			sourceCheckPart(t, part, i, kinds, want)
-			i++
-			return nil
-		}))
-	})
+	sourceMust(t, o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error {
+		if i == 0 && len(beforeFirst) != 0 {
+			beforeFirst[0]()
+		}
+		sourceCheckPart(t, part, i, kinds, want)
+		i++
+		return nil
+	}))
 	sourceFailIf(t, i != len(want), "part count=%d, want %d", i, len(want))
 }
 

@@ -619,7 +619,10 @@ func (d *sourceRelease) checkStageSpelling(r *sourceRoot, stage sourceDebt, err 
 	if key := cmp.Or(observed, d.name); stage.name != key {
 		stage, err = r.stageAlias(key)
 	}
-	if err == nil && stage.file == d.file && !stage.held {
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || stage.file == d.file && !stage.held {
 		return ErrIdentityV1
 	}
 	return nil
