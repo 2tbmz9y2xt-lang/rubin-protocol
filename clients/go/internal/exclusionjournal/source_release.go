@@ -262,7 +262,7 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	if err := o.clearReleaseScratch(r); err != nil {
 		return err
 	}
-	if err := o.space(r, uint64(len(d.record)), sourceDebt{}); err != nil {
+	if _, err := o.space(r, uint64(len(d.record)), sourceDebt{}); err != nil {
 		return err
 	}
 	id, err := o.writeRelease(r, d.record)

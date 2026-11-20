@@ -253,20 +253,24 @@ func (o *SourceOwnerV1) censusEntry(name string, info os.FileInfo) error {
 	return nil
 }
 
-func (o *SourceOwnerV1) space(r *sourceRoot, required uint64, stage sourceDebt) error {
+func (o *SourceOwnerV1) space(r *sourceRoot, required uint64, stage sourceDebt) (bool, error) {
 	var stat syscall.Statfs_t
 	err := o.ops.statfs(int(r.pin.Fd()), &stat)
 	overflow, available := bits.Mul64(uint64(stat.Bavail), sourceSpaceUnit(&stat))
 	if err != nil || overflow != 0 || o.currentRoot() != nil {
-		return ErrCapacityV1
+		return false, ErrCapacityV1
 	}
-	if available < required+o.limits.Overhead-min(required, stage.diskCredit(r)) {
-		return ErrCapacityV1
+	full := required + o.limits.Overhead
+	if available >= full {
+		return false, nil
 	}
-	return nil
+	if full-available > min(required, stage.diskCredit(r)) {
+		return false, ErrCapacityV1
+	}
+	return true, nil
 }
 
-// diskCredit counts the observed stage only when removing its name frees the file.
+// diskCredit bounds how much space removing this stage might reclaim.
 func (d sourceDebt) diskCredit(r *sourceRoot) uint64 {
 	if d.name == "" || d.removed || d.alias {
 		return 0
@@ -275,10 +279,15 @@ func (d sourceDebt) diskCredit(r *sourceRoot) uint64 {
 	if err != nil || d.file != filelock.FileIdentityV1(info) {
 		return 0
 	}
-	if links, _ := sourceInfoLinks(info); links != 1 {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st.Nlink != 1 || st.Blocks <= 0 {
 		return 0
 	}
-	return min(d.size, uint64(max(info.Size(), 0)))
+	overflow, allocated := bits.Mul64(uint64(st.Blocks), 512)
+	if overflow != 0 {
+		return 0
+	}
+	return min(d.size, uint64(max(info.Size(), 0)), allocated)
 }
 
 func assurance(part SourcePartV1) error {
@@ -578,19 +587,20 @@ func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, 
 	if !errors.Is(err, os.ErrNotExist) || o.live[name] != nil {
 		return nil, ErrIntegrityV1
 	}
-	if err := o.admitPublication(r, size, used); err != nil {
+	recheckSpace, err := o.admitPublication(r, size, used)
+	if err != nil {
 		return nil, err
 	}
-	return o.publish(r, m, name, produce, size)
+	return o.publish(r, m, name, produce, size, recheckSpace)
 }
 
-func (o *SourceOwnerV1) admitPublication(r *sourceRoot, size uint64, used sourceUsage) error {
+func (o *SourceOwnerV1) admitPublication(r *sourceRoot, size uint64, used sourceUsage) (bool, error) {
 	if used.stage.name != "" {
 		used.files--
 		used.bytes -= used.stage.size
 	}
 	if used.files >= o.limits.Files || size > o.limits.Bytes-used.bytes {
-		return ErrCapacityV1
+		return false, ErrCapacityV1
 	}
 	return o.space(r, size, used.stage)
 }
@@ -609,7 +619,7 @@ func (o *SourceOwnerV1) prepared(r *sourceRoot, m SourceManifestV1, name string,
 	return &PreparedSourceV1{manifest: m, name: name, incarnation: token}, nil
 }
 
-func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, produce func(func(SourcePartV1) error) error, size uint64) (_ *PreparedSourceV1, err error) {
+func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, produce func(func(SourcePartV1) error) error, size uint64, recheckSpace bool) (_ *PreparedSourceV1, err error) {
 	w := &sourceFileWriter{o: o}
 	defer func() {
 		if w.file == nil {
@@ -622,7 +632,7 @@ func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, 
 			}
 		}
 	}()
-	observed, err := o.writeBundle(r, w, m, name, produce, size)
+	observed, err := o.writeBundle(r, w, m, name, produce, size, recheckSpace)
 	if err != nil {
 		return nil, err
 	}
@@ -644,13 +654,18 @@ func (o *SourceOwnerV1) finishFile(f *os.File) error {
 	return o.ops.close(f)
 }
 
-func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m SourceManifestV1, name string, produce func(func(SourcePartV1) error) error, size uint64) (sourceIncarnation, error) {
+func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m SourceManifestV1, name string, produce func(func(SourcePartV1) error) error, size uint64, recheckSpace bool) (sourceIncarnation, error) {
 	scratch := make([]byte, scratchBytes)
 	hash := sha256.New()
 	out := io.MultiWriter(w, hash)
 	start := func() error {
 		if err := o.reconcile(r); err != nil {
 			return err
+		}
+		if recheckSpace {
+			if _, err := o.space(r, size, sourceDebt{}); err != nil {
+				return err
+			}
 		}
 		f, err := r.OpenFile(".staging-"+name, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 		if err != nil {

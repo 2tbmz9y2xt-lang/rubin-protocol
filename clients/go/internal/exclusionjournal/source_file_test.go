@@ -409,20 +409,37 @@ func testSourceStageSpace(t *testing.T) {
 		sourcePresence(t, root, m.name(o.id), false)
 		sourceRead(t, o, other, parts)
 	})
-	for _, mode := range []string{"exact", "one-short", "clamped", "unlinked-unsynced", "absent-at-statfs"} {
+	for _, mode := range []string{"exact", "one-short", "clamped", "clamped-short", "unlinked-unsynced", "absent-at-statfs", "sparse", "held-open", "post-statfs-error", "credited-sync-error", "credited-unlink-error", "write-enospc", "full-first"} {
 		t.Run(mode, func(t *testing.T) {
 			s, dir := sourceStore(t)
 			m, parts := sourceBundle(1, false)
+			if mode == "sparse" {
+				parts[0] = bytes.Repeat([]byte{42}, 128*1024)
+				m.Parts[0].Length = uint64(len(parts[0]))
+			}
 			limits := sourceLimits()
 			o := sourceOpen(t, s, sourceID(), limits, nil)
 			root, stage := filepath.Join(dir, sourceDirectory), ".staging-"+m.name(o.id)
 			size, err := m.SizeV1()
 			sourceMust(t, err)
 			stageSize := size / 2
-			if mode == "clamped" {
+			if mode == "clamped" || mode == "clamped-short" {
 				stageSize = size + 13
 			}
-			sourceMust(t, os.WriteFile(filepath.Join(root, stage), make([]byte, stageSize), 0o600))
+			path := filepath.Join(root, stage)
+			if mode == "sparse" {
+				sourceMust(t, os.WriteFile(path, nil, 0o600))
+				sourceMust(t, os.Truncate(path, int64(stageSize)))
+				allocated := uint64(sourceLstat(t, path).Sys().(*syscall.Stat_t).Blocks) * 512
+				sourceFailIf(t, allocated >= stageSize, "sparse fixture fully allocated")
+			} else {
+				sourceMust(t, os.WriteFile(path, bytes.Repeat([]byte{42}, int(stageSize)), 0o600))
+			}
+			if mode == "held-open" {
+				held, err := os.Open(path)
+				sourceMust(t, err)
+				defer held.Close()
+			}
 			if mode == "unlinked-unsynced" {
 				cause := errors.New("stage directory sync")
 				o.ops.dirSync = func(*os.File) error { return cause }
@@ -431,24 +448,118 @@ func testSourceStageSpace(t *testing.T) {
 				o.ops = realSourceFS
 			}
 			space := limits.Overhead + size - min(size, stageSize)
-			if mode == "one-short" {
+			if mode == "full-first" {
+				space = limits.Overhead + size
+			}
+			if mode == "one-short" || mode == "clamped-short" {
 				space--
 			}
+			probes := 0
+			cause := errors.New("credited stage sync")
+			synced := false
+			o.ops.dirSync = func(f *os.File) error {
+				if mode == "credited-sync-error" {
+					return cause
+				}
+				err := f.Sync()
+				synced = err == nil
+				return err
+			}
 			o.ops.statfs = func(_ int, s *syscall.Statfs_t) error {
+				probes++
+				if probes == 2 {
+					sourceFailIf(t, !synced, "space recheck before stage removal sync")
+					sourcePresence(t, root, stage, false)
+					if mode == "post-statfs-error" {
+						return syscall.EIO
+					}
+					if mode != "held-open" {
+						space = limits.Overhead + size
+					}
+				}
 				if mode == "absent-at-statfs" {
 					sourceMust(t, os.Remove(filepath.Join(root, stage)))
 				}
 				sourceStatfsFixture(s, 1, space)
 				return nil
 			}
-			if mode == "one-short" || mode == "unlinked-unsynced" || mode == "absent-at-statfs" {
+			switch mode {
+			case "exact":
+				unchanged := sourcePreservedEntry(t, path)
+				testSourceUnfundedBacking(t, o, m, parts, path)
+				unchanged()
+				assertSourceReleaseCharge(t, o, m, 1, stageSize)
+				sourceFailIf(t, probes != 1 || synced, "unfunded retry cleaned staging")
+				probes = 0
+			case "one-short", "clamped-short", "unlinked-unsynced", "absent-at-statfs", "sparse":
+				present := mode != "unlinked-unsynced" && mode != "absent-at-statfs"
+				if present {
+					defer sourcePreservedEntry(t, path)()
+				}
 				calls := 0
 				sourcePrepareResult(t, o, m, func(*SourceOperationV1, func(SourcePartV1) error) error { calls++; return nil }, ErrCapacityV1)
 				sourceFailIf(t, calls != 0, "insufficient disk entered producer")
-				sourcePresence(t, root, stage, mode == "one-short")
+				sourcePresence(t, root, stage, present)
+				if present {
+					assertSourceReleaseCharge(t, o, m, 1, stageSize)
+				}
+				return
+			case "credited-unlink-error":
+				unchanged := sourcePreservedEntry(t, path)
+				o.ops.remove = func(*os.Root, string) error { return syscall.EIO }
+				sourcePrepareResult(t, o, m, sourceProducer(m, parts), syscall.EIO)
+				sourceFailIf(t, probes != 1 || synced, "release continued after unlink refusal")
+				unchanged()
+				assertSourceReleaseCharge(t, o, m, 1, stageSize)
+				return
+			case "write-enospc":
+				o.ops.write = func(*os.File, []byte) (int, error) { return 0, syscall.ENOSPC }
+				sourcePrepareResult(t, o, m, sourceProducer(m, parts), syscall.ENOSPC)
+				sourceFailIf(t, probes != 2, "write failure before full space recheck")
+				sourcePresence(t, root, m.name(o.id), false)
+				assertSourceReleaseCharge(t, o, m, 0, 0)
+				return
+			}
+			if mode == "held-open" || mode == "post-statfs-error" || mode == "credited-sync-error" {
+				calls := 0
+				want := error(ErrCapacityV1)
+				if mode == "credited-sync-error" {
+					want = cause
+				}
+				o.ops.write = func(*os.File, []byte) (int, error) {
+					t.Fatal("new stage write after capacity or sync refusal")
+					return 0, io.ErrShortWrite
+				}
+				sourcePrepareResult(t, o, m, func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
+					calls++
+					return sourceExportParts(op, m, parts, func(p SourcePartV1) error {
+						p.ReadAt = func([]byte, int64) (int, error) {
+							t.Fatal("source bytes read after capacity or sync refusal")
+							return 0, io.EOF
+						}
+						return visit(p)
+					})
+				}, want)
+				sourceFailIf(t, calls != 1, "producer calls after preliminary admission: %d", calls)
+				sourcePresence(t, root, stage, false)
+				sourcePresence(t, root, m.name(o.id), false)
+				if mode == "credited-sync-error" {
+					sourceFailIf(t, probes != 1, "space rechecked after sync error")
+					assertSourceReleaseCharge(t, o, m, 1, stageSize)
+				} else {
+					sourceFailIf(t, probes != 2, "space probes: %d", probes)
+					assertSourceReleaseCharge(t, o, m, 0, 0)
+				}
+				o.ops = realSourceFS
+				sourcePrepareAndRead(t, o, m, parts)
 				return
 			}
 			sourcePrepareAndRead(t, o, m, parts)
+			wantProbes := 2
+			if mode == "full-first" {
+				wantProbes = 1
+			}
+			sourceFailIf(t, probes != wantProbes, "space probes: %d, want %d", probes, wantProbes)
 			sourcePresence(t, root, stage, false)
 		})
 	}
