@@ -174,6 +174,10 @@ func (s *Service) startOutboundPeers() {
 // below always reflects final state — either a published listener that
 // Close itself closes, or nil if Start aborted and cleaned up.
 //
+// The Close that owns the teardown releases cfg.PeerManager after loopWG.Wait
+// and before closeDone is closed, so a joined Close returns only after that
+// release and releases nothing itself.
+//
 // Close MUST be invoked only by the external lifecycle owner, never reentrantly
 // from work whose own lease it would have to await (RUBIN_L1_P2P_AUX section 5).
 func (s *Service) Close() error {
@@ -230,6 +234,7 @@ func (s *Service) Close() error {
 		_ = current.conn.Close()
 	}
 	s.loopWG.Wait()
+	s.cfg.PeerManager.Release()
 	return nil
 }
 

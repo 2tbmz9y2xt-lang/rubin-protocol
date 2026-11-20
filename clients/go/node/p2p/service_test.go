@@ -49,9 +49,15 @@ func unclaimedServiceSink(t *testing.T) (*testHarness, ServiceConfig) {
 		t.Fatalf("NewMempool: %v", err)
 	}
 	engine.SetMempool(mempool)
-	cfg := h.service.cfg
+	cfg := freePeerManager(h.service.cfg)
 	cfg.SyncEngine = engine
 	return &testHarness{chainState: h.chainState, blockStore: h.blockStore, syncEngine: engine}, cfg
+}
+
+// freePeerManager returns cfg with a fresh PeerManager that no Service holds.
+func freePeerManager(cfg ServiceConfig) ServiceConfig {
+	cfg.PeerManager = node.NewPeerManager(cfg.PeerRuntimeConfig)
+	return cfg
 }
 
 func TestNewServiceAfterCloseBindsFreshService(t *testing.T) {
@@ -78,7 +84,7 @@ func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
 		require(t, err == nil, "NewService: %v", err)
 		require(t, service != nil && service.daRelay != nil && service.daRelay == cfg.SyncEngine.DARelayState() && service.cfg.Now != nil && service.addrMgr != nil && service.peers != nil && service.peerQuotaLocks != nil && service.inFlightDial != nil && service.reconnectState != nil && service.handshakeSlots != nil && service.blockSeen != nil && service.txSeen != nil && service.orphans != nil, "published incomplete Service: %+v", service)
 		require(t, cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(service), "first construction is not the binding")
-		later, err := NewService(cfg)
+		later, err := NewService(freePeerManager(cfg))
 		require(t, err == nil && later.daRelay == service.daRelay && cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(later), "later NewService=(%p,%v)", later, err)
 		err = service.Close()
 		require(t, err == nil, "Close: %v", err)
@@ -112,7 +118,7 @@ func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
 		base := newTestHarness(t, 1, "127.0.0.1:0", nil)
 		engine, err := node.NewSyncEngine(base.chainState, base.blockStore, base.syncCfg)
 		require(t, err == nil, "NewSyncEngine: %v", err)
-		cfg := base.service.cfg
+		cfg := freePeerManager(base.service.cfg)
 		cfg.SyncEngine = engine
 		cfg.BootstrapPeers = []string{"127.0.0.9:19119"}
 		entered, release := make(chan struct{}), make(chan struct{})
@@ -169,7 +175,7 @@ func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
 		for range 2 {
 			go func() {
 				<-start
-				service, err := NewService(cfg)
+				service, err := NewService(freePeerManager(cfg))
 				results <- constructionResult{service, err}
 			}()
 		}
@@ -197,7 +203,7 @@ func TestNewServiceRejectsUninitializedEngineAfterConfigValidation(t *testing.T)
 	if err != nil {
 		t.Fatalf("NewSyncEngine: %v", err)
 	}
-	cfg := h.service.cfg
+	cfg := freePeerManager(h.service.cfg)
 	cfg.SyncEngine = uninitialized
 	if _, err := NewService(cfg); err == nil || err.Error() != "sync engine DA relay state is not initialized" {
 		t.Fatalf("uninitialized engine error=%v", err)
@@ -744,7 +750,7 @@ func serviceWithBoundDACapacity(t *testing.T, relayCap, serviceCopy uint64) *Ser
 	mempool, err := node.NewMempool(h.chainState, h.blockStore, node.DevnetGenesisChainID())
 	must(t, err, "NewMempool")
 	engine.SetMempool(mempool)
-	cfg := h.service.cfg
+	cfg := freePeerManager(h.service.cfg)
 	cfg.SyncEngine, cfg.SyncConfig.DAMempoolSize = engine, serviceCopy
 	service, err := NewService(cfg)
 	must(t, err, "NewService")
@@ -1913,7 +1919,7 @@ func requireFirstClaimant(t *testing.T, sink *testHarness, cfg ServiceConfig, se
 	t.Helper()
 	diag := &lockedBuffer{}
 	cfg.SyncEngine.SetStderr(diag)
-	later := newBoundService(t, cfg)
+	later := newBoundService(t, freePeerManager(cfg))
 	require(t, cfg.SyncEngine.DATTLBindingService() == node.DATTLMutationService(later) && service.Close() == nil, "later binding and close of the first claimant")
 	retained := detachedReorgHookRetains(t, newTestHarness(t, 1, "127.0.0.1:0", nil), sink)
 	require(t, !retained && strings.Contains(diag.String(), errServiceClosed.Error()), "retained=%v diagnostics=%q: the hook is not the closed first claimant's", retained, diag.String())

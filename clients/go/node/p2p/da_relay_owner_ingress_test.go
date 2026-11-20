@@ -431,11 +431,11 @@ func highTipHarness(t *testing.T, height uint64) *testHarness {
 	mempool, err := node.NewMempool(chainState, nil, node.DevnetGenesisChainID())
 	must(t, err, "NewMempool")
 	engine.SetMempool(mempool)
-	cfg := h.service.cfg
+	cfg := freePeerManager(h.service.cfg)
 	cfg.SyncEngine, cfg.BlockStore = engine, blockStore
 	service, err := NewService(cfg)
 	must(t, err, "NewService")
-	h.chainState, h.blockStore, h.syncEngine, h.mempool, h.service = chainState, blockStore, engine, mempool, service
+	h.chainState, h.blockStore, h.syncEngine, h.mempool, h.service, h.peerManager = chainState, blockStore, engine, mempool, service, cfg.PeerManager
 	require(t, engine.LocalTipHeight() == height, "LocalTipHeight=%d, want %d", engine.LocalTipHeight(), height)
 	return h
 }
