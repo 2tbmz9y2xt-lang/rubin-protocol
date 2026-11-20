@@ -814,14 +814,24 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 			o.ops = realSourceFS
 		}
 		path := filepath.Join(dir, sourceDirectory, releaseFile)
-		checked := false
+		backing := sourceLstat(t, filepath.Join(dir, sourceDirectory, p.name))
+		var markerHeld, backingAtSync, backingAtDetach bool
 		o.ops.dirSync = func(f *os.File) error {
 			o.ops.dirSync = (*os.File).Sync
-			checked = sourceHasOpenFile(t, sourceLstat(t, path))
+			markerHeld = sourceHasOpenFile(t, sourceLstat(t, path))
+			backingAtSync = sourceHasOpenFile(t, backing)
 			return f.Sync()
 		}
+		o.ops.namespace = func(op sourceNameOp, r *sourceRoot, from, to string) error {
+			if to == releaseDetached {
+				backingAtDetach = sourceHasOpenFile(t, backing)
+			}
+			return op(r, from, to)
+		}
 		sourceReleaseResult(t, o, p, true, nil)
-		sourceFailIf(t, !checked, "release used the marker without holding it through directory sync")
+		sourceFailIf(t, !markerHeld, "release used the marker without holding it through directory sync")
+		sourceFailIf(t, !backingAtSync || !backingAtDetach, "release lost its backing before detachment (sync %v, detach %v)", backingAtSync, backingAtDetach)
+		sourceFailIf(t, sourceHasOpenFile(t, backing), "completed release retained the backing descriptor")
 	})
 	t.Run("marker-after-final-sync", func(t *testing.T) {
 		_, o, dir, m, parts, p := sourcePreparedBundle(t)

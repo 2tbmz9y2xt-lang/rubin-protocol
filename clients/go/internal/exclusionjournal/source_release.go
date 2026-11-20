@@ -105,6 +105,10 @@ func readRelease(r *sourceRoot) ([]byte, filelock.IdentityV1, error) {
 		return nil, filelock.IdentityV1{}, err
 	}
 	defer f.Close()
+	return readReleaseFile(f)
+}
+
+func readReleaseFile(f *os.File) ([]byte, filelock.IdentityV1, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, filelock.IdentityV1{}, err
@@ -168,15 +172,18 @@ func (o *SourceOwnerV1) releaseManifest(header []byte) (SourceManifestV1, uint64
 }
 
 func (o *SourceOwnerV1) releaseBacking(r *sourceRoot, d *sourceRelease, scratch []byte) (bool, error) {
-	name, err := d.location(r)
+	name, err := d.pinnedLocation(r)
 	if err != nil || name == "" {
 		return false, err
 	}
-	f, err := openSourceFile(r, name, nil)
-	if err != nil {
-		return false, err
+	f := r.backingPin
+	if name != d.name || f == nil {
+		f, err = openSourceFile(r, name, nil)
+		if err != nil {
+			return false, err
+		}
+		defer f.Close()
 	}
-	defer f.Close()
 	_, err = o.qualify(f, d.manifest, d.size, scratch, &d.sourceIncarnation, ErrIdentityV1)
 	return true, err
 }
@@ -207,6 +214,14 @@ func (d *sourceRelease) location(r *sourceRoot) (string, error) {
 		location = name
 	}
 	return location, nil
+}
+
+func (d *sourceRelease) pinnedLocation(r *sourceRoot) (string, error) {
+	name, err := d.location(r)
+	if name == d.name {
+		return name, r.backingErr
+	}
+	return name, err
 }
 
 func (inc *sourceIncarnation) match(info os.FileInfo) error {
@@ -287,7 +302,6 @@ func (o *SourceOwnerV1) publishMarker(r *sourceRoot, d *sourceRelease, id filelo
 	if err != nil {
 		return err
 	}
-	defer pin.Close()
 	visibility, err := o.linkVisible(r, releaseScratch, releaseFile, id)
 	if visibility != sourceNotVisible {
 		d.markerFile = id
@@ -295,6 +309,7 @@ func (o *SourceOwnerV1) publishMarker(r *sourceRoot, d *sourceRelease, id filelo
 		o.release = d
 	}
 	if err != nil {
+		_ = pin.Close()
 		return err
 	}
 	present, err := o.syncedMarker(r, d, pin)
@@ -394,25 +409,35 @@ func (d *sourceRelease) marker(r *sourceRoot) (bool, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
+	return d.checkMarker(record, id, err)
+}
+
+func (d *sourceRelease) checkMarker(record []byte, id filelock.IdentityV1, err error) (bool, error) {
 	if err != nil || !bytes.Equal(record, d.record) || id != d.markerFile {
 		return false, ErrIntegrityV1
 	}
 	return true, nil
 }
 
-func (o *SourceOwnerV1) syncedMarker(r *sourceRoot, d *sourceRelease, pin *os.File) (bool, error) {
-	if err := o.syncBoundRoot(r); err != nil {
-		return false, err
+func (d *sourceRelease) pinnedMarker(r *sourceRoot, pin *os.File) (bool, error) {
+	named, err := sourceEntryInfo(r, releaseFile, nil)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	}
-	present, err := d.marker(r)
-	if err != nil || !present {
-		return present, err
-	}
-	info, err := pin.Stat()
-	if err != nil || filelock.FileIdentityV1(info) != d.markerFile {
+	if err != nil || filelock.FileIdentityV1(named) != d.markerFile {
 		return false, ErrIntegrityV1
 	}
-	return true, nil
+	return d.checkMarker(readReleaseFile(pin))
+}
+
+func (o *SourceOwnerV1) syncedMarker(r *sourceRoot, d *sourceRelease, pin *os.File) (bool, error) {
+	if err := o.ops.dirSync(r.pin); err != nil {
+		_ = pin.Close()
+		return false, err
+	}
+	present, err := d.pinnedMarker(r, pin)
+	_ = pin.Close()
+	return present, cmp.Or(o.currentRoot(), err)
 }
 
 // releaseIntent qualifies the visible record before its backing can be detached.
@@ -425,7 +450,6 @@ func (o *SourceOwnerV1) releaseIntent(r *sourceRoot, d *sourceRelease, scratch [
 		pin, _ = openSourceFile(r, releaseScratch, nil)
 	}
 	present, err := o.syncedMarker(r, d, pin)
-	_ = pin.Close()
 	if err != nil || present {
 		return err
 	}
@@ -439,6 +463,8 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 	if d.backingSynced {
 		return nil
 	}
+	r.backingPin, r.backingErr = d.pinCanonical(r)
+	defer r.backingPin.Close()
 	if err := o.releaseIntent(r, d, scratch); err != nil {
 		return err
 	}
@@ -446,7 +472,7 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 	if d.unlinkFailure != nil {
 		return d.unlinkFailure
 	}
-	name, err := d.location(r)
+	name, err := d.pinnedLocation(r)
 	if err != nil {
 		return err
 	}
@@ -458,6 +484,19 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 	}
 	d.backingSynced = true
 	return nil
+}
+
+// pinCanonical holds the observed inode across marker publication and detachment.
+func (d *sourceRelease) pinCanonical(r *sourceRoot) (*os.File, error) {
+	f, err := openSourceFile(r, d.name, ErrIdentityV1)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return f, err
+	}
+	return f, d.match(info)
 }
 
 func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name string, scratch []byte) error {
@@ -518,6 +557,7 @@ func (d *sourceRelease) stageAlias(r *sourceRoot, key string) (sourceDebt, os.Fi
 // unlinkDetached pins and qualifies the private file before removing its last link.
 func (o *SourceOwnerV1) unlinkDetached(r *sourceRoot, d *sourceRelease, scratch []byte) error {
 	f, err := openSourceFile(r, releaseDetached, nil)
+	_ = r.backingPin.Close()
 	if err != nil {
 		return o.restoreBacking(r, d, err)
 	}

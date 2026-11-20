@@ -14,6 +14,8 @@ type sourceRoot struct {
 	pin            *os.File
 	stagePin       *os.File
 	stageErr       error
+	backingPin     *os.File
+	backingErr     error
 	releaseScanned bool
 }
 
