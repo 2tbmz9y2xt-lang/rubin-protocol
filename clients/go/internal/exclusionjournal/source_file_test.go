@@ -1221,7 +1221,7 @@ func TestSourceRefusesUnusableDirectoryHandle(t *testing.T) {
 		}
 		err := o.withRoot(func(parent *os.Root) (*os.Root, error) {
 			if mode == "replacement" {
-				return os.OpenRoot(t.TempDir())
+				return parent.OpenRoot(".")
 			}
 			r, err := o.bindRoot(parent)
 			sourceMust(t, err)
