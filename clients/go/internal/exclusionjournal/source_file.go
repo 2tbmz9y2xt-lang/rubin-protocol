@@ -266,13 +266,16 @@ func (o *SourceOwnerV1) space(r *sourceRoot, required uint64, stage sourceDebt) 
 	return nil
 }
 
-// diskCredit counts only the census inode that still occupies the staging slot.
+// diskCredit counts the observed stage only when removing its name frees the file.
 func (d sourceDebt) diskCredit(r *sourceRoot) uint64 {
 	if d.name == "" || d.removed || d.alias {
 		return 0
 	}
 	info, err := sourceEntryInfo(r, ".staging-"+d.name, nil)
 	if err != nil || d.file != filelock.FileIdentityV1(info) {
+		return 0
+	}
+	if links, _ := sourceInfoLinks(info); links != 1 {
 		return 0
 	}
 	return min(d.size, uint64(max(info.Size(), 0)))

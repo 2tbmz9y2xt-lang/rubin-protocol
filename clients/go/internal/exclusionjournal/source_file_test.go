@@ -384,6 +384,31 @@ func TestSourcePartialCleanupRetry(t *testing.T) {
 }
 
 func testSourceStageSpace(t *testing.T) {
+	t.Run("other-capture-link", func(t *testing.T) {
+		_, o, dir, other, parts, p := sourcePreparedBundle(t)
+		m := sourceForeign(other)
+		root := filepath.Join(dir, sourceDirectory)
+		stage := filepath.Join(root, ".staging-"+m.name(o.id))
+		backing := filepath.Join(root, p.name)
+		sourceMust(t, os.Link(backing, stage))
+		checkStage, checkBacking := sourcePreservedEntry(t, stage), sourcePreservedEntry(t, backing)
+		size, err := m.SizeV1()
+		sourceMust(t, err)
+		o.ops.statfs = func(_ int, s *syscall.Statfs_t) error {
+			sourceStatfsFixture(s, 1, o.limits.Overhead+size-1)
+			return nil
+		}
+		entries := 0
+		sourcePrepareResult(t, o, m, func(op *SourceOperationV1, v func(SourcePartV1) error) error {
+			entries++
+			return sourceExportParts(op, m, parts, v)
+		}, ErrCapacityV1)
+		sourceFailIf(t, entries != 0, "unfunded capture entered the producer")
+		checkStage()
+		checkBacking()
+		sourcePresence(t, root, m.name(o.id), false)
+		sourceRead(t, o, other, parts)
+	})
 	for _, mode := range []string{"exact", "one-short", "clamped", "unlinked-unsynced", "absent-at-statfs"} {
 		t.Run(mode, func(t *testing.T) {
 			s, dir := sourceStore(t)
@@ -483,6 +508,46 @@ func testSourceUnfundedBacking(t *testing.T, o *SourceOwnerV1, m SourceManifestV
 }
 
 func TestSourceReleaseOnlyRetry(t *testing.T) {
+	t.Run("marker-lost-before-clear", func(t *testing.T) {
+		_, o, dir, m, parts, p := sourcePreparedBundle(t)
+		root := filepath.Join(dir, sourceDirectory)
+		o.ops.remove = func(r *os.Root, name string) error {
+			if name == releaseDetached {
+				o.ops.dirSync = func(pin *os.File) error {
+					o.ops.dirSync = (*os.File).Sync
+					sourceMust(t, os.Remove(filepath.Join(root, releaseFile)))
+					return pin.Sync()
+				}
+			}
+			return r.Remove(name)
+		}
+		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
+		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
+		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+		size, err := m.SizeV1()
+		sourceMust(t, err)
+		assertSourceReleaseCharge(t, o, m, 1, size)
+		sourcePresence(t, root, releaseFile, false)
+		sourcePresence(t, root, releaseDetached, false)
+		sourcePresence(t, root, p.name, false)
+	})
+	t.Run("proved-marker-disappears", func(t *testing.T) {
+		_, o, dir, m, parts, p := sourcePreparedBundle(t)
+		sourceReleaseWithFault(t, o, p, "rename-visible", syscall.EIO)
+		o.ops = realSourceFS
+		root := filepath.Join(dir, sourceDirectory)
+		checkBacking := sourcePreservedEntry(t, filepath.Join(root, p.name))
+		checkScratch := sourcePreservedEntry(t, filepath.Join(root, releaseScratch))
+		sourceMust(t, os.Remove(filepath.Join(root, releaseFile)))
+		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
+		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+		checkBacking()
+		checkScratch()
+		sourcePresence(t, root, releaseFile, false)
+		size, err := m.SizeV1()
+		sourceMust(t, err)
+		assertSourceReleaseCharge(t, o, m, 1, size)
+	})
 	t.Run("previously-unlinked-alias", func(t *testing.T) {
 		_, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
@@ -668,7 +733,14 @@ func testSourcePrivateNames(t *testing.T) {
 			path := filepath.Join(root, name)
 			sourceMust(t, os.WriteFile(path, []byte("preserve"), 0o600))
 			info := sourceLstat(t, path)
-			sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), ErrIntegrityV1)
+			s = sourceReopenStore(t, s, dir)
+			if mode == "different-marker-scratch" {
+				bounded := sourceLimits()
+				bounded.Files, bounded.Scans = 1, 3
+				sourceOpen(t, s, sourceID(), bounded, ErrCapacityV1)
+				sourceUnchangedEntry(t, path, info)
+			}
+			sourceOpen(t, s, sourceID(), sourceLimits(), ErrIntegrityV1)
 			sourceFailIf(t, !os.SameFile(info, sourceLstat(t, path)) || !bytes.Equal(sourceReadFile(t, path), []byte("preserve")), "private name changed on refusal")
 			sourcePresence(t, root, p.name, true)
 		})

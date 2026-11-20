@@ -24,15 +24,16 @@ const (
 
 type sourceRelease struct {
 	sourceIncarnation
-	name          string
-	manifest      SourceManifestV1
-	record        []byte
-	reopened      bool
-	pending       bool
-	backingSynced bool
-	unlinked      bool
-	unlinkFailure error
-	markerFile    filelock.IdentityV1
+	name           string
+	manifest       SourceManifestV1
+	record         []byte
+	reopened       bool
+	pending        bool
+	backingSynced  bool
+	clearAttempted bool
+	unlinked       bool
+	unlinkFailure  error
+	markerFile     filelock.IdentityV1
 }
 
 // ReleaseUnpublishedSourceV1 holds the source charge through durable removal (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
@@ -224,8 +225,7 @@ func (o *SourceOwnerV1) openRelease(r *sourceRoot) error {
 		return err
 	}
 	o.release.markerFile = id
-	_, err = releaseScratchAlias(r)
-	return err
+	return nil
 }
 
 // releaseScratchAlias recognizes the second name of the visible marker.
@@ -272,7 +272,7 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	visibility, err := o.linkVisible(r, releaseScratch, releaseFile, id)
 	if visibility != sourceNotVisible {
 		d.markerFile = id
-		d.pending = err != nil
+		d.pending = visibility == sourceIndeterminate
 		o.release = d
 	}
 	return err
@@ -329,12 +329,16 @@ func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) erro
 	if err != nil {
 		return err
 	}
+	if !present && !d.clearAttempted {
+		return ErrIntegrityV1
+	}
 	if err := d.checkStage(r); err != nil || !present {
 		return err
 	}
 	if err := o.removeMarkerAlias(r); err != nil {
 		return err
 	}
+	d.clearAttempted = true
 	return o.ops.remove(r.Root, releaseFile)
 }
 
@@ -477,6 +481,10 @@ func sourceLinks(f *os.File) (uint64, error) {
 	if err != nil {
 		return 0, ErrUnavailableV1
 	}
+	return sourceInfoLinks(info)
+}
+
+func sourceInfoLinks(info os.FileInfo) (uint64, error) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return 0, ErrUnavailableV1
