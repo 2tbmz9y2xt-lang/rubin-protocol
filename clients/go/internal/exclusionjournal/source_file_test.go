@@ -1171,8 +1171,28 @@ func testSourceReleaseSpelling(t *testing.T) {
 }
 
 func testSourceRefilledCanonical(t *testing.T) {
+	t.Run("qualified-canonical", func(t *testing.T) {
+		_, o, dir, _, _, p := sourcePreparedBundle(t)
+		root := filepath.Join(dir, sourceDirectory)
+		path := filepath.Join(root, p.name)
+		original := sourcePreservedEntry(t, path)
+		held := filepath.Join(t.TempDir(), "original")
+		o.ops.namespace = func(op sourceNameOp, r *sourceRoot, from, to string) error {
+			if to != releaseDetached {
+				return op(r, from, to)
+			}
+			sourceMust(t, os.Rename(path, held))
+			sourceMust(t, os.Mkdir(path, 0o700))
+			sourceMust(t, op(r, from, to))
+			return os.Rename(held, path)
+		}
+		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
+		original()
+		sourceFailIf(t, !sourceLstat(t, filepath.Join(root, releaseDetached)).IsDir(), "release changed the detached directory")
+		sourcePresence(t, root, releaseFile, true)
+	})
 	sourceModes(t, []string{"detach", "stage-claim", "stage-unlink"}, func(t *testing.T, phase string) {
-		s, o, dir, m, parts, p := sourcePreparedBundle(t)
+		s, o, dir, m, _, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		canonical := filepath.Join(root, p.name)
 		original := sourceLstat(t, canonical)
@@ -1201,7 +1221,10 @@ func testSourceRefilledCanonical(t *testing.T) {
 		sourcePresence(t, root, publicStagePrefix+p.name, phase == "detach")
 		sourcePresence(t, root, heldStagePrefix+p.name, phase == "stage-claim")
 		marker := sourcePreservedEntry(t, filepath.Join(root, releaseFile))
-		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+		sourcePrepareResult(t, o, sourceForeign(m), func(*SourceOperationV1, func(SourcePartV1) error) error {
+			t.Fatal("pending release entered producer")
+			return nil
+		}, ErrBusyV1)
 		marker()
 		sourceMust(t, os.Remove(canonical))
 		fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)

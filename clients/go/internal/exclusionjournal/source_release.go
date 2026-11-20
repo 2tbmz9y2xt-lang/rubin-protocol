@@ -485,14 +485,15 @@ func (d *sourceRelease) canonicalVacant(r *sourceRoot) error {
 	if d == nil {
 		return nil
 	}
-	info, err := sourceEntryInfo(r, d.name, nil)
+	_, err := r.Lstat(d.name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return ErrIntegrityV1
 	}
-	return cmp.Or(d.match(info), ErrIdentityV1)
+	_, err = d.location(r)
+	return cmp.Or(err, ErrIdentityV1)
 }
 
 func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name string, scratch []byte) error {

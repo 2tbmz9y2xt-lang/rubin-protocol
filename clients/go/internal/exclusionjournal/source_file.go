@@ -674,15 +674,13 @@ func (r *sourceRoot) pinStage(d *sourceDebt) error {
 	if d == nil || d.held || r.stagePin != nil || r.stageErr != nil {
 		return r.stageErr
 	}
-	f, err := r.pinFile(d.leaf(), nil, &d.file)
-	r.stagePin = f
-	return err
+	r.stagePin, r.stageErr = r.pinFile(d.leaf(), nil, &d.file)
+	return r.stageErr
 }
 
 // observeStage withholds credit on failure and reports the cause if cleanup is reached.
 func (r *sourceRoot) observeStage(d *sourceDebt) *sourceDebt {
-	if err := r.pinStage(d); err != nil {
-		r.stageErr = err
+	if r.pinStage(d) != nil {
 		return nil
 	}
 	return d
