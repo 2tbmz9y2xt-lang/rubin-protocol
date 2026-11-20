@@ -4543,7 +4543,18 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 		return true
 	})
 	tail := newService.Body.List
-	require(t, len(tail) >= 4 && tail[len(tail)-4].Pos() == serviceAt, "reorg claim binding mismatch: construction is not immediately before claim")
+	require(t, len(tail) >= 5 && tail[len(tail)-5].Pos() == serviceAt, "reorg claim binding mismatch: construction is not immediately before the peer manager claim")
+	pmIf, pmIfOK := tail[len(tail)-4].(*ast.IfStmt)
+	require(t, pmIfOK && pmIf.Else == nil && len(pmIf.Body.List) == 1, "peer manager claim statement shape")
+	pmInit, pmInitOK := pmIf.Init.(*ast.AssignStmt)
+	require(t, pmInitOK && pmInit.Tok == token.DEFINE && len(pmInit.Lhs) == 1 && len(pmInit.Rhs) == 1, "peer manager claim initializer")
+	pmCall, pmCallOK := pmInit.Rhs[0].(*ast.CallExpr)
+	require(t, pmCallOK && daNonReplaySelector(pmCall.Fun) == "cfg.PeerManager.Claim" && len(pmCall.Args) == 0, "peer manager claim call")
+	pmCondition, pmConditionOK := pmIf.Cond.(*ast.BinaryExpr)
+	require(t, pmConditionOK && pmCondition.Op == token.NEQ, "peer manager claim condition")
+	pmReturn, pmReturnOK := pmIf.Body.List[0].(*ast.ReturnStmt)
+	require(t, pmReturnOK && len(pmReturn.Results) == 2, "peer manager claim return shape")
+	identifiers[pmInit.Lhs[0]], identifiers[pmCondition.X], identifiers[pmCondition.Y], identifiers[pmReturn.Results[0]], identifiers[pmReturn.Results[1]] = "err", "err", "nil", "nil", "err"
 	// The TTL binding publication is the one statement between the successful claim and the
 	// return, so every fallible step precedes it and a refused claim publishes nothing.
 	publish, publishOK := tail[len(tail)-2].(*ast.ExprStmt)
@@ -4553,13 +4564,17 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 	identifiers[publishCall.Args[0]] = "service"
 	require(t, writes["service"] == 1 && writes["expectedRelay"] == 1 && writes["service.daRelay"] == 0, "reorg claim binding mismatch: writes=%v", writes)
 	claimIf, ifOK := tail[len(tail)-3].(*ast.IfStmt)
-	require(t, ifOK && claimIf.Else == nil && len(claimIf.Body.List) == 1, "reorg claim binding mismatch: claim statement shape")
+	require(t, ifOK && claimIf.Else == nil && len(claimIf.Body.List) == 2, "reorg claim binding mismatch: claim statement shape")
+	release, releaseOK := claimIf.Body.List[0].(*ast.ExprStmt)
+	require(t, releaseOK, "peer manager release is not the first statement of the refused claim")
+	releaseCall, releaseCallOK := release.X.(*ast.CallExpr)
+	require(t, releaseCallOK && daNonReplaySelector(releaseCall.Fun) == "cfg.PeerManager.Release" && len(releaseCall.Args) == 0, "peer manager release call")
 	init, initOK := claimIf.Init.(*ast.AssignStmt)
 	require(t, initOK && init.Tok == token.DEFINE && len(init.Lhs) == 2 && len(init.Rhs) == 1 && init.Rhs[0] == claimCall, "reorg claim binding mismatch: claim initializer")
 	condition, conditionOK := claimIf.Cond.(*ast.BinaryExpr)
 	require(t, conditionOK && condition.Op == token.NEQ, "reorg claim binding mismatch: claim condition")
 	identifiers[init.Lhs[0]], identifiers[init.Lhs[1]], identifiers[condition.X], identifiers[condition.Y] = "_", "err", "err", "nil"
-	for i, statement := range []ast.Stmt{claimIf.Body.List[0], tail[len(tail)-1]} {
+	for i, statement := range []ast.Stmt{claimIf.Body.List[1], tail[len(tail)-1]} {
 		returned, ok := statement.(*ast.ReturnStmt)
 		require(t, ok && len(returned.Results) == 2, "reorg claim binding mismatch: return statement shape %d", i)
 		want := [2][2]string{{"nil", "err"}, {"service", "nil"}}[i]

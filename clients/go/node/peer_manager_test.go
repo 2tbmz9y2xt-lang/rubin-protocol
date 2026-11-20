@@ -1,6 +1,9 @@
 package node
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestDefaultPeerRuntimeConfig_ClampMaxPeers(t *testing.T) {
 	cfg := DefaultPeerRuntimeConfig("devnet", 0)
@@ -105,4 +108,74 @@ func TestPeerManager_UpsertPeer(t *testing.T) {
 	if snap[0].BanScore != 9 {
 		t.Fatalf("ban_score=%d, want 9", snap[0].BanScore)
 	}
+}
+
+func requirePeerTable(t *testing.T, pm *PeerManager, want []PeerState) {
+	t.Helper()
+	if got := pm.Snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("snapshot=%#v, want %#v", got, want)
+	}
+}
+
+func TestPeerManagerClaimFreeSucceeds(t *testing.T) {
+	pm := NewPeerManager(DefaultPeerRuntimeConfig("devnet", 8))
+	if err := pm.Claim(); err != nil {
+		t.Fatalf("Claim on free manager: %v", err)
+	}
+}
+
+func TestPeerManagerClaimHeldRefusedTableUnchanged(t *testing.T) {
+	pm := NewPeerManager(DefaultPeerRuntimeConfig("devnet", 1))
+	if err := pm.AddPeer(&PeerState{Addr: "a", BanScore: 3}); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	if err := pm.Claim(); err != nil {
+		t.Fatalf("first Claim: %v", err)
+	}
+	err := pm.Claim()
+	if err == nil || err.Error() != "peer manager is already claimed" {
+		t.Fatalf("second Claim err=%v, want peer manager is already claimed", err)
+	}
+	requirePeerTable(t, pm, []PeerState{{Addr: "a", BanScore: 3}})
+	if err := pm.AddPeer(&PeerState{Addr: "b"}); err == nil || err.Error() != "max peers reached" {
+		t.Fatalf("AddPeer over limit err=%v, want max peers reached", err)
+	}
+}
+
+func TestPeerManagerReleaseThenClaimSucceeds(t *testing.T) {
+	pm := NewPeerManager(DefaultPeerRuntimeConfig("devnet", 8))
+	if err := pm.AddPeer(&PeerState{Addr: "a"}); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	if err := pm.Claim(); err != nil {
+		t.Fatalf("first Claim: %v", err)
+	}
+	pm.Release()
+	requirePeerTable(t, pm, []PeerState{{Addr: "a"}})
+	if err := pm.Claim(); err != nil {
+		t.Fatalf("Claim after Release: %v", err)
+	}
+}
+
+func TestPeerManagerReleaseOnFreeChangesNothing(t *testing.T) {
+	pm := NewPeerManager(DefaultPeerRuntimeConfig("devnet", 8))
+	if err := pm.AddPeer(&PeerState{Addr: "a"}); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	pm.Release()
+	requirePeerTable(t, pm, []PeerState{{Addr: "a"}})
+	if err := pm.Claim(); err != nil {
+		t.Fatalf("Claim after Release on free manager: %v", err)
+	}
+	if err := pm.Claim(); err == nil || err.Error() != "peer manager is already claimed" {
+		t.Fatalf("second Claim err=%v, want peer manager is already claimed", err)
+	}
+}
+
+func TestPeerManagerClaimNilReceiver(t *testing.T) {
+	var pm *PeerManager
+	if err := pm.Claim(); err == nil || err.Error() != "nil peer manager" {
+		t.Fatalf("Claim on nil err=%v, want nil peer manager", err)
+	}
+	pm.Release()
 }

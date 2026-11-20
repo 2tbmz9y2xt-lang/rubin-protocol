@@ -166,12 +166,14 @@ type peer struct {
 	inboundLease *inboundBlockLease
 }
 
-// NewService validates and normalizes cfg, then claims the SyncEngine's DA relay
-// state (the first successful claimant keeps the detached-reorg hook; an earlier
-// claim or binding refuses no later construction), and as its final step publishes
-// this OPEN Service as the current DA TTL binding (RUBIN_COMPACT_BLOCKS.md Section 5).
-// Construction and publication change no DA record, count or claim; a failed
-// construction leaves the binding unchanged; Close never clears it.
+// NewService validates and normalizes cfg (its nil cfg.PeerManager check refuses with
+// "nil peer manager"), builds the Service, claims cfg.PeerManager (a held one is refused with
+// "peer manager is already claimed" before any later step), then claims the SyncEngine's DA
+// relay state (the first successful claimant keeps the detached-reorg hook; an earlier DA claim
+// or binding refuses no later construction) and returns that claim's refusal after releasing the
+// PeerManager claim. Its final step publishes this OPEN Service as the current DA TTL binding
+// (RUBIN_COMPACT_BLOCKS.md Section 5). Construction and publication change no other DA record,
+// count or claim; a failed construction leaves the binding unchanged; Close never clears it.
 func NewService(cfg ServiceConfig) (*Service, error) {
 	if err := validateServiceConfig(cfg); err != nil {
 		return nil, err
@@ -200,7 +202,11 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		daRelay:        expectedRelay,
 		inboundBudget:  inboundBudget,
 	}
+	if err := cfg.PeerManager.Claim(); err != nil {
+		return nil, err
+	}
 	if _, err := cfg.SyncEngine.ClaimDARelayState(expectedRelay, service.admitDetachedReorgDA); err != nil {
+		cfg.PeerManager.Release()
 		return nil, err
 	}
 	cfg.SyncEngine.PublishDATTLBinding(service)
