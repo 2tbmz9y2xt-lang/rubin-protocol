@@ -266,7 +266,7 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	if present, err := o.releaseBacking(r, d, scratch); err != nil || !present {
 		return cmp.Or(err, ErrIdentityV1)
 	}
-	if err := o.checkAliasSpelling(r, d); err != nil {
+	if err := o.checkReleaseStages(r, d, true); err != nil {
 		return err
 	}
 	if err := o.clearReleaseScratch(r); err != nil {
@@ -461,10 +461,7 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 }
 
 func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name string, scratch []byte) error {
-	if err := o.checkStage(r, d, name != ""); err != nil {
-		return err
-	}
-	if err := o.checkAliasSpelling(r, d); err != nil {
+	if err := o.checkReleaseStages(r, d, name != ""); err != nil {
 		return err
 	}
 	if err := o.removeMarkerAlias(r); err != nil {
@@ -571,7 +568,10 @@ func (stage sourceDebt) canClaimAs(observed string) bool {
 	return stage.held || stage.name == observed && validHeldStageKey(observed)
 }
 
-func (o *SourceOwnerV1) checkAliasSpelling(r *sourceRoot, d *sourceRelease) error {
+func (o *SourceOwnerV1) checkReleaseStages(r *sourceRoot, d *sourceRelease, backingPresent bool) error {
+	if err := o.checkStage(r, d, backingPresent); err != nil {
+		return err
+	}
 	observed := d.sharedStageKey(o.debt)
 	if validHeldStageKey(observed) {
 		return nil

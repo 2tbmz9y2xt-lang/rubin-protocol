@@ -1066,11 +1066,11 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 }
 
 func testSourceReleaseSpelling(t *testing.T) {
-	sourceModes(t, []string{"mixed-alias", "same-key-file", "pending-cross-key", "late-alias", "unrelated-file", "fresh-mixed-file"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"mixed-alias", "same-key-file", "pending-absent-file", "pending-cross-key", "late-alias", "unrelated-file", "fresh-mixed-file"}, func(t *testing.T, mode string) {
 		s, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		key := sourceForeign(m).name(o.id)
-		if mode == "same-key-file" {
+		if mode == "same-key-file" || mode == "pending-absent-file" {
 			key = p.name
 		}
 		key = strings.ToUpper(key[:32]) + key[32:]
@@ -1085,9 +1085,15 @@ func testSourceReleaseSpelling(t *testing.T) {
 			sourceReleaseWithFault(t, o, p, "intent-sync", syscall.EIO)
 			o.ops = realSourceFS
 		}
+		if mode == "pending-absent-file" {
+			sourceReleaseWithFault(t, o, p, "pending-absent", syscall.EIO)
+			o.ops = realSourceFS
+			sourcePresence(t, root, releaseScratch, true)
+			sourcePresence(t, root, releaseFile, false)
+		}
 		files, used, want := uint64(1), size, ErrIdentityV1
 		switch mode {
-		case "same-key-file", "unrelated-file", "fresh-mixed-file":
+		case "same-key-file", "pending-absent-file", "unrelated-file", "fresh-mixed-file":
 			sourceMust(t, os.WriteFile(stage, []byte{17}, 0o600))
 			files, used, want = 2, size+1, ErrBusyV1
 		case "late-alias":
