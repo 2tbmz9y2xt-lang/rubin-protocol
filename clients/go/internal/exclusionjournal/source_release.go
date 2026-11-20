@@ -44,20 +44,18 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 		}
 		return o.withRoot(o.bindRoot, func(r *sourceRoot) error {
 			scratch := make([]byte, scratchBytes)
-			if o.release == nil {
+			d := o.release
+			if d == nil {
 				if _, err := o.census(r, false); err != nil {
 					return err
 				}
 				if o.debt.name == p.name && o.debt.backing != p.name {
 					return ErrBusyV1
 				}
-				d := &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
+				d = &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
 				d.record = o.releaseRecord(d)
-				if err := o.persistRelease(r, d, scratch); err != nil {
-					return err
-				}
 			}
-			return o.continueRelease(r, scratch)
+			return o.continueRelease(r, d, scratch)
 		})
 	})
 }
@@ -266,11 +264,27 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	if err != nil {
 		return err
 	}
+	return o.publishMarker(r, d, id)
+}
+
+func (o *SourceOwnerV1) publishMarker(r *sourceRoot, d *sourceRelease, id filelock.IdentityV1) error {
+	pin, err := openSourceFile(r, releaseScratch, nil)
+	if err != nil {
+		return err
+	}
+	defer pin.Close()
 	visibility, err := o.linkVisible(r, releaseScratch, releaseFile, id)
 	if visibility != sourceNotVisible {
 		d.markerFile = id
 		d.pending = visibility == sourceIndeterminate
 		o.release = d
+	}
+	if err != nil {
+		return err
+	}
+	present, err := o.syncedMarker(r, d, pin)
+	if err == nil && !present {
+		return ErrIntegrityV1
 	}
 	return err
 }
@@ -292,8 +306,7 @@ func (o *SourceOwnerV1) writeRelease(r *sourceRoot, record []byte) (filelock.Ide
 	return filelock.FileIdentityV1(info), cmp.Or(o.ops.chmod(f, 0o600), o.finishFile(f))
 }
 
-func (o *SourceOwnerV1) continueRelease(r *sourceRoot, scratch []byte) error {
-	d := o.release
+func (o *SourceOwnerV1) continueRelease(r *sourceRoot, d *sourceRelease, scratch []byte) error {
 	if err := o.syncReleasedBacking(r, d, scratch); err != nil {
 		return err
 	}
@@ -372,22 +385,39 @@ func (d *sourceRelease) marker(r *sourceRoot) (bool, error) {
 	return true, nil
 }
 
-// releaseIntent syncs the named record and verifies it against the saved bytes.
-func (o *SourceOwnerV1) releaseIntent(r *sourceRoot, d *sourceRelease, scratch []byte) error {
+func (o *SourceOwnerV1) syncedMarker(r *sourceRoot, d *sourceRelease, pin *os.File) (bool, error) {
 	if err := o.syncBoundRoot(r); err != nil {
-		return err
+		return false, err
 	}
 	present, err := d.marker(r)
+	if err != nil || !present {
+		return present, err
+	}
+	info, err := pin.Stat()
+	if err != nil || filelock.FileIdentityV1(info) != d.markerFile {
+		return false, ErrIntegrityV1
+	}
+	return true, nil
+}
+
+// releaseIntent qualifies the visible record before its backing can be detached.
+func (o *SourceOwnerV1) releaseIntent(r *sourceRoot, d *sourceRelease, scratch []byte) error {
+	if o.release == nil {
+		return o.persistRelease(r, d, scratch)
+	}
+	pin, err := openSourceFile(r, releaseScratch, nil)
+	if err != nil {
+		pin, _ = openSourceFile(r, releaseFile, nil)
+	}
+	present, err := o.syncedMarker(r, d, pin)
+	_ = pin.Close()
 	if err != nil || present {
 		return err
 	}
 	if !d.pending {
 		return ErrIntegrityV1
 	}
-	if err := o.persistRelease(r, d, scratch); err != nil {
-		return err
-	}
-	return o.releaseIntent(r, d, scratch)
+	return o.persistRelease(r, d, scratch)
 }
 
 func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scratch []byte) error {

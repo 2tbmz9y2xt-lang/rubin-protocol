@@ -660,25 +660,39 @@ func (o *SourceOwnerV1) claimStage(r *sourceRoot, d *sourceDebt) error {
 	return err
 }
 
+func (r *sourceRoot) pinStage(d *sourceDebt) error {
+	if d == nil || d.held || r.stagePin != nil {
+		return nil
+	}
+	f, err := openSourceFile(r, d.leaf(), nil)
+	if err != nil {
+		return err
+	}
+	info, err := f.Stat()
+	if err != nil || filelock.FileIdentityV1(info) != d.file {
+		_ = f.Close()
+		return cmp.Or(err, ErrIdentityV1)
+	}
+	r.stagePin = f
+	return nil
+}
+
+func (r *sourceRoot) closeStagePin() {
+	_ = r.stagePin.Close()
+	r.stagePin = nil
+}
+
 func (o *SourceOwnerV1) moveStage(r *sourceRoot, d *sourceDebt) error {
-	pin, err := openSourceFile(r, d.leaf(), nil)
-	if err != nil {
+	if err := r.pinStage(d); err != nil {
 		return err
 	}
-	defer pin.Close()
-	info, err := pin.Stat()
-	if err != nil {
-		return err
-	}
-	if filelock.FileIdentityV1(info) != d.file {
-		return ErrIdentityV1
-	}
+	defer r.closeStagePin()
 	if err := o.ops.namespace(detachSource, r, d.leaf(), heldStagePrefix+d.name); err != nil {
 		return err
 	}
 	d.held = true
 	moved, err := sourceEntryInfo(r, d.leaf(), nil)
-	if err == nil && os.SameFile(info, moved) {
+	if err == nil && filelock.FileIdentityV1(moved) == d.file {
 		return nil
 	}
 	return cmp.Or(err, ErrIdentityV1)
@@ -708,6 +722,10 @@ func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, 
 	if o.debt.name != "" && o.debt.name != name {
 		return nil, ErrBusyV1
 	}
+	if err := r.pinStage(used.observedStage); err != nil {
+		return nil, err
+	}
+	defer r.closeStagePin()
 	f, err := openSourceFile(r, name, nil)
 	if err == nil {
 		defer f.Close()

@@ -539,6 +539,7 @@ func testSourceStageSpace(t *testing.T) {
 			} else {
 				sourceMust(t, os.WriteFile(path, bytes.Repeat([]byte{42}, int(stageSize)), 0o600))
 			}
+			originalStage := sourceLstat(t, path)
 			if mode == "held-open" {
 				held, err := os.Open(path)
 				sourceMust(t, err)
@@ -575,6 +576,9 @@ func testSourceStageSpace(t *testing.T) {
 					sourceFailIf(t, !synced, "space recheck before stage removal sync")
 					sourcePresence(t, root, stage, false)
 					sourcePresence(t, root, ".stage-hold-"+m.name(o.id), false)
+					if mode == "exact" {
+						sourceFailIf(t, sourceHasOpenFile(t, originalStage), "space recheck still held the retired stage")
+					}
 					if mode == "post-statfs-error" {
 						return syscall.EIO
 					}
@@ -584,6 +588,7 @@ func testSourceStageSpace(t *testing.T) {
 				}
 				if mode == "absent-at-statfs" {
 					sourceMust(t, os.Remove(filepath.Join(root, stage)))
+					sourceFailIf(t, !sourceHasOpenFile(t, originalStage), "space check lost the observed stage")
 				}
 				sourceStatfsFixture(s, 1, space)
 				return nil
@@ -725,6 +730,22 @@ func testSourceUnfundedBacking(t *testing.T, o *SourceOwnerV1, m SourceManifestV
 }
 
 func TestSourceReleaseOnlyRetry(t *testing.T) {
+	sourceModes(t, []string{"published-marker-pin", "retry-marker-pin"}, func(t *testing.T, mode string) {
+		_, o, dir, _, _, p := sourcePreparedBundle(t)
+		if mode == "retry-marker-pin" {
+			sourceReleaseWithFault(t, o, p, "intent-sync", syscall.EIO)
+			o.ops = realSourceFS
+		}
+		path := filepath.Join(dir, sourceDirectory, releaseFile)
+		checked := false
+		o.ops.dirSync = func(f *os.File) error {
+			o.ops.dirSync = (*os.File).Sync
+			checked = sourceHasOpenFile(t, sourceLstat(t, path))
+			return f.Sync()
+		}
+		sourceReleaseResult(t, o, p, true, nil)
+		sourceFailIf(t, !checked, "release used the marker without holding it through directory sync")
+	})
 	t.Run("marker-after-final-sync", func(t *testing.T) {
 		_, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
@@ -1908,6 +1929,21 @@ func sourceLstat(t *testing.T, name string) os.FileInfo {
 	return info
 }
 
+func sourceHasOpenFile(t *testing.T, info os.FileInfo) bool {
+	t.Helper()
+	original := info.Sys().(*syscall.Stat_t)
+	entries, err := os.ReadDir("/dev/fd")
+	sourceMust(t, err)
+	for _, entry := range entries {
+		fd, err := strconv.Atoi(entry.Name())
+		var held syscall.Stat_t
+		if err == nil && syscall.Fstat(fd, &held) == nil && held.Dev == original.Dev && held.Ino == original.Ino {
+			return true
+		}
+	}
+	return false
+}
+
 func sourceUnchangedEntry(t *testing.T, name string, original os.FileInfo) {
 	t.Helper()
 	info := sourceLstat(t, name)
@@ -2334,6 +2370,17 @@ func testSourceHeldRestoreIO(t *testing.T) {
 }
 
 func testSourceProtectedPublication(t *testing.T) {
+	t.Run("reuse-with-public-stage", func(t *testing.T) {
+		_, o, dir, m, parts, p := sourcePreparedBundle(t)
+		stage := filepath.Join(dir, sourceDirectory, publicStagePrefix+p.name)
+		sourceMust(t, os.WriteFile(stage, []byte("partial"), 0o600))
+		before := sourceLstat(t, stage)
+		got := sourcePrepareResult(t, o, m, func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
+			sourceFailIf(t, !sourceHasOpenFile(t, before), "reuse entered producer without holding the observed stage")
+			return sourceProducer(m, parts)(op, visit)
+		}, nil)
+		sourceFailIf(t, got.incarnation != p.incarnation || sourceHasOpenFile(t, before), "reuse changed the token or held the retired stage")
+	})
 	sourceModes(t, []string{"pin-on-publish", "pin-on-reuse"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 		if mode == "pin-on-reuse" {
@@ -2342,20 +2389,11 @@ func testSourceProtectedPublication(t *testing.T) {
 		path := filepath.Join(dir, sourceDirectory, m.name(o.id))
 		checked := false
 		o.ops.dirSync = func(f *os.File) error {
-			original := sourceLstat(t, path).Sys().(*syscall.Stat_t)
+			original := sourceLstat(t, path)
 			sourceMust(t, os.Remove(path))
-			entries, err := os.ReadDir("/dev/fd")
-			sourceMust(t, err)
-			for _, entry := range entries {
-				fd, err := strconv.Atoi(entry.Name())
-				var held syscall.Stat_t
-				if err == nil && syscall.Fstat(fd, &held) == nil && held.Dev == original.Dev && held.Ino == original.Ino {
-					checked = true
-					return f.Sync()
-				}
-			}
-			t.Fatal("last source name removed with no descriptor holding the original inode")
-			return nil
+			checked = sourceHasOpenFile(t, original)
+			sourceFailIf(t, !checked, "last source name removed with no descriptor holding the original inode")
+			return f.Sync()
 		}
 		sourcePrepareResult(t, o, m, sourceProducer(m, parts), ErrIdentityV1)
 		sourceFailIf(t, !checked, "directory sync did not observe the qualified source")
