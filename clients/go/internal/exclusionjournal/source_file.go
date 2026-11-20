@@ -33,7 +33,25 @@ type sourceDebt struct {
 	size                    uint64
 	file                    filelock.IdentityV1
 	staging, removed, alias bool
-	unlinkTried             bool
+	unlinkTried, held       bool
+}
+
+const publicStagePrefix = ".staging-"
+const heldStagePrefix = ".stage-hold-"
+
+func (d sourceDebt) leaf() string {
+	if d.held {
+		return heldStagePrefix + d.name
+	}
+	return publicStagePrefix + d.name
+}
+
+func stageSlotVacant(r *sourceRoot, key string, occupied error) error {
+	_, err := r.Lstat(publicStagePrefix + key)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return cmp.Or(err, occupied)
 }
 
 type sourceUsage struct {
@@ -56,7 +74,7 @@ func detachSource(r *sourceRoot, from, to string) error {
 
 var realSourceFS = sourceFS{statfs: syscall.Fstatfs, write: (*os.File).Write, fileSync: (*os.File).Sync, close: (*os.File).Close, chmod: (*os.File).Chmod, namespace: sourceNameOp.run, remove: (*os.Root).Remove, dirSync: (*os.File).Sync}
 
-func (o *SourceOwnerV1) census(r *sourceRoot) (sourceUsage, error) {
+func (o *SourceOwnerV1) census(r *sourceRoot, reopening bool) (sourceUsage, error) {
 	f, err := r.Open(".")
 	if err != nil {
 		return sourceUsage{}, err
@@ -69,14 +87,17 @@ func (o *SourceOwnerV1) census(r *sourceRoot) (sourceUsage, error) {
 	if uint64(len(entries)) >= o.limits.Scans {
 		return sourceUsage{}, ErrCapacityV1
 	}
-	return o.censusFiles(r, entries)
+	return o.censusFiles(r, entries, reopening)
 }
 
-func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry) (sourceUsage, error) {
+func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, reopening bool) (sourceUsage, error) {
 	var used sourceUsage
 	missing, absentRelease := len(o.live), o.release
 	backing, err := absentRelease.location(r)
 	if err != nil {
+		return sourceUsage{}, err
+	}
+	if err := o.admitHeldStage(r, entries, reopening); err != nil {
 		return sourceUsage{}, err
 	}
 	for _, entry := range entries {
@@ -89,6 +110,35 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry) (sourc
 		}
 	}
 	return o.includeAbsent(used, missing, absentRelease)
+}
+
+func (o *SourceOwnerV1) admitHeldStage(r *sourceRoot, entries []os.DirEntry, reopening bool) error {
+	seen := false
+	for _, entry := range entries {
+		key, held := strings.CutPrefix(entry.Name(), heldStagePrefix)
+		if !held {
+			continue
+		}
+		if seen || !validHeldStageKey(key) {
+			return ErrIntegrityV1
+		}
+		seen = true
+		if !reopening && o.debt.name != key {
+			return ErrIdentityV1
+		}
+		if err := stageSlotVacant(r, key, syscall.EEXIST); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validHeldStageKey(key string) bool {
+	if len(key) != sha256.Size*2 || strings.ToLower(key) != key {
+		return false
+	}
+	_, err := hex.DecodeString(key)
+	return err == nil
 }
 
 func (o *SourceOwnerV1) countEntry(r *sourceRoot, name, backing string, used *sourceUsage, missing *int) error {
@@ -154,10 +204,14 @@ func (o *SourceOwnerV1) censusFile(r *sourceRoot, logical, pending string, info 
 		}
 		*missing -= 1
 	}
-	if err := o.censusEntry(logical, info); err != nil {
+	stage, held := strings.CutPrefix(logical, heldStagePrefix)
+	if held {
+		logical = publicStagePrefix + stage
+	}
+	if err := o.censusEntry(logical, info, held); err != nil {
 		return err
 	}
-	if stage, ok := strings.CutPrefix(logical, ".staging-"); ok {
+	if stage, ok := strings.CutPrefix(logical, publicStagePrefix); ok {
 		err := o.observeStage(r, stage, pending, info)
 		used.stage = o.debt
 		if err != nil || used.stage.alias {
@@ -228,8 +282,8 @@ func sourceEntryInfo(r *sourceRoot, name string, unobserved error) (os.FileInfo,
 	return info, nil
 }
 
-func (o *SourceOwnerV1) censusEntry(name string, info os.FileInfo) error {
-	name, staging := strings.CutPrefix(name, ".staging-")
+func (o *SourceOwnerV1) censusEntry(name string, info os.FileInfo, held bool) error {
+	name, staging := strings.CutPrefix(name, publicStagePrefix)
 	decoded, err := hex.DecodeString(name)
 	if err != nil || len(decoded) != 32 {
 		return ErrIntegrityV1
@@ -238,19 +292,30 @@ func (o *SourceOwnerV1) censusEntry(name string, info os.FileInfo) error {
 		return nil
 	}
 	file := filelock.FileIdentityV1(info)
-	if d := o.debt; d.name != "" {
-		if d.name != name {
-			return ErrBusyV1
-		}
-		if d.removed {
-			return ErrIntegrityV1
-		}
-		if d.file != file {
-			return ErrIdentityV1
-		}
+	if err := o.debt.matchStage(name, file, held); err != nil {
+		return err
 	}
-	o.debt = sourceDebt{name: name, size: uint64(max(info.Size(), 0)), file: file, staging: true}
+	o.debt = sourceDebt{name: name, size: uint64(max(info.Size(), 0)), file: file, staging: true, held: held}
 	return nil
+}
+
+func (d sourceDebt) matchStage(name string, file filelock.IdentityV1, held bool) error {
+	switch {
+	case d.name == "":
+		return nil
+	case d.name != name:
+		return ErrBusyV1
+	case d.held && !held:
+		return ErrIdentityV1
+	case d.removed:
+		return ErrIntegrityV1
+	case d.held && d.file == (filelock.IdentityV1{}):
+		return nil
+	case d.file != file:
+		return ErrIdentityV1
+	default:
+		return nil
+	}
 }
 
 func (o *SourceOwnerV1) space(r *sourceRoot, required uint64, stage sourceDebt) (bool, error) {
@@ -275,7 +340,7 @@ func (d sourceDebt) diskCredit(r *sourceRoot) uint64 {
 	if d.name == "" || d.removed || d.alias {
 		return 0
 	}
-	info, err := sourceEntryInfo(r, ".staging-"+d.name, nil)
+	info, err := sourceEntryInfo(r, d.leaf(), nil)
 	if err != nil || d.file != filelock.FileIdentityV1(info) {
 		return 0
 	}
@@ -525,7 +590,7 @@ func (w *sourceWindows) part(f *os.File, base int64, spec SourcePartSpecV1, hash
 
 func (o *SourceOwnerV1) withFiles(account *mdbx.OperationAccount, m SourceManifestV1, preparing bool, use func(*sourceRoot, SourceManifestV1, uint64, sourceUsage) error) error {
 	return o.withManifest(account, m, preparing, func(r *sourceRoot, m SourceManifestV1, size uint64) error {
-		used, err := o.census(r)
+		used, err := o.census(r, false)
 		if err != nil {
 			return err
 		}
@@ -540,7 +605,7 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 		return nil
 	}
 	if !d.removed {
-		if err := o.unlinkStage(r); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := o.unlinkStage(r, d); err != nil {
 			return err
 		}
 		d.removed = true
@@ -552,19 +617,56 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 	return nil
 }
 
-func (o *SourceOwnerV1) unlinkStage(r *sourceRoot) error {
-	d := &o.debt
-	name := ".staging-" + d.name
-	info, err := sourceEntryInfo(r, name, nil)
+func (o *SourceOwnerV1) unlinkStage(r *sourceRoot, d *sourceDebt) error {
+	if !d.held {
+		if err := o.claimStage(r, d); err != nil {
+			return err
+		}
+	}
+	info, err := sourceEntryInfo(r, d.leaf(), nil)
 	if err != nil {
 		return err
 	}
-	if d.file != filelock.FileIdentityV1(info) {
+	if d.file != (filelock.IdentityV1{}) && d.file != filelock.FileIdentityV1(info) {
 		return ErrIdentityV1
 	}
+	d.file = filelock.FileIdentityV1(info)
 	d.size = uint64(max(info.Size(), 0))
 	d.unlinkTried = true
-	return o.ops.remove(r.Root, name)
+	return o.ops.remove(r.Root, d.leaf())
+}
+
+func (o *SourceOwnerV1) claimStage(r *sourceRoot, d *sourceDebt) error {
+	pin, err := openSourceFile(r, d.leaf(), nil)
+	if err != nil {
+		return err
+	}
+	defer pin.Close()
+	info, err := pin.Stat()
+	if err != nil {
+		return err
+	}
+	if filelock.FileIdentityV1(info) != d.file {
+		return ErrIdentityV1
+	}
+	if err := o.ops.namespace(detachSource, r, d.leaf(), heldStagePrefix+d.name); err != nil {
+		return err
+	}
+	d.held = true
+	moved, err := sourceEntryInfo(r, d.leaf(), nil)
+	if err == nil && os.SameFile(info, moved) {
+		return nil
+	}
+	_ = o.restoreStage(r, d)
+	return cmp.Or(err, ErrIdentityV1)
+}
+
+func (o *SourceOwnerV1) restoreStage(r *sourceRoot, d *sourceDebt) error {
+	if err := o.ops.namespace(detachSource, r, d.leaf(), publicStagePrefix+d.name); err != nil {
+		return err
+	}
+	d.held = false
+	return o.syncBoundRoot(r)
 }
 
 // PrepareSourceV1 returns a handle after durable publication (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
@@ -617,6 +719,10 @@ func (o *SourceOwnerV1) prepared(r *sourceRoot, m SourceManifestV1, name string,
 	if err != nil || observed.file != filelock.FileIdentityV1(info) || o.currentRoot() != nil {
 		return nil, ErrIdentityV1
 	}
+	if stageSlotVacant(r, name, ErrIdentityV1) != nil {
+		o.debt = sourceDebt{}
+		return nil, ErrIdentityV1
+	}
 	o.debt = sourceDebt{}
 	token := cmp.Or(o.live[name], &observed)
 	o.live[name] = token
@@ -629,7 +735,7 @@ func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, 
 		if w.file == nil {
 			return
 		}
-		_ = w.file.Close()
+		defer w.file.Close()
 		if o.debt.staging {
 			if cleanup := o.reconcile(r); cleanup != nil {
 				err = errors.Join(err, cleanup)
@@ -643,11 +749,15 @@ func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, 
 	if err := o.finishFile(w.file); err != nil {
 		return nil, err
 	}
-	visibility, err := o.linkVisible(r, ".staging-"+name, name, observed.file)
+	if stageSlotVacant(r, name, ErrIdentityV1) != nil {
+		return nil, ErrIdentityV1
+	}
+	visibility, err := o.linkVisible(r, o.debt.leaf(), name, observed.file)
 	o.debt.staging = visibility == sourceNotVisible
 	if err != nil {
 		return nil, err
 	}
+	o.debt.removed, o.debt.alias = true, true
 	return o.prepared(r, m, name, observed)
 }
 
@@ -671,12 +781,12 @@ func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m Source
 				return err
 			}
 		}
-		f, err := r.OpenFile(".staging-"+name, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		f, err := r.OpenFile(heldStagePrefix+name, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 		if err != nil {
 			return err
 		}
 		w.file = f
-		o.debt = sourceDebt{name: name, size: size, staging: true}
+		o.debt = sourceDebt{name: name, staging: true, held: true}
 		info, err := f.Stat()
 		if err != nil {
 			return err

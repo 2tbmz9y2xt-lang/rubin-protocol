@@ -156,16 +156,29 @@ func (o *SourceOwnerV1) openSourceRoot() error {
 		if err := o.openRelease(r); err != nil {
 			return err
 		}
-		if _, err := o.census(r); err != nil || o.release == nil {
+		if _, err := o.census(r, true); err != nil {
 			return err
 		}
-		if !o.manifestFits(o.release.manifest, o.release.size) {
-			return ErrCapacityV1
+		if err := o.openReleaseBacking(r); err != nil {
+			return err
 		}
-		present, err := o.releaseBacking(r, o.release, make([]byte, scratchBytes))
-		o.release.unlinked = err == nil && !present && o.debt.name != o.release.name
-		return err
+		if o.debt.held {
+			return o.restoreStage(r, &o.debt)
+		}
+		return nil
 	})
+}
+
+func (o *SourceOwnerV1) openReleaseBacking(r *sourceRoot) error {
+	if o.release == nil {
+		return nil
+	}
+	if !o.manifestFits(o.release.manifest, o.release.size) {
+		return ErrCapacityV1
+	}
+	present, err := o.releaseBacking(r, o.release, make([]byte, scratchBytes))
+	o.release.unlinked = err == nil && !present && o.debt.name != o.release.name
+	return err
 }
 
 // syncBoundRoot makes namespace changes durable and verifies current root reachability.

@@ -45,7 +45,7 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 		return o.withRoot(o.bindRoot, func(r *sourceRoot) error {
 			scratch := make([]byte, scratchBytes)
 			if o.release == nil {
-				if _, err := o.census(r); err != nil {
+				if _, err := o.census(r, false); err != nil {
 					return err
 				}
 				if o.debt.name == p.name && !o.debt.alias {
@@ -437,7 +437,7 @@ func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name stri
 
 // checkStage preserves an independent stage for the same capture.
 func (d *sourceRelease) checkStage(r *sourceRoot, backingPresent bool) error {
-	info, err := sourceEntryInfo(r, ".staging-"+d.name, nil)
+	_, info, err := d.stageAlias(r)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -448,6 +448,18 @@ func (d *sourceRelease) checkStage(r *sourceRoot, backingPresent bool) error {
 		return ErrBusyV1
 	}
 	return nil
+}
+
+func (d *sourceRelease) stageAlias(r *sourceRoot) (sourceDebt, os.FileInfo, error) {
+	stage := sourceDebt{name: d.name, file: d.file, held: true}
+	info, err := sourceEntryInfo(r, stage.leaf(), nil)
+	if errors.Is(err, os.ErrNotExist) {
+		stage.held = false
+		info, err = sourceEntryInfo(r, stage.leaf(), nil)
+	} else if err == nil {
+		err = stageSlotVacant(r, d.name, syscall.EEXIST)
+	}
+	return stage, info, err
 }
 
 // unlinkDetached pins and qualifies the private file before removing its last link.
@@ -502,8 +514,7 @@ func requireSourceLinks(f *os.File, want uint64) error {
 
 // singleBackingLink removes only a qualified staging alias before the last unlink.
 func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os.File) error {
-	name := ".staging-" + d.name
-	info, err := sourceEntryInfo(r, name, nil)
+	stage, info, err := d.stageAlias(r)
 	if errors.Is(err, os.ErrNotExist) {
 		return requireSourceLinks(f, 1)
 	}
@@ -513,9 +524,15 @@ func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os
 	if err := requireSourceLinks(f, 2); err != nil {
 		return err
 	}
-	if err := o.ops.remove(r.Root, name); err != nil {
+	if o.debt.name != "" && o.debt.name != stage.name {
+		return ErrBusyV1
+	}
+	stage.staging, stage.alias, stage.size = true, true, d.size
+	o.debt = stage
+	if err := o.unlinkStage(r, &o.debt); err != nil {
 		return err
 	}
+	o.debt.removed = true
 	return requireSourceLinks(f, 1)
 }
 
