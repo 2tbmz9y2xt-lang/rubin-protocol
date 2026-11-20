@@ -63,8 +63,21 @@ type journalHeaderEvidence struct {
 
 func newJournalHeaderEvidence(t *testing.T, class byte, count, extent int, supplied bool) journalHeaderEvidence {
 	t.Helper()
-	owner, oldest, tip := hcBase(t, hcLim())
-	recs := []HeaderCandidateRecord148V1{oldest, tip}[2-count:]
+	return newJournalHeaderEvidenceWithReceived(t, class, count, extent, supplied, 0)
+}
+
+func newJournalHeaderEvidenceWithReceived(t *testing.T, class byte, count, extent int, supplied bool, receivedStart int) journalHeaderEvidence {
+	t.Helper()
+	owner := hcNew(t, hcLim())
+	oldest := hcMk(t, hcRoot, 10, 100, 1)
+	tip := hcMk(t, oldest.Hash, 11, 110, 2)
+	records := []HeaderCandidateRecord148V1{oldest, tip}
+	received := records[receivedStart:]
+	if len(received) != 0 {
+		received[0] = hcExt(received[0])
+	}
+	hcEstablish(t, owner, received...)
+	recs := records[2-count:]
 	e := journalHeaderEvidence{manifest: exclusionjournal.SourceManifestV1{Class: exclusionjournal.CaptureClassV1(class), Identity: [32]byte{19}}}
 	e.input = JournalHeaderPathInput148V1{
 		Owner: owner, Incarnation: 7, Version: owner.VersionV1(), Height: 11, AttachmentHeight: 9,
@@ -149,6 +162,15 @@ func (e journalHeaderEvidence) assertPart(t *testing.T, part exclusionjournal.So
 	}
 }
 
+func (e journalHeaderEvidence) assertPathSuffix(t *testing.T, part exclusionjournal.SourcePartV1) {
+	t.Helper()
+	want := e.want[e.pathIndex][1:]
+	got := make([]byte, len(want))
+	if n, err := part.ReadAt(got, 1); n != len(want) || err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("path suffix read %d/%v: got %x want %x", n, err, got, want)
+	}
+}
+
 func journalHeaderGuards(t *testing.T, owner *HeaderCandidateOwner148V1) {
 	t.Helper()
 	if owner == nil {
@@ -187,7 +209,8 @@ func journalHeaderSnapshot(t *testing.T) {
 	}{{1, 1, false}, {2, 0, true}, {3, 2, false}} {
 		t.Run(fmt.Sprint(c.class), func(t *testing.T) {
 			_, source := journalHeaderSource(t, t.TempDir(), journalHeaderLimits, false)
-			e := newJournalHeaderEvidence(t, c.class, 2, int(c.extent), true)
+			extent := int(c.extent)
+			e := newJournalHeaderEvidenceWithReceived(t, c.class, 2, extent, true, extent)
 			if c.class == 2 {
 				e.manifest.Parts[5].Length = 0
 				e.input.Parts[4] = exclusionjournal.SourceViewV1{Origin: -1}
@@ -203,6 +226,9 @@ func journalHeaderSnapshot(t *testing.T) {
 						journalHeaderChangeOriginal(t, e.input, c.close)
 					}
 					e.assertPart(t, part, visits)
+					if visits == e.pathIndex {
+						e.assertPathSuffix(t, part)
+					}
 					visits++
 					return nil
 				})
@@ -362,7 +388,11 @@ func journalHeaderPointRefusals(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, source := journalHeaderSource(t, t.TempDir(), journalHeaderLimits, false)
-			supplied := c.name != "stale" && c.name != "wrong-raw-hash" && c.name != "short-durable"
+			supplied := true
+			switch c.name {
+			case "stale", "wrong-raw-hash", "short-durable", "wrong-final-B", "wrong-expected-B":
+				supplied = false
+			}
 			e := newJournalHeaderEvidence(t, 1, 2, 1, supplied)
 			c.edit(t, &e)
 			journalHeaderAccount(t, func(a *mdbx.OperationAccount) error {

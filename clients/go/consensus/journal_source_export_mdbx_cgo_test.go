@@ -126,6 +126,7 @@ func TestJournalSourceExportExactAndScoped(t *testing.T) {
 		t.Run(fmt.Sprint(class), func(t *testing.T) {
 			_, source := journalReplaySource(t, t.TempDir(), false)
 			e := newJournalReplayEvidence(class, "prefix-v4!")
+			e.origins[0].Bytes[e.views[2].Offset] ^= 1
 			export := e.producer(t)
 			e.origins[0].Bytes = nil
 			e.views[0].Offset++
