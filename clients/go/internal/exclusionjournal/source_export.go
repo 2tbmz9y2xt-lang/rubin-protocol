@@ -312,7 +312,7 @@ func copyPart(part SourcePartV1, dst io.Writer, scratch []byte) error {
 // readPartAt accepts a full final read accompanied by EOF.
 func readPartAt(part SourcePartV1, dst []byte, offset uint64) error {
 	n, err := part.ReadAt(dst, int64(min(offset, math.MaxInt64)))
-	if n != len(dst) || err != nil && (err != io.EOF || uint64(len(dst)) != part.Length-offset) {
+	if n != len(dst) || err != nil && (any(err) != any(io.EOF) || uint64(len(dst)) != part.Length-offset) {
 		return ErrIntegrityV1
 	}
 	return nil
