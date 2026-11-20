@@ -73,7 +73,7 @@ func treeCallPoll(condition func() bool) bool {
 
 func treeCallWorkersGone() bool { return treeCallWorkerCount() == 0 }
 
-// treeCallChild re-executes the test binary for one child row (pattern of mdbx_cgo_test.go:2530-2541).
+// treeCallChild re-executes the test binary for one child row (pattern of TestViewErrorPanicAndCloseCoordination).
 func treeCallChild(t *testing.T, row string, env ...string) (string, error) {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestTreeCallV1ChildRows$/^"+row+"$", "-test.count=1", "-test.v")

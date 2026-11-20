@@ -362,7 +362,7 @@ func (k *MLDSA87Keypair) SignDigest32(digest [32]byte) ([]byte, error) {
 	// runtime.KeepAlive(k) AFTER signOpenSSLDigest32 returns so the
 	// finalizer cannot free k.pkey while the underlying C call is still
 	// using it. A pre-call KeepAlive would not cover the C call window.
-	// Mirrors the conformance-only helper at clients/go/consensus/openssl_signer_conformance_fixture.go:174.
+	// Mirrors the conformance-only helper (*MLDSA87Keypair).SignDigest32ForConformanceFixture.
 	runtime.KeepAlive(k)
 	return sig, err
 }
@@ -402,8 +402,7 @@ func (k *MLDSA87Keypair) PrivateKeyDER() ([]byte, error) {
 	// validatePrivateKeyDERPostC isolates the three crypto-defensive
 	// branches (rc==0 but degenerate runtime returned nil/zero/overflow
 	// outputs) so they can be unit-tested without a working OpenSSL
-	// fault injector. Mirrors validateConformanceSignResult at
-	// clients/go/consensus/openssl_signer_conformance_fixture.go:205.
+	// fault injector. Mirrors validateConformanceSignResult.
 	if err := validatePrivateKeyDERPostC(der == nil, uint64(derLen)); err != nil {
 		return nil, err
 	}

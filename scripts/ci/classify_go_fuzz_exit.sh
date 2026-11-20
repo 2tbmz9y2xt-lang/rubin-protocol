@@ -2,7 +2,7 @@
 # Classify a non-zero `go test -fuzz` exit as either the benign upstream
 # fuzztime-expiry shutdown race (exit 0) or defect evidence (exit 1).
 #
-# Benign signature (verified in go1.26.5, src/internal/fuzz/fuzz.go:129): the
+# Benign signature (verified in go1.26.5, internal/fuzz.CoordinateFuzzing): the
 # coordinator can observe the fuzztime deadline before its own context reports
 # it, so the `err == fuzzCtx.Err()` suppression guard misses and a bare
 # "context deadline exceeded" fails a run that spent its full budget cleanly.

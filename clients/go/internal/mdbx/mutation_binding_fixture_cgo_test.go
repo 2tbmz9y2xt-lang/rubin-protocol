@@ -430,7 +430,7 @@ func TestMutationBindingTreeRetainedV1(t *testing.T) {
 		if evidence.commits != 1 {
 			t.Fatalf("N15 retained OLD commits %d", evidence.commits)
 		}
-		// Nearest existing pin: tsfCoveredLifecycle cleanup10/nil (tree_stream_fixture_cgo_test.go:1134, r.tuple(t, 2, 3, -1))
+		// Nearest existing pin: tsfCoveredLifecycle cleanup10/nil (r.tuple(t, 2, 3, -1))
 		// uses the same fault mode 10, key tsCounterKey(2) and nil source delivery, but on a tsfCover scene; no existing
 		// row pins this plain tsfNew scene, so the literal tuple here is this row's own assertion.
 		r.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
@@ -478,7 +478,7 @@ func mbRetainedReadbackRows(t *testing.T) {
 			t.Fatalf("N15 retained readback commits %d", evidence.commits)
 		}
 		// No existing test pins the normal-path mode-15 tuple: the verdict NEW is checked independently below against
-		// the durable post-image (tsfScene.durable), and the cause against tcPoisonedCause (tree_compose_cgo_test.go:2179).
+		// the durable post-image (tsfScene.durable), and the cause against tcPoisonedCause.
 		r.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 		tcPoisonedCause(t, r.err)
 		if old == nil || any(s.s.txn) == old {
@@ -516,7 +516,7 @@ func mbRetainedReadbackRows(t *testing.T) {
 		}()
 		<-done
 		// The public entry resumes the Goexit on this goroutine, so neither the result nor the fixture return reaches
-		// the caller; the latched terminal is checked against tcPoisonedChild (tree_compose_cgo_test.go:2221-2230).
+		// the caller; the latched terminal is checked against tcPoisonedChild.
 		if s.s.state != storePOISONEDTHREAD || s.s.terminalTruth != CommitTruthUnknown || r != (tsResult{}) {
 			t.Fatalf("N15 readback goexit: state %s truth %s result %+v", s.s.state, s.s.terminalTruth, r)
 		}

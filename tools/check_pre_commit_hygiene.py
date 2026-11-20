@@ -236,7 +236,7 @@ def check_test_helpers_in_production(files: list[str], staged_only: bool) -> lis
         for i, line in enumerate(lines[:prod_end], 1):
             if TEST_HELPER_RE.search(line):
                 # Skip if the previous non-blank line gates this with #[cfg(test)]
-                # (inline test-only function pattern, e.g. txpool.rs:150).
+                # (inline test-only function pattern).
                 if f.endswith(".rs"):
                     j = i - 2  # zero-based, line before this match
                     while j >= 0 and not lines[j].strip():

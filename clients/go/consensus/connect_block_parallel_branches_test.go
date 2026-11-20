@@ -1169,7 +1169,7 @@ func TestApplyWrapper(t *testing.T) {
 }
 
 // TestApplyNonCoinbaseTxBasicWorkQ_CovenantGenesisError exercises the
-// ValidateTxCovenantsGenesis error path (connect_block_parallel.go lines 241-242).
+// ValidateTxCovenantsGenesis error path.
 func TestApplyNonCoinbaseTxBasicWorkQ_CovenantGenesisError(t *testing.T) {
 	// P2PK output with value=0 fails covenant genesis validation.
 	kp := mustMLDSA87Keypair(t)
@@ -1203,7 +1203,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CovenantGenesisError(t *testing.T) {
 }
 
 // TestApplyNonCoinbaseTxBasicWorkQ_SighashPrehashError exercises the
-// NewSighashV1PrehashCache error path (connect_block_parallel.go line 245).
+// NewSighashV1PrehashCache error path.
 func TestApplyNonCoinbaseTxBasicWorkQ_SighashPrehashError(t *testing.T) {
 	// TxKind=0x01 without DaCommitCore fails sighash prehash cache creation.
 	kp := mustMLDSA87Keypair(t)
@@ -1366,7 +1366,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityInputGroupCapDeferredBehind
 	assertTxErrCodeMsg(t, runQ(SIMPLICITY_MAX_GROUP_INPUTS+1, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
 }
 
-// TestApplyNonCoinbaseTxBasicWorkQ_P2PKSpendQError exercises line 326:
+// TestApplyNonCoinbaseTxBasicWorkQ_P2PKSpendQError exercises:
 // P2PK input with an invalid suite ID triggers validateP2PKSpendQ error.
 func TestApplyNonCoinbaseTxBasicWorkQ_P2PKSpendQError(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)

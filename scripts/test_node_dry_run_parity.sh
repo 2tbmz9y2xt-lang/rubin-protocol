@@ -42,7 +42,7 @@ ART="${RUBIN_PROCESS_ARTIFACT_ROOT}"
 # the preserved artifact tree keeps a directory the operator cannot remove, so
 # the restore hangs off the EXIT trap rather than off fail(). Overwriting the
 # helper's EXIT trap and calling `rubin_process_cleanup` with the original
-# status is the pattern in `devnet-go-da-relay.sh:38-45`.
+# status is the pattern in `go_da_relay_exit_trap`.
 RESTORE_MODE_DIR=""
 
 dry_run_parity_exit_trap() {
@@ -311,7 +311,7 @@ echo "Building the Rust node from the current checkout"
 # guessed `target/debug/` layout: under `CARGO_TARGET_DIR`, `build.target-dir`
 # or a configured target triple the guess either fails outright or — the
 # dangerous branch — copies a stale binary from an earlier build. Same pattern
-# as `scripts/devnet-rust-binary-soak.sh:258-370`.
+# as `scripts/devnet-rust-binary-soak.sh`.
 CARGO_BUILD_LOG="${ART}/cargo-build.jsonl"
 "${DEV_ENV}" -- cargo build --manifest-path "${REPO_ROOT}/clients/rust/Cargo.toml" \
   -p rubin-node --message-format=json-render-diagnostics >"${CARGO_BUILD_LOG}"
@@ -690,7 +690,7 @@ done
 printf 'PASS  %-32s\n' "peer-argv-permutation"
 
 # `F3_PEERS_LAST_WINS`: Go's `--peers` is a `flag.String`
-# (`clients/go/cmd/rubin-node/main.go:292`), so a repeated occurrence overwrites
+# (`run` in `clients/go/cmd/rubin-node`), so a repeated occurrence overwrites
 # and only the final CSV reaches `append([]string{*peerCSV}, peers...)`.
 # compare_row's cross-client diff reddens if exactly one client accumulated, but
 # not if both accumulate alike, so pin the exact ordered list per client.

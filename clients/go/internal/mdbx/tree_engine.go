@@ -18,7 +18,7 @@ const (
 	treeNodeWorkBytesV1 uint64 = 147968 // L2 per-call working memory: 289 frames * 512 bytes
 )
 
-// Primitive encodings (D13-7): 0 is invalid. Kinds 1-6 are forward, 7-9 inverse (MEMPOOL L2984-2989).
+// Primitive encodings (D13-7): 0 is invalid. Kinds 1-6 are forward, 7-9 inverse.
 const (
 	treeForwardV1 uint8 = 1
 	treeInverseV1 uint8 = 2

@@ -837,7 +837,7 @@ func (r *treeReadbackStateV1) recordV1(dbi DBI, key []byte, kind uint8, value []
 }
 
 // verdictV1 completes both predicates over P_r, references, the Pair targets and Consulted rows even after one is false:
-// OLD if OLD matches, else NEW, else UNKNOWN (MEMPOOL L5408-5414). Pair rows carry no AfterOldValueRef (D14-5, D14-11).
+// OLD if OLD matches, else NEW, else UNKNOWN. Pair rows carry no AfterOldValueRef (D14-5, D14-11).
 func (r *treeReadbackStateV1) verdictV1(pair []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) (CommitTruth, error) {
 	if r.failed != nil {
 		return CommitTruthUnknown, r.failed

@@ -1126,7 +1126,7 @@ func TestValidateThresholdSigSpendQ_SentinelWithData(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HTLC claim preimage length bounds tests (lines 172-177 of sig_verify_queued.go)
+// HTLC claim preimage length bounds tests (validateHTLCSpendQ)
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestValidateHTLCSpendQ_ClaimPreimageTooShort(t *testing.T) {
@@ -1226,7 +1226,7 @@ func TestValidateHTLCSpendQ_ClaimPreimageLengthMismatch(t *testing.T) {
 
 func TestVerifyMLDSAKeyAndSigQ_NilQueue_BadSuiteErr(t *testing.T) {
 	// Call verifyMLDSAKeyAndSigQ with nil queue and a bad suite so that
-	// verifySig returns err (not ok=false). Covers lines 44-46.
+	// verifySig returns err (not ok=false).
 	tx, inputIndex, inputValue, chainID := testSighashContextTx()
 	cache, _ := NewSighashV1PrehashCache(tx)
 	digest, _ := SighashV1DigestWithCache(cache, inputIndex, inputValue, chainID, SIGHASH_ALL)
@@ -1235,12 +1235,12 @@ func TestVerifyMLDSAKeyAndSigQ_NilQueue_BadSuiteErr(t *testing.T) {
 
 	// verifyMLDSAKeyAndSigQ calls extractSigAndDigestWithCache then verifySig.
 	// We feed bad suite through validateP2PKSpendQ with nil queue.
-	// But validateP2PKSpendQ checks suite before reaching verifySig at line 29.
+	// But validateP2PKSpendQ checks suite before reaching verifySig.
 	// Instead, test via validateThresholdSigSpendQ with nil queue and a bad suite
 	// that passes the ML-DSA-87 length check but has corrupt pubkey → verifySig err.
 	// Actually, verifySig with SUITE_ID_ML_DSA_87 and corrupt pubkey returns (false, nil),
 	// not err. To get err, need unknown suite — but that's caught earlier.
-	// The nil-queue verifySig err path (lines 44-46) requires a suite that passes
+	// The nil-queue verifySig err path requires a suite that passes
 	// earlier checks but fails in verifySig. This is UNREACHABLE_FROM_PUBLIC_SURFACE
 	// because all invalid suites are caught before reaching verifySig.
 	// Skip: unreachable via public API.
@@ -1248,10 +1248,10 @@ func TestVerifyMLDSAKeyAndSigQ_NilQueue_BadSuiteErr(t *testing.T) {
 }
 
 func TestValidateHTLCSpendQ_NilQueue_BadSuiteErr(t *testing.T) {
-	// Same reasoning: lines 231-233 (nil-queue verifySig err in HTLC path).
-	// verifySig only returns err for unknown suites, but suite check is at line 213.
+	// Same reasoning: (nil-queue verifySig err in HTLC path).
+	// verifySig only returns err for unknown suites, but suite check is in validateHTLCSpendQ.
 	// UNREACHABLE_FROM_PUBLIC_SURFACE.
-	t.Skip("HTLC nil-queue verifySig err is unreachable: suite checked at line 213")
+	t.Skip("HTLC nil-queue verifySig err is unreachable: suite checked in validateHTLCSpendQ")
 }
 
 func TestValidateThresholdSigSpendQ_NonCanonicalLengths(t *testing.T) {

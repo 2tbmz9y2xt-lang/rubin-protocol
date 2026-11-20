@@ -985,8 +985,8 @@ func handleReady(state *devnetRPCState, w http.ResponseWriter, r *http.Request) 
 		// WriteHeader because headers are frozen once status is written.
 		w.Header().Set("Allow", http.MethodGet)
 		// Match the JSON-error envelope used by the rest of the devnet
-		// RPC surface (see handleGetTip / handleSubmitTx non-method paths
-		// at L364+ / L511+) so /ready stays machine-readable on error.
+		// RPC surface (see handleGetTip / handleSubmitTx non-method paths)
+		// so /ready stays machine-readable on error.
 		// Status stays 405 — semantically correct for method-not-allowed
 		// and pinned by TestReadyHandlerRejectsNonGet.
 		writeJSONResponse(state, route, w, http.StatusMethodNotAllowed, submitTxResponse{

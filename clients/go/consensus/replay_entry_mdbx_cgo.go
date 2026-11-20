@@ -15,7 +15,7 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
-// Dormant replay-target entry, sources (b), (d), (e): RUBIN_MEMPOOL_POLICY.md L2510-2615. No production caller.
+// Dormant replay-target entry, sources (b), (d), (e). No production caller.
 
 const (
 	replayEntryRecovery = "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)"
@@ -27,7 +27,7 @@ const (
 	// replayEntryIdentityBytes is the identity envelope of the one-row step-1 page (archiveSelectedSideIdentityBytes).
 	replayEntryIdentityBytes uint64 = 512
 	replayEntryPageRows      uint32 = 1_440
-	// replayEntryWalkBytes is the RUB-1506 capacity_boundary walk term (CB 1935-1951).
+	// replayEntryWalkBytes is the capacity_boundary walk term.
 	replayEntryWalkBytes uint64 = 2*8*WINDOW_SIZE + 2*8*11 + uint64(replayEntryPageRows)*(16+104+48) + 78 + 2*116 + 2*32 + 8*40
 	replayEntryPlanBytes uint64 = 3*mdbx.MaxMetadataBytes + 512
 	// replayEntryDerivedBytes per returned header (D_h): one replayNode and one replayKid, sizes pinned by a test.
@@ -162,7 +162,7 @@ func replayEntryContextShape(g PublishedGenesisContextV1) bool {
 	return g.ChainID != ([32]byte{}) && g.GenesisHash != ([32]byte{}) && (g.Published == nil || len(g.Published) == 266)
 }
 
-// replayEntryCall is one invocation's callback state; step is the in-flight read class (SD L88-90).
+// replayEntryCall is one invocation's callback state; step is the in-flight read class.
 type replayEntryCall struct {
 	owner        *ReplayEntryOwnerV1
 	reservations *mdbx.OperationReservationOwner
@@ -237,7 +237,7 @@ func (c *replayEntryCall) decide(result, decision string) (mdbx.Batch, error) {
 	return mdbx.Batch{}, c.sentinel
 }
 
-// plan is the shared entry sequence of RUBIN_MEMPOOL_POLICY.md L2594-2604; the denied path stops after the gates.
+// plan is the shared entry sequence; the denied path stops after the gates.
 func (c *replayEntryCall) plan(reader *mdbx.Reader) (mdbx.Batch, error) {
 	a, err := reader.ReadStorageAuthorityV1()
 	if err != nil {
@@ -258,7 +258,7 @@ func (c *replayEntryCall) plan(reader *mdbx.Reader) (mdbx.Batch, error) {
 	return c.qualifyAndPlan(reader, a, source)
 }
 
-// gates is source legality and the source (b) step-1 identity page and genesis-first gate (MP L1941-1947, L2608).
+// gates is source legality and the source (b) step-1 identity page and genesis-first gate.
 func (c *replayEntryCall) gates(reader *mdbx.Reader, a mdbx.StorageAuthorityV1) (byte, bool, error) {
 	switch {
 	case a.Phase != mdbx.StoragePhaseNoneV1:
@@ -325,7 +325,7 @@ func replayEntryIdentity(reader *mdbx.Reader, generation uint64) (uint8, string,
 	return identity, "", nil
 }
 
-// qualifyAndPlan runs inventory, walk, selection, protection, sequence and plan in that order (MP L2976-2993).
+// qualifyAndPlan runs inventory, walk, selection, protection, sequence and plan in that order.
 func (c *replayEntryCall) qualifyAndPlan(reader *mdbx.Reader, a mdbx.StorageAuthorityV1, source byte) (mdbx.Batch, error) {
 	inv, result := replayEntryInventory(c.owner.view, replayInvLimit(c.lane))
 	if result != "" {
@@ -376,7 +376,7 @@ func replayEntryInventory(view HeaderCandidateViewV1, limit uint64) (HeaderCandi
 	return inv, selectedSideInvariant
 }
 
-// entryBatch is the REPLAY_PROGRESS plan; no target canonical-index or owner row is written (MP L1899-1901).
+// entryBatch is the REPLAY_PROGRESS plan; no target canonical-index or owner row is written.
 func (c *replayEntryCall) entryBatch(a mdbx.StorageAuthorityV1, source byte, target mdbx.RecoveryTargetV1, tipHeight uint64) (mdbx.Batch, error) {
 	profile := a.ActiveProfile
 	if source == 'd' {
@@ -451,7 +451,7 @@ func replayEntryProject(out ReplayEntryOutcomeV1, call *replayEntryCall) ReplayE
 	return out
 }
 
-// replayEntryCensusDecision is the BS census refusal cell (R18; BS L72-76): not eligible, empty Result, raw Err kept.
+// replayEntryCensusDecision is the BS census refusal cell (R18): not eligible, empty Result, raw Err kept.
 func replayEntryCensusDecision(result string, call *replayEntryCall) string {
 	if result == "" && call.census {
 		return replayEntryNotEligible
@@ -483,7 +483,7 @@ func replayEntryCauses(err error, call *replayEntryCall) string {
 }
 
 func replayEntryPart(part error, call *replayEntryCall) string {
-	if call.sentinel != nil && part == call.sentinel { //nolint:errorlint // This invocation's exact sentinel leaf (SD L788-800).
+	if call.sentinel != nil && part == call.sentinel { //nolint:errorlint // This invocation's exact sentinel leaf.
 		return call.result // Empty is skipped by the walk; otherwise the decided Result.
 	}
 	switch e := part.(type) { //nolint:errorlint // Classify only this direct cause.
@@ -850,7 +850,7 @@ func (q *replayQualifier) advance(h uint64, hash [32]byte, raw []byte, header Bl
 }
 
 // markBad records disqualified or excluded canonical height h before advance overwrites q.hash and q.work: the first
-// such height (the walk ascends) makes the identity at h-1 the published prefix tip candidate (MP 2544-2561) and
+// such height (the walk ascends) makes the identity at h-1 the published prefix tip candidate and
 // records it as the recomputation's published OLD comparand.
 func (q *replayQualifier) markBad(h uint64) {
 	if q.badFrom == math.MaxUint64 && h > 0 {
@@ -861,7 +861,7 @@ func (q *replayQualifier) markBad(h uint64) {
 }
 
 // countIdentityTip reports whether hash, a canonical or Fork F anchor identity, is a listed tip, and counts it when no
-// header supplies it, so unknownTips does not take it for E1 (MP 2529-2535).
+// header supplies it, so unknownTips does not take it for E1.
 func (q *replayQualifier) countIdentityTip(hash [32]byte) bool {
 	_, tip := slices.BinarySearchFunc(q.tips, hash, replayHashCompare)
 	if tip && q.find(hash) < 0 {
@@ -870,7 +870,7 @@ func (q *replayQualifier) countIdentityTip(hash [32]byte) bool {
 	return tip
 }
 
-// canonicalOK is D10: PoW at height 0 (CANONICAL L1802, L2232); CAN15 target, PoW and CAN22 above it.
+// canonicalOK is D10: PoW at height 0; CAN15 target, PoW and CAN22 above it.
 func (q *replayQualifier) canonicalOK(h uint64, raw []byte, header BlockHeader) bool {
 	if h == 0 {
 		return q.pow(raw, header.Target) == nil

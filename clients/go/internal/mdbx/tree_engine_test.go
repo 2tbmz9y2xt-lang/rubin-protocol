@@ -35,7 +35,7 @@ func treeMethodsV1(typ reflect.Type) string {
 	return out.String()
 }
 
-// A10, A13, H5: budget arithmetic, the ledger view and the exact constants (literals from CSM line 358, 671-672).
+// A10, A13, H5: budget arithmetic, the ledger view and the exact constants (65596 and 288 from RUBIN_CONSENSUS_STATE_MACHINE.md Sections 2.5, 2.6).
 func TestTreeBudgetAndConstantsV1(t *testing.T) {
 	const maxStateEntry = 65596
 	b := treeBudgetV1{held: 10}
