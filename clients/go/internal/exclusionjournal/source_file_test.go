@@ -439,6 +439,13 @@ func testSourceReleaseWithStage(t *testing.T) {
 	size, err := m.SizeV1()
 	sourceMust(t, err)
 	assertSourceReleaseCharge(t, o, m, 2, size+uint64(len(data)))
+	held := sourceHeld(t, o)
+	foreignHandle := *p
+	incarnation := *p.incarnation
+	foreignHandle.incarnation = &incarnation
+	sourceReleaseResult(t, o, &foreignHandle, true, ErrIntegrityV1)
+	sourceReleaseResult(t, o, p, false, ErrIntegrityV1)
+	held("release without authority during staging")
 	sourceReleaseResult(t, o, p, true, nil)
 	sourceFailIf(t, !os.SameFile(info, sourceLstat(t, stage)) || !bytes.Equal(data, sourceReadFile(t, stage)), "release touched independent stage")
 	assertSourceReleaseCharge(t, o, m, 1, uint64(len(data)))
@@ -676,7 +683,7 @@ func testSourceDetachedRelease(t *testing.T) {
 				root := filepath.Join(dir, sourceDirectory)
 				size, err := m.SizeV1()
 				sourceMust(t, err)
-				cause := errors.New(stage)
+				cause := syscall.EIO
 				o.ops.namespace = func(op sourceNameOp, r *sourceRoot, from, to string) error {
 					if to == releaseDetached {
 						switch stage {
@@ -705,6 +712,11 @@ func testSourceDetachedRelease(t *testing.T) {
 				sourcePresence(t, root, p.name, stage == "before-detach")
 				sourcePresence(t, root, releaseDetached, stage == "after-detach" || stage == "before-unlink")
 				sourcePresence(t, root, releaseFile, true)
+				marker := filepath.Join(root, releaseFile)
+				markerInfo := sourceLstat(t, marker)
+				record := slices.Clone(o.release.record)
+				sourceFailIf(t, !bytes.Equal(sourceReadFile(t, marker), record), "unlink fault altered its intent")
+				assertSourceReleaseCharge(t, o, m, 1, size)
 				o.ops = realSourceFS
 				if stage == "after-unlink" && !reopen {
 					o.ops.remove = func(r *os.Root, name string) error {
@@ -716,6 +728,8 @@ func testSourceDetachedRelease(t *testing.T) {
 				}
 				if reopen {
 					o, p = sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil), nil
+					sourceUnchangedEntry(t, marker, markerInfo)
+					sourceFailIf(t, !bytes.Equal(sourceReadFile(t, marker), record), "reopen altered pending intent")
 				}
 				sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
 				assertSourceReleaseCharge(t, o, m, 1, size)
@@ -740,7 +754,7 @@ func testSourcePendingCensus(t *testing.T) {
 			}
 			original := sourceReadFile(t, path)
 			sourceReleaseWithFault(t, o, p, where, errors.New("pending"))
-			record := sourceReadFile(t, marker)
+			checkMarker := sourcePreservedEntry(t, marker)
 			want := ErrIntegrityV1
 			switch mode {
 			case "short":
@@ -767,7 +781,12 @@ func testSourcePendingCensus(t *testing.T) {
 				sourceMust(t, os.Link(path, filepath.Join(root, releaseDetached)))
 				want = ErrIdentityV1
 			}
-			info := sourceLstat(t, path)
+			checkBacking := sourcePreservedEntry(t, path)
+			detached := filepath.Join(root, releaseDetached)
+			privatePresent := where == "unlink" || mode == "canonical-first-qualified-pair"
+			if privatePresent {
+				defer sourcePreservedEntry(t, detached)()
+			}
 			sourceWantError(t, o.ReleaseUnpublishedSourceV1(nil, p, true), ErrCapacityV1, "unfunded release")
 			size, err := m.SizeV1()
 			sourceMust(t, err)
@@ -775,8 +794,9 @@ func testSourcePendingCensus(t *testing.T) {
 			sourceReleaseResult(t, o, p, true, want)
 			sourceFailIf(t, o.release == nil || o.release.size != size || o.live[p.name] != p.incarnation, "invalid backing consumed charge")
 			sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), want)
-			sourceFailIf(t, !os.SameFile(info, sourceLstat(t, path)) || !bytes.Equal(record, sourceReadFile(t, marker)), "refusal changed backing or marker")
-			sourcePresence(t, root, releaseDetached, where == "unlink" || mode == "canonical-first-qualified-pair")
+			checkBacking()
+			checkMarker()
+			sourcePresence(t, root, releaseDetached, privatePresent)
 		})
 	}
 }
@@ -788,7 +808,7 @@ func testSourceBackingLinks(t *testing.T) {
 		original := filepath.Join(root, p.name)
 		stage := filepath.Join(root, ".staging-"+p.name)
 		unexpected := filepath.Join(t.TempDir(), "extra")
-		lost := errors.New("unlink acknowledgement")
+		lost := syscall.EIO
 		want := ErrIdentityV1
 		switch mode {
 		case "extra":
@@ -809,7 +829,22 @@ func testSourceBackingLinks(t *testing.T) {
 			}
 		case "stage-alias":
 			sourceMust(t, os.Link(original, stage))
+			f, err := os.Open(original)
+			sourceMust(t, err)
+			defer f.Close()
+			var st syscall.Stat_t
+			removed := false
+			o.ops.remove = func(r *os.Root, name string) error {
+				if name == releaseDetached {
+					sourceMust(t, syscall.Fstat(int(f.Fd()), &st))
+					sourceFailIf(t, st.Nlink != 1, "backing links before unlink: %d", st.Nlink)
+					removed = true
+				}
+				return r.Remove(name)
+			}
 			sourceReleaseResult(t, o, p, true, nil)
+			sourceMust(t, syscall.Fstat(int(f.Fd()), &st))
+			sourceFailIf(t, !removed || st.Nlink != 0, "released backing links: %d", st.Nlink)
 			sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "removed capture retained staging alias")
 			return
 		case "stage-distinct":
@@ -1470,6 +1505,22 @@ func sourceUnchangedEntry(t *testing.T, name string, original os.FileInfo) {
 	t.Helper()
 	info := sourceLstat(t, name)
 	sourceFailIf(t, !os.SameFile(original, info) || info.Mode() != original.Mode(), "source entry %s changed", name)
+}
+
+func sourcePreservedEntry(t *testing.T, name string) func() {
+	t.Helper()
+	info := sourceLstat(t, name)
+	var data []byte
+	if info.Mode().IsRegular() {
+		data = sourceReadFile(t, name)
+	}
+	return func() {
+		t.Helper()
+		sourceUnchangedEntry(t, name, info)
+		if info.Mode().IsRegular() {
+			sourceFailIf(t, !bytes.Equal(data, sourceReadFile(t, name)), "refusal changed bytes at %s", name)
+		}
+	}
 }
 
 func TestSourceInitializationRefusesOccupiedName(t *testing.T) {
