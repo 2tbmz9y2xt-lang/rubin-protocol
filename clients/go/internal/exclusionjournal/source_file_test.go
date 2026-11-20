@@ -458,12 +458,16 @@ func testSourceStageClaim(t *testing.T) {
 }
 
 func testSourceStageSpace(t *testing.T) {
-	t.Run("other-capture-link", func(t *testing.T) {
+	sourceModes(t, []string{"other-capture-link", "external-stage-link"}, func(t *testing.T, mode string) {
 		_, o, dir, other, parts, p := sourcePreparedBundle(t)
 		m := sourceForeign(other)
 		root := filepath.Join(dir, sourceDirectory)
 		stage := filepath.Join(root, ".staging-"+m.name(o.id))
 		backing := filepath.Join(root, p.name)
+		if mode == "external-stage-link" {
+			backing = filepath.Join(dir, "linked-file")
+			sourceMust(t, os.WriteFile(backing, []byte("retained"), 0o600))
+		}
 		sourceMust(t, os.Link(backing, stage))
 		checkStage, checkBacking := sourcePreservedEntry(t, stage), sourcePreservedEntry(t, backing)
 		size, err := m.SizeV1()
