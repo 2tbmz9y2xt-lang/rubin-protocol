@@ -36,8 +36,10 @@ type sourceDebt struct {
 	unlinkTried, held       bool
 }
 
-const publicStagePrefix = ".staging-"
-const heldStagePrefix = ".stage-hold-"
+const (
+	publicStagePrefix = ".staging-"
+	heldStagePrefix   = ".stage-hold-"
+)
 
 func (d sourceDebt) leaf() string {
 	if d.held {
@@ -204,14 +206,11 @@ func (o *SourceOwnerV1) censusFile(r *sourceRoot, logical, pending string, info 
 		}
 		*missing -= 1
 	}
-	stage, held := strings.CutPrefix(logical, heldStagePrefix)
-	if held {
-		logical = publicStagePrefix + stage
-	}
-	if err := o.censusEntry(logical, info, held); err != nil {
+	stage, err := o.censusEntry(logical, info)
+	if err != nil {
 		return err
 	}
-	if stage, ok := strings.CutPrefix(logical, publicStagePrefix); ok {
+	if stage != "" {
 		err := o.observeStage(r, stage, pending, info)
 		used.stage = o.debt
 		if err != nil || used.stage.alias {
@@ -282,21 +281,24 @@ func sourceEntryInfo(r *sourceRoot, name string, unobserved error) (os.FileInfo,
 	return info, nil
 }
 
-func (o *SourceOwnerV1) censusEntry(name string, info os.FileInfo, held bool) error {
-	name, staging := strings.CutPrefix(name, publicStagePrefix)
+func (o *SourceOwnerV1) censusEntry(leaf string, info os.FileInfo) (string, error) {
+	name, held := strings.CutPrefix(leaf, heldStagePrefix)
+	if !held {
+		name = strings.TrimPrefix(leaf, publicStagePrefix)
+	}
 	decoded, err := hex.DecodeString(name)
 	if err != nil || len(decoded) != 32 {
-		return ErrIntegrityV1
+		return "", ErrIntegrityV1
 	}
-	if !staging {
-		return nil
+	if leaf == name {
+		return "", nil
 	}
 	file := filelock.FileIdentityV1(info)
 	if err := o.debt.matchStage(name, file, held); err != nil {
-		return err
+		return "", err
 	}
 	o.debt = sourceDebt{name: name, size: uint64(max(info.Size(), 0)), file: file, staging: true, held: held}
-	return nil
+	return name, nil
 }
 
 func (d sourceDebt) matchStage(name string, file filelock.IdentityV1, held bool) error {
@@ -309,9 +311,7 @@ func (d sourceDebt) matchStage(name string, file filelock.IdentityV1, held bool)
 		return ErrIdentityV1
 	case d.removed:
 		return ErrIntegrityV1
-	case d.held && d.file == (filelock.IdentityV1{}):
-		return nil
-	case d.file != file:
+	case d.file != (filelock.IdentityV1{}) && d.file != file:
 		return ErrIdentityV1
 	default:
 		return nil
