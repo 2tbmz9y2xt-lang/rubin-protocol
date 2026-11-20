@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"syscall"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
@@ -49,7 +50,7 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 				if _, err := o.census(r, false); err != nil {
 					return err
 				}
-				if o.debt.name == p.name && o.debt.backing != p.name {
+				if strings.EqualFold(o.debt.name, p.name) && o.debt.backing != p.name {
 					return ErrBusyV1
 				}
 				d = &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
@@ -254,6 +255,9 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	if present, err := o.releaseBacking(r, d, scratch); err != nil || !present {
 		return cmp.Or(err, ErrIdentityV1)
 	}
+	if err := o.checkAliasSpelling(r, d); err != nil {
+		return err
+	}
 	if err := o.clearReleaseScratch(r); err != nil {
 		return err
 	}
@@ -449,6 +453,9 @@ func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name stri
 	if err := d.checkStage(r, name != ""); err != nil {
 		return err
 	}
+	if err := o.checkAliasSpelling(r, d); err != nil {
+		return err
+	}
 	if err := o.removeMarkerAlias(r); err != nil {
 		return err
 	}
@@ -542,6 +549,22 @@ func (d *sourceRelease) sharedStageKey(debt sourceDebt) string {
 	return ""
 }
 
+func (stage sourceDebt) canClaimAs(observed string) bool {
+	return stage.held || stage.name == observed && validHeldStageKey(observed)
+}
+
+func (o *SourceOwnerV1) checkAliasSpelling(r *sourceRoot, d *sourceRelease) error {
+	observed := d.sharedStageKey(o.debt)
+	if validHeldStageKey(observed) {
+		return nil
+	}
+	stage, info, err := d.stageAlias(r, cmp.Or(observed, d.name))
+	if err == nil && filelock.FileIdentityV1(info) == d.file && !stage.canClaimAs(observed) {
+		return ErrIdentityV1
+	}
+	return nil
+}
+
 func (o *SourceOwnerV1) requireBackingLinks(r *sourceRoot, d *sourceRelease, f *os.File, want uint64) error {
 	links, err := sourceLinks(f)
 	if err == nil && links != want {
@@ -561,7 +584,8 @@ func (o *SourceOwnerV1) requireBackingLinks(r *sourceRoot, d *sourceRelease, f *
 
 // singleBackingLink removes only a qualified staging alias before the last unlink.
 func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os.File) error {
-	stage, info, err := d.stageAlias(r, cmp.Or(d.sharedStageKey(o.debt), d.name))
+	observed := d.sharedStageKey(o.debt)
+	stage, info, err := d.stageAlias(r, cmp.Or(observed, d.name))
 	if errors.Is(err, os.ErrNotExist) {
 		return o.requireBackingLinks(r, d, f, 1)
 	}
@@ -570,6 +594,13 @@ func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os
 	}
 	if err := o.requireBackingLinks(r, d, f, 2); err != nil {
 		return err
+	}
+	return o.removeReleaseStage(r, d, f, stage, observed)
+}
+
+func (o *SourceOwnerV1) removeReleaseStage(r *sourceRoot, d *sourceRelease, f *os.File, stage sourceDebt, observed string) error {
+	if !stage.canClaimAs(observed) {
+		return ErrIdentityV1
 	}
 	if o.debt.name != "" && o.debt.name != stage.name {
 		return ErrBusyV1
