@@ -329,7 +329,7 @@ func TestSigCheckQueue_Len_Nil(t *testing.T) {
 
 func TestSigCheckQueue_Single_BadSuiteError(t *testing.T) {
 	// Push a single task with an unknown suite ID. verifySig returns an error
-	// (not ok=false), which exercises the Flush single-task err!=nil path (line 94).
+	// (not ok=false), which exercises the Flush single-task err!=nil path.
 	q := NewSigCheckQueue(1)
 	q.Push(0xFE, []byte("fake-pubkey"), []byte("fake-sig"), [32]byte{}, txerr(TX_ERR_SIG_INVALID, "test"))
 	err := q.Flush()

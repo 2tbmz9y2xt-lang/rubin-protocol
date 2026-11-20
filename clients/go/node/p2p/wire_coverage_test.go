@@ -88,7 +88,7 @@ func TestEncodeWireCommand_NonASCIIPrintable(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// readFrameHeader — decodeWireCommand error propagation (line 110)
+// readFrameHeader — decodeWireCommand error propagation
 // ---------------------------------------------------------------------------
 
 func TestReadFrameHeader_BadCommandInHeader(t *testing.T) {
@@ -107,7 +107,7 @@ func TestReadFrameHeader_BadCommandInHeader(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// decodeGetBlocksPayload — width mismatch (line 365)
+// decodeGetBlocksPayload — width mismatch
 // ---------------------------------------------------------------------------
 
 func TestDecodeGetBlocksPayload_WidthMismatch(t *testing.T) {
@@ -122,7 +122,7 @@ func TestDecodeGetBlocksPayload_WidthMismatch(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// decodeAddrPayload — trailing bytes (line 421)
+// decodeAddrPayload — trailing bytes
 // ---------------------------------------------------------------------------
 
 func TestDecodeAddrPayload_TrailingBytes(t *testing.T) {
@@ -139,7 +139,7 @@ func TestDecodeAddrPayload_TrailingBytes(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// decodeAddrCount — DecodeCompactSize error (line 439)
+// decodeAddrCount — DecodeCompactSize error
 // ---------------------------------------------------------------------------
 
 func TestDecodeAddrCount_CompactSizeError(t *testing.T) {

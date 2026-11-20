@@ -236,7 +236,7 @@ func treeRoleCensusV1(t *testing.T) {
 	}
 }
 
-// treeRoleOrderPairsV1 is line 75's adjacent finite-stage pairs: each row
+// treeRoleOrderPairsV1 is the adjacent finite-stage pairs: each row
 // puts an EIO on the earlier row and removes the later row (or stores bad bytes
 // at the armed row for read-before-decode) in one input, so only the
 // earlier-first order returns the native error.
@@ -301,7 +301,7 @@ func treeRoleOrderPairsV1(t *testing.T) {
 	}
 }
 
-// treeRoleOrderRelationsV1 is line 75's pairs whose earlier check is a relation: a false earlier relation with the
+// treeRoleOrderRelationsV1 is the pairs whose earlier check is a relation: a false earlier relation with the
 // next read EIO-armed is the earlier Positive, fault not hit (H2 shape); a last-point EIO before a final violation is native.
 func treeRoleOrderRelationsV1(t *testing.T) {
 	two, three, single := [][36]byte{testKA, testKC}, [][36]byte{testKA, testKB, testKC}, [][36]byte{testKA}
@@ -417,7 +417,7 @@ func treeRoleRawBindingCorpusV1(t *testing.T) {
 	// The assurance kind is the last byte of a FULL_HISTORY binding (132); an
 	// IMPORTED_BASE binding appends its reference after it. Kind IMPORTED_BASE
 	// with no reference is a missing payload; kind FULL_HISTORY followed by a
-	// reference is an extra payload (contract line 133).
+	// reference is an extra payload.
 	ref, _ := treeRoleImportV1(TreeOriginalCurrentV1, 8)
 	importedBinding := good.binding
 	importedBinding.Assurance = TreeAssuranceV1{Kind: TreeAssuranceImportedBaseV1, Import: &ref}
@@ -754,7 +754,7 @@ func treeRoleZeroIOV1(t *testing.T) {
 
 // treeRoleBindingReuseV1 is H6's reuse row. The large-image fault serves the
 // first get of the armed CURRENT binding key on the View's transaction and
-// fails every later one with EIO (mdbx_cgo.go:223-229). The finite call is
+// fails every later one with EIO (rubin_sd_get). The finite call is
 // Qualified without reaching the fault; a second binding call on the same
 // transaction then hits it, which shows the arm was live.
 func treeRoleBindingReuseV1(t *testing.T) {

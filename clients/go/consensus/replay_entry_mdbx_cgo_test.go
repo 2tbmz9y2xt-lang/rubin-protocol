@@ -638,7 +638,7 @@ func TestReplayEntryTieSmallerHash(t *testing.T) {
 
 // A6 and R4: a path containing the excluded hash is skipped; when every received path contains it, the N1 published
 // prefix tip below the excluded canonical height is the target (RUB-1571: world w2 was recovery_artifact "all excluded"
-// before MP 2544-2561 and now commits hashes[1], height 1, work 2); an excluded height 0 leaves no target.
+// before and now commits hashes[1], height 1, work 2); an excluded height 0 leaves no target.
 func TestReplayEntryExclusion(t *testing.T) {
 	w := pendingWorld(t, 5)
 	long, longTips := w.fork(5, 4, 1)
@@ -1000,7 +1000,7 @@ func replayPrefixCommits(t *testing.T, w *replayWorld, view *replayView, h uint6
 	replayCommitted(t, w, w.enter(view, w.genesis), before, mdbx.StorageProfilePrunedV1, w.hashes[h], h, h+1)
 }
 
-// RUB-1571 E1, E2, E3, K2, X1 (MP 2544-2561): the D10 world's published tip 10 is ineligible from height 6, so the
+// E1, E2, E3, K2, X1: the D10 world's published tip 10 is ineligible from height 6, so the
 // published prefix tip is canonical height 5 with work 6, a candidate whether or not it is inventoried.
 func TestReplayEntryPrefixTipD10(t *testing.T) {
 	headers := replayD10Headers(t)
@@ -1050,7 +1050,7 @@ func TestReplayEntryPrefixTipD10(t *testing.T) {
 	})
 }
 
-// RUB-1571 E5, E6, K1, X3 (MP 2544-2561): an excluded canonical hash ends the published prefix below it.
+// E5, E6, K1, X3: an excluded canonical hash ends the published prefix below it.
 func TestReplayEntryPrefixTipExcluded(t *testing.T) {
 	t.Run("E5 no other candidate", func(t *testing.T) {
 		w := pendingWorld(t, 5)
@@ -1104,7 +1104,7 @@ func TestReplayEntryForkFAnchor(t *testing.T) {
 		})
 	}
 	t.Run("H22 anchor tip", func(t *testing.T) {
-		// A listed GenesisHash tip is the established Fork F anchor identity (MP 2529-2535), never E1: the inventory
+		// A listed GenesisHash tip is the established Fork F anchor identity, never E1: the inventory
 		// binds the height-9 tip exactly like the control that also supplies the genesis header.
 		tips := [][32]byte{base.genesis.GenesisHash, hashes[8]}
 		for _, supplied := range [][][116]byte{headers[:9], withH0[:10]} {
@@ -2001,7 +2001,7 @@ func TestReplayEntryExportedSignatures(t *testing.T) {
 // qualify/attach); this pending (source d) world never reads the step-1 identity page: an R4-shaped entry over canonical 0..100 and a 50-header received
 // branch, with canonical height 1 excluded so every path is ineligible and the published prefix tip is height 0 (no
 // positive-height target); it ends recovery_artifact with zero mutation and the Store is unchanged across iterations.
-// RUB-1571: the exclusion was height 2, which now commits the height-1 prefix tip (MP 2544-2561). A measurement with no threshold (coder-go section 3); the contract sets none.
+// The exclusion was height 2, which now commits the height-1 prefix tip. A measurement with no threshold (coder-go section 3); the contract sets none.
 func BenchmarkReplayEntryWalk(b *testing.B) {
 	w := pendingWorld(b, 100)
 	headers, hashes := w.fork(100, 50, 1)

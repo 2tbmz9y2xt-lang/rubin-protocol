@@ -550,8 +550,8 @@ func prunedTreeExcluded(t *testing.T, key []byte, seed, reopen bool) {
 	if !errors.As(out.Err, &engine) || engine.Class != EngineCapacity || engine.Code != codeENOSPC {
 		t.Fatalf("A9 exclusion commit error %v", out.Err)
 	}
-	// D2: the commit error consumed the Store (mdbx_cgo.go:2369-2370), which is closed and
-	// retains truth NEW (refusedUpdate, :2432-2438), so the following refusal is
+	// D2: the commit error consumed the Store ((*Store).applyUpdateOutcome), which is closed and
+	// retains truth NEW (refusedUpdate), so the following refusal is
 	// NEW/Prewrite, as a direct UpdateTreeV1 call returns.
 	again := sc.s.SelectPrunedTreeProfileV1(true, nil, sc.o)
 	var direct tsResult

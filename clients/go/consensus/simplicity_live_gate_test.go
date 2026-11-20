@@ -198,7 +198,7 @@ func TestSimplicityLiveGate_OrderedErrorSet(t *testing.T) {
 		}(), func() UtxoEntry { return coreSimplicityAcceptEntry(100) }, TX_ERR_SIGHASH_TYPE_INVALID},
 		{
 			// step4 DECODE precedes CMR comparison: an undecodable selector (0x25) fails structurally
-			// before any program_cmr check (§14.3:1578-1583).
+			// before any program_cmr check (§14.3).
 			"step4_decode", simplicityEnvelopeSignature([]byte{0x25}, nil, SIGHASH_ALL),
 			func() UtxoEntry { return coreSimplicityAcceptEntry(100) }, TX_ERR_SIMPLICITY_DECODE,
 		},

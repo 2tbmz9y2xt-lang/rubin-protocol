@@ -2822,7 +2822,7 @@ func cp2RowRegistry() map[string]string {
 }
 
 // cp2CommitTruthFor is the exact result -> commit truth relation of spec 6.4.1
-// (rubin-spec@c14b0100 RUBIN_MEMPOOL_POLICY.md L436-L446). It is total on the
+// (rubin-spec@c14b0100 RUBIN_MEMPOOL_POLICY.md Section 6.4.1). It is total on the
 // closed taxonomy: an unmapped result is a corpus defect, never a default.
 func cp2CommitTruthFor(result string) (string, bool) {
 	if !canonicalPipelineResultRE.MatchString(result) {

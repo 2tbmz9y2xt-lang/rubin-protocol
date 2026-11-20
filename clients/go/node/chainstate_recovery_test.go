@@ -167,9 +167,9 @@ func TestReconcileChainStateWithBlockStore_InputValidationAndNoopPaths(t *testin
 // composes its per-stage prefix from the shared identity helper. The two stages
 // reachable through it must still produce the exact baseline strings — the
 // third ("hash header") is defense-in-depth only: ParseBlockBytes returns
-// HeaderBytes sliced to exactly BLOCK_HEADER_BYTES
-// (consensus/block_basic.go:72), and the only error BlockHash returns is a
-// header length other than BLOCK_HEADER_BYTES (consensus/block_parse.go:56-59).
+// HeaderBytes sliced to exactly BLOCK_HEADER_BYTES,
+// and the only error BlockHash returns is a
+// header length other than BLOCK_HEADER_BYTES.
 func TestChainStateRecoveryReplayHashMessagesArePinned(t *testing.T) {
 	parsed, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
 	if err != nil {
