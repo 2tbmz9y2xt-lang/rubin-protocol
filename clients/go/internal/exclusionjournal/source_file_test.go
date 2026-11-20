@@ -455,7 +455,7 @@ func testSourceStageObservation(t *testing.T) {
 		producerErr := errors.New("producer refused")
 		want := map[string]error{"logical-capacity": ErrCapacityV1, "disk-capacity": ErrCapacityV1, "producer": producerErr, "reuse-producer": producerErr, "reuse-integrity": ErrIntegrityV1}[mode]
 		wantCalls := 0
-		if want == producerErr {
+		if errors.Is(want, producerErr) {
 			wantCalls = 1
 		}
 		sourceAccount(t, func(a *mdbx.OperationAccount) {
