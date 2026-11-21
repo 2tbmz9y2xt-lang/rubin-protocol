@@ -65,7 +65,6 @@ type sourceUsage struct {
 
 type sourceNameOp func(*sourceRoot, string, string) error
 
-// run applies the selected operation inside the pinned source directory.
 func (op sourceNameOp) run(r *sourceRoot, from, to string) error {
 	return op(r, from, to)
 }
@@ -123,6 +122,21 @@ func isStageLeaf(name string) bool {
 }
 
 func (o *SourceOwnerV1) censusStages(r *sourceRoot, entries []os.DirEntry, reopening bool, used *sourceUsage) error {
+	if err := o.admitHeldStage(r, entries, reopening); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if isStageLeaf(entry.Name()) {
+			if err := o.censusStage(r, entry.Name()); err != nil {
+				return err
+			}
+			used.observedStage = &o.debt
+		}
+	}
+	return nil
+}
+
+func (o *SourceOwnerV1) admitHeldStage(r *sourceRoot, entries []os.DirEntry, reopening bool) error {
 	seen := false
 	for _, entry := range entries {
 		key, held := strings.CutPrefix(entry.Name(), heldStagePrefix)
@@ -140,15 +154,6 @@ func (o *SourceOwnerV1) censusStages(r *sourceRoot, entries []os.DirEntry, reope
 			return err
 		}
 	}
-	for _, entry := range entries {
-		if !isStageLeaf(entry.Name()) {
-			continue
-		}
-		if err := o.censusStage(r, entry.Name()); err != nil {
-			return err
-		}
-		used.observedStage = &o.debt
-	}
 	return nil
 }
 
@@ -163,8 +168,7 @@ func (o *SourceOwnerV1) countEntry(r *sourceRoot, name, backing string, used *so
 		if o.release == nil {
 			return ErrIntegrityV1
 		}
-		_, err := releaseScratchAlias(r)
-		return err
+		return r.checkMarkerAlias(nil)
 	case releaseScratch:
 		return nil
 	case releaseDetached:
@@ -299,25 +303,32 @@ func (o *SourceOwnerV1) censusStage(r *sourceRoot, leaf string) error {
 	if err != nil || !validSourceKey(name) {
 		return ErrIntegrityV1
 	}
-	file := filelock.FileIdentityV1(info)
+	next := sourceDebt{name: name, size: uint64(max(info.Size(), 0)), file: filelock.FileIdentityV1(info), staging: true, held: held}
+	if err := o.qualifyStage(r, next); err != nil {
+		return err
+	}
+	o.debt = next
+	return nil
+}
+
+func (d sourceDebt) hasOtherName(name string) bool { return d.name != "" && d.name != name }
+
+func (o *SourceOwnerV1) qualifyStage(r *sourceRoot, next sourceDebt) error {
 	d := &o.debt
 	switch {
-	case d.name != "" && d.name != name:
+	case d.hasOtherName(next.name):
 		return ErrBusyV1
-	case d.held && !held:
+	case d.held && !next.held:
 		return ErrIdentityV1
 	case d.removed:
 		return ErrIntegrityV1
-	case d.file != (filelock.IdentityV1{}) && d.file != file:
+	case d.file != (filelock.IdentityV1{}) && d.file != next.file:
 		return ErrIdentityV1
-	}
-	if held {
+	case next.held:
 		o.stage.Clear()
-	} else if err := o.retainStage(r, leaf, file); err != nil {
-		return err
+		return nil
 	}
-	*d = sourceDebt{name: name, size: uint64(max(info.Size(), 0)), file: file, staging: true, held: held}
-	return nil
+	return o.retainStage(r, next.leaf(), next.file)
 }
 
 func (o *SourceOwnerV1) space(r *sourceRoot, required uint64, stage *sourceDebt) (bool, error) {
@@ -351,14 +362,10 @@ func (d *sourceDebt) diskCredit(r *sourceRoot) uint64 {
 
 func singleLinkAllocatedBytes(info os.FileInfo) uint64 {
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || st == nil || st.Nlink != 1 || st.Blocks <= 0 {
+	if !ok || st == nil || st.Nlink != 1 || st.Blocks <= 0 || uint64(st.Blocks) > math.MaxUint64/512 {
 		return 0
 	}
-	overflow, allocated := bits.Mul64(uint64(st.Blocks), 512)
-	if overflow != 0 {
-		return 0
-	}
-	return allocated
+	return uint64(st.Blocks) * 512
 }
 
 func assurance(part SourcePartV1) error {
@@ -538,7 +545,6 @@ func sourceWindowCount(length uint64) uint64 {
 	return (length + scratchBytes - 1) / scratchBytes
 }
 
-// Write records one part-relative copy window.
 func (w *sourceWindows) Write(b []byte) (int, error) {
 	w.hashes = append(w.hashes, sha256.Sum256(b))
 	return len(b), nil
@@ -679,11 +685,8 @@ func (o *SourceOwnerV1) ownedStageInfo(r *sourceRoot, d *sourceDebt) (os.FileInf
 	if d.held {
 		return d.privateInfo(r)
 	}
-	if r.stageErr != nil {
-		return nil, r.stageErr
-	}
-	if o.stage.File == nil {
-		return nil, ErrIdentityV1
+	if r.stageErr != nil || o.stage.File == nil {
+		return nil, cmp.Or(r.stageErr, ErrIdentityV1)
 	}
 	if err := o.ops.namespace(detachSource, r, d.leaf(), heldStagePrefix+d.name); err != nil {
 		return nil, err
@@ -725,7 +728,7 @@ func (o *SourceOwnerV1) PrepareSourceV1(account *mdbx.OperationAccount, m Source
 
 func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage, produce func(func(SourcePartV1) error) error) (*PreparedSourceV1, error) {
 	name := m.name(o.id)
-	if o.debt.name != "" && o.debt.name != name {
+	if o.debt.hasOtherName(name) {
 		return nil, ErrBusyV1
 	}
 	f, err := openSourceFile(r, name, nil)

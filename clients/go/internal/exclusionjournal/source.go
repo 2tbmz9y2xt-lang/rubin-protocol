@@ -122,10 +122,7 @@ func NewSourceOwnerV1(store *policycontrol.Store, expected policycontrol.Identit
 	o := &SourceOwnerV1{store: store, sourceBinding: sourceBinding{dir, id, parent}, limits: limits, ops: realSourceFS, live: make(map[string]*sourceIncarnation)}
 	o.self = o
 	err = account.WithReservation(limits.WorkingBytesV1(), func() error {
-		return b.WithSourceOwnerClaimV1(func(stage *policycontrol.SourceStagePinV1) error {
-			o.stage = stage
-			return o.openSourceRoot()
-		})
+		return b.WithSourceOwnerClaimV1(o.openSourceRoot)
 	})
 	if any(err) == any(policycontrol.ErrBusy) {
 		return nil, ErrBusyV1
@@ -138,12 +135,10 @@ func NewSourceOwnerV1(store *policycontrol.Store, expected policycontrol.Identit
 
 func (l SourceLimitsV1) valid() bool {
 	bounds := []uint64{l.Bytes, l.Files, l.Scans, l.RAM, l.Headers, l.Descriptors, l.Overhead}
-	if slices.Min(bounds) == 0 || slices.Max(bounds) >= math.MaxInt64 || l.Scans > uint64(math.MaxInt-scratchBytes-4096)/512 {
-		return false
-	}
 	working := l.WorkingBytesV1()
 	available := min(l.RAM, uint64(math.MaxInt))
-	return l.Descriptors >= 4 && l.Files < l.Scans && working <= available && l.retainedRAM() <= available-working
+	return slices.Min(bounds) != 0 && slices.Max(bounds) < math.MaxInt64 && l.Scans <= uint64(math.MaxInt-scratchBytes-4096)/512 &&
+		l.Descriptors >= 4 && l.Files < l.Scans && working <= available && l.retainedRAM() <= available-working
 }
 
 // WorkingBytesV1 bounds copy scratch, window digests, directory metadata and operation state.

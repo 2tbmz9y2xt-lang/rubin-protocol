@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/policycontrol"
 	"golang.org/x/sys/unix"
 )
 
@@ -152,7 +153,8 @@ func sourceRootInfo(parent *os.Root) (os.FileInfo, error) {
 	return info, err
 }
 
-func (o *SourceOwnerV1) openSourceRoot() error {
+func (o *SourceOwnerV1) openSourceRoot(stage *policycontrol.SourceStagePinV1) error {
+	o.stage = stage
 	return o.withRoot(o.createSourceRoot, func(r *sourceRoot) error {
 		if err := o.syncBoundRoot(r); err != nil {
 			return err

@@ -128,7 +128,7 @@ func readReleaseFile(f *os.File) ([]byte, filelock.IdentityV1, error) {
 	return record[:n], filelock.FileIdentityV1(info), nil
 }
 
-func (o *SourceOwnerV1) decodeRelease(record []byte) (*sourceRelease, error) {
+func (o *SourceOwnerV1) decodeRelease(record []byte, marker filelock.IdentityV1) (*sourceRelease, error) {
 	if len(record) < releasePrefix+bundleHeader+sha256.Size || !bytes.Equal(record[:4], []byte{'S', 'R', 'V', 1}) {
 		return nil, ErrIntegrityV1
 	}
@@ -145,7 +145,7 @@ func (o *SourceOwnerV1) decodeRelease(record []byte) (*sourceRelease, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &sourceRelease{name: m.name(o.id), manifest: m, record: record, reopened: true}
+	d := &sourceRelease{name: m.name(o.id), manifest: m, record: record, reopened: true, markerFile: marker}
 	d.file = filelock.IdentityV1{identity[2], identity[3]}
 	d.size = identity[4]
 	copy(d.footer[:], record[44:releasePrefix])
@@ -249,25 +249,24 @@ func (o *SourceOwnerV1) openRelease(r *sourceRoot) error {
 	if err != nil {
 		return ErrIntegrityV1
 	}
-	o.release, err = o.decodeRelease(record)
-	if err != nil {
-		return err
-	}
-	o.release.markerFile = id
-	return nil
+	o.release, err = o.decodeRelease(record, id)
+	return err
 }
 
-// releaseScratchAlias recognizes the second name of the visible marker.
-func releaseScratchAlias(r *sourceRoot) (bool, error) {
+// checkMarkerAlias permits removal only of a second name for the visible marker.
+func (r *sourceRoot) checkMarkerAlias(remove func(*os.Root, string) error) error {
 	scratch, err := sourceEntryInfo(r, releaseScratch, nil)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return nil
 	}
-	marker, markerErr := sourceEntryInfo(r, releaseFile, nil)
-	if err != nil || markerErr != nil || !os.SameFile(scratch, marker) {
-		return false, ErrIntegrityV1
+	marker, _ := sourceEntryInfo(r, releaseFile, nil)
+	if !os.SameFile(scratch, marker) {
+		return ErrIntegrityV1
 	}
-	return true, nil
+	if remove != nil {
+		return remove(r.Root, releaseScratch)
+	}
+	return nil
 }
 
 func (o *SourceOwnerV1) clearReleaseScratch(r *sourceRoot) error {
@@ -301,6 +300,10 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	if err != nil {
 		return err
 	}
+	return o.publishMarker(r, d, id)
+}
+
+func (o *SourceOwnerV1) publishMarker(r *sourceRoot, d *sourceRelease, id filelock.IdentityV1) error {
 	pin, err := r.pinFile(releaseScratch, nil, &id)
 	if err != nil {
 		return err
@@ -369,29 +372,17 @@ func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) erro
 		return ErrIdentityV1
 	}
 	present, err := d.checkMarker(readRelease(r))
-	if err != nil {
-		return err
-	}
-	if !present && d.phase != releaseMarkerClearing {
-		return ErrIntegrityV1
+	if err != nil || !present && d.phase != releaseMarkerClearing {
+		return cmp.Or(err, ErrIntegrityV1)
 	}
 	if err := o.checkStage(r, d, false); err != nil || !present {
 		return err
 	}
-	if err := o.removeMarkerAlias(r); err != nil {
+	if err := r.checkMarkerAlias(o.ops.remove); err != nil {
 		return err
 	}
 	d.phase = releaseMarkerClearing
 	return o.ops.remove(r.Root, releaseFile)
-}
-
-// removeMarkerAlias clears the temporary name only when it shares the visible marker inode.
-func (o *SourceOwnerV1) removeMarkerAlias(r *sourceRoot) error {
-	alias, err := releaseScratchAlias(r)
-	if err != nil || !alias {
-		return err
-	}
-	return o.ops.remove(r.Root, releaseScratch)
 }
 
 func (d *sourceRelease) backingAbsent(r *sourceRoot) bool {
@@ -408,42 +399,35 @@ func (d *sourceRelease) checkMarker(record []byte, id filelock.IdentityV1, err e
 	return true, nil
 }
 
-func (d *sourceRelease) pinnedMarker(r *sourceRoot, pin *os.File) (bool, error) {
-	named, err := sourceEntryInfo(r, releaseFile, nil)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil || filelock.FileIdentityV1(named) != d.markerFile {
-		return false, ErrIntegrityV1
-	}
-	return d.checkMarker(readReleaseFile(pin))
-}
-
-func (o *SourceOwnerV1) syncedMarker(r *sourceRoot, d *sourceRelease, pin *os.File) (bool, error) {
+func (o *SourceOwnerV1) syncedMarker(r *sourceRoot, d *sourceRelease, pin *os.File) (present bool, err error) {
 	if err := o.ops.dirSync(r.pin); err != nil {
 		_ = pin.Close()
 		return false, err
 	}
-	present, err := d.pinnedMarker(r, pin)
+	named, statErr := sourceEntryInfo(r, releaseFile, nil)
+	if statErr == nil && filelock.FileIdentityV1(named) == d.markerFile {
+		present, err = d.checkMarker(readReleaseFile(pin))
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		err = ErrIntegrityV1
+	}
 	_ = pin.Close()
 	return present, cmp.Or(o.currentRoot(), err)
 }
 
 // releaseIntent qualifies the visible record before its backing can be detached.
 func (o *SourceOwnerV1) releaseIntent(r *sourceRoot, d *sourceRelease, scratch []byte) error {
-	if o.release == nil {
-		return o.persistRelease(r, d, scratch)
-	}
-	pin, err := openSourceFile(r, releaseFile, nil)
-	if err != nil {
-		pin, _ = openSourceFile(r, releaseScratch, nil)
-	}
-	present, err := o.syncedMarker(r, d, pin)
-	if err != nil || present {
-		return err
-	}
-	if !d.pending {
-		return ErrIntegrityV1
+	if o.release != nil {
+		pin, err := openSourceFile(r, releaseFile, nil)
+		if err != nil {
+			pin, _ = openSourceFile(r, releaseScratch, nil)
+		}
+		present, err := o.syncedMarker(r, d, pin)
+		if err != nil || present {
+			return err
+		}
+		if !d.pending {
+			return ErrIntegrityV1
+		}
 	}
 	return o.persistRelease(r, d, scratch)
 }
@@ -494,7 +478,7 @@ func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name stri
 	if err := o.checkStage(r, d, name != ""); err != nil {
 		return err
 	}
-	if err := o.removeMarkerAlias(r); err != nil {
+	if err := r.checkMarkerAlias(o.ops.remove); err != nil {
 		return err
 	}
 	if (name != "") != (d.phase == releaseBackingPending) {
@@ -521,26 +505,36 @@ func (o *SourceOwnerV1) checkStage(r *sourceRoot, d *sourceRelease, backingPrese
 		key = o.debt.name
 	}
 	stage, err := r.stageAlias(key)
-	switch {
-	case err == nil && (!backingPresent || stage.file != d.file):
-		return ErrBusyV1
-	case err != nil && !errors.Is(err, os.ErrNotExist):
-		return ErrIntegrityV1
+	if !errors.Is(err, os.ErrNotExist) {
+		if err != nil {
+			return ErrIntegrityV1
+		}
+		if !backingPresent || stage.file != d.file {
+			return ErrBusyV1
+		}
 	}
 	if !backingPresent {
 		return nil
 	}
-	observed := d.sharedStageKey(o.debt)
+	return d.checkStageSpelling(r, stage, err, d.sharedStageKey(o.debt))
+}
+
+func (d *sourceRelease) checkStageSpelling(r *sourceRoot, stage sourceDebt, err error, observed string) error {
 	if key := cmp.Or(observed, d.name); stage.name != key {
 		stage, err = r.stageAlias(key)
 	}
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if err != nil || observed != "" && stage.file != d.file || stage.file == d.file && !stage.held && !validHeldStageKey(observed) {
+	wrongFile := observed != "" && stage.file != d.file
+	if err != nil || wrongFile || stage.file == d.file && !stage.claimable(observed) {
 		return ErrIdentityV1
 	}
 	return nil
+}
+
+func (stage sourceDebt) claimable(observed string) bool {
+	return stage.held || validHeldStageKey(observed)
 }
 
 func (r *sourceRoot) stageAlias(key string) (sourceDebt, error) {
@@ -642,10 +636,10 @@ func (o *SourceOwnerV1) dropReleaseAlias(r *sourceRoot, d *sourceRelease, f *os.
 	if err := o.requireBackingLinks(r, d, f, 2); err != nil {
 		return err
 	}
-	if !stage.held && !validHeldStageKey(observed) {
+	if !stage.claimable(observed) {
 		return ErrIdentityV1
 	}
-	if o.debt.name != "" && o.debt.name != stage.name {
+	if o.debt.hasOtherName(stage.name) {
 		return ErrBusyV1
 	}
 	stage.staging, stage.backing, stage.size = true, d.name, d.size

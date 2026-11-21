@@ -1762,7 +1762,7 @@ func testSourceReleaseIncarnation(t *testing.T, mode string) {
 	} else {
 		for _, offset := range []int{3, len(record) - 1, 4, 36, releasePrefix + 3, releasePrefix + 4, releasePrefix + bundleHeader - 1} {
 			markerErr := map[bool]error{false: ErrIntegrityV1, true: ErrIdentityV1}[offset == 4 || offset == releasePrefix+4]
-			release, err := o.decodeRelease(sourceResealed(record, offset))
+			release, err := o.decodeRelease(sourceResealed(record, offset), o.release.markerFile)
 			sourceFailIf(t, release != nil || any(err) != any(markerErr), "release marker offset %d: %v/%v, want %v", offset, release, err, markerErr)
 		}
 		sourceMust(t, os.WriteFile(path, changed, 0o600))
