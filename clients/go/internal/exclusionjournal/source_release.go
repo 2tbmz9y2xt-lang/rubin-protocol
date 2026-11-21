@@ -40,7 +40,7 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 		return o.withRoot(o.bindRoot, func(r *sourceRoot) error {
 			scratch := make([]byte, scratchBytes)
 			if o.release == nil {
-				if _, err := o.census(r); err != nil {
+				if err := o.releaseCensus(r); err != nil {
 					return err
 				}
 				d := &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
@@ -58,7 +58,7 @@ func (o *SourceOwnerV1) releaseAdmission(p *PreparedSourceV1, proof bool) error 
 	if !proof || !o.hasReleaseAuthority(p) {
 		return ErrIntegrityV1
 	}
-	if p != nil && (o.debt.name != "" || o.release != nil && o.release.name != p.name) {
+	if p != nil && (o.debt.name != "" || o.pendingStage.name != "" || o.release != nil && o.release.name != p.name) {
 		return ErrBusyV1
 	}
 	return nil
@@ -68,7 +68,32 @@ func (o *SourceOwnerV1) hasReleaseAuthority(p *PreparedSourceV1) bool {
 	if p == nil {
 		return o.release != nil && o.release.reopened
 	}
-	return p.incarnation != nil && o.live[p.name] == p.incarnation
+	return p.incarnation != nil && p.incarnation.issued && o.live[p.name] == p.incarnation
+}
+
+// releaseCensus preserves the release admission charge for a newly observed public alias.
+func (o *SourceOwnerV1) releaseCensus(r *sourceRoot) error {
+	used, err := o.census(r)
+	if err != nil {
+		return err
+	}
+	if used.releaseMismatch != nil {
+		return used.releaseMismatch
+	}
+	if used.stage.held() {
+		return ErrIntegrityV1
+	}
+	if used.stage.shared != "" {
+		if err := o.charge(&used, used.stage.size); err != nil {
+			o.debt = used.stage
+			o.debt.unfunded = true
+			return err
+		}
+	}
+	if err := used.releaseBindingError(); err != nil {
+		return err
+	}
+	return o.adoptStage(r, used)
 }
 
 func (o *SourceOwnerV1) releaseRecord(d *sourceRelease) []byte {
@@ -191,7 +216,7 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	if err := o.clearReleaseScratch(r); err != nil {
 		return err
 	}
-	if err := o.space(r, uint64(len(d.record))); err != nil {
+	if _, err := o.space(r, uint64(len(d.record)), sourceDebt{}); err != nil {
 		return err
 	}
 	if err := o.writeRelease(r, d.record); err != nil {

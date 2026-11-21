@@ -14,6 +14,25 @@ type sourceRoot struct {
 	pin *os.File
 }
 
+// renameExclusive transfers one leaf without replacing its destination.
+func (r *sourceRoot) renameExclusive(from, to string) error {
+	return renameSourceAt(int(r.pin.Fd()), from, to)
+}
+
+// pinFile holds the expected regular incarnation through a namespace operation.
+func (r *sourceRoot) pinFile(name string, id filelock.IdentityV1) (*os.File, error) {
+	f, err := openSourceFile(r, name, ErrIdentityV1)
+	if err != nil {
+		return nil, ErrIdentityV1
+	}
+	info, err := f.Stat()
+	if err != nil || !sameSourceFile(info, id) {
+		_ = f.Close()
+		return nil, ErrIdentityV1
+	}
+	return f, nil
+}
+
 const sourceInitDirectory = "." + sourceDirectory + ".init"
 
 func (o *SourceOwnerV1) withRoot(open func(*os.Root) (*os.Root, error), use func(*sourceRoot) error) error {
@@ -111,7 +130,7 @@ func publishSourceRoot(parent int) (*os.File, os.FileInfo, error) {
 	if err := pin.Sync(); err != nil {
 		return pin, nil, err
 	}
-	return pin, info, renameSourceInit(parent)
+	return pin, info, renameSourceAt(parent, sourceInitDirectory, sourceDirectory)
 }
 
 // openSourceInit replaces only an empty directory at the reserved name and pins the replacement.
@@ -149,22 +168,61 @@ func sourceRootInfo(parent *os.Root) (os.FileInfo, error) {
 }
 
 func (o *SourceOwnerV1) openSourceRoot() error {
-	return o.withRoot(o.createSourceRoot, func(r *sourceRoot) error {
-		if err := o.syncBoundRoot(r); err != nil {
-			return err
-		}
-		if err := o.openRelease(r); err != nil {
-			return err
-		}
-		if _, err := o.census(r); err != nil || o.release == nil {
-			return err
-		}
-		if !o.manifestFits(o.release.manifest, o.release.size) {
-			return ErrCapacityV1
-		}
-		_, err := o.releaseBacking(r, o.release, make([]byte, scratchBytes))
+	return o.withRoot(o.createSourceRoot, o.recoverSourceRoot)
+}
+
+// recoverSourceRoot admits the existing namespace before restoring protected staging.
+func (o *SourceOwnerV1) recoverSourceRoot(r *sourceRoot) error {
+	if err := o.syncBoundRoot(r); err != nil {
 		return err
-	})
+	}
+	if err := o.openRelease(r); err != nil {
+		return err
+	}
+	used, err := o.census(r)
+	if err != nil {
+		return err
+	}
+	if err := o.qualifyReopenedRelease(r); err != nil {
+		return err
+	}
+	if used.stage.held() {
+		return o.restoreHeldStage(r, used.stage)
+	}
+	return o.adoptStage(r, used)
+}
+
+// qualifyReopenedRelease checks the existing release intent against admitted backing.
+func (o *SourceOwnerV1) qualifyReopenedRelease(r *sourceRoot) error {
+	if o.release == nil {
+		return nil
+	}
+	if !o.manifestFits(o.release.manifest, o.release.size) {
+		return ErrCapacityV1
+	}
+	_, err := o.releaseBacking(r, o.release, make([]byte, scratchBytes))
+	return err
+}
+
+// restoreHeldStage retains the same staging incarnation across the exclusive move.
+func (o *SourceOwnerV1) restoreHeldStage(r *sourceRoot, stage sourceDebt) error {
+	if err := o.retainStage(r, stage); err != nil {
+		return err
+	}
+	public := publicStagePrefix + stage.name
+	if err := o.ops.namespace((*sourceRoot).renameExclusive, r, stage.leaf, public); err != nil {
+		return err
+	}
+	if err := o.syncBoundRoot(r); err != nil {
+		return err
+	}
+	info, err := r.Lstat(public)
+	if err != nil || !sameSourceFile(info, stage.file) {
+		return ErrIdentityV1
+	}
+	stage.leaf = public
+	o.debt = stage
+	return nil
 }
 
 // syncBoundRoot makes namespace changes durable and verifies current root reachability.

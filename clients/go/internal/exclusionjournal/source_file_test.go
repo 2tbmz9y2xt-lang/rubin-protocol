@@ -13,6 +13,8 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -46,7 +48,7 @@ func sourceHeld(t *testing.T, o *SourceOwnerV1) func(string) {
 			held = append(held, fmt.Sprintf("%s %p %v", name, token, *token))
 		}
 		slices.Sort(held)
-		return append(held, fmt.Sprint(err, o.debt, o.release))
+		return append(held, fmt.Sprint(err, o.debt, o.pendingStage, o.release))
 	}
 	before := state()
 	return func(action string) {
@@ -85,7 +87,7 @@ func sourceFault(o *SourceOwnerV1, stage string, cause error, observe func()) {
 	case "chmod":
 		o.ops.chmod = func(*os.File, os.FileMode) error { return fail() }
 	case "rename":
-		o.ops.rename = func(*os.Root, string, string) error { return fail() }
+		o.ops.namespace = func(sourceNamespace, *sourceRoot, string, string) error { return fail() }
 	case "parent-sync":
 		o.ops.dirSync = fileOp
 	case "unlink", "unlink-reopen-competing-prepare":
@@ -95,10 +97,10 @@ func sourceFault(o *SourceOwnerV1, stage string, cause error, observe func()) {
 	}
 }
 
-func renameSourceFault(t *testing.T, cause error, published, unobserved bool) func(*os.Root, string, string) error {
-	return func(r *os.Root, from, to string) error {
+func renameSourceFault(t *testing.T, cause error, published, unobserved bool) func(sourceNamespace, *sourceRoot, string, string) error {
+	return func(op sourceNamespace, r *sourceRoot, from, to string) error {
 		if published {
-			sourceMust(t, r.Rename(from, to))
+			sourceMust(t, op(r, from, to))
 		}
 		if unobserved {
 			sourceMust(t, r.Close())
@@ -280,7 +282,10 @@ func TestSourceDurabilityFailures(t *testing.T) {
 			want := map[bool]error{false: cause, true: ErrCapacityV1}[stage == "statfs"]
 			sourcePrepareResult(t, o, m, sourceProducer(m, parts), want)
 			sourceFailIf(t, !failed, "durability operation did not reach %s", stage)
-			sourceFailIf(t, stage == "parent-sync" && (o.debt.name == "" || o.debt.staging || len(sourceEntries(t, dir)) != 1), "renamed backing lost its owner")
+			if stage == "parent-sync" {
+				binding := o.live[m.name(o.id)]
+				sourceFailIf(t, binding == nil || binding.issued || o.pendingStage.name == "" || len(sourceEntries(t, dir)) != 1, "linked backing lost its owner")
+			}
 			sourceFailIf(t, stage != "parent-sync" && (o.debt.name != "" || len(sourceEntries(t, dir)) != 0), "unpublished cleanup was not completed")
 			if mode == stage+"/reopentrue" {
 				o = sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
@@ -292,6 +297,11 @@ func TestSourceDurabilityFailures(t *testing.T) {
 }
 
 func TestSourcePartialCleanupRetry(t *testing.T) {
+	sourceModes(t, []string{"before-claim", "late-claim", "unobservable-claim", "restored", "restore-collision"}, testSourceClaimFault)
+	sourceModes(t, []string{"exact", "fully-funded", "first-short", "second-short", "second-error", "unlink-error", "late-unlink-error", "sync-error", "unfunded", "open-file"}, testSourcePhysicalRetry)
+	sourceModes(t, []string{"sparse", "linked", "replaced", "clamped"}, testSourcePhysicalCreditBounds)
+	t.Run("allocation-domain", testSourceAllocationDomain)
+	t.Run("write-no-space", testSourceWriteNoSpace)
 	m, parts := sourceBundle(1, false)
 	parts[0] = bytes.Repeat([]byte{42}, 70000)
 	m.Parts[0].Length = 70000
@@ -316,10 +326,10 @@ func TestSourcePartialCleanupRetry(t *testing.T) {
 	}
 	sourceAccount(t, func(a *mdbx.OperationAccount) {
 		p, err := o.PrepareSourceV1(a, m, producer)
-		sourceFailIf(t, p != nil || !errors.Is(err, cause) || !errors.Is(err, cleanup) || errors.Is(err, later) || o.debt.name == "" || !o.debt.staging,
+		sourceFailIf(t, p != nil || !errors.Is(err, cause) || !errors.Is(err, cleanup) || errors.Is(err, later) || o.debt.name == "" || !o.debt.held(),
 			"partial owner: %v/%v %+v", p, err, o.debt)
 	})
-	staging := filepath.Join(dir, sourceDirectory, ".staging-"+m.name(o.id))
+	staging := filepath.Join(dir, sourceDirectory, ".stage-hold-"+m.name(o.id))
 	info, err := os.Stat(staging)
 	sourceFailIf(t, err != nil || info.Size() <= 0 || info.Size() >= 70000, "partial size: %v/%v", info, err)
 	testSourceUnfundedBacking(t, o, m, parts, staging)
@@ -340,6 +350,332 @@ func TestSourcePartialCleanupRetry(t *testing.T) {
 	o.ops = realSourceFS
 	sourcePrepareAndRead(t, o, m, parts)
 	sourcePresence(t, root, stage, false)
+}
+
+func testSourceClaimFault(t *testing.T, mode string) {
+	t.Helper()
+	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	name := m.name(o.id)
+	root := filepath.Join(dir, sourceDirectory)
+	public, held := ".staging-"+strings.ToUpper(name), ".stage-hold-"+name
+	path := filepath.Join(root, public)
+	data := []byte("public staging")
+	sourceMust(t, os.WriteFile(path, data, 0o600))
+	original := sourceLstat(t, path)
+	cause := errors.New("stage claim stopped")
+	want := cause
+	if mode == "restored" || mode == "restore-collision" {
+		want = ErrIdentityV1
+		o.ops.namespace = sourceReplacementClaim(t, dir, public, held, mode == "restore-collision")
+	} else {
+		o.ops.namespace = renameSourceFault(t, cause, mode != "before-claim", mode == "unobservable-claim")
+	}
+	sourcePrepareResult(t, o, m, sourceProducer(m, parts), want)
+	sourcePresence(t, root, name, false)
+	o.ops = realSourceFS
+	if mode == "restored" || mode == "restore-collision" {
+		checkSourceRestoredClaim(t, o, m, parts, dir, public, held, mode == "restore-collision")
+	} else {
+		reached := map[bool]string{true: public, false: held}[mode == "before-claim"]
+		path := filepath.Join(root, reached)
+		sourceUnchangedEntry(t, path, original)
+		sourceFailIf(t, !bytes.Equal(data, sourceReadFile(t, path)), "stage claim changed original bytes")
+		assertSourceReleaseCharge(t, o, m, 1, uint64(len(data)))
+	}
+	sourcePrepareAndRead(t, o, m, parts)
+	sourcePresence(t, root, public, false)
+	sourcePresence(t, root, held, false)
+}
+
+func sourceReplacementClaim(t *testing.T, dir, public, held string, collision bool) func(sourceNamespace, *sourceRoot, string, string) error {
+	t.Helper()
+	root := filepath.Join(dir, sourceDirectory)
+	return func(op sourceNamespace, r *sourceRoot, from, to string) error {
+		switch from {
+		case public:
+			sourceMust(t, os.Rename(filepath.Join(root, public), filepath.Join(dir, "pinned-original")))
+			sourceMust(t, os.WriteFile(filepath.Join(root, public), []byte("different inode"), 0o600))
+		case held:
+			if collision {
+				sourceMust(t, os.WriteFile(filepath.Join(root, public), []byte("occupied public leaf"), 0o600))
+			}
+		}
+		return op(r, from, to)
+	}
+}
+
+func checkSourceRestoredClaim(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte, dir, public, held string, collision bool) {
+	t.Helper()
+	root := filepath.Join(dir, sourceDirectory)
+	moved := map[bool]string{true: held, false: public}[collision]
+	sourcePresence(t, root, held, collision)
+	sourceFailIf(t, string(sourceReadFile(t, filepath.Join(root, moved))) != "different inode", "claim changed replacement bytes")
+	want := ErrIdentityV1
+	if collision {
+		want = syscall.EEXIST
+		sourceFailIf(t, string(sourceReadFile(t, filepath.Join(root, public))) != "occupied public leaf", "restore replaced public leaf")
+	}
+	sourcePrepareRefusal(t, o, m, parts, want)
+	sourceMust(t, os.Remove(filepath.Join(root, moved)))
+	if collision {
+		sourceMust(t, os.Remove(filepath.Join(root, public)))
+	}
+	sourceMust(t, os.Rename(filepath.Join(dir, "pinned-original"), filepath.Join(root, public)))
+}
+
+type sourceSpaceFixture struct {
+	o               *SourceOwnerV1
+	m               SourceManifestV1
+	parts           [][]byte
+	stage           string
+	info            os.FileInfo
+	size, allocated uint64
+	logical         uint64
+}
+
+func sourceSpaceScene(t *testing.T, mode string) sourceSpaceFixture {
+	t.Helper()
+	m, parts := sourceBundle(1, false)
+	parts[0] = bytes.Repeat([]byte{41}, 90_000)
+	m.Parts[0].Length = uint64(len(parts[0]))
+	size, err := m.SizeV1()
+	sourceMust(t, err)
+	limits := sourceLimits()
+	s, o, dir := sourceScene(t, limits)
+	stage := filepath.Join(dir, sourceDirectory, ".staging-"+m.name(o.id))
+	length := uint64(16384)
+	if mode == "clamped" {
+		length = size * 2
+	}
+	data := bytes.Repeat([]byte{19}, int(length))
+	if mode == "sparse" {
+		data = nil
+	}
+	sourceMust(t, os.WriteFile(stage, data, 0o600))
+	if mode == "sparse" {
+		sourceMust(t, os.Truncate(stage, int64(length)))
+	}
+	if mode == "linked" {
+		sourceMust(t, os.Link(stage, filepath.Join(dir, "second-link")))
+	}
+	info := sourceLstat(t, stage)
+	allocated := uint64(info.Sys().(*syscall.Stat_t).Blocks) * 512
+	o = sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), limits, nil)
+	return sourceSpaceFixture{o: o, m: m, parts: parts, stage: stage, info: info, size: size, allocated: allocated, logical: length}
+}
+
+func testSourcePhysicalRetry(t *testing.T, mode string) {
+	t.Helper()
+	scene := sourceSpaceScene(t, mode)
+	o := scene.o
+	full := scene.size + o.limits.Overhead
+	credit := min(scene.logical, scene.allocated, scene.size)
+	sourceFailIf(t, credit < 2, "staging allocation is too small: %d bytes", credit)
+	cause := errors.New("staging operation stopped")
+	pin := o.stage.File
+	var other *os.File
+	if mode == "open-file" {
+		var err error
+		other, err = os.Open(scene.stage)
+		sourceMust(t, err)
+		defer other.Close()
+	}
+	checks := 0
+	o.ops.statfs = func(_ int, stat *syscall.Statfs_t) error {
+		checks++
+		if checks == 1 {
+			sourceUnchangedEntry(t, scene.stage, scene.info)
+			sourceStatfsFixture(stat, 1, sourceInitialSpace(mode, full, credit))
+			return nil
+		}
+		return sourceSecondSpace(t, scene, pin, other, stat, mode, full, cause)
+	}
+	switch mode {
+	case "unlink-error":
+		o.ops.remove = func(*os.Root, string) error { return cause }
+	case "late-unlink-error":
+		o.ops.remove = func(r *os.Root, name string) error {
+			sourceMust(t, r.Remove(name))
+			return cause
+		}
+	case "sync-error":
+		o.ops.dirSync = func(*os.File) error { return cause }
+	}
+	testSourcePhysicalResult(t, scene, mode, cause, &checks)
+}
+
+func sourceInitialSpace(mode string, full, credit uint64) uint64 {
+	switch mode {
+	case "fully-funded":
+		return full
+	case "first-short":
+		return full - credit - 1
+	}
+	return full - credit
+}
+
+func sourceSecondSpace(t *testing.T, scene sourceSpaceFixture, pin, other *os.File, stat *syscall.Statfs_t, mode string, full uint64, cause error) error {
+	t.Helper()
+	root, name := filepath.Dir(scene.stage), scene.m.name(scene.o.id)
+	sourcePresence(t, root, filepath.Base(scene.stage), false)
+	sourcePresence(t, root, ".stage-hold-"+name, false)
+	sourcePresence(t, root, name, false)
+	_, err := pin.Stat()
+	sourceFailIf(t, !errors.Is(err, os.ErrClosed), "physical recheck retained stage pin: %v", err)
+	sourceFailIf(t, scene.o.debt.name != "" || scene.o.pendingStage.name != "", "physical recheck preceded stage retirement")
+	switch mode {
+	case "second-error":
+		return cause
+	case "open-file":
+		info, err := other.Stat()
+		sourceFailIf(t, err != nil || !os.SameFile(info, scene.info), "independent open file did not retain the old backing")
+		full--
+	case "second-short":
+		full--
+	}
+	sourceStatfsFixture(stat, 1, full)
+	return nil
+}
+
+func testSourcePhysicalResult(t *testing.T, scene sourceSpaceFixture, mode string, cause error, checks *int) {
+	t.Helper()
+	o, m, parts := scene.o, scene.m, scene.parts
+	if mode == "unfunded" {
+		testSourceUnfundedBacking(t, o, m, parts, scene.stage)
+		sourceFailIf(t, *checks != 1, "unfunded producer reached the second space probe")
+		return
+	}
+	if mode == "first-short" {
+		sourcePrepareRefusal(t, o, m, parts, ErrCapacityV1)
+		sourceFailIf(t, *checks != 1, "preliminary refusal probed space %d times", *checks)
+		return
+	}
+	reads, writes, calls := 0, 0, 0
+	o.ops.write = func(f *os.File, data []byte) (int, error) { writes++; return f.Write(data) }
+	produce := sourceMappedProducer(m, parts, func(part SourcePartV1, visit func(SourcePartV1) error) error {
+		read := part.ReadAt
+		part.ReadAt = func(dst []byte, off int64) (int, error) { reads++; return read(dst, off) }
+		return visit(part)
+	})
+	want := map[string]error{"second-short": ErrCapacityV1, "second-error": ErrCapacityV1, "open-file": ErrCapacityV1, "unlink-error": cause, "late-unlink-error": cause, "sync-error": cause}[mode]
+	sourcePrepareResult(t, o, m, func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
+		calls++
+		return produce(op, visit)
+	}, want)
+	probes := map[bool]int{true: 1, false: 2}[mode == "fully-funded" || want == cause]
+	sourceFailIf(t, *checks != probes || calls != 1, "retry probes=%d and producers=%d, want %d and one", *checks, calls, probes)
+	testSourcePhysicalOutcome(t, scene, mode, want, reads, writes)
+}
+
+func testSourcePhysicalOutcome(t *testing.T, scene sourceSpaceFixture, mode string, want error, reads, writes int) {
+	t.Helper()
+	o, m, parts := scene.o, scene.m, scene.parts
+	root, name := filepath.Dir(scene.stage), m.name(o.id)
+	o.ops = realSourceFS
+	if want == nil {
+		sourceFailIf(t, reads == 0 || writes == 0, "funded retry did not retain produced bytes")
+		sourceRead(t, o, m, parts)
+		return
+	}
+	sourceFailIf(t, reads != 0 || writes != 0, "refused retry reached producer reads or file writes")
+	sourcePresence(t, root, name, false)
+	sourcePresence(t, root, filepath.Base(scene.stage), false)
+	sourcePresence(t, root, ".stage-hold-"+name, mode == "unlink-error")
+	if mode == "sync-error" || mode == "unlink-error" || mode == "late-unlink-error" {
+		assertSourceReleaseCharge(t, o, m, 1, scene.logical)
+	} else {
+		assertSourceReleaseCharge(t, o, m, 0, 0)
+	}
+	if mode == "sync-error" {
+		o.ops.statfs = func(_ int, stat *syscall.Statfs_t) error {
+			sourceStatfsFixture(stat, 1, scene.size+o.limits.Overhead-1)
+			return nil
+		}
+		sourcePrepareRefusal(t, o, m, parts, ErrCapacityV1)
+		o.ops = realSourceFS
+	}
+	sourcePrepareAndRead(t, o, m, parts)
+}
+
+type sourceAllocationInfo struct {
+	os.FileInfo
+	stat any
+}
+
+func (i sourceAllocationInfo) Sys() any { return i.stat }
+
+func testSourceAllocationDomain(t *testing.T) {
+	t.Helper()
+	tests := []struct {
+		stat any
+		want uint64
+	}{
+		{nil, 0},
+		{(*syscall.Stat_t)(nil), 0},
+		{&syscall.Stat_t{Nlink: 2, Blocks: 3}, 0},
+		{&syscall.Stat_t{Nlink: 1, Blocks: -1}, 0},
+		{&syscall.Stat_t{Nlink: 1, Blocks: math.MaxInt64}, 0},
+		{&syscall.Stat_t{Nlink: 1, Blocks: 3}, 1536},
+	}
+	for _, row := range tests {
+		got := singleLinkAllocatedBytes(sourceAllocationInfo{stat: row.stat})
+		sourceFailIf(t, got != row.want, "allocated bytes for %#v: %d, want %d", row.stat, got, row.want)
+	}
+}
+
+func testSourceWriteNoSpace(t *testing.T) {
+	t.Helper()
+	scene := sourceSpaceScene(t, "write-no-space")
+	o, m, parts := scene.o, scene.m, scene.parts
+	writes := 0
+	o.ops.write = func(*os.File, []byte) (int, error) {
+		writes++
+		return 0, syscall.ENOSPC
+	}
+	sourcePrepareResult(t, o, m, sourceProducer(m, parts), syscall.ENOSPC)
+	sourceFailIf(t, writes != 1, "write shortage was not reached")
+	o.ops = realSourceFS
+	assertSourceReleaseCharge(t, o, m, 0, 0)
+	sourcePrepareAndRead(t, o, m, parts)
+}
+
+func testSourcePhysicalCreditBounds(t *testing.T, mode string) {
+	t.Helper()
+	scene := sourceSpaceScene(t, mode)
+	o, m, parts := scene.o, scene.m, scene.parts
+	var moved string
+	checks := 0
+	o.ops.statfs = func(_ int, stat *syscall.Statfs_t) error {
+		checks++
+		available := scene.size + o.limits.Overhead - 1
+		switch mode {
+		case "sparse":
+			sourceFailIf(t, scene.allocated >= scene.logical, "sparse fixture did not expose a logical/allocated gap")
+			available -= scene.allocated
+		case "replaced":
+			moved = filepath.Join(o.dir, "original-stage")
+			sourceMust(t, os.Rename(scene.stage, moved))
+			sourceMust(t, os.WriteFile(scene.stage, []byte("different physical allocation"), 0o600))
+		case "clamped":
+			sourceFailIf(t, scene.logical <= scene.size || scene.allocated <= scene.size, "clamping fixture did not exceed new capture size")
+			available -= scene.size
+		}
+		sourceStatfsFixture(stat, 1, available)
+		return nil
+	}
+	if mode == "replaced" {
+		calls := 0
+		sourcePrepareResult(t, o, m, func(*SourceOperationV1, func(SourcePartV1) error) error { calls++; return nil }, ErrCapacityV1)
+		sourceFailIf(t, calls != 0, "replacement supplied physical credit")
+		sourceMust(t, os.Remove(scene.stage))
+		sourceMust(t, os.Rename(moved, scene.stage))
+	} else {
+		sourcePrepareRefusal(t, o, m, parts, ErrCapacityV1)
+	}
+	sourceFailIf(t, checks != 1, "credit refusal used %d space probes", checks)
+	sourceUnchangedEntry(t, scene.stage, scene.info)
+	o.ops = realSourceFS
+	sourcePrepareAndRead(t, o, m, parts)
 }
 
 func sourceBackingCharge(parts [][]byte) uint64 {
@@ -472,7 +808,7 @@ func testSourceReleaseInconclusive(t *testing.T, stage string) {
 		sourceMust(t, os.WriteFile(path, record, 0o600))
 	}
 	renames, unlinks, syncs := 0, 0, 0
-	o.ops.rename = func(r *os.Root, from, to string) error { renames++; return r.Rename(from, to) }
+	o.ops.namespace = func(op sourceNamespace, r *sourceRoot, from, to string) error { renames++; return op(r, from, to) }
 	o.ops.remove = func(r *os.Root, name string) error {
 		if name == p.name {
 			unlinks++
@@ -496,8 +832,10 @@ func testSourceReleaseInconclusive(t *testing.T, stage string) {
 func assertSourceReleaseCharge(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, files, size uint64) {
 	t.Helper()
 	sourceAccount(t, func(a *mdbx.OperationAccount) {
-		sourceMust(t, o.withFiles(a, m, false, func(_ *sourceRoot, _ SourceManifestV1, _ uint64, used sourceUsage) error {
-			sourceFailIf(t, used.files != files || used.bytes != size, "release charge: %d files/%d bytes, want %d/%d", used.files, used.bytes, files, size)
+		sourceMust(t, o.withManifest(a, m, false, func(r *sourceRoot, _ SourceManifestV1, _ uint64) error {
+			used, err := o.census(r)
+			sourceMust(t, err)
+			sourceFailIf(t, used.files != files || used.bytes != size, "source charge: %d files/%d bytes, want %d/%d", used.files, used.bytes, files, size)
 			return nil
 		}))
 	})
@@ -643,10 +981,10 @@ func sourceReleaseWithFault(t *testing.T, o *SourceOwnerV1, p *PreparedSourceV1,
 		sourceFault(o, stage, cause, nil)
 		return stage == "unlink" || stage == "unlink-reopen-competing-prepare", true
 	case "rename-visible":
-		o.ops.rename = renameSourceFault(t, cause, true, false)
+		o.ops.namespace = renameSourceFault(t, cause, true, false)
 		return true, true
 	case "pending-absent", "pending-visible":
-		o.ops.rename = renameSourceFault(t, cause, stage == "pending-visible", true)
+		o.ops.namespace = renameSourceFault(t, cause, stage == "pending-visible", true)
 		return true, true
 	case "marker-clear", "clear-present", "clear-absent":
 		o.ops.remove = func(r *os.Root, name string) error {
@@ -768,7 +1106,7 @@ func TestSourceNoOverwriteAndDistinctCopies(t *testing.T) {
 		root := filepath.Join(dir, sourceDirectory)
 		path := filepath.Join(root, p.name)
 		producer := sourceAfterFirstPart(m, changed, func() error {
-			sourcePresence(t, root, ".staging-"+p.name, true)
+			sourcePresence(t, root, ".stage-hold-"+p.name, true)
 			return os.WriteFile(path, original, 0o600)
 		})
 		sourcePrepareResult(t, owner, m, producer, ErrIntegrityV1)
@@ -789,6 +1127,150 @@ func TestSourceNoOverwriteAndDistinctCopies(t *testing.T) {
 		sourceReleaseResult(t, owner, replacement, true, nil)
 		sourcePresence(t, filepath.Join(dir, sourceDirectory), replacement.name, false)
 	})
+	t.Run("written-digest", testSourceWrittenDigest)
+	t.Run("producer-digest", testSourceComparedDigest)
+	t.Run("requalify-after-producer", testSourceRequalifyAfterProducer)
+	t.Run("at-link-destination-collision", testSourceLinkCollision)
+	sourceModes(t, []string{"fresh-pin", "reuse-pin"}, testSourceFinalPin)
+}
+
+func testSourceLinkCollision(t *testing.T) {
+	t.Helper()
+	_, incumbent, dir, m, parts, prepared := sourcePreparedBundle(t)
+	from := filepath.Join(dir, sourceDirectory, prepared.name)
+	original, image := sourceLstat(t, from), sourceReadFile(t, from)
+	_, target, targetDir := sourceScene(t, sourceLimits())
+	root := filepath.Join(targetDir, sourceDirectory)
+	final := filepath.Join(root, prepared.name)
+	links := 0
+	target.ops.namespace = func(op sourceNamespace, r *sourceRoot, source, destination string) error {
+		links++
+		sourceMust(t, os.Link(from, final))
+		return op(r, source, destination)
+	}
+	sourcePrepareResult(t, target, m, sourceProducer(m, parts), ErrIntegrityV1)
+	sourceFailIf(t, links != 1, "destination collision reached %d namespace calls", links)
+	sourceUnchangedEntry(t, final, original)
+	sourceUnchangedEntry(t, from, original)
+	sourceFailIf(t, !bytes.Equal(sourceReadFile(t, final), image) || target.live[prepared.name] != nil, "refused link changed or bound the destination")
+	sourcePresence(t, root, ".stage-hold-"+prepared.name, false)
+	sourceRead(t, incumbent, m, parts)
+	target.ops = realSourceFS
+	sourcePrepareAndRead(t, target, m, parts)
+}
+
+func testSourceWrittenDigest(t *testing.T) {
+	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	size, err := m.SizeV1()
+	sourceMust(t, err)
+	syncs, links := 0, 0
+	o.ops.fileSync = func(f *os.File) error { syncs++; return f.Sync() }
+	o.ops.namespace = func(op sourceNamespace, r *sourceRoot, from, to string) error { links++; return op(r, from, to) }
+	o.ops.write = func(f *os.File, data []byte) (int, error) {
+		info, err := f.Stat()
+		sourceMust(t, err)
+		if uint64(info.Size()) != size-sha256.Size {
+			return f.Write(data)
+		}
+		image := make([]byte, size)
+		_, err = f.ReadAt(image[:info.Size()], 0)
+		sourceMust(t, err)
+		image = sourceResealed(image, len(m.header(o.id)))
+		_, err = f.WriteAt(image[:info.Size()], 0)
+		sourceMust(t, err)
+		return f.Write(image[info.Size():])
+	}
+	sourcePrepareResult(t, o, m, sourceProducer(m, parts), ErrIntegrityV1)
+	sourceFailIf(t, syncs != 0 || links != 0 || len(sourceEntries(t, dir)) != 0, "write digest refusal crossed the file handoff")
+	o.ops = realSourceFS
+	sourcePrepareAndRead(t, o, m, parts)
+}
+
+func testSourceComparedDigest(t *testing.T) {
+	_, o, dir, m, parts, p := sourcePreparedBundle(t)
+	path := filepath.Join(dir, sourceDirectory, p.name)
+	image := sourceReadFile(t, path)
+	f, err := os.Open(path)
+	sourceMust(t, err)
+	defer f.Close()
+	backing := image[:len(image)-sha256.Size]
+	w := compareSourceWriter{file: f, scratch: make([]byte, len(backing)), digest: sha256.New()}
+	n, err := w.Write(backing)
+	sourceFailIf(t, n != len(backing) || err != nil, "comparison read %d bytes: %v", n, err)
+	sourceWantError(t, w.verifyDigest(sha256.Sum256(backing)), nil, "matching comparison digest")
+	sourceWantError(t, w.verifyDigest(sha256.Sum256([]byte("other producer bytes"))), ErrIntegrityV1, "differing comparison digest")
+	changed := slices.Clone(parts)
+	changed[0] = slices.Clone(parts[0])
+	changed[0][0] ^= 1
+	held := sourceHeld(t, o)
+	sourcePrepareResult(t, o, m, sourceProducer(m, changed), ErrIntegrityV1)
+	held("refused file-backed comparison")
+	assertSourceReleaseCharge(t, o, m, 1, uint64(len(image)))
+	got := sourcePrepare(t, o, m, parts)
+	sourceFailIf(t, got.incarnation != p.incarnation, "valid comparison changed the issued incarnation")
+	sourceRead(t, o, m, parts)
+}
+
+func testSourceRequalifyAfterProducer(t *testing.T) {
+	_, o, dir, m, parts, p := sourcePreparedBundle(t)
+	path := filepath.Join(dir, sourceDirectory, p.name)
+	image := sourceReadFile(t, path)
+	original := sourceLstat(t, path)
+	changed := sourceResealed(image, len(m.header(o.id)))
+	syncs := 0
+	o.ops.fileSync = func(f *os.File) error { syncs++; return f.Sync() }
+	produce := func(op *SourceOperationV1, visit func(SourcePartV1) error) error {
+		if err := sourceExportParts(op, m, parts, visit); err != nil {
+			return err
+		}
+		return os.WriteFile(path, changed, 0o600)
+	}
+	sourcePrepareResult(t, o, m, produce, ErrIntegrityV1)
+	sourceUnchangedEntry(t, path, original)
+	sourceFailIf(t, syncs != 0 || !bytes.Equal(sourceReadFile(t, path), changed), "requalification refusal crossed the handoff or changed backing")
+	sourceMust(t, os.WriteFile(path, image, 0o600))
+	o.ops = realSourceFS
+	sourcePrepareAndRead(t, o, m, parts)
+}
+
+func testSourceFinalPin(t *testing.T, mode string) {
+	t.Helper()
+	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	if mode == "reuse-pin" {
+		sourcePrepare(t, o, m, parts)
+	}
+	name := m.name(o.id)
+	path := filepath.Join(dir, sourceDirectory, name)
+	var original os.FileInfo
+	var image []byte
+	o.ops.dirSync = func(pin *os.File) error {
+		original = sourceLstat(t, path)
+		image = sourceReadFile(t, path)
+		sourceMust(t, os.Remove(path))
+		sourceFailIf(t, !sourceHasOpenFile(t, original), "final sync did not retain the unlinked file")
+		sourceMust(t, os.WriteFile(path, image, 0o600))
+		sourceFailIf(t, os.SameFile(original, sourceLstat(t, path)), "final replacement acquired the original inode")
+		return pin.Sync()
+	}
+	sourcePrepareResult(t, o, m, sourceProducer(m, parts), ErrIdentityV1)
+	sourceFailIf(t, original == nil || sourceHasOpenFile(t, original), "handoff retained a descriptor after refusal")
+	sourceFailIf(t, !bytes.Equal(sourceReadFile(t, path), image), "handoff changed the replacement bytes")
+	assertSourceReleaseCharge(t, o, m, 1, uint64(len(image)))
+}
+
+func sourceHasOpenFile(t *testing.T, info os.FileInfo) bool {
+	t.Helper()
+	original := info.Sys().(*syscall.Stat_t)
+	entries, err := os.ReadDir("/dev/fd")
+	sourceMust(t, err)
+	for _, entry := range entries {
+		fd, err := strconv.Atoi(entry.Name())
+		var held syscall.Stat_t
+		if err == nil && syscall.Fstat(fd, &held) == nil && held.Dev == original.Dev && held.Ino == original.Ino {
+			return true
+		}
+	}
+	return false
 }
 
 func acquiredSourceFrame(t *testing.T, encoded string, size int, want string) (SourceManifestV1, [][]byte) {
@@ -917,7 +1399,7 @@ func TestSourceLimitsAndIdentity(t *testing.T) {
 		original, scratch := sourceLstat(t, root), sourceLstat(t, init)
 		parent, err := os.Open(dir)
 		sourceMust(t, err)
-		sourceFailIf(t, !errors.Is(renameSourceInit(int(parent.Fd())), os.ErrExist), "exclusive directory publication replaced the destination")
+		sourceFailIf(t, !errors.Is(renameSourceAt(int(parent.Fd()), sourceInitDirectory, sourceDirectory), os.ErrExist), "exclusive directory publication replaced the destination")
 		sourceMust(t, parent.Close())
 		for _, mode := range []os.FileMode{os.ModeSetuid, os.ModeSetgid, os.ModeSticky} {
 			sourceMust(t, os.Chmod(root, mode|0o700))
@@ -1138,11 +1620,12 @@ func TestSourceStagingRestartAndAmbiguousRename(t *testing.T) {
 		s, o, dir, m, parts := sourceBundleScene(t, 1, false)
 		cause := errors.New("rename observation")
 		if mode != "staging" {
-			o.ops.rename = renameSourceFault(t, cause, mode != "unobserved-staged", mode != "renamed")
+			o.ops.namespace = renameSourceFault(t, cause, mode != "unobserved-staged", mode != "renamed")
 			o.ops.remove = func(_ *os.Root, name string) error { return os.Remove(filepath.Join(dir, sourceDirectory, name)) }
 			sourcePrepareResult(t, o, m, sourceProducer(m, parts), cause)
-			sourceFailIf(t, o.debt.name == "" || o.debt.staging, "ambiguous publication debt: %+v", o.debt)
-			sourceFailIf(t, len(sourceEntries(t, dir)) != 1, "ambiguous publication lost backing")
+			sourceFailIf(t, o.debt.name == "" || !o.debt.held(), "ambiguous publication debt: %+v", o.debt)
+			count := map[bool]int{true: 1, false: 2}[mode == "unobserved-staged"]
+			sourceFailIf(t, len(sourceEntries(t, dir)) != count, "ambiguous publication lost backing or staging")
 		} else {
 			sourceMust(t, os.WriteFile(filepath.Join(dir, sourceDirectory, ".staging-"+m.name(o.id)), []byte{1, 2, 3}, 0o600))
 		}
@@ -1152,11 +1635,472 @@ func TestSourceStagingRestartAndAmbiguousRename(t *testing.T) {
 			sourceFailIf(t, len(sourceEntries(t, dir)) != 1, "same identity retry retained staging")
 		}
 		fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
-		if mode == "staging" {
+		if mode == "staging" || mode == "renamed" {
 			sourceReadRefusal(t, fresh, m, ErrBusyV1, "staging owner readback")
+			sourcePrepareRefusal(t, fresh, sourceForeign(m), parts, ErrBusyV1)
 		}
 		sourcePrepareAndRead(t, fresh, m, parts)
 	})
+	sourceModes(t, []string{"occupied", "scan-limit", "unavailable"}, testSourcePreLinkSlot)
+	sourceModes(t, []string{"during-link", "final-reuse"}, testSourceIncomingStage)
+	sourceModes(t, []string{"final-slot", "producer-error", "producer-panic"}, testSourcePendingBinding)
+	sourceModes(t, []string{"foreign-file", "foreign-shape"}, testSourceIndeterminateBinding)
+	sourceModes(t, []string{"held-only", "held-alias", "legacy-public"}, testSourceStageRestart)
+	sourceModes(t, []string{"upper-held", "extra-held", "shared-collision", "distinct-collision"}, testSourceStageRestartRefusal)
+	sourceModes(t, []string{"before-restore", "after-restore", "restore-sync"}, testSourceStageRestoreFault)
+	t.Run("descriptor-budget", testSourceStageDescriptorBudget)
+	t.Run("charged-logical-names", testSourceChargedLogicalNames)
+	t.Run("clean-reopen-occupancy", testSourceCleanReopenOccupancy)
+	sourceModes(t, []string{"release-file-cap", "release-byte-cap"}, testSourceReleaseAliasCharge)
+}
+
+func testSourceIndeterminateBinding(t *testing.T, mode string) {
+	t.Helper()
+	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	root, name := filepath.Join(dir, sourceDirectory), m.name(o.id)
+	path, stage := filepath.Join(root, name), filepath.Join(root, ".stage-hold-"+name)
+	cause := errors.New("publication observation stopped")
+	o.ops.namespace = renameSourceFault(t, cause, false, true)
+	sourcePrepareResult(t, o, m, sourceProducer(m, parts), cause)
+	o.ops = realSourceFS
+	expected := o.live[name]
+	sourceFailIf(t, expected == nil || !expected.uncertain || expected.issued, "indeterminate publication lost its qualified binding")
+	before, original := sourceLstat(t, stage), sourceReadFile(t, stage)
+	changed := slices.Clone(parts)
+	changed[0] = slices.Clone(parts[0])
+	changed[0][0] ^= 1
+	want := ErrIdentityV1
+	if mode == "foreign-file" {
+		sourceMust(t, os.WriteFile(path, sourceResealed(original, len(m.header(o.id))), 0o600))
+		assertSourceReleaseCharge(t, o, m, 2, 2*uint64(len(original)))
+	} else {
+		sourceMust(t, os.Mkdir(path, 0o700))
+		want = ErrIntegrityV1
+	}
+	foreign := sourceLstat(t, path)
+	sourcePrepareRefusal(t, o, m, changed, want)
+	sourceUnchangedEntry(t, path, foreign)
+	sourceUnchangedEntry(t, stage, before)
+	sourceFailIf(t, o.live[name] != expected || !bytes.Equal(sourceReadFile(t, stage), original), "refusal changed qualified binding or staged bytes")
+	sourceMust(t, os.Remove(path))
+	sourcePrepareAndRead(t, o, m, parts)
+}
+
+func testSourceCleanReopenOccupancy(t *testing.T) {
+	t.Helper()
+	m, parts := sourceBundle(1, false)
+	size, err := m.SizeV1()
+	sourceMust(t, err)
+	limits := sourceLimits()
+	limits.Files, limits.Bytes = 1, size
+	s, o, dir := sourceScene(t, limits)
+	original := sourcePrepare(t, o, m, parts)
+	fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), limits, nil)
+	assertSourceReleaseCharge(t, fresh, m, 1, size)
+	sourceFailIf(t, fresh.stage.File != nil || len(sourceEntries(t, dir)) != 1, "clean reopen retained a staging slot")
+	sourcePrepareRefusal(t, fresh, sourceForeign(m), parts, ErrCapacityV1)
+	sourceReleaseResult(t, fresh, original, true, ErrIntegrityV1)
+	sourcePrepareAndRead(t, fresh, m, parts)
+}
+
+func testSourceStageRestart(t *testing.T, mode string) {
+	t.Helper()
+	m, parts := sourceBundle(1, false)
+	size, err := m.SizeV1()
+	sourceMust(t, err)
+	limits := sourceLimits()
+	limits.Files, limits.Bytes = 1, size
+	s, o, dir := sourceScene(t, limits)
+	name := m.name(o.id)
+	root := filepath.Join(dir, sourceDirectory)
+	data := []byte("retained staging bytes")
+	held, public := ".stage-hold-"+name, ".staging-"+name
+	var old *PreparedSourceV1
+	if mode == "held-alias" {
+		old = sourcePrepare(t, o, m, parts)
+		data = sourceReadFile(t, filepath.Join(root, name))
+		sourceMust(t, os.Link(filepath.Join(root, name), filepath.Join(root, held)))
+	} else if mode == "legacy-public" {
+		public = ".staging-" + strings.ToUpper(name)
+		sourceMust(t, os.WriteFile(filepath.Join(root, public), data, 0o600))
+	} else {
+		sourceMust(t, os.WriteFile(filepath.Join(root, held), data, 0o600))
+	}
+	leaf := held
+	if mode == "legacy-public" {
+		leaf = public
+	}
+	original := sourceLstat(t, filepath.Join(root, leaf))
+	fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), limits, nil)
+	sourcePresence(t, root, held, false)
+	sourceUnchangedEntry(t, filepath.Join(root, public), original)
+	sourceFailIf(t, !bytes.Equal(data, sourceReadFile(t, filepath.Join(root, public))), "reopen changed staging bytes")
+	testSourceReopenedPin(t, fresh, m, parts, old, public, original, uint64(len(data)))
+}
+
+func testSourceReopenedPin(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte, old *PreparedSourceV1, public string, original os.FileInfo, charged uint64) {
+	t.Helper()
+	assertSourceReleaseCharge(t, o, m, 1, charged)
+	pin := o.stage.File
+	info, err := pin.Stat()
+	sourceFailIf(t, err != nil || !os.SameFile(original, info), "reopened stage pin: %v", err)
+	sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+	if old != nil {
+		sourceReleaseResult(t, o, old, true, ErrIntegrityV1)
+	}
+	got := sourcePrepare(t, o, m, parts)
+	sourceFailIf(t, old != nil && got.incarnation == old.incarnation, "reopen reused a process-local token")
+	_, err = pin.Stat()
+	sourceFailIf(t, !errors.Is(err, os.ErrClosed), "retired public-stage pin: %v", err)
+	sourcePresence(t, filepath.Join(o.dir, sourceDirectory), public, false)
+	sourceRead(t, o, m, parts)
+}
+
+func testSourceStageRestartRefusal(t *testing.T, mode string) {
+	t.Helper()
+	s, o, dir, m, _ := sourceBundleScene(t, 1, false)
+	name := m.name(o.id)
+	root := filepath.Join(dir, sourceDirectory)
+	held, other := ".stage-hold-"+name, ".staging-"+name
+	if mode == "upper-held" {
+		held = ".stage-hold-" + strings.ToUpper(name)
+	}
+	if mode == "extra-held" {
+		other = ".stage-hold-" + sourceForeign(m).name(o.id)
+	}
+	sourceMust(t, os.WriteFile(filepath.Join(root, held), []byte("held"), 0o600))
+	if mode == "shared-collision" {
+		sourceMust(t, os.Link(filepath.Join(root, held), filepath.Join(root, other)))
+	} else {
+		sourceMust(t, os.WriteFile(filepath.Join(root, other), []byte("separate"), 0o600))
+	}
+	unchanged := sourceHeld(t, o)
+	want := map[string]error{"upper-held": ErrIntegrityV1, "extra-held": ErrBusyV1, "shared-collision": syscall.EEXIST, "distinct-collision": syscall.EEXIST}[mode]
+	sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), want)
+	unchanged("refused stage restore")
+}
+
+func testSourceStageRestoreFault(t *testing.T, mode string) {
+	t.Helper()
+	s, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	name := m.name(o.id)
+	root := filepath.Join(dir, sourceDirectory)
+	held, public := ".stage-hold-"+name, ".staging-"+name
+	originalBytes := []byte("staging before reopening")
+	sourceMust(t, os.WriteFile(filepath.Join(root, held), originalBytes, 0o600))
+	original := sourceLstat(t, filepath.Join(root, held))
+	s = sourceReopenStore(t, s, dir)
+	saved := realSourceFS
+	defer func() { realSourceFS = saved }()
+	cause := errors.New("restore I/O stopped")
+	if mode == "restore-sync" {
+		calls := 0
+		realSourceFS.dirSync = func(pin *os.File) error {
+			calls++
+			if calls == 2 {
+				return cause
+			}
+			return pin.Sync()
+		}
+	} else {
+		realSourceFS.namespace = renameSourceFault(t, cause, mode == "after-restore", false)
+	}
+	sourceOpen(t, s, sourceID(), sourceLimits(), cause)
+	reached := map[bool]string{true: held, false: public}[mode == "before-restore"]
+	sourceUnchangedEntry(t, filepath.Join(root, reached), original)
+	sourceFailIf(t, !bytes.Equal(originalBytes, sourceReadFile(t, filepath.Join(root, reached))) || sourceHasOpenFile(t, original), "failed restore changed bytes or retained its descriptor")
+	realSourceFS = saved
+	fresh := sourceOpen(t, s, sourceID(), sourceLimits(), nil)
+	sourceUnchangedEntry(t, filepath.Join(root, public), original)
+	sourcePrepareAndRead(t, fresh, m, parts)
+}
+
+func testSourceStageDescriptorBudget(t *testing.T) {
+	t.Helper()
+	m, parts := sourceBundle(1, false)
+	limits := sourceLimits()
+	limits.Descriptors = 4
+	s, o, dir := sourceScene(t, limits)
+	sourcePrepareAndRead(t, o, m, parts)
+	root := filepath.Join(dir, sourceDirectory)
+	stage := filepath.Join(root, ".staging-"+m.name(o.id))
+	sourceMust(t, os.WriteFile(stage, []byte("stage"), 0o600))
+	sourcePrepareRefusal(t, o, m, parts, ErrCapacityV1)
+	original := sourceLstat(t, stage)
+	fresh := sourceReopenStore(t, s, dir)
+	sourceOpen(t, fresh, sourceID(), limits, ErrCapacityV1)
+	sourceUnchangedEntry(t, stage, original)
+	limits.Descriptors = 5
+	owner := sourceOpen(t, fresh, sourceID(), limits, nil)
+	pin := owner.stage.File
+	info, err := pin.Stat()
+	sourceFailIf(t, err != nil || !os.SameFile(info, original), "funded staging descriptor: %v", err)
+	sourcePrepareAndRead(t, owner, m, parts)
+	_, err = pin.Stat()
+	sourceFailIf(t, !errors.Is(err, os.ErrClosed), "retired funded staging descriptor: %v", err)
+}
+
+func testSourceChargedLogicalNames(t *testing.T) {
+	t.Helper()
+	m, parts := sourceBundle(1, false)
+	size, err := m.SizeV1()
+	sourceMust(t, err)
+	limits := sourceLimits()
+	limits.Files, limits.Bytes = 3, size+1
+	_, o, dir := sourceScene(t, limits)
+	name := m.name(o.id)
+	root := filepath.Join(dir, sourceDirectory)
+	path, alias := filepath.Join(root, name), filepath.Join(root, sourceForeign(m).name(o.id))
+	public := filepath.Join(root, ".staging-"+name)
+	o.ops.dirSync = func(pin *os.File) error {
+		sourceMust(t, os.WriteFile(public, []byte{1}, 0o600))
+		return pin.Sync()
+	}
+	sourcePrepareResult(t, o, m, sourceProducer(m, parts), ErrIdentityV1)
+	o.ops = realSourceFS
+	sourceMust(t, os.Remove(public))
+	original := sourceReadFile(t, path)
+	sourceMust(t, os.Link(path, alias))
+	sourceMust(t, os.Truncate(path, 1))
+	sourceMust(t, o.withRoot(o.bindRoot, func(r *sourceRoot) error {
+		entries, err := o.sourceEntries(r)
+		sourceMust(t, err)
+		for range 2 {
+			used, err := o.censusFiles(r, entries)
+			sourceMust(t, err)
+			sourceFailIf(t, used.files != 2 || used.bytes != size+1, "bound logical name charge: %d files/%d bytes", used.files, used.bytes)
+			slices.Reverse(entries)
+		}
+		return nil
+	}))
+	sourcePrepareRefusal(t, o, sourceForeign(sourceForeign(m)), parts, ErrCapacityV1)
+	sourceMust(t, os.Remove(alias))
+	sourceMust(t, os.WriteFile(path, original, 0o600))
+	sourcePrepareAndRead(t, o, m, parts)
+}
+
+func testSourceReleaseAliasCharge(t *testing.T, mode string) {
+	t.Helper()
+	m, parts := sourceBundle(1, false)
+	size, err := m.SizeV1()
+	sourceMust(t, err)
+	limits := sourceLimits()
+	if mode == "release-file-cap" {
+		limits.Files = 1
+	} else {
+		limits.Bytes = size
+	}
+	_, o, dir := sourceScene(t, limits)
+	p := sourcePrepare(t, o, m, parts)
+	root := filepath.Join(dir, sourceDirectory)
+	path, alias := filepath.Join(root, p.name), filepath.Join(root, ".staging-"+p.name)
+	original, data := sourceLstat(t, path), sourceReadFile(t, path)
+	sourceMust(t, os.Link(path, alias))
+	sourceReleaseResult(t, o, p, true, ErrCapacityV1)
+	sourceFailIf(t, o.debt.name != p.name || !o.debt.unfunded || o.stage.File != nil, "capacity refusal changed staging ownership")
+	before := sourceHeld(t, o)
+	sourceReleaseResult(t, o, p, true, ErrBusyV1)
+	before("release with recorded staging observation")
+	sourceUnchangedEntry(t, path, original)
+	sourceUnchangedEntry(t, alias, original)
+	sourceFailIf(t, !bytes.Equal(sourceReadFile(t, alias), data), "release changed alias bytes")
+	sourcePresence(t, root, releaseFile, false)
+	sourcePresence(t, root, releaseScratch, false)
+	sourceMust(t, os.Remove(alias))
+	sourceReleaseResult(t, o, p, true, ErrBusyV1)
+	changed := slices.Clone(parts)
+	changed[0] = slices.Clone(parts[0])
+	changed[0][0] ^= 1
+	sourcePrepareResult(t, o, m, sourceProducer(m, changed), ErrIntegrityV1)
+	sourceReleaseResult(t, o, p, true, ErrBusyV1)
+	reused := sourcePrepare(t, o, m, parts)
+	sourceFailIf(t, reused.incarnation != p.incarnation || o.stage.File != nil, "empty staging recovery changed the release handle")
+	sourceReleaseResult(t, o, p, true, nil)
+}
+
+func testSourcePreLinkSlot(t *testing.T, mode string) {
+	t.Helper()
+	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	name := m.name(o.id)
+	root := filepath.Join(dir, sourceDirectory)
+	held := filepath.Join(root, ".stage-hold-"+name)
+	incoming := filepath.Join(root, ".staging-"+strings.ToUpper(name))
+	stageBytes := []byte("separate public stage")
+	var qualified os.FileInfo
+	var qualifiedBytes []byte
+	links := 0
+	o.ops.namespace = func(op sourceNamespace, r *sourceRoot, from, to string) error { links++; return op(r, from, to) }
+	o.ops.close = func(f *os.File) error {
+		sourceMust(t, f.Close())
+		qualified, qualifiedBytes = sourceLstat(t, held), sourceReadFile(t, held)
+		switch mode {
+		case "occupied":
+			return os.WriteFile(incoming, stageBytes, 0o600)
+		case "scan-limit":
+			return sourceSlotFill(root, o.limits.Scans-1, os.Mkdir)
+		}
+		return nil
+	}
+	if mode == "unavailable" {
+		testSourceUnavailableSlot(t, o, m, parts)
+	} else {
+		want := map[string]error{"occupied": ErrIdentityV1, "scan-limit": ErrCapacityV1}[mode]
+		sourcePrepareResult(t, o, m, sourceProducer(m, parts), want)
+	}
+	sourceFailIf(t, links != 0 || qualified == nil, "pre-link refusal reached namespace operation or omitted the private file")
+	sourcePresence(t, root, name, false)
+	sourceUnchangedEntry(t, held, qualified)
+	sourceFailIf(t, !bytes.Equal(qualifiedBytes, sourceReadFile(t, held)) || o.debt.size != uint64(len(qualifiedBytes)), "private stage lost original bytes or charge")
+	if mode == "occupied" {
+		unchanged := sourceLstat(t, incoming)
+		sourcePrepareResult(t, o, m, sourceProducer(m, parts), syscall.EEXIST)
+		sourceUnchangedEntry(t, incoming, unchanged)
+		sourceFailIf(t, !bytes.Equal(stageBytes, sourceReadFile(t, incoming)), "occupied guard changed public bytes")
+		sourceMust(t, os.Remove(incoming))
+	}
+	if mode == "scan-limit" {
+		sourceMust(t, sourceSlotFill(root, o.limits.Scans-1, func(path string, _ os.FileMode) error { return os.Remove(path) }))
+	}
+	o.ops = realSourceFS
+	assertSourceReleaseCharge(t, o, m, 1, uint64(len(qualifiedBytes)))
+	sourcePrepareAndRead(t, o, m, parts)
+}
+
+func sourceSlotFill(root string, count uint64, apply func(string, os.FileMode) error) error {
+	for i := range count {
+		if err := apply(filepath.Join(root, fmt.Sprintf("entry-%d", i)), 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func testSourceUnavailableSlot(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte) {
+	t.Helper()
+	sourceAccount(t, func(a *mdbx.OperationAccount) {
+		err := o.withFiles(a, m, true, func(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage) error {
+			closeFile := o.ops.close
+			o.ops.close = func(f *os.File) error {
+				sourceMust(t, closeFile(f))
+				return r.Close()
+			}
+			prepared, err := o.prepare(r, m, size, used, func(visit func(SourcePartV1) error) error {
+				return o.export(a, m, sourceProducer(m, parts), visit)
+			})
+			sourceFailIf(t, prepared != nil, "unavailable pre-link census issued a handle")
+			return err
+		})
+		sourceWantError(t, err, ErrIdentityV1, "unavailable pre-link census")
+	})
+}
+
+func testSourceIncomingStage(t *testing.T, mode string) {
+	t.Helper()
+	_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+	name := m.name(o.id)
+	root := filepath.Join(dir, sourceDirectory)
+	path, stage := filepath.Join(root, name), filepath.Join(root, ".staging-"+strings.ToUpper(name))
+	data := []byte("separate staging content")
+	var original, incoming os.FileInfo
+	var image []byte
+	arrive := func() {
+		sourceMust(t, os.WriteFile(stage, data, 0o600))
+		incoming = sourceLstat(t, stage)
+	}
+	if mode == "during-link" {
+		o.ops.namespace = func(op sourceNamespace, r *sourceRoot, from, to string) error {
+			private := filepath.Join(root, ".stage-hold-"+name)
+			original, image = sourceLstat(t, private), sourceReadFile(t, private)
+			arrive()
+			return op(r, from, to)
+		}
+	} else {
+		sourcePrepare(t, o, m, parts)
+		original, image = sourceLstat(t, path), sourceReadFile(t, path)
+		o.ops.dirSync = func(pin *os.File) error { arrive(); return pin.Sync() }
+	}
+	sourcePrepareResult(t, o, m, sourceProducer(m, parts), ErrIdentityV1)
+	o.ops = realSourceFS
+	sourceUnchangedEntry(t, path, original)
+	sourceUnchangedEntry(t, stage, incoming)
+	sourceFailIf(t, !bytes.Equal(image, sourceReadFile(t, path)) || !bytes.Equal(data, sourceReadFile(t, stage)), "final staging check changed backing bytes")
+	assertSourceReleaseCharge(t, o, m, 2, uint64(len(image)+len(data)))
+	sourcePrepareAndRead(t, o, m, parts)
+	sourcePresence(t, root, filepath.Base(stage), false)
+}
+
+func testSourcePendingBinding(t *testing.T, mode string) {
+	t.Helper()
+	m, parts := sourceBundle(1, false)
+	size, err := m.SizeV1()
+	sourceMust(t, err)
+	extra := []byte("separate stage")
+	limits := sourceLimits()
+	limits.Files, limits.Bytes = 2, size+uint64(len(extra))
+	_, o, dir := sourceScene(t, limits)
+	name := m.name(o.id)
+	root := filepath.Join(dir, sourceDirectory)
+	path, stage := filepath.Join(root, name), filepath.Join(root, ".staging-"+name)
+	cause := errors.New("retained capture directory sync")
+	want := cause
+	o.ops.dirSync = func(*os.File) error { return cause }
+	if mode == "final-slot" {
+		want = ErrIdentityV1
+		o.ops.dirSync = func(pin *os.File) error {
+			sourceMust(t, os.WriteFile(stage, extra, 0o600))
+			return pin.Sync()
+		}
+	}
+	sourcePrepareResult(t, o, m, sourceProducer(m, parts), want)
+	o.ops = realSourceFS
+	original, image := sourceLstat(t, path), sourceReadFile(t, path)
+	binding := o.live[name]
+	sourceFailIf(t, binding == nil || binding.issued, "refused publication lost its unissued binding")
+	if mode == "final-slot" {
+		sourceFailIf(t, !bytes.Equal(extra, sourceReadFile(t, stage)), "publication changed independent stage")
+		assertSourceReleaseCharge(t, o, m, 2, size+uint64(len(extra)))
+		sourceMust(t, os.Remove(stage))
+	} else {
+		testSourceProducerRefusesAfterCleanup(t, o, m, parts, stage, extra, mode)
+	}
+	testSourceBoundChanges(t, o, m, parts, path, image)
+	sourceUnchangedEntry(t, path, original)
+	sourceFailIf(t, sourcePrepare(t, o, m, parts).incarnation != binding, "qualified retry replaced its binding")
+	sourceRead(t, o, m, parts)
+}
+
+func testSourceProducerRefusesAfterCleanup(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte, stage string, extra []byte, mode string) {
+	t.Helper()
+	sourceMust(t, os.WriteFile(stage, extra, 0o600))
+	cause := errors.New("producer stopped after staging cleanup")
+	produce := sourceAfterFirstPart(m, parts, func() error {
+		sourcePresence(t, filepath.Dir(stage), filepath.Base(stage), false)
+		sourceFailIf(t, o.debt.name != "" || o.pendingStage.name != "", "producer ran before staging debt was durably retired")
+		if mode == "producer-panic" {
+			panic(cause)
+		}
+		return cause
+	})
+	if mode == "producer-error" {
+		sourcePrepareResult(t, o, m, produce, cause)
+	} else {
+		caught := catchSourcePanic(func() { sourcePrepareResult(t, o, m, produce, nil) })
+		sourceFailIf(t, caught != cause, "producer panic changed: %v", caught)
+	}
+	sourcePresence(t, filepath.Dir(stage), filepath.Base(stage), false)
+}
+
+func testSourceBoundChanges(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte, path string, image []byte) {
+	t.Helper()
+	changed := slices.Clone(parts)
+	changed[0] = slices.Clone(parts[0])
+	changed[0][0] ^= 1
+	sourceMust(t, os.WriteFile(path, sourceResealed(image, len(m.header(o.id))), 0o600))
+	sourcePrepareRefusal(t, o, m, changed, ErrIntegrityV1)
+	sourceMust(t, os.Truncate(path, 1))
+	assertSourceReleaseCharge(t, o, m, 1, uint64(len(image)))
+	sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrCapacityV1)
+	sourceMust(t, os.WriteFile(path, image, 0o600))
 }
 
 func TestSourceDirectoryChangeBeforeCopy(t *testing.T) {
@@ -1255,7 +2199,8 @@ func testSourceMovedDuringExport(t *testing.T, reuse bool) {
 	})
 	sourcePrepareResult(t, o, m, producer, ErrIdentityV1)
 	name := m.name(o.id)
-	sourceFailIf(t, o.live[name] != token || (o.debt.name == "") != reuse || !reuse && (o.debt.name != name || o.debt.staging),
+	binding := o.live[name]
+	sourceFailIf(t, binding == nil || reuse && binding != token || !reuse && binding.issued || o.debt.name != "" || o.pendingStage.name != "",
 		"moved root changed the retained owner: token=%v debt=%+v", o.live[name], o.debt)
 	sourcePresence(t, moved, name, true)
 	sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "replacement directory acquired backing")
@@ -1269,7 +2214,7 @@ func TestSourceOperationAuthorityAdmission(t *testing.T) {
 		s, o, dir, m, parts := sourceBundleScene(t, 1, false)
 		alias := s
 		producer := sourceAfterFirstPart(m, parts, func() error {
-			root, stage := filepath.Join(dir, sourceDirectory), ".staging-"+m.name(o.id)
+			root, stage := filepath.Join(dir, sourceDirectory), ".stage-hold-"+m.name(o.id)
 			sourcePresence(t, root, stage, true)
 			sourceOpen(t, alias, sourceID(), sourceLimits(), ErrBusyV1)
 			sourcePresence(t, root, stage, true)
@@ -1339,7 +2284,7 @@ func TestSourcePreparationPanicRetainsCleanup(t *testing.T) {
 	producer := sourceAfterFirstPart(m, parts, func() error { panic(cause) })
 	sourceAccount(t, func(a *mdbx.OperationAccount) {
 		caught := catchSourcePanic(func() { _, _ = o.PrepareSourceV1(a, m, producer) })
-		sourceFailIf(t, caught != any(cause) || o.debt.name == "" || !o.debt.staging || !bytes.Equal(parts[0], original) || cleanupCalls != 1,
+		sourceFailIf(t, caught != any(cause) || o.debt.name == "" || !o.debt.held() || !bytes.Equal(parts[0], original) || cleanupCalls != 1,
 			"panic owner: %v %+v, cleanup calls=%d", caught, o.debt, cleanupCalls)
 		sourceMust(t, a.WithReservation(mdbx.TreeLaneMaxBytes, func() error { return nil }))
 	})
