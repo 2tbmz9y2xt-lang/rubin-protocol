@@ -3212,6 +3212,11 @@ func testSourceProtectedPublication(t *testing.T) {
 			assertSourceReleaseCharge(t, o, m, 1, size)
 			sourcePrepareRefusal(t, o, m, parts, ErrIntegrityV1)
 			assertSourceReleaseCharge(t, o, m, 1, size)
+			if mode == "truncated-linked-publication" {
+				other := filepath.Join(dir, sourceDirectory, sourceForeign(m).name(o.id))
+				sourceMust(t, os.Link(path, other))
+				assertSourceReleaseCharge(t, o, m, 2, size+1)
+			}
 		}
 	})
 	t.Run("reuse-with-public-stage", func(t *testing.T) {

@@ -201,7 +201,7 @@ func (o *SourceOwnerV1) countBacking(used *sourceUsage, name string, file filelo
 		if stageSeenTogether && (o.debt.backing == "" || name == o.debt.name) {
 			o.debt.backing = name
 		}
-		if name == o.debt.backing {
+		if used.stageCharged && name == o.debt.backing {
 			used.stageCharged = false
 			size = max(size, o.debt.qualifiedBytes)
 		}
