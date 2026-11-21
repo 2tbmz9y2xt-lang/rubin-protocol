@@ -1153,8 +1153,9 @@ func testSourceReleaseSpelling(t *testing.T) {
 		sourceFailIf(t, target != p.name, "stage link target changed to %q", target)
 		sourcePrepareRefusal(t, o, m, parts, ErrBusyV1)
 	})
-	sourceModes(t, []string{"mixed-alias", "mixed-alias-another-name", "same-key-file", "same-key-before-content", "pending-absent-file", "pending-cross-key", "late-alias", "unrelated-file", "fresh-mixed-file"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"mixed-alias", "mixed-alias-another-name", "same-key-file", "same-key-before-content", "pending-absent-file", "pending-cross-key", "late-alias", "late-alias-live", "unrelated-file", "fresh-mixed-file"}, func(t *testing.T, mode string) {
 		s, o, dir, m, parts, p := sourcePreparedBundle(t)
+		lateAlias := strings.HasPrefix(mode, "late-alias")
 		root := filepath.Join(dir, sourceDirectory)
 		key := sourceForeign(m).name(o.id)
 		if strings.HasPrefix(mode, "same-key-") || mode == "pending-absent-file" {
@@ -1162,13 +1163,13 @@ func testSourceReleaseSpelling(t *testing.T) {
 		}
 		key = strings.ToUpper(key[:32]) + key[32:]
 		sourceFailIf(t, key == strings.ToLower(key) || key == strings.ToUpper(key), "fixture needs both cases of hex letters")
-		if mode == "late-alias" {
+		if lateAlias {
 			key = p.name
 		}
 		stage := filepath.Join(root, publicStagePrefix+key)
 		size, err := m.SizeV1()
 		sourceMust(t, err)
-		if mode == "pending-cross-key" || mode == "late-alias" {
+		if mode == "pending-cross-key" || lateAlias {
 			sourceReleaseWithFault(t, o, p, "intent-sync", syscall.EIO)
 			o.ops = realSourceFS
 		}
@@ -1189,7 +1190,7 @@ func testSourceReleaseSpelling(t *testing.T) {
 				data[len(data)-1] ^= 1
 				sourceMust(t, os.WriteFile(path, data, 0o600))
 			}
-		case "late-alias":
+		case "late-alias", "late-alias-live":
 			o.ops.namespace = func(op sourceNameOp, r *sourceRoot, from, to string) error {
 				sourceFailIf(t, from != p.name || to != releaseDetached, "unexpected namespace operation on a late stage")
 				sourceMust(t, op(r, from, to))
@@ -1219,7 +1220,7 @@ func testSourceReleaseSpelling(t *testing.T) {
 			preserved()
 			return
 		}
-		if mode != "late-alias" {
+		if !lateAlias {
 			var unchanged func(string)
 			if mode == "pending-cross-key" {
 				marker := sourcePreservedEntry(t, filepath.Join(root, releaseFile))
@@ -1258,11 +1259,14 @@ func testSourceReleaseSpelling(t *testing.T) {
 			preserved()
 		}
 		o.ops = realSourceFS
-		if mode == "pending-cross-key" || mode == "late-alias" {
+		if mode == "pending-cross-key" || lateAlias {
 			sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
 			sourceMust(t, os.Remove(stage))
-			fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
-			sourceReleaseResult(t, fresh, nil, true, nil)
+			if mode != "late-alias-live" {
+				o = sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
+				p = nil
+			}
+			sourceReleaseResult(t, o, p, true, nil)
 			sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "resumed release retained an entry")
 		}
 	})
