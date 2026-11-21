@@ -523,19 +523,18 @@ func (o *SourceOwnerV1) checkStage(r *sourceRoot, d *sourceRelease, backingPrese
 
 func (d *sourceRelease) stageAt(r *sourceRoot, key, observed string, backingPresent bool, malformed, conflict error) error {
 	stage, err := r.stageAlias(key)
-	if errors.Is(err, os.ErrNotExist) {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil && err != syscall.EEXIST:
+		return malformed
+	case !backingPresent || stage.file != d.file:
+		return conflict
+	case err != nil || !stage.claimable(observed):
+		return ErrIdentityV1
+	default:
 		return nil
 	}
-	if err != nil {
-		return malformed
-	}
-	if !backingPresent || stage.file != d.file {
-		return conflict
-	}
-	if !stage.claimable(observed) {
-		return ErrIdentityV1
-	}
-	return nil
 }
 
 func (stage sourceDebt) claimable(observed string) bool {
@@ -549,7 +548,10 @@ func (r *sourceRoot) stageAlias(key string) (sourceDebt, error) {
 		stage.held = false
 		info, err = sourceEntryInfo(r, stage.leaf(), nil)
 	} else if err == nil {
-		err = r.requireVacant(publicStagePrefix+key, syscall.EEXIST)
+		public, publicErr := sourceEntryInfo(r, publicStagePrefix+key, nil)
+		if !errors.Is(publicErr, os.ErrNotExist) {
+			return sourceDebt{name: key, file: filelock.FileIdentityV1(public)}, cmp.Or[error](publicErr, syscall.EEXIST)
+		}
 	}
 	stage.file = filelock.FileIdentityV1(info)
 	return stage, err

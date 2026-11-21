@@ -1159,11 +1159,30 @@ func testSourceFinalStage(t *testing.T) {
 			keep()
 		}
 	})
-	sourceModes(t, []string{"before-detach/mixed-case", "before-detach/scan-limit"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"before-detach/mixed-case", "before-detach/scan-limit", "before-detach/held-lowercase", "before-detach/held-mixed-case"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		keepBacking := sourcePreservedEntry(t, filepath.Join(root, p.name))
 		names := []string{publicStagePrefix + strings.ToUpper(p.name[:32]) + p.name[32:]}
+		var keepHeld func()
+		if strings.Contains(mode, "/held-") {
+			public, held := publicStagePrefix+p.name, heldStagePrefix+p.name
+			sourceMust(t, os.Link(filepath.Join(root, p.name), filepath.Join(root, public)))
+			o.ops.namespace = func(op sourceNameOp, r *sourceRoot, from, to string) error {
+				sourceFailIf(t, from != public || to != held, "unexpected staging transfer %q to %q", from, to)
+				sourceMust(t, op(r, from, to))
+				return syscall.EIO
+			}
+			sourcePrepareResult(t, o, m, sourceProducer(m, parts), syscall.EIO)
+			keepHeld = sourcePreservedEntry(t, filepath.Join(root, held))
+			if strings.HasSuffix(mode, "lowercase") {
+				names[0] = public
+			}
+		}
+		o.ops.namespace = func(op sourceNameOp, r *sourceRoot, from, to string) error {
+			sourceFailIf(t, to == releaseDetached, "release attempted to move the backing")
+			return op(r, from, to)
+		}
 		scanLimit := strings.HasSuffix(mode, "scan-limit")
 		want := ErrBusyV1
 		if scanLimit {
@@ -1188,6 +1207,9 @@ func testSourceFinalStage(t *testing.T) {
 		sourceReleaseResult(t, o, p, true, want)
 		keepBacking()
 		keepMarker()
+		if keepHeld != nil {
+			keepHeld()
+		}
 		sourcePresence(t, root, releaseDetached, false)
 		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
 		for _, leaf := range names {
@@ -1198,6 +1220,7 @@ func testSourceFinalStage(t *testing.T) {
 		size, err := m.SizeV1()
 		sourceMust(t, err)
 		assertSourceReleaseCharge(t, o, m, 1, size)
+		o.ops = realSourceFS
 		sourceReleaseResult(t, o, p, true, nil)
 	})
 	t.Run("observed-alias-changed-case", func(t *testing.T) {
@@ -1221,7 +1244,7 @@ func testSourceFinalStage(t *testing.T) {
 	})
 	for _, phase := range []string{"before-clear", "before-return"} {
 		t.Run(phase, func(t *testing.T) {
-			sourceModes(t, []string{"mixed-case", "scan-limit"}, func(t *testing.T, mode string) {
+			sourceModes(t, []string{"mixed-case", "scan-limit", "canonical", "detached"}, func(t *testing.T, mode string) {
 				_, o, dir, m, parts, p := sourcePreparedBundle(t)
 				root := filepath.Join(dir, sourceDirectory)
 				beforeClear := phase == "before-clear"
@@ -1229,7 +1252,12 @@ func testSourceFinalStage(t *testing.T) {
 				sourceFailIf(t, key == p.name, "fixture needs an alternate stage spelling")
 				names := []string{publicStagePrefix + key}
 				want := ErrBusyV1
-				if mode == "scan-limit" {
+				switch mode {
+				case "canonical":
+					names, want = []string{p.name}, ErrIdentityV1
+				case "detached":
+					names, want = []string{releaseDetached}, ErrIdentityV1
+				case "scan-limit":
 					want = ErrCapacityV1
 					count := int(o.limits.Scans)
 					if beforeClear {
