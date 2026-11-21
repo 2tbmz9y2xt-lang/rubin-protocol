@@ -34,6 +34,37 @@ func (f *sourceCountedFile) ReadAt(dst []byte, off int64) (int, error) {
 
 // TestSourceVerifiedReadWindows changes backing after qualification and before a partial read.
 func TestSourceVerifiedReadWindows(t *testing.T) {
+	t.Run("refused-header-leaves-window-storage-empty", func(t *testing.T) {
+		_, o, dir, m, _, p := sourcePreparedBundle(t)
+		f, err := os.Open(filepath.Join(dir, sourceDirectory, p.name))
+		sourceMust(t, err)
+		defer f.Close()
+		size, err := m.SizeV1()
+		sourceMust(t, err)
+		check := func() {
+			t.Helper()
+			var w sourceWindows
+			_, err := o.qualifyWindows(f, m, size, nil, nil, ErrIntegrityV1, &w)
+			sourceWantError(t, err, ErrIntegrityV1, "file shape")
+			sourceFailIf(t, w.hashes != nil || w.scratch != nil, "allocated window storage for refused file")
+		}
+		size++
+		check()
+		size--
+		m.Parts[0].Length++
+		m.Parts[1].Length--
+		check()
+	})
+	t.Run("conditional-length-crosses-window", func(t *testing.T) {
+		_, o, _, m, parts := sourceBundleScene(t, 1, false)
+		record := []byte{2}
+		for _, field := range [][]byte{bytes.Repeat([]byte{0x41}, 65536-4-9), {2, 3}, {4}, {5}} {
+			record = binary.LittleEndian.AppendUint64(record, uint64(len(field)))
+			record = append(record, field...)
+		}
+		parts[3], m.Parts[3].Length = record, uint64(len(record))
+		sourcePrepareAndRead(t, o, m, parts)
+	})
 	t.Run("single-window-conditional-assurance", func(t *testing.T) {
 		m, parts := sourceBundle(1, true)
 		for _, malformed := range []bool{false, true} {
@@ -171,6 +202,7 @@ func TestSourceVerifiedReadWindows(t *testing.T) {
 		t.Run(fmt.Sprintf("offset=%d/result=%v", tc.offset, tc.result), func(t *testing.T) {
 			_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 			parts[0] = bytes.Repeat([]byte{0x21}, 65536+37)
+			copy(parts[0][65536:], []byte{0x31, 0x32})
 			m.Parts[0].Length = uint64(len(parts[0]))
 			p := sourcePrepare(t, o, m, parts)
 			f, err := os.OpenFile(filepath.Join(dir, sourceDirectory, p.name), os.O_RDWR, 0)
@@ -234,7 +266,7 @@ func testSourceProducerEndReads(t *testing.T) {
 func testSourceProducerRead(t *testing.T, site, mode string, reuse bool) {
 	t.Helper()
 	_, o, dir, m, parts := sourceBundleScene(t, 1, site == "field" || site == "flag" && mode == "early")
-	parts[0] = bytes.Repeat([]byte{1}, 65537)
+	parts[0] = bytes.Repeat([]byte{1}, 65539)
 	m.Parts[0].Length = uint64(len(parts[0]))
 	if reuse {
 		sourcePrepare(t, o, m, parts)

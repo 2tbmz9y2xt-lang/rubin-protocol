@@ -1087,7 +1087,9 @@ func TestSourcePositiveInsufficientLimits(t *testing.T) {
 	ram.RAM, descriptors.Descriptors = ram.RAM-1, 3
 	extreme := exact
 	extreme.RAM, extreme.Bytes, extreme.Scans = math.MaxInt64-1, math.MaxInt64-1, uint64(math.MaxInt-65536-4096)/512
-	for _, limits := range []SourceLimitsV1{ram, descriptors, extreme} {
+	combined := extreme
+	combined.Bytes = 1
+	for _, limits := range []SourceLimitsV1{ram, descriptors, extreme, combined} {
 		sourceOpen(t, s, sourceID(), limits, ErrCapacityV1)
 	}
 	held("insufficient limits")

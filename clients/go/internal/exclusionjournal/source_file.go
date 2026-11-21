@@ -288,6 +288,8 @@ func (o *SourceOwnerV1) qualifyWindows(f *os.File, m SourceManifestV1, size uint
 	_, _ = hash.Write(actual)
 	var out io.Writer = hash
 	if windows != nil {
+		*windows = newSourceWindows(m)
+		scratch = windows.scratch
 		out = io.MultiWriter(hash, windows)
 	}
 	if err := stream(m, fileExporter(f, m, len(actual)), out, scratch, nil, windows == nil); err != nil {
@@ -347,8 +349,8 @@ func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m S
 			return err
 		}
 		defer f.Close()
-		windows := newSourceWindows(m)
-		if _, err := o.qualifyWindows(f, m, size, windows.scratch, o.live[name], ErrIntegrityV1, windows); err != nil {
+		var windows sourceWindows
+		if _, err := o.qualifyWindows(f, m, size, nil, o.live[name], ErrIntegrityV1, &windows); err != nil {
 			return err
 		}
 		return windows.deliver(f, m, len(m.header(o.id)), visit)
@@ -361,12 +363,12 @@ type sourceWindows struct {
 	failure error
 }
 
-func newSourceWindows(m SourceManifestV1) *sourceWindows {
+func newSourceWindows(m SourceManifestV1) sourceWindows {
 	var count uint64
 	for _, part := range m.Parts {
 		count += sourceWindowCount(part.Length)
 	}
-	return &sourceWindows{hashes: make([][sha256.Size]byte, 0, count), scratch: make([]byte, scratchBytes)}
+	return sourceWindows{hashes: make([][sha256.Size]byte, 0, count), scratch: make([]byte, scratchBytes)}
 }
 
 func sourceWindowCount(length uint64) uint64 {
