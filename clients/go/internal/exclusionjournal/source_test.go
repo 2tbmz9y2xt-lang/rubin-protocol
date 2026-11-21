@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -34,26 +35,27 @@ func (f *sourceCountedFile) ReadAt(dst []byte, off int64) (int, error) {
 
 // TestSourceVerifiedReadWindows changes backing after qualification and before a partial read.
 func TestSourceVerifiedReadWindows(t *testing.T) {
-	t.Run("refused-header-leaves-window-storage-empty", func(t *testing.T) {
-		_, o, dir, m, _, p := sourcePreparedBundle(t)
-		f, err := os.Open(filepath.Join(dir, sourceDirectory, p.name))
-		sourceMust(t, err)
-		defer f.Close()
-		size, err := m.SizeV1()
-		sourceMust(t, err)
-		check := func() {
-			t.Helper()
-			var w sourceWindows
-			_, err := o.qualifyWindows(f, m, size, nil, nil, ErrIntegrityV1, &w)
-			sourceWantError(t, err, ErrIntegrityV1, "file shape")
-			sourceFailIf(t, w.hashes != nil || w.scratch != nil, "allocated window storage for refused file")
-		}
-		size++
-		check()
-		size--
+	t.Run("refused-file-allocates-less-than-one-window", func(t *testing.T) {
+		_, o, _, m, _, _ := sourcePreparedBundle(t)
 		m.Parts[0].Length++
-		m.Parts[1].Length--
-		check()
+		sourceAccount(t, func(a *mdbx.OperationAccount) {
+			visit := func(SourcePartV1) error { t.Fatal("refused file was visited"); return nil }
+			check := func(reason string) {
+				t.Helper()
+				sourceWantError(t, o.WithCapturedSourceV1(a, m, visit), ErrIntegrityV1, reason)
+				var before, after runtime.MemStats
+				runtime.ReadMemStats(&before)
+				err := o.WithCapturedSourceV1(a, m, visit)
+				runtime.ReadMemStats(&after)
+				sourceWantError(t, err, ErrIntegrityV1, reason)
+				allocated := after.TotalAlloc - before.TotalAlloc
+				t.Logf("%s: allocated %d bytes", reason, allocated)
+				sourceFailIf(t, allocated >= 64<<10, "%s: allocated %d bytes on refusal", reason, allocated)
+			}
+			check("size mismatch")
+			m.Parts[1].Length--
+			check("header mismatch at matching size")
+		})
 	})
 	t.Run("conditional-length-crosses-window", func(t *testing.T) {
 		_, o, _, m, parts := sourceBundleScene(t, 1, false)
