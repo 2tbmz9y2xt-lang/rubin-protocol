@@ -501,7 +501,7 @@ func testSourceStageObservation(t *testing.T) {
 }
 
 func testSourceStageClaim(t *testing.T) {
-	sourceModes(t, []string{"mismatch", "occupied-restore", "late-claim", "late-restore-original", "late-restore-replacement"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"mismatch", "occupied-restore", "late-claim", "late-restore-original", "late-restore-unobserved", "late-restore-replacement"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 		root, name := filepath.Join(dir, sourceDirectory), m.name(o.id)
 		public, held := ".staging-"+name, ".stage-hold-"+name
@@ -528,6 +528,10 @@ func testSourceStageClaim(t *testing.T) {
 			}
 			sourceFailIf(t, to != held, "stage claimed at %s", to)
 			claimed = true
+			if mode == "late-restore-unobserved" {
+				sourceMust(t, op(r, from, to))
+				return r.Close()
+			}
 			if mode == "late-claim" {
 				sourceMust(t, op(r, from, to))
 				return syscall.EIO
@@ -549,15 +553,23 @@ func testSourceStageClaim(t *testing.T) {
 		if mode == "late-claim" {
 			want = syscall.EIO
 		}
-		sourcePrepareResult(t, o, m, sourceProducer(m, parts), want)
+		if mode == "late-restore-unobserved" {
+			sourceAccount(t, func(a *mdbx.OperationAccount) {
+				p, err := o.PrepareSourceV1(a, m, sourceProducer(m, parts))
+				sourceFailIf(t, p != nil || !errors.Is(err, os.ErrClosed), "prepare after lost observation: %v, %v", p, err)
+			})
+		} else {
+			sourcePrepareResult(t, o, m, sourceProducer(m, parts), want)
+		}
 		sourceFailIf(t, !claimed, "stage claim did not run")
 		sourceFailIf(t, strings.HasPrefix(mode, "late-restore-") && !restored, "restore did not complete")
 		sourcePresence(t, root, name, false)
 		o.ops = realSourceFS
 		switch mode {
-		case "late-restore-original":
+		case "late-restore-original", "late-restore-unobserved":
 			sourceUnchangedEntry(t, original, before)
 			sourcePresence(t, root, held, false)
+			sourceFailIf(t, !sourceHasOpenFile(t, before), "restored public stage lost its pin")
 			sourcePrepareAndRead(t, o, m, parts)
 		case "late-claim":
 			sourceUnchangedEntry(t, filepath.Join(root, held), before)

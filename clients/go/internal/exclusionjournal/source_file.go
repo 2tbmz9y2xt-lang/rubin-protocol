@@ -711,14 +711,8 @@ func (o *SourceOwnerV1) restoreStage(r *sourceRoot, d *sourceDebt) error {
 	if err := o.retainStage(r, d.leaf(), d.file); err != nil {
 		return err
 	}
-	public := publicStagePrefix + d.name
-	err := o.ops.namespace(detachSource, r, d.leaf(), public)
-	if err != nil {
-		info, publicErr := sourceEntryInfo(r, public, nil)
-		if publicErr != nil || filelock.FileIdentityV1(info) != d.file || r.requireVacant(d.leaf(), ErrIdentityV1) != nil {
-			return err
-		}
-	}
+	err := o.ops.namespace(detachSource, r, d.leaf(), publicStagePrefix+d.name)
+	// The pin identifies the original while the next census locates it after the move.
 	d.held = false
 	return cmp.Or(err, o.syncBoundRoot(r))
 }
