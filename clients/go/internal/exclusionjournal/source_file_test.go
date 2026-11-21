@@ -897,7 +897,7 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 		sourceFailIf(t, !backingAtSync || !backingAtDetach, "release lost its backing before detachment (sync %v, detach %v)", backingAtSync, backingAtDetach)
 		sourceFailIf(t, sourceHasOpenFile(t, backing), "completed release retained the backing descriptor")
 	})
-	t.Run("marker-after-final-sync", func(t *testing.T) {
+	sourceModes(t, []string{"marker-after-final-sync", "marker-and-stage-after-final-sync"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		marker := filepath.Join(root, releaseFile)
@@ -909,6 +909,9 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 				o.ops.dirSync = func(pin *os.File) error {
 					if err := pin.Sync(); err != nil {
 						return err
+					}
+					if mode == "marker-and-stage-after-final-sync" {
+						sourceMust(t, os.WriteFile(filepath.Join(root, publicStagePrefix+p.name), []byte{42}, 0o600))
 					}
 					return os.WriteFile(marker, []byte("independent marker"), 0o600)
 				}
@@ -922,7 +925,11 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 		unchanged()
 		size, err := m.SizeV1()
 		sourceMust(t, err)
-		assertSourceReleaseCharge(t, o, m, 1, size)
+		if mode == "marker-and-stage-after-final-sync" {
+			assertSourceReleaseCharge(t, o, m, 2, size+1)
+		} else {
+			assertSourceReleaseCharge(t, o, m, 1, size)
+		}
 	})
 	t.Run("protected-stage-alias", func(t *testing.T) {
 		_, o, dir, m, _, p := sourcePreparedBundle(t)
@@ -1145,10 +1152,11 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 }
 
 func testSourceFinalStage(t *testing.T) {
-	sourceModes(t, []string{"before-detach/missing-marker", "before-detach/changed-marker"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"before-detach/missing-marker", "before-detach/changed-marker", "before-detach/missing-marker-with-alias"}, func(t *testing.T, mode string) {
 		s, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		marker, saved := filepath.Join(root, releaseFile), filepath.Join(dir, "saved-marker")
+		alias := filepath.Join(root, publicStagePrefix+strings.ToUpper(p.name))
 		keepBacking := sourcePreservedEntry(t, filepath.Join(root, p.name))
 		sourceReleaseWithFault(t, o, p, "rename-visible", syscall.EIO)
 		o.ops = realSourceFS
@@ -1160,6 +1168,9 @@ func testSourceFinalStage(t *testing.T) {
 				sourceMust(t, os.Rename(marker, saved))
 				if mode == "before-detach/changed-marker" {
 					sourceMust(t, os.WriteFile(marker, sourceReadFile(t, saved), 0o600))
+				}
+				if mode == "before-detach/missing-marker-with-alias" {
+					sourceMust(t, os.Link(filepath.Join(root, p.name), alias))
 				}
 			}
 			return nil
@@ -1173,6 +1184,10 @@ func testSourceFinalStage(t *testing.T) {
 		sourcePresence(t, root, releaseDetached, false)
 		sourcePresence(t, root, releaseFile, mode == "before-detach/changed-marker")
 		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+		if mode == "before-detach/missing-marker-with-alias" {
+			sourceUnchangedEntry(t, alias, sourceLstat(t, filepath.Join(root, p.name)))
+			sourceMust(t, os.Remove(alias))
+		}
 		sourceMust(t, os.Rename(saved, marker))
 		fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
 		sourceReleaseResult(t, fresh, nil, true, nil)

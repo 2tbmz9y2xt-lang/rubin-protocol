@@ -191,7 +191,6 @@ func (o *SourceOwnerV1) countEntry(r *sourceRoot, name, backing string, used *so
 	return o.censusFile(logical, info, used)
 }
 
-// countBacking charges the capture once even when its inode also carries the stage.
 func (o *SourceOwnerV1) countBacking(used *sourceUsage, name string, file filelock.IdentityV1, stageSeenTogether bool) {
 	used.files++
 	if o.live[name] != nil {
