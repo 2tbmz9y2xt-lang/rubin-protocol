@@ -573,8 +573,13 @@ func testSourceStageClaim(t *testing.T) {
 			sourcePrepareAndRead(t, o, m, parts)
 		case "late-claim":
 			sourceUnchangedEntry(t, filepath.Join(root, held), before)
-			assertSourceReleaseCharge(t, o, m, 1, uint64(len("old stage")))
-			sourceFailIf(t, sourceHasOpenFile(t, before), "qualified private stage retained the public pin")
+			sourceFailIf(t, !sourceHasOpenFile(t, before), "unobserved claim lost the original pin")
+			sourceFailIf(t, o.debt.size != uint64(before.Size()), "unobserved claim lost its charge")
+			o.ops.remove = func(r *os.Root, leaf string) error {
+				sourceFailIf(t, leaf != held || sourceHasOpenFile(t, before), "retry did not release its pin before private unlink")
+				o.ops.remove = (*os.Root).Remove
+				return r.Remove(leaf)
+			}
 			sourcePrepareAndRead(t, o, m, parts)
 		case "occupied-restore":
 			sourceUnchangedEntry(t, filepath.Join(root, held), second)
@@ -668,8 +673,9 @@ func testSourceStageSpace(t *testing.T) {
 				sourceMust(t, os.WriteFile(path, bytes.Repeat([]byte{42}, int(stageSize)), 0o600))
 			}
 			originalStage := sourceLstat(t, path)
+			var held *os.File
 			if mode == "held-open" {
-				held, err := os.Open(path)
+				held, err = os.Open(path)
 				sourceMust(t, err)
 				defer held.Close()
 			}
@@ -710,8 +716,12 @@ func testSourceStageSpace(t *testing.T) {
 					if mode == "post-statfs-error" {
 						return syscall.EIO
 					}
-					if mode != "held-open" {
+					if held == nil {
 						space = limits.Overhead + size
+					} else {
+						info, err := held.Stat()
+						sourceMust(t, err)
+						sourceFailIf(t, !os.SameFile(originalStage, info) || info.Sys().(*syscall.Stat_t).Nlink != 0, "space probe did not observe the unlinked original")
 					}
 				}
 				if mode == "absent-at-statfs" {
@@ -1135,6 +1145,80 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 }
 
 func testSourceFinalStage(t *testing.T) {
+	t.Run("backing-in-list", func(t *testing.T) {
+		_, o, dir, _, _, p := sourcePreparedBundle(t)
+		root := filepath.Join(dir, sourceDirectory)
+		for _, leaf := range []string{p.name, releaseDetached} {
+			path := filepath.Join(root, leaf)
+			if leaf == releaseDetached {
+				sourceMust(t, os.Rename(filepath.Join(root, p.name), path))
+			}
+			keep := sourcePreservedEntry(t, path)
+			err := o.withRoot(o.bindRoot, func(r *sourceRoot) error { return o.checkNames(r, p.name, nil, nil) })
+			sourceWantError(t, err, ErrIdentityV1, "backing observed in final directory listing")
+			keep()
+		}
+	})
+	sourceModes(t, []string{"before-detach/mixed-case", "before-detach/scan-limit"}, func(t *testing.T, mode string) {
+		_, o, dir, m, parts, p := sourcePreparedBundle(t)
+		root := filepath.Join(dir, sourceDirectory)
+		keepBacking := sourcePreservedEntry(t, filepath.Join(root, p.name))
+		names := []string{publicStagePrefix + strings.ToUpper(p.name[:32]) + p.name[32:]}
+		scanLimit := strings.HasSuffix(mode, "scan-limit")
+		want := ErrBusyV1
+		if scanLimit {
+			want = ErrCapacityV1
+		}
+		var keepMarker func()
+		o.ops.dirSync = func(pin *os.File) error {
+			sourceMust(t, pin.Sync())
+			o.ops.dirSync = (*os.File).Sync
+			keepMarker = sourcePreservedEntry(t, filepath.Join(root, releaseFile))
+			if scanLimit {
+				names = make([]string, int(o.limits.Scans)-len(sourceEntries(t, dir)))
+				for i := range names {
+					names[i] = fmt.Sprintf("%064x", i)
+				}
+			}
+			for _, leaf := range names {
+				sourceMust(t, os.WriteFile(filepath.Join(root, leaf), []byte{42}, 0o600))
+			}
+			return nil
+		}
+		sourceReleaseResult(t, o, p, true, want)
+		keepBacking()
+		keepMarker()
+		sourcePresence(t, root, releaseDetached, false)
+		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+		for _, leaf := range names {
+			path := filepath.Join(root, leaf)
+			sourceFailIf(t, !bytes.Equal(sourceReadFile(t, path), []byte{42}), "release changed %q", leaf)
+			sourceMust(t, os.Remove(path))
+		}
+		size, err := m.SizeV1()
+		sourceMust(t, err)
+		assertSourceReleaseCharge(t, o, m, 1, size)
+		sourceReleaseResult(t, o, p, true, nil)
+	})
+	t.Run("observed-alias-changed-case", func(t *testing.T) {
+		_, o, dir, m, _, p := sourcePreparedBundle(t)
+		root := filepath.Join(dir, sourceDirectory)
+		backing := filepath.Join(root, p.name)
+		lower := filepath.Join(root, publicStagePrefix+p.name)
+		mixed := filepath.Join(root, publicStagePrefix+strings.ToUpper(p.name[:32])+p.name[32:])
+		sourceMust(t, os.Link(backing, lower))
+		sourceReadRefusal(t, o, m, ErrBusyV1, "observed stage")
+		aside := filepath.Join(dir, "alias")
+		sourceMust(t, os.Rename(lower, aside))
+		sourceMust(t, os.Rename(aside, mixed))
+		keepBacking, keepStage := sourcePreservedEntry(t, backing), sourcePreservedEntry(t, mixed)
+		sourceReleaseResult(t, o, p, true, ErrIdentityV1)
+		keepBacking()
+		keepStage()
+		sourcePresence(t, root, releaseFile, false)
+		sourcePresence(t, root, releaseScratch, false)
+		assertSourceReleaseCharge(t, o, m, 1, uint64(sourceLstat(t, backing).Size()))
+	})
 	for _, phase := range []string{"before-clear", "before-return"} {
 		t.Run(phase, func(t *testing.T) {
 			sourceModes(t, []string{"mixed-case", "scan-limit"}, func(t *testing.T, mode string) {
@@ -1296,12 +1380,17 @@ func testSourceReleaseSpelling(t *testing.T) {
 		}
 		if !lateAlias {
 			var unchanged func(string)
-			if crossKey {
-				marker := sourcePreservedEntry(t, filepath.Join(root, releaseFile))
+			if crossKey || mode == "same-key-before-content" {
 				alias := sourcePreservedEntry(t, stage)
 				backing := sourcePreservedEntry(t, filepath.Join(root, p.name))
+				var marker func()
+				if crossKey {
+					marker = sourcePreservedEntry(t, filepath.Join(root, releaseFile))
+				}
 				unchanged = func(string) {
-					marker()
+					if marker != nil {
+						marker()
+					}
 					alias()
 					backing()
 				}
@@ -1703,6 +1792,30 @@ func testSourceBackingLinks(t *testing.T) {
 }
 
 func testSourceMarkerCollision(t *testing.T) {
+	t.Run("changed-record", func(t *testing.T) {
+		s, o, dir, m, parts, p := sourcePreparedBundle(t)
+		root := filepath.Join(dir, sourceDirectory)
+		backing := sourcePreservedEntry(t, filepath.Join(root, p.name))
+		var written os.FileInfo
+		var image []byte
+		o.ops.write = func(f *os.File, record []byte) (int, error) {
+			image = slices.Clone(record)
+			image[len(image)-1] ^= 1
+			var err error
+			written, err = f.Stat()
+			sourceMust(t, err)
+			return f.Write(image)
+		}
+		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
+		path := filepath.Join(root, releaseScratch)
+		sourceUnchangedEntry(t, path, written)
+		sourceFailIf(t, !bytes.Equal(image, sourceReadFile(t, path)), "scratch record changed after refusal")
+		sourcePresence(t, root, releaseFile, false)
+		backing()
+		fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
+		sourcePresence(t, root, releaseScratch, false)
+		sourceRead(t, fresh, m, parts)
+	})
 	t.Run("changed-scratch", func(t *testing.T) {
 		_, o, dir, _, _, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
@@ -2827,6 +2940,70 @@ func testSourceHeldRestoreIO(t *testing.T) {
 }
 
 func testSourceProtectedPublication(t *testing.T) {
+	for _, phase := range []string{"before-link", "publish-handoff", "reuse-handoff"} {
+		t.Run(phase, func(t *testing.T) {
+			sourceModes(t, []string{"mixed-case", "scan-limit"}, func(t *testing.T, mode string) {
+				s, o, dir, m, parts := sourceBundleScene(t, 1, false)
+				root, key := filepath.Join(dir, sourceDirectory), m.name(o.id)
+				if phase == "reuse-handoff" {
+					sourcePrepare(t, o, m, parts)
+				}
+				var fixtures []string
+				var keepBacking func()
+				populate := func() error {
+					if phase != "before-link" {
+						keepBacking = sourcePreservedEntry(t, filepath.Join(root, key))
+					}
+					fixtures = []string{publicStagePrefix + strings.ToUpper(key[:32]) + key[32:]}
+					if mode == "scan-limit" {
+						fixtures = make([]string, int(o.limits.Scans)-len(sourceEntries(t, dir)))
+						for i := range fixtures {
+							fixtures[i] = fmt.Sprintf("%064x", i)
+						}
+					}
+					for _, name := range fixtures {
+						sourceMust(t, os.WriteFile(filepath.Join(root, name), []byte{42}, 0o600))
+					}
+					return nil
+				}
+				producer := sourceProducer(m, parts)
+				if phase == "before-link" {
+					producer = sourceAfterFirstPart(m, parts, populate)
+					o.ops.close = func(f *os.File) error {
+						sourceMust(t, f.Close())
+						keepBacking = sourcePreservedEntry(t, filepath.Join(root, heldStagePrefix+key))
+						return nil
+					}
+				} else {
+					o.ops.dirSync = func(f *os.File) error {
+						sourceMust(t, f.Sync())
+						o.ops.dirSync = (*os.File).Sync
+						return populate()
+					}
+				}
+				want := ErrIdentityV1
+				if mode == "scan-limit" {
+					want = ErrCapacityV1
+				}
+				sourcePrepareResult(t, o, m, producer, want)
+				sourcePresence(t, root, heldStagePrefix+key, phase == "before-link")
+				sourcePresence(t, root, key, phase != "before-link")
+				if keepBacking != nil {
+					keepBacking()
+					if mode == "mixed-case" && phase != "before-link" {
+						sourceReadRefusal(t, o, m, ErrBusyV1, "public stage at handoff")
+					}
+				}
+				for _, name := range fixtures {
+					path := filepath.Join(root, name)
+					sourceFailIf(t, !bytes.Equal(sourceReadFile(t, path), []byte{42}), "prepare changed %q", name)
+					sourceMust(t, os.Remove(path))
+				}
+				fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
+				sourcePrepareAndRead(t, fresh, m, parts)
+			})
+		})
+	}
 	sourceModes(t, []string{"truncated-publication", "truncated-reuse", "corrupt-publication", "corrupt-reuse"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 		if strings.HasSuffix(mode, "-reuse") {
@@ -2916,7 +3093,7 @@ func testSourceProtectedPublication(t *testing.T) {
 		}
 		sourcePrepareResult(t, o, m, producer, want)
 		sourceFailIf(t, string(sourceReadFile(t, path)) != "independent", "publication changed independent staging bytes")
-		sourcePresence(t, root, held, mode == "link-error")
+		sourcePresence(t, root, held, mode != "public-before-token")
 		sourcePresence(t, root, key, mode != "public-before-link")
 		if mode != "public-before-link" {
 			final := filepath.Join(root, key)

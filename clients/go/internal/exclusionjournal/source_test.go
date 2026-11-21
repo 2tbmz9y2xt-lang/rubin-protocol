@@ -22,6 +22,16 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/policycontrol"
 )
 
+type sourceCountedFile struct {
+	*os.File
+	reads int
+}
+
+func (f *sourceCountedFile) ReadAt(dst []byte, off int64) (int, error) {
+	f.reads++
+	return f.File.ReadAt(dst, off)
+}
+
 // TestSourceVerifiedReadWindows changes backing after qualification and before a partial read.
 func TestSourceVerifiedReadWindows(t *testing.T) {
 	t.Run("single-window-conditional-assurance", func(t *testing.T) {
@@ -32,18 +42,20 @@ func TestSourceVerifiedReadWindows(t *testing.T) {
 			if malformed {
 				data = data[:len(data)-1]
 			}
-			reader := bytes.NewReader(data)
-			reads := 0
-			part := SourcePartV1{Kind: OriginalAssuranceV1, Length: uint64(len(data)), ReadAt: func(dst []byte, off int64) (int, error) {
-				reads++
-				return reader.ReadAt(dst, off)
-			}}
+			path := filepath.Join(t.TempDir(), "assurance")
+			sourceMust(t, os.WriteFile(path, data, 0o600))
+			f, err := os.Open(path)
+			sourceMust(t, err)
+			spec := SourcePartSpecV1{Kind: OriginalAssuranceV1, Length: uint64(len(data))}
+			file := &sourceCountedFile{File: f}
+			part := w.part(io.NewSectionReader(file, 0, int64(len(data))), spec, [][sha256.Size]byte{sha256.Sum256(data)})
 			var want error
 			if malformed {
 				want = ErrIntegrityV1
 			}
 			sourceWantError(t, w.checkAssurance(part), want, "conditional assurance")
-			sourceFailIf(t, reads != 1, "conditional assurance made %d storage reads", reads)
+			sourceMust(t, f.Close())
+			sourceFailIf(t, file.reads != 1, "conditional assurance made %d file reads", file.reads)
 		}
 	})
 	t.Run("visitor-lifetime-and-funding", func(t *testing.T) {

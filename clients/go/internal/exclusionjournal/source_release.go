@@ -16,12 +16,13 @@ import (
 )
 
 const (
-	releaseFile     = ".release"
-	releaseScratch  = ".release-scratch"
-	releaseDetached = ".release-backing"
-	releasePrefix   = 4 + 16 + 16 + 8 + 32
-	releaseMax      = releasePrefix + bundleHeader + 6*9 + sha256.Size
+	releaseFile    = ".release"
+	releaseScratch = ".release-scratch"
+	releasePrefix  = 4 + 16 + 16 + 8 + 32
+	releaseMax     = releasePrefix + bundleHeader + 6*9 + sha256.Size
 )
+
+const releaseDetached = ".release-backing"
 
 type releasePhase uint8
 
@@ -58,7 +59,7 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 					return err
 				}
 				d = &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
-				if o.debt.matchesKey(p.name) && d.sharedStageKey(o.debt) == "" {
+				if o.debt.matchesKey(p.name) && o.debt.sharedKey(d.file) == "" {
 					return ErrBusyV1
 				}
 				d.record = o.releaseRecord(d)
@@ -107,13 +108,10 @@ func readRelease(r *sourceRoot) ([]byte, filelock.IdentityV1, error) {
 }
 
 func readReleaseFile(f *os.File) ([]byte, filelock.IdentityV1, error) {
-	info, err := f.Stat()
-	if err != nil {
-		return nil, filelock.IdentityV1{}, ErrIntegrityV1
-	}
+	info, statErr := f.Stat()
 	record := make([]byte, releaseMax+1)
-	n, err := io.ReadFull(f, record)
-	if !errors.Is(err, io.ErrUnexpectedEOF) {
+	n, err := f.ReadAt(record, 0)
+	if statErr != nil || n == 0 || !errors.Is(err, io.EOF) {
 		return nil, filelock.IdentityV1{}, ErrIntegrityV1
 	}
 	return record[:n], filelock.FileIdentityV1(info), nil
@@ -186,7 +184,6 @@ func (o *SourceOwnerV1) releaseBacking(r *sourceRoot, d *sourceRelease, scratch 
 	return true, err
 }
 
-// location checks the public name before the private name for a pending intent.
 func (d *sourceRelease) location(r *sourceRoot, canonicalPinErr error) (string, error) {
 	if d == nil {
 		if r.requireVacant(releaseDetached, ErrIntegrityV1) != nil {
@@ -282,17 +279,17 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	if _, err := o.space(r, uint64(len(d.record)), nil); err != nil {
 		return err
 	}
-	id, err := o.writeRelease(r, d.record)
-	if err != nil {
-		return err
-	}
-	return o.publishMarker(r, d, id)
+	return o.writeRelease(r, d)
 }
 
 func (o *SourceOwnerV1) publishMarker(r *sourceRoot, d *sourceRelease, id filelock.IdentityV1) error {
 	pin, err := r.pinFile(releaseScratch, nil, &id)
 	if err != nil {
 		return err
+	}
+	if record, _, err := readReleaseFile(pin); err != nil || !bytes.Equal(record, d.record) {
+		_ = pin.Close()
+		return ErrIntegrityV1
 	}
 	visibility, err := o.linkVisible(r, releaseScratch, releaseFile, id)
 	if visibility != sourceNotVisible {
@@ -311,21 +308,24 @@ func (o *SourceOwnerV1) publishMarker(r *sourceRoot, d *sourceRelease, id filelo
 	return err
 }
 
-func (o *SourceOwnerV1) writeRelease(r *sourceRoot, record []byte) (filelock.IdentityV1, error) {
+func (o *SourceOwnerV1) writeRelease(r *sourceRoot, d *sourceRelease) error {
 	f, err := r.OpenFile(releaseScratch, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return filelock.IdentityV1{}, err
+		return err
 	}
 	defer f.Close()
 	w := sourceFileWriter{o: o, file: f}
-	if _, err := w.Write(record); err != nil {
-		return filelock.IdentityV1{}, err
+	if _, err := w.Write(d.record); err != nil {
+		return err
 	}
 	info, err := f.Stat()
 	if err != nil {
-		return filelock.IdentityV1{}, err
+		return err
 	}
-	return filelock.FileIdentityV1(info), cmp.Or(o.ops.chmod(f, 0o600), o.finishFile(f))
+	if err := cmp.Or(o.ops.chmod(f, 0o600), o.finishFile(f)); err != nil {
+		return err
+	}
+	return o.publishMarker(r, d, filelock.FileIdentityV1(info))
 }
 
 func (o *SourceOwnerV1) continueRelease(r *sourceRoot, d *sourceRelease, scratch []byte) error {
@@ -367,20 +367,32 @@ func (o *SourceOwnerV1) releaseBoundary(r *sourceRoot, d *sourceRelease, final b
 	if err != nil || present && final || !present && d.phase != releaseMarkerClearing {
 		return false, cmp.Or(err, ErrIntegrityV1)
 	}
-	return present, o.finalStage(r, d.name)
+	return present, o.checkNames(r, d.name, nil, nil)
 }
 
-// finalStage checks the current public spellings and the reserved stage before release completes.
-func (o *SourceOwnerV1) finalStage(r *sourceRoot, name string) error {
-	entries, err := o.entries(r)
+func (o *SourceOwnerV1) checkNames(r *sourceRoot, name string, publishing error, moving *sourceRelease) error {
+	entries, err := o.entries(r, publishing)
+	final := publishing == nil && moving == nil
 	for _, entry := range entries {
-		key, public := strings.CutPrefix(entry.Name(), publicStagePrefix)
-		if entry.Name() == heldStagePrefix+name || public && strings.EqualFold(key, name) {
-			_, err := sourceEntryInfo(r, entry.Name(), ErrIntegrityV1)
-			return cmp.Or(err, ErrBusyV1)
+		leaf := entry.Name()
+		if final && (leaf == name || leaf == releaseDetached) {
+			return ErrIdentityV1
+		}
+		if key, matches := boundaryStage(leaf, name, final); matches {
+			if moving != nil {
+				err = cmp.Or(err, moving.stageAt(r, key, o.debt.sharedKey(moving.file), true, ErrIntegrityV1, ErrBusyV1))
+			} else {
+				_, obsErr := sourceEntryInfo(r, leaf, ErrIntegrityV1)
+				err = cmp.Or(err, publishing, obsErr, ErrBusyV1)
+			}
 		}
 	}
 	return err
+}
+
+func boundaryStage(leaf, name string, final bool) (string, bool) {
+	key, public := strings.CutPrefix(leaf, publicStagePrefix)
+	return key, public && strings.EqualFold(key, name) || final && leaf == heldStagePrefix+name
 }
 
 func (d *sourceRelease) checkMarker(record []byte, id filelock.IdentityV1, err error) (bool, error) {
@@ -408,7 +420,6 @@ func (o *SourceOwnerV1) syncedMarker(r *sourceRoot, d *sourceRelease, pin *os.Fi
 	return present, cmp.Or(o.currentRoot(), err)
 }
 
-// releaseIntent qualifies the visible record before its backing can be detached.
 func (o *SourceOwnerV1) releaseIntent(r *sourceRoot, d *sourceRelease, scratch []byte) error {
 	if o.release != nil {
 		pin, err := openSourceFile(r, releaseFile, nil)
@@ -457,15 +468,15 @@ func (d *sourceRelease) canonicalVacant(r *sourceRoot) error {
 	if d == nil {
 		return nil
 	}
-	_, err := r.Lstat(d.name)
-	if errors.Is(err, os.ErrNotExist) {
+	switch err := r.requireVacant(d.name, ErrIdentityV1); err {
+	case nil:
 		return nil
-	}
-	if err != nil {
+	case ErrIdentityV1:
+		_, err = d.location(r, nil)
+		return cmp.Or(err, ErrIdentityV1)
+	default:
 		return ErrIntegrityV1
 	}
-	_, err = d.location(r, nil)
-	return cmp.Or(err, ErrIdentityV1)
 }
 
 func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name string, scratch []byte) error {
@@ -478,10 +489,13 @@ func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name stri
 	if (name != "") != (d.phase == releaseBackingPending) {
 		return ErrIdentityV1
 	}
-	if name == "" {
+	switch name {
+	case "":
 		return nil
-	}
-	if name != releaseDetached {
+	case d.name:
+		if err := o.checkNames(r, name, nil, d); err != nil {
+			return err
+		}
 		if err := o.ops.namespace(detachSource, r, name, releaseDetached); err != nil {
 			return err
 		}
@@ -497,36 +511,35 @@ func (o *SourceOwnerV1) checkStage(r *sourceRoot, d *sourceRelease, backingPrese
 	if o.debt.matchesKey(key) {
 		key = o.debt.name
 	}
-	stage, err := r.stageAlias(key)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		if !backingPresent {
-			return nil
-		}
-	case err != nil:
-		return ErrIntegrityV1
-	case !backingPresent || stage.file != d.file:
-		return ErrBusyV1
+	observed := o.debt.sharedKey(d.file)
+	if err := d.stageAt(r, key, observed, backingPresent, ErrIntegrityV1, ErrBusyV1); err != nil {
+		return err
 	}
-	return d.checkStageSpelling(r, stage, err, d.sharedStageKey(o.debt))
+	if backingPresent && observed != "" && observed != key {
+		return d.stageAt(r, observed, observed, true, ErrIdentityV1, ErrIdentityV1)
+	}
+	return nil
 }
 
-func (d *sourceRelease) checkStageSpelling(r *sourceRoot, stage sourceDebt, err error, observed string) error {
-	if key := cmp.Or(observed, d.name); stage.name != key {
-		stage, err = r.stageAlias(key)
-	}
+func (d *sourceRelease) stageAt(r *sourceRoot, key, observed string, backingPresent bool, malformed, conflict error) error {
+	stage, err := r.stageAlias(key)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	wrongFile := observed != "" && stage.file != d.file
-	if err != nil || wrongFile || stage.file == d.file && !stage.claimable(observed) {
+	if err != nil {
+		return malformed
+	}
+	if !backingPresent || stage.file != d.file {
+		return conflict
+	}
+	if !stage.claimable(observed) {
 		return ErrIdentityV1
 	}
 	return nil
 }
 
 func (stage sourceDebt) claimable(observed string) bool {
-	return stage.held || validHeldStageKey(observed)
+	return stage.held || stage.name == observed && validHeldStageKey(observed)
 }
 
 func (r *sourceRoot) stageAlias(key string) (sourceDebt, error) {
@@ -542,7 +555,6 @@ func (r *sourceRoot) stageAlias(key string) (sourceDebt, error) {
 	return stage, err
 }
 
-// unlinkDetached pins and qualifies the private file before removing its last link.
 func (o *SourceOwnerV1) unlinkDetached(r *sourceRoot, d *sourceRelease, scratch []byte) error {
 	if err := d.canonicalVacant(r); err != nil {
 		return err
@@ -580,8 +592,8 @@ func sourceLinks(f *os.File) (uint64, error) {
 	return uint64(stat.Nlink), nil
 }
 
-func (d *sourceRelease) sharedStageKey(debt sourceDebt) string {
-	if debt.backing != "" && debt.file == d.file {
+func (debt sourceDebt) sharedKey(file filelock.IdentityV1) string {
+	if debt.backing != "" && debt.file == file {
 		return debt.name
 	}
 	return ""
@@ -603,7 +615,7 @@ func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os
 	if err := o.requireBackingLinks(r, d, f, 1); err != nil {
 		return err
 	}
-	if d.sharedStageKey(o.debt) != "" {
+	if o.debt.sharedKey(d.file) != "" {
 		o.stage.Clear()
 		o.debt = sourceDebt{}
 	}
@@ -611,7 +623,7 @@ func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os
 }
 
 func (o *SourceOwnerV1) dropReleaseAlias(r *sourceRoot, d *sourceRelease, f *os.File) error {
-	observed := d.sharedStageKey(o.debt)
+	observed := o.debt.sharedKey(d.file)
 	stage, err := r.stageAlias(cmp.Or(observed, d.name))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
