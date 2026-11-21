@@ -471,13 +471,16 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 	return nil
 }
 
-func (d *sourceRelease) canonicalVacant(r *sourceRoot) error {
+func (d *sourceRelease) checkDetachedIntent(r *sourceRoot) error {
 	if d != nil {
 		switch _, err := r.Lstat(d.name); {
 		case err == nil:
 			_, err = d.location(r, nil)
 			return cmp.Or(err, ErrIdentityV1)
 		case !errors.Is(err, os.ErrNotExist):
+			return ErrIntegrityV1
+		}
+		if present, _ := d.checkMarker(readRelease(r)); !present {
 			return ErrIntegrityV1
 		}
 	}
@@ -560,7 +563,7 @@ func (r *sourceRoot) stageAlias(key string) (sourceDebt, error) {
 }
 
 func (o *SourceOwnerV1) unlinkDetached(r *sourceRoot, d *sourceRelease, scratch []byte) error {
-	if err := d.canonicalVacant(r); err != nil {
+	if err := d.checkDetachedIntent(r); err != nil {
 		return err
 	}
 	f, err := openSourceFile(r, releaseDetached, nil)
@@ -608,10 +611,7 @@ func (o *SourceOwnerV1) authorizeUnlink(r *sourceRoot, d *sourceRelease, f *os.F
 	if err != nil || links != wantLinks {
 		return o.restoreBacking(r, d, cmp.Or(err, ErrIdentityV1))
 	}
-	if present, _ := d.checkMarker(readRelease(r)); !present {
-		return ErrIntegrityV1
-	}
-	return nil
+	return d.checkDetachedIntent(r)
 }
 
 // singleBackingLink retires the shared stage charge once the backing has exactly one link.
@@ -653,7 +653,7 @@ func (o *SourceOwnerV1) dropReleaseAlias(r *sourceRoot, d *sourceRelease, f *os.
 		return err
 	}
 	o.debt.removed = true
-	return d.canonicalVacant(r)
+	return d.checkDetachedIntent(r)
 }
 
 // afterUnlink allows another unlink only while the original private entry is identifiable.

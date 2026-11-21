@@ -1606,21 +1606,26 @@ func testSourcePrivateNames(t *testing.T) {
 }
 
 func testSourceDetachedRelease(t *testing.T) {
-	sourceModes(t, []string{"marker-missing", "marker-different", "marker-missing-with-alias"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"marker-missing", "marker-different", "marker-missing-with-alias", "marker-missing-after-claim"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		marker, saved := filepath.Join(root, releaseFile), filepath.Join(dir, "saved-marker")
 		backing := sourceLstat(t, filepath.Join(root, p.name))
 		data := sourceReadFile(t, filepath.Join(root, p.name))
 		alias := publicStagePrefix + p.name
-		if mode == "marker-missing-with-alias" {
+		boundary := releaseDetached
+		if mode == "marker-missing-after-claim" {
+			boundary = heldStagePrefix + p.name
+		}
+		hasAlias := mode == "marker-missing-with-alias" || mode == "marker-missing-after-claim"
+		if hasAlias {
 			sourceMust(t, os.Link(filepath.Join(root, p.name), filepath.Join(root, alias)))
 		}
 		o.ops.namespace = func(op sourceNameOp, r *sourceRoot, from, to string) error {
 			if err := op(r, from, to); err != nil {
 				return err
 			}
-			if to == releaseDetached {
+			if to == boundary {
 				sourceMust(t, os.Rename(marker, saved))
 				if mode == "marker-different" {
 					sourceMust(t, os.WriteFile(marker, sourceReadFile(t, saved), 0o600))
@@ -1632,7 +1637,11 @@ func testSourceDetachedRelease(t *testing.T) {
 		detached := filepath.Join(root, releaseDetached)
 		sourceUnchangedEntry(t, detached, backing)
 		sourceFailIf(t, !bytes.Equal(data, sourceReadFile(t, detached)), "release changed detached contents")
-		if mode == "marker-missing-with-alias" {
+		if hasAlias {
+			if mode == "marker-missing-after-claim" {
+				sourcePresence(t, root, alias, false)
+				alias = boundary
+			}
 			sourceUnchangedEntry(t, filepath.Join(root, alias), backing)
 		}
 		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)

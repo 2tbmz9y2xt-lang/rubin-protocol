@@ -648,7 +648,7 @@ func (o *SourceOwnerV1) unlinkStage(r *sourceRoot, d *sourceDebt) error {
 		return err
 	}
 	o.stage.Clear()
-	if err := o.release.canonicalVacant(r); err != nil {
+	if err := o.release.checkDetachedIntent(r); err != nil {
 		return err
 	}
 	d.file = filelock.FileIdentityV1(info)
