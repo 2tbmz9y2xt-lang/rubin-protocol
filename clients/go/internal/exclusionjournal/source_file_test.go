@@ -1145,6 +1145,39 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 }
 
 func testSourceFinalStage(t *testing.T) {
+	sourceModes(t, []string{"before-detach/missing-marker", "before-detach/changed-marker"}, func(t *testing.T, mode string) {
+		s, o, dir, m, parts, p := sourcePreparedBundle(t)
+		root := filepath.Join(dir, sourceDirectory)
+		marker, saved := filepath.Join(root, releaseFile), filepath.Join(dir, "saved-marker")
+		keepBacking := sourcePreservedEntry(t, filepath.Join(root, p.name))
+		sourceReleaseWithFault(t, o, p, "rename-visible", syscall.EIO)
+		o.ops = realSourceFS
+		o.ops.remove = func(r *os.Root, leaf string) error {
+			if err := r.Remove(leaf); err != nil {
+				return err
+			}
+			if leaf == releaseScratch {
+				sourceMust(t, os.Rename(marker, saved))
+				if mode == "before-detach/changed-marker" {
+					sourceMust(t, os.WriteFile(marker, sourceReadFile(t, saved), 0o600))
+				}
+			}
+			return nil
+		}
+		o.ops.namespace = func(_ sourceNameOp, _ *sourceRoot, from, to string) error {
+			t.Fatalf("release attempted to move %q to %q without its marker", from, to)
+			return syscall.EIO
+		}
+		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
+		keepBacking()
+		sourcePresence(t, root, releaseDetached, false)
+		sourcePresence(t, root, releaseFile, mode == "before-detach/changed-marker")
+		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+		sourceMust(t, os.Rename(saved, marker))
+		fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
+		sourceReleaseResult(t, fresh, nil, true, nil)
+		sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "reopened release retained entries")
+	})
 	t.Run("backing-in-list", func(t *testing.T) {
 		_, o, dir, _, _, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)

@@ -358,16 +358,16 @@ func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) erro
 }
 
 func (o *SourceOwnerV1) releaseBoundary(r *sourceRoot, d *sourceRelease) (bool, error) {
-	if r.requireVacant(d.name, ErrIdentityV1) != nil || r.requireVacant(releaseDetached, ErrIdentityV1) != nil {
+	var moving *sourceRelease
+	if d.phase == releaseBackingPending {
+		moving = d
+	} else if r.requireVacant(d.name, ErrIdentityV1) != nil || r.requireVacant(releaseDetached, ErrIdentityV1) != nil {
 		return false, ErrIdentityV1
 	}
+	listed, scanErr := o.checkNames(r, d.name, nil, moving)
 	present, err := d.checkMarker(readRelease(r))
-	if err != nil || !present && d.phase != releaseMarkerClearing {
-		return false, cmp.Or(err, ErrIntegrityV1)
-	}
-	listed, err := o.checkNames(r, d.name, nil, nil)
-	if listed != present {
-		return false, cmp.Or(err, ErrIntegrityV1)
+	if scanErr != nil || listed != present || !present && d.phase != releaseMarkerClearing {
+		return false, cmp.Or(scanErr, ErrIntegrityV1)
 	}
 	return present, err
 }
@@ -501,7 +501,7 @@ func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name stri
 	case "":
 		return nil
 	case d.name:
-		if _, err := o.checkNames(r, name, nil, d); err != nil {
+		if _, err := o.releaseBoundary(r, d); err != nil {
 			return err
 		}
 		if err := o.ops.namespace(detachSource, r, name, releaseDetached); err != nil {
