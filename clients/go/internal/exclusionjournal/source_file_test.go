@@ -847,6 +847,7 @@ func testSourceUnfundedBacking(t *testing.T, o *SourceOwnerV1, m SourceManifestV
 
 func TestSourceReleaseOnlyRetry(t *testing.T) {
 	t.Run("stage-spelling", testSourceReleaseSpelling)
+	t.Run("final-stage", testSourceFinalStage)
 	t.Run("canonical-refilled", testSourceRefilledCanonical)
 	sourceModes(t, []string{"published-marker-pin", "retry-marker-pin"}, func(t *testing.T, mode string) {
 		_, o, dir, _, _, p := sourcePreparedBundle(t)
@@ -1121,6 +1122,66 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 	sourceModes(t, []string{"scratch-sync", "pending-absent", "pending-visible", "clear-present", "clear-absent"}, testSourceReleaseInconclusive)
 }
 
+func testSourceFinalStage(t *testing.T) {
+	for _, phase := range []string{"before-clear", "before-return"} {
+		t.Run(phase, func(t *testing.T) {
+			sourceModes(t, []string{"mixed-case", "scan-limit"}, func(t *testing.T, mode string) {
+				_, o, dir, m, parts, p := sourcePreparedBundle(t)
+				root := filepath.Join(dir, sourceDirectory)
+				beforeClear := phase == "before-clear"
+				key := strings.ToUpper(p.name[:32]) + p.name[32:]
+				sourceFailIf(t, key == p.name, "fixture needs an alternate stage spelling")
+				names := []string{publicStagePrefix + key}
+				want := ErrBusyV1
+				if mode == "scan-limit" {
+					want = ErrCapacityV1
+					count := int(o.limits.Scans)
+					if beforeClear {
+						count--
+					}
+					names = make([]string, count)
+					for i := range names {
+						names[i] = fmt.Sprintf("%064x", i)
+					}
+				}
+				var marker []byte
+				o.ops.dirSync = func(pin *os.File) error {
+					sourceMust(t, pin.Sync())
+					_, err := os.Lstat(filepath.Join(root, releaseFile))
+					if err == nil {
+						marker = sourceReadFile(t, filepath.Join(root, releaseFile))
+					}
+					_, backing := os.Lstat(filepath.Join(root, p.name))
+					if !errors.Is(backing, os.ErrNotExist) || beforeClear != (err == nil) {
+						return nil
+					}
+					o.ops.dirSync = (*os.File).Sync
+					for _, name := range names {
+						sourceMust(t, os.WriteFile(filepath.Join(root, name), []byte{42}, 0o600))
+					}
+					return nil
+				}
+				sourceReleaseResult(t, o, p, true, want)
+				sourcePresence(t, root, releaseFile, beforeClear)
+				if beforeClear {
+					sourceFailIf(t, !bytes.Equal(marker, sourceReadFile(t, filepath.Join(root, releaseFile))), "release marker changed")
+				}
+				sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+				for _, name := range names {
+					path := filepath.Join(root, name)
+					sourceFailIf(t, !bytes.Equal(sourceReadFile(t, path), []byte{42}), "release changed entry %q", name)
+					sourceMust(t, os.Remove(path))
+				}
+				size, err := m.SizeV1()
+				sourceMust(t, err)
+				assertSourceReleaseCharge(t, o, m, 1, size)
+				sourceReleaseResult(t, o, p, true, nil)
+				sourcePrepareAndRead(t, o, sourceForeign(m), parts)
+			})
+		})
+	}
+}
+
 func testSourceReleaseSpelling(t *testing.T) {
 	sourceModes(t, []string{"unqualified-cross-key", "unqualified-lowercase-cross-key"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts, p := sourcePreparedBundle(t)
@@ -1262,12 +1323,14 @@ func testSourceReleaseSpelling(t *testing.T) {
 		o.ops = realSourceFS
 		if crossKey || lateAlias {
 			sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+			original := sourceLstat(t, stage)
 			sourceMust(t, os.Remove(stage))
 			if !strings.HasSuffix(mode, "-live") {
 				o = sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
 				p = nil
 			}
 			sourceReleaseResult(t, o, p, true, nil)
+			sourceFailIf(t, sourceHasOpenFile(t, original), "completed release kept the backing descriptor")
 			sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "resumed release retained an entry")
 			sourcePrepareAndRead(t, o, sourceForeign(m), parts)
 		}

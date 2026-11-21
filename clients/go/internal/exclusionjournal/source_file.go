@@ -75,26 +75,33 @@ func detachSource(r *sourceRoot, from, to string) error {
 
 var realSourceFS = sourceFS{statfs: syscall.Fstatfs, write: (*os.File).Write, fileSync: (*os.File).Sync, close: (*os.File).Close, chmod: (*os.File).Chmod, namespace: sourceNameOp.run, remove: (*os.Root).Remove, dirSync: (*os.File).Sync}
 
-func (o *SourceOwnerV1) census(r *sourceRoot, reopening bool) (sourceUsage, error) {
+func (o *SourceOwnerV1) entries(r *sourceRoot) ([]os.DirEntry, error) {
 	f, err := r.Open(".")
 	if err != nil {
-		return sourceUsage{}, err
+		return nil, err
 	}
 	entries, err := f.ReadDir(int(min(o.limits.Scans, math.MaxInt)))
 	_ = f.Close()
 	if err != nil && !errors.Is(err, io.EOF) {
-		return sourceUsage{}, err
+		return nil, err
 	}
 	if uint64(len(entries)) >= o.limits.Scans {
-		return sourceUsage{}, ErrCapacityV1
+		return nil, ErrCapacityV1
 	}
-	return o.censusFiles(r, entries, reopening)
+	return entries, nil
 }
 
-func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, reopening bool) (sourceUsage, error) {
+func (o *SourceOwnerV1) census(r *sourceRoot, reopening bool) (sourceUsage, error) {
+	if r.usage != nil {
+		return *r.usage, nil
+	}
+	entries, err := o.entries(r)
+	if err != nil {
+		return sourceUsage{}, err
+	}
 	used := sourceUsage{missing: len(o.live)}
 	absentRelease := o.release
-	backing, err := absentRelease.location(r)
+	backing, err := absentRelease.location(r, nil)
 	if err != nil {
 		return sourceUsage{}, err
 	}
@@ -104,9 +111,6 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, reopen
 	used.stageCharged = o.debt.name != ""
 	for _, entry := range entries {
 		name := entry.Name()
-		if isStageLeaf(name) {
-			continue
-		}
 		if err := o.countEntry(r, name, backing, &used); err != nil {
 			return sourceUsage{}, err
 		}
@@ -114,7 +118,7 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, reopen
 			absentRelease = nil
 		}
 	}
-	return o.includeAbsent(used, absentRelease)
+	return o.includeAbsent(r, used, absentRelease)
 }
 
 func isStageLeaf(name string) bool {
@@ -162,6 +166,9 @@ func validHeldStageKey(key string) bool {
 }
 
 func (o *SourceOwnerV1) countEntry(r *sourceRoot, name, backing string, used *sourceUsage) error {
+	if isStageLeaf(name) {
+		return nil
+	}
 	logical := name
 	switch name {
 	case releaseFile:
@@ -202,7 +209,7 @@ func (o *SourceOwnerV1) countBacking(used *sourceUsage, name string, file filelo
 	}
 }
 
-func (o *SourceOwnerV1) includeAbsent(used sourceUsage, absentRelease *sourceRelease) (sourceUsage, error) {
+func (o *SourceOwnerV1) includeAbsent(r *sourceRoot, used sourceUsage, absentRelease *sourceRelease) (sourceUsage, error) {
 	var absentBytes uint64
 	if absentRelease != nil {
 		o.countBacking(&used, absentRelease.name, absentRelease.file, false)
@@ -222,6 +229,7 @@ func (o *SourceOwnerV1) includeAbsent(used sourceUsage, absentRelease *sourceRel
 		return sourceUsage{}, ErrIntegrityV1
 	}
 	used.bytes += absentBytes
+	r.usage = &used
 	return used, nil
 }
 

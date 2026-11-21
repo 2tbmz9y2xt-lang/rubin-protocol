@@ -12,11 +12,9 @@ import (
 
 type sourceRoot struct {
 	*os.Root
-	pin            *os.File
-	stageErr       error
-	backingPin     *os.File
-	backingErr     error
-	releaseScanned bool
+	pin, backingPin      *os.File
+	stageErr, backingErr error
+	usage                *sourceUsage
 }
 
 const sourceInitDirectory = "." + sourceDirectory + ".init"

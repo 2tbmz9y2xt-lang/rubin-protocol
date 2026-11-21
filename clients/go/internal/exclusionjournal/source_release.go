@@ -54,7 +54,7 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 			scratch := make([]byte, scratchBytes)
 			d := o.release
 			if d == nil {
-				if err := o.releaseCensus(r); err != nil {
+				if _, err := o.census(r, false); err != nil {
 					return err
 				}
 				d = &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
@@ -66,15 +66,6 @@ func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccoun
 			return o.continueRelease(r, d, scratch)
 		})
 	})
-}
-
-func (o *SourceOwnerV1) releaseCensus(r *sourceRoot) error {
-	if r.releaseScanned {
-		return nil
-	}
-	_, err := o.census(r, false)
-	r.releaseScanned = err == nil
-	return err
 }
 
 func (d sourceDebt) matchesKey(name string) bool { return strings.EqualFold(d.name, name) }
@@ -179,7 +170,7 @@ func (o *SourceOwnerV1) releaseManifest(header []byte) (SourceManifestV1, uint64
 }
 
 func (o *SourceOwnerV1) releaseBacking(r *sourceRoot, d *sourceRelease, scratch []byte) (bool, error) {
-	name, err := d.pinnedLocation(r)
+	name, err := d.location(r, r.backingErr)
 	if err != nil || name == "" {
 		return false, err
 	}
@@ -196,7 +187,7 @@ func (o *SourceOwnerV1) releaseBacking(r *sourceRoot, d *sourceRelease, scratch 
 }
 
 // location checks the public name before the private name for a pending intent.
-func (d *sourceRelease) location(r *sourceRoot) (string, error) {
+func (d *sourceRelease) location(r *sourceRoot, canonicalPinErr error) (string, error) {
 	if d == nil {
 		if r.requireVacant(releaseDetached, ErrIntegrityV1) != nil {
 			return "", ErrIntegrityV1
@@ -209,9 +200,6 @@ func (d *sourceRelease) location(r *sourceRoot) (string, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if err != nil {
-			return "", ErrIntegrityV1
-		}
 		if err := d.match(info); err != nil {
 			return "", err
 		}
@@ -220,18 +208,16 @@ func (d *sourceRelease) location(r *sourceRoot) (string, error) {
 		}
 		location = name
 	}
+	if location == d.name {
+		return location, canonicalPinErr
+	}
 	return location, nil
 }
 
-func (d *sourceRelease) pinnedLocation(r *sourceRoot) (string, error) {
-	name, err := d.location(r)
-	if name == d.name {
-		return name, r.backingErr
-	}
-	return name, err
-}
-
 func (inc *sourceIncarnation) match(info os.FileInfo) error {
+	if info == nil {
+		return ErrIntegrityV1
+	}
 	if filelock.FileIdentityV1(info) != inc.file {
 		return ErrIdentityV1
 	}
@@ -352,13 +338,7 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, d *sourceRelease, scratch
 	if err := o.syncBoundRoot(r); err != nil {
 		return err
 	}
-	if !d.backingAbsent(r) {
-		return ErrIdentityV1
-	}
-	if r.requireVacant(releaseFile, ErrIntegrityV1) != nil {
-		return ErrIntegrityV1
-	}
-	if err := o.checkStage(r, d, false); err != nil {
+	if _, err := o.releaseBoundary(r, d, true); err != nil {
 		return err
 	}
 	delete(o.live, d.name)
@@ -368,14 +348,8 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, d *sourceRelease, scratch
 
 // clearReleaseMarker removes a matching release record only after the backing name is observed absent.
 func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) error {
-	if !d.backingAbsent(r) {
-		return ErrIdentityV1
-	}
-	present, err := d.checkMarker(readRelease(r))
-	if err != nil || !present && d.phase != releaseMarkerClearing {
-		return cmp.Or(err, ErrIntegrityV1)
-	}
-	if err := o.checkStage(r, d, false); err != nil || !present {
+	present, err := o.releaseBoundary(r, d, false)
+	if err != nil || !present {
 		return err
 	}
 	if err := r.checkMarkerAlias(o.ops.remove); err != nil {
@@ -385,8 +359,28 @@ func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) erro
 	return o.ops.remove(r.Root, releaseFile)
 }
 
-func (d *sourceRelease) backingAbsent(r *sourceRoot) bool {
-	return r.requireVacant(d.name, ErrIdentityV1) == nil && r.requireVacant(releaseDetached, ErrIdentityV1) == nil
+func (o *SourceOwnerV1) releaseBoundary(r *sourceRoot, d *sourceRelease, final bool) (bool, error) {
+	if r.requireVacant(d.name, ErrIdentityV1) != nil || r.requireVacant(releaseDetached, ErrIdentityV1) != nil {
+		return false, ErrIdentityV1
+	}
+	present, err := d.checkMarker(readRelease(r))
+	if err != nil || present && final || !present && d.phase != releaseMarkerClearing {
+		return false, cmp.Or(err, ErrIntegrityV1)
+	}
+	return present, o.finalStage(r, d.name)
+}
+
+// finalStage checks the current public spellings and the reserved stage before release completes.
+func (o *SourceOwnerV1) finalStage(r *sourceRoot, name string) error {
+	entries, err := o.entries(r)
+	for _, entry := range entries {
+		key, public := strings.CutPrefix(entry.Name(), publicStagePrefix)
+		if entry.Name() == heldStagePrefix+name || public && strings.EqualFold(key, name) {
+			_, err := sourceEntryInfo(r, entry.Name(), ErrIntegrityV1)
+			return cmp.Or(err, ErrBusyV1)
+		}
+	}
+	return err
 }
 
 func (d *sourceRelease) checkMarker(record []byte, id filelock.IdentityV1, err error) (bool, error) {
@@ -445,7 +439,7 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 	if d.unlinkFailure != nil {
 		return d.unlinkFailure
 	}
-	name, err := d.pinnedLocation(r)
+	name, err := d.location(r, r.backingErr)
 	if err != nil {
 		return err
 	}
@@ -470,7 +464,7 @@ func (d *sourceRelease) canonicalVacant(r *sourceRoot) error {
 	if err != nil {
 		return ErrIntegrityV1
 	}
-	_, err = d.location(r)
+	_, err = d.location(r, nil)
 	return cmp.Or(err, ErrIdentityV1)
 }
 
@@ -497,7 +491,7 @@ func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name stri
 
 // checkStage preserves an independent stage for the same capture.
 func (o *SourceOwnerV1) checkStage(r *sourceRoot, d *sourceRelease, backingPresent bool) error {
-	if err := o.releaseCensus(r); err != nil {
+	if _, err := o.census(r, false); err != nil {
 		return err
 	}
 	key := d.name
@@ -505,15 +499,12 @@ func (o *SourceOwnerV1) checkStage(r *sourceRoot, d *sourceRelease, backingPrese
 		key = o.debt.name
 	}
 	stage, err := r.stageAlias(key)
-	if !errors.Is(err, os.ErrNotExist) {
-		if err != nil {
-			return ErrIntegrityV1
-		}
-		if !backingPresent || stage.file != d.file {
-			return ErrBusyV1
-		}
-	}
-	if !backingPresent {
+	switch {
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return ErrIntegrityV1
+	case err == nil && (!backingPresent || stage.file != d.file):
+		return ErrBusyV1
+	case !backingPresent:
 		return nil
 	}
 	return d.checkStageSpelling(r, stage, err, d.sharedStageKey(o.debt))
@@ -581,12 +572,8 @@ func (o *SourceOwnerV1) restoreBacking(r *sourceRoot, d *sourceRelease, cause er
 }
 
 func sourceLinks(f *os.File) (uint64, error) {
-	info, err := f.Stat()
-	if err != nil {
-		return 0, ErrUnavailableV1
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &stat); err != nil {
 		return 0, ErrUnavailableV1
 	}
 	return uint64(stat.Nlink), nil
