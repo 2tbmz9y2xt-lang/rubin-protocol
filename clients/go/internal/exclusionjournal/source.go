@@ -69,6 +69,7 @@ type SourceLimitsV1 struct {
 type SourceOwnerV1 struct {
 	sourceBinding
 	store   *policycontrol.Store
+	stage   *policycontrol.SourceStagePinV1
 	info    os.FileInfo
 	self    *SourceOwnerV1
 	limits  SourceLimitsV1
@@ -134,12 +135,16 @@ func NewSourceOwnerV1(store *policycontrol.Store, expected policycontrol.Identit
 
 func (l SourceLimitsV1) valid() bool {
 	bounds := []uint64{l.Bytes, l.Files, l.Scans, l.RAM, l.Headers, l.Descriptors, l.Overhead}
+	working := l.WorkingBytesV1()
+	available := min(l.RAM, uint64(math.MaxInt))
 	return slices.Min(bounds) != 0 && slices.Max(bounds) < math.MaxInt64 && l.Scans <= uint64(math.MaxInt-scratchBytes-4096)/512 &&
-		l.Descriptors >= 4 && l.Files < l.Scans && l.RAM >= l.WorkingBytesV1()+l.retainedRAM()
+		l.Descriptors >= 4 && l.Files < l.Scans && working <= available && l.retainedRAM() <= available-working
 }
 
-// WorkingBytesV1 bounds copy scratch, directory metadata and constant operation/borrow state.
-func (l SourceLimitsV1) WorkingBytesV1() uint64 { return scratchBytes + 4096 + l.Scans*512 }
+// WorkingBytesV1 bounds copy scratch, window digests, directory metadata and operation state.
+func (l SourceLimitsV1) WorkingBytesV1() uint64 {
+	return scratchBytes + 4096 + l.Scans*512 + sha256.Size*(l.Bytes/scratchBytes+6)
+}
 
 func (l SourceLimitsV1) retainedRAM() uint64 { return 1024 + l.Files*(136+sha256.Size) }
 

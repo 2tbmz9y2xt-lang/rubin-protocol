@@ -25,6 +25,6 @@ func chmodSourceInit(parent int) error {
 	return os.Chmod("/proc/self/fd/"+strconv.FormatUint(uint64(f.Fd()), 10), 0o700)
 }
 
-func renameSourceInit(parent int) error {
-	return unix.Renameat2(parent, sourceInitDirectory, parent, sourceDirectory, unix.RENAME_NOREPLACE)
+func renameSourceExclusive(parent int, from, to string) error {
+	return unix.Renameat2(parent, from, parent, to, unix.RENAME_NOREPLACE)
 }

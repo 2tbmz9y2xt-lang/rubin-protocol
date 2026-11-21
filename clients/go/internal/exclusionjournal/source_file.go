@@ -24,7 +24,7 @@ type sourceFS struct {
 	write           func(*os.File, []byte) (int, error)
 	fileSync, close func(*os.File) error
 	chmod           func(*os.File, os.FileMode) error
-	rename          func(*os.Root, string, string) error
+	namespace       func(sourceNameOp, *sourceRoot, string, string) error
 	remove          func(*os.Root, string) error
 	dirSync         func(*os.File) error
 }
@@ -32,108 +32,235 @@ type sourceDebt struct {
 	name             string
 	size             uint64
 	staging, removed bool
+
+	backing           string
+	qualifiedBytes    uint64
+	file              filelock.IdentityV1
+	unlinkTried, held bool
+}
+
+const (
+	publicStagePrefix = ".staging-"
+	heldStagePrefix   = ".stage-hold-"
+)
+
+func (d sourceDebt) leaf() string {
+	if d.held {
+		return heldStagePrefix + d.name
+	}
+	return publicStagePrefix + d.name
+}
+
+func (r *sourceRoot) requireVacant(name string, occupied error) error {
+	_, err := r.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return cmp.Or(err, occupied)
 }
 
 type sourceUsage struct {
-	files, bytes uint64
-	stage        sourceDebt
+	files, bytes  uint64
+	observedStage *sourceDebt
+	stageCharged  bool
+	missing       int
 }
 
-var realSourceFS = sourceFS{statfs: syscall.Fstatfs, write: (*os.File).Write, fileSync: (*os.File).Sync, close: (*os.File).Close, chmod: (*os.File).Chmod, rename: (*os.Root).Rename, remove: (*os.Root).Remove, dirSync: (*os.File).Sync}
+type sourceNameOp func(*sourceRoot, string, string) error
 
-func (o *SourceOwnerV1) census(r *sourceRoot) (sourceUsage, error) {
+func (op sourceNameOp) run(r *sourceRoot, from, to string) error {
+	return op(r, from, to)
+}
+
+func detachSource(r *sourceRoot, from, to string) error {
+	return renameSourceExclusive(int(r.pin.Fd()), from, to)
+}
+
+var realSourceFS = sourceFS{statfs: syscall.Fstatfs, write: (*os.File).Write, fileSync: (*os.File).Sync, close: (*os.File).Close, chmod: (*os.File).Chmod, namespace: sourceNameOp.run, remove: (*os.Root).Remove, dirSync: (*os.File).Sync}
+
+func (o *SourceOwnerV1) entries(r *sourceRoot, unavailable error) ([]os.DirEntry, error) {
 	f, err := r.Open(".")
 	if err != nil {
-		return sourceUsage{}, err
+		return nil, cmp.Or(unavailable, err)
 	}
 	entries, err := f.ReadDir(int(min(o.limits.Scans, math.MaxInt)))
 	_ = f.Close()
 	if err != nil && !errors.Is(err, io.EOF) {
-		return sourceUsage{}, err
+		return nil, cmp.Or(unavailable, err)
 	}
 	if uint64(len(entries)) >= o.limits.Scans {
-		return sourceUsage{}, ErrCapacityV1
+		return nil, ErrCapacityV1
 	}
-	return o.censusFiles(r, entries)
+	return entries, nil
 }
 
-func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry) (sourceUsage, error) {
-	var used sourceUsage
-	missing, absentRelease := len(o.live), o.release
+func (o *SourceOwnerV1) census(r *sourceRoot, reopening bool) (sourceUsage, error) {
+	if r.usage != nil {
+		return *r.usage, nil
+	}
+	entries, err := o.entries(r, nil)
+	if err != nil {
+		return sourceUsage{}, err
+	}
+	used := sourceUsage{missing: len(o.live)}
+	absentRelease := o.release
+	backing, err := absentRelease.location(r, nil)
+	if err != nil {
+		return sourceUsage{}, err
+	}
+	if err := o.censusStages(r, entries, reopening, &used); err != nil {
+		return sourceUsage{}, err
+	}
+	used.stageCharged = o.debt.name != ""
 	for _, entry := range entries {
 		name := entry.Name()
-		switch name {
-		case releaseFile, releaseScratch:
-			if name == releaseFile && o.release == nil {
-				return sourceUsage{}, ErrIntegrityV1
-			}
-			continue
-		}
-		if err := o.censusFile(r, name, &used, &missing); err != nil {
+		if err := o.countEntry(r, name, backing, &used); err != nil {
 			return sourceUsage{}, err
 		}
-		if absentRelease != nil && name == absentRelease.name {
+		if name == backing {
 			absentRelease = nil
 		}
 	}
-	return o.includeAbsent(used, missing, absentRelease)
+	return o.includeAbsent(r, used, absentRelease)
 }
 
-func (o *SourceOwnerV1) includeAbsent(used sourceUsage, missing int, absentRelease *sourceRelease) (sourceUsage, error) {
-	var absentBytes uint64
-	if o.debt.removed {
-		used.files++
-		absentBytes = o.debt.size
-		used.stage = o.debt
+func isStageLeaf(name string) bool {
+	return strings.HasPrefix(name, publicStagePrefix) || strings.HasPrefix(name, heldStagePrefix)
+}
+
+func (o *SourceOwnerV1) censusStages(r *sourceRoot, entries []os.DirEntry, reopening bool, used *sourceUsage) error {
+	if err := o.admitHeldStage(r, entries, reopening); err != nil {
+		return err
 	}
-	if absentRelease != nil {
-		used.files++
-		absentBytes += absentRelease.size
-		if o.live[absentRelease.name] != nil {
-			missing--
+	for _, entry := range entries {
+		if isStageLeaf(entry.Name()) {
+			if err := o.censusStage(r, entry.Name(), used.observedStage != nil); err != nil {
+				return err
+			}
+			used.observedStage = &o.debt
 		}
 	}
-	if absentBytes > o.limits.Bytes-used.bytes || used.files > o.limits.Files {
-		return sourceUsage{}, ErrCapacityV1
-	}
-	if missing != 0 {
-		return sourceUsage{}, ErrIntegrityV1
-	}
-	used.bytes += absentBytes
-	return used, nil
+	return nil
 }
 
-func (o *SourceOwnerV1) censusFile(r *sourceRoot, name string, used *sourceUsage, missing *int) error {
+func (o *SourceOwnerV1) admitHeldStage(r *sourceRoot, entries []os.DirEntry, reopening bool) error {
+	seen := false
+	for _, entry := range entries {
+		key, held := strings.CutPrefix(entry.Name(), heldStagePrefix)
+		if !held {
+			continue
+		}
+		if seen || !validHeldStageKey(key) {
+			return ErrIntegrityV1
+		}
+		seen = true
+		if !reopening && o.debt.name != key {
+			return ErrIdentityV1
+		}
+		if err := r.requireVacant(publicStagePrefix+key, syscall.EEXIST); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validHeldStageKey(key string) bool {
+	return strings.ToLower(key) == key && validSourceKey(key)
+}
+
+func (o *SourceOwnerV1) countEntry(r *sourceRoot, name, backing string, used *sourceUsage) error {
+	if isStageLeaf(name) || name == releaseScratch {
+		return nil
+	}
+	logical := name
+	switch name {
+	case releaseFile:
+		if o.release == nil {
+			return ErrIntegrityV1
+		}
+		return r.checkMarkerAlias(nil)
+	case releaseDetached:
+		if backing != releaseDetached {
+			return ErrIntegrityV1
+		}
+		logical = o.release.name
+	}
 	info, err := sourceEntryInfo(r, name, nil)
 	if err != nil {
 		return ErrIntegrityV1
 	}
-	size := uint64(max(info.Size(), 0))
-	if token := o.live[name]; token != nil {
-		if token.file != filelock.FileIdentityV1(info) {
-			return ErrIdentityV1
-		}
-		if size != token.size {
-			return ErrIntegrityV1
-		}
-		*missing -= 1
+	return o.censusFile(logical, info, used)
+}
+
+func (o *SourceOwnerV1) countBacking(used *sourceUsage, name string, file filelock.IdentityV1, size uint64, stageSeenTogether bool) uint64 {
+	used.files++
+	if o.live[name] != nil {
+		used.missing--
 	}
-	if err := o.censusEntry(name, size, used); err != nil {
-		return err
+	if file == o.debt.file {
+		if stageSeenTogether && (o.debt.backing == "" || name == o.debt.name) {
+			o.debt.backing = name
+		}
+		if used.stageCharged && name == o.debt.backing {
+			used.stageCharged = false
+			size = max(size, o.debt.qualifiedBytes)
+		}
 	}
+	return size
+}
+
+func (o *SourceOwnerV1) includeAbsent(r *sourceRoot, used sourceUsage, absentRelease *sourceRelease) (sourceUsage, error) {
+	var absentBytes uint64
+	if absentRelease != nil {
+		absentBytes = o.countBacking(&used, absentRelease.name, absentRelease.file, absentRelease.size, false)
+	}
+	if o.debt.unlinkTried && used.observedStage == nil {
+		o.debt.removed = true
+	}
+	if used.stageCharged {
+		used.files++
+		absentBytes += o.debt.size
+	}
+	if absentBytes > o.limits.Bytes-used.bytes || used.files > o.limits.Files {
+		return sourceUsage{}, ErrCapacityV1
+	}
+	if used.missing != 0 {
+		return sourceUsage{}, ErrIntegrityV1
+	}
+	used.bytes += absentBytes
+	r.usage = &used
+	return used, nil
+}
+
+func (o *SourceOwnerV1) censusFile(logical string, info os.FileInfo, used *sourceUsage) error {
+	if token := o.live[logical]; token != nil {
+		if err := token.match(info); err != nil {
+			return err
+		}
+	}
+	if !validSourceKey(logical) {
+		return ErrIntegrityV1
+	}
+	size := o.countBacking(used, logical, filelock.FileIdentityV1(info), uint64(max(info.Size(), 0)), used.observedStage != nil)
 	if size > o.limits.Bytes-used.bytes {
 		return ErrCapacityV1
 	}
-	used.files++
 	used.bytes += size
 	return nil
 }
 
 // openSourceFile checks that a nonblocking, no-follow open pins the observed regular file.
 func openSourceFile(r *sourceRoot, name string, unobserved error) (*os.File, error) {
+	return r.pinFile(name, unobserved, nil)
+}
+
+func (r *sourceRoot) pinFile(name string, unobserved error, expected *filelock.IdentityV1) (*os.File, error) {
 	named, err := sourceEntryInfo(r, name, unobserved)
 	if err != nil {
 		return nil, err
+	}
+	if expected != nil && filelock.FileIdentityV1(named) != *expected {
+		return nil, ErrIdentityV1
 	}
 	f, err := openSourceAt(int(r.pin.Fd()), name, unix.O_NONBLOCK)
 	if err != nil {
@@ -168,41 +295,88 @@ func sourceEntryInfo(r *sourceRoot, name string, unobserved error) (os.FileInfo,
 	return info, nil
 }
 
-func (o *SourceOwnerV1) censusEntry(name string, size uint64, used *sourceUsage) error {
-	name, staging := strings.CutPrefix(name, ".staging-")
+func validSourceKey(name string) bool {
 	decoded, err := hex.DecodeString(name)
-	if err != nil || len(decoded) != 32 {
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func (o *SourceOwnerV1) censusStage(r *sourceRoot, leaf string, alreadySeen bool) error {
+	name, held := strings.CutPrefix(leaf, heldStagePrefix)
+	if !held {
+		name = strings.TrimPrefix(leaf, publicStagePrefix)
+	}
+	info, err := sourceEntryInfo(r, leaf, nil)
+	if err != nil || !validSourceKey(name) {
 		return ErrIntegrityV1
 	}
-	if !staging {
-		return nil
+	next := sourceDebt{name: name, size: max(o.debt.qualifiedBytes, uint64(max(info.Size(), 0))), qualifiedBytes: o.debt.qualifiedBytes, file: filelock.FileIdentityV1(info), staging: true, held: held}
+	if o.debt.hasOtherName(name) && (alreadySeen || o.debt.sharedKey(next.file) == "") {
+		return ErrBusyV1
 	}
-	if d := o.debt; d.name != "" {
-		if d.name != name {
-			return ErrBusyV1
-		}
-		if d.removed {
-			return ErrIntegrityV1
-		}
+	if err := o.qualifyStage(r, next); err != nil {
+		return err
 	}
-	o.debt = sourceDebt{name: name, size: size, staging: true}
-	used.stage = o.debt
+	o.debt = next
 	return nil
 }
 
-func (o *SourceOwnerV1) space(r *sourceRoot, required uint64) error {
+func (d sourceDebt) hasOtherName(name string) bool { return d.name != "" && d.name != name }
+
+func (o *SourceOwnerV1) qualifyStage(r *sourceRoot, next sourceDebt) error {
+	d := &o.debt
+	switch {
+	case d.held && !next.held:
+		return ErrIdentityV1
+	case d.removed:
+		return ErrIntegrityV1
+	case d.file != (filelock.IdentityV1{}) && d.file != next.file:
+		return ErrIdentityV1
+	case next.held:
+		o.stage.Clear()
+		return nil
+	}
+	return o.retainStage(r, next.leaf(), next.file)
+}
+
+func (o *SourceOwnerV1) space(r *sourceRoot, required uint64, stage *sourceDebt) (bool, error) {
 	var stat syscall.Statfs_t
 	err := o.ops.statfs(int(r.pin.Fd()), &stat)
 	overflow, available := bits.Mul64(uint64(stat.Bavail), sourceSpaceUnit(&stat))
-	if err != nil || overflow != 0 || available < required+o.limits.Overhead || o.currentRoot() != nil {
-		return ErrCapacityV1
+	if err != nil || overflow != 0 || o.currentRoot() != nil {
+		return false, ErrCapacityV1
 	}
-	return nil
+	full := required + o.limits.Overhead
+	if available >= full {
+		return false, nil
+	}
+	if full-available > min(required, stage.diskCredit(r)) {
+		return false, ErrCapacityV1
+	}
+	return true, nil
+}
+
+func (d *sourceDebt) diskCredit(r *sourceRoot) uint64 {
+	if d == nil || d.removed || d.backing != "" {
+		return 0
+	}
+	info, err := sourceEntryInfo(r, d.leaf(), nil)
+	if err != nil || d.file != filelock.FileIdentityV1(info) {
+		return 0
+	}
+	return min(d.size, uint64(max(info.Size(), 0)), singleLinkAllocatedBytes(info))
+}
+
+func singleLinkAllocatedBytes(info os.FileInfo) uint64 {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st == nil || st.Nlink != 1 || st.Blocks <= 0 || uint64(st.Blocks) > math.MaxUint64/512 {
+		return 0
+	}
+	return uint64(st.Blocks) * 512
 }
 
 func assurance(part SourcePartV1) error {
 	var field [8]byte
-	if n, err := part.ReadAt(field[:1], 0); n != 1 || err != nil {
+	if err := readPartAt(part, field[:1], 0); err != nil {
 		return ErrIntegrityV1
 	}
 	offset := uint64(1)
@@ -229,7 +403,7 @@ func assuranceField(part SourcePartV1, offset uint64) (uint64, error) {
 		return 0, ErrIntegrityV1
 	}
 	var field [8]byte
-	if n, err := part.ReadAt(field[:], int64(min(offset, math.MaxInt64))); n != 8 || err != nil {
+	if err := readPartAt(part, field[:], offset); err != nil {
 		return 0, ErrIntegrityV1
 	}
 	length := binary.LittleEndian.Uint64(field[:])
@@ -240,7 +414,7 @@ func assuranceField(part SourcePartV1, offset uint64) (uint64, error) {
 	return offset + length, nil
 }
 
-func stream(m SourceManifestV1, produce func(func(SourcePartV1) error) error, dst io.Writer, scratch []byte, start func() error) error {
+func stream(m SourceManifestV1, produce func(func(SourcePartV1) error) error, dst io.Writer, scratch []byte, start func() error, checkAssurance bool) error {
 	var digest [sha256.Size]byte
 	err := produce(func(part SourcePartV1) error {
 		if start != nil {
@@ -249,7 +423,7 @@ func stream(m SourceManifestV1, produce func(func(SourcePartV1) error) error, ds
 			}
 			start = nil
 		}
-		if part.Kind == OriginalAssuranceV1 {
+		if checkAssurance && part.Kind == OriginalAssuranceV1 {
 			if err := assurance(part); err != nil {
 				return err
 			}
@@ -272,6 +446,11 @@ func stream(m SourceManifestV1, produce func(func(SourcePartV1) error) error, ds
 }
 
 func (o *SourceOwnerV1) qualify(f *os.File, m SourceManifestV1, size uint64, scratch []byte, expected *sourceIncarnation, shapeError error) (sourceIncarnation, error) {
+	return o.qualifyWindows(f, m, size, scratch, expected, shapeError, nil)
+}
+
+// qualifyWindows binds the optional window digests to the bytes used for the footer check.
+func (o *SourceOwnerV1) qualifyWindows(f *os.File, m SourceManifestV1, size uint64, scratch []byte, expected *sourceIncarnation, shapeError error, windows *sourceWindows) (sourceIncarnation, error) {
 	var observed sourceIncarnation
 	file, actual, err := o.sourceFileHeader(f, m, size, expected, shapeError)
 	if err != nil {
@@ -281,7 +460,11 @@ func (o *SourceOwnerV1) qualify(f *os.File, m SourceManifestV1, size uint64, scr
 	observed.size = size
 	hash := sha256.New()
 	_, _ = hash.Write(actual)
-	if err := stream(m, fileExporter(f, m, len(actual)), hash, scratch, nil); err != nil {
+	var out io.Writer = hash
+	if windows != nil {
+		out = io.MultiWriter(hash, windows)
+	}
+	if err := stream(m, fileExporter(f, m, len(actual)), out, scratch, nil, windows == nil); err != nil {
 		return observed, err
 	}
 	_, err = f.ReadAt(observed.footer[:], int64(min(size, math.MaxInt64))-sha256.Size)
@@ -293,12 +476,15 @@ func (o *SourceOwnerV1) qualify(f *os.File, m SourceManifestV1, size uint64, scr
 
 func (o *SourceOwnerV1) sourceFileHeader(f *os.File, m SourceManifestV1, size uint64, expected *sourceIncarnation, shapeError error) (filelock.IdentityV1, []byte, error) {
 	info, err := f.Stat()
-	if err != nil || info.Size() != int64(min(size, math.MaxInt64)) {
+	if err != nil {
 		return filelock.IdentityV1{}, nil, shapeError
 	}
 	file := filelock.FileIdentityV1(info)
 	if expected != nil && file != expected.file {
 		return file, nil, ErrIdentityV1
+	}
+	if info.Size() != int64(min(size, math.MaxInt64)) {
+		return file, nil, shapeError
 	}
 	header := m.header(o.id)
 	actual := make([]byte, len(header))
@@ -327,7 +513,7 @@ func fileExporter(f *os.File, m SourceManifestV1, header int) func(func(SourcePa
 func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, visit func(SourcePartV1) error) error {
 	return o.withFiles(account, m, false, func(r *sourceRoot, m SourceManifestV1, size uint64, _ sourceUsage) error {
 		name := m.name(o.id)
-		if o.debt.name == name || o.release != nil && o.release.name == name {
+		if o.debt.matchesKey(name) || o.release != nil && o.release.name == name {
 			return ErrBusyV1
 		}
 		if visit == nil {
@@ -338,16 +524,96 @@ func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m S
 			return err
 		}
 		defer f.Close()
-		if _, err := o.qualify(f, m, size, make([]byte, scratchBytes), o.live[name], ErrIntegrityV1); err != nil {
+		windows := newSourceWindows(m)
+		if _, err := o.qualifyWindows(f, m, size, windows.scratch, o.live[name], ErrIntegrityV1, windows); err != nil {
 			return err
 		}
-		return fileExporter(f, m, len(m.header(o.id)))(visit)
+		return windows.deliver(f, m, len(m.header(o.id)), visit)
 	})
+}
+
+type sourceWindows struct {
+	hashes  [][sha256.Size]byte
+	scratch []byte
+	failure error
+}
+
+func newSourceWindows(m SourceManifestV1) *sourceWindows {
+	var count uint64
+	for _, part := range m.Parts {
+		count += sourceWindowCount(part.Length)
+	}
+	return &sourceWindows{hashes: make([][sha256.Size]byte, 0, count), scratch: make([]byte, scratchBytes)}
+}
+
+func sourceWindowCount(length uint64) uint64 {
+	return (length + scratchBytes - 1) / scratchBytes
+}
+
+func (w *sourceWindows) Write(b []byte) (int, error) {
+	w.hashes = append(w.hashes, sha256.Sum256(b))
+	return len(b), nil
+}
+
+func (w *sourceWindows) deliver(f *os.File, m SourceManifestV1, header int, visit func(SourcePartV1) error) error {
+	var parts [6]SourcePartV1
+	hashes, base := w.hashes, int64(header)
+	for i, spec := range m.Parts {
+		n := sourceWindowCount(spec.Length)
+		section := io.NewSectionReader(f, base, int64(min(spec.Length, math.MaxInt64)))
+		parts[i] = w.part(section, spec, hashes[:n])
+		hashes, base = hashes[n:], base+section.Size()
+		if spec.Kind == OriginalAssuranceV1 {
+			if err := w.checkAssurance(parts[i]); err != nil {
+				return err
+			}
+		}
+	}
+	for _, part := range parts[:len(m.Parts)] {
+		err := visitPart(part, visit)
+		if err := cmp.Or(w.failure, err); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *sourceWindows) checkAssurance(part SourcePartV1) error {
+	if part.Length > 1 && part.Length <= uint64(len(w.scratch)) {
+		data := w.scratch[:part.Length]
+		if err := readPartAt(part, data, 0); err != nil {
+			return err
+		}
+		part.ReadAt = bytes.NewReader(data).ReadAt
+	}
+	return assurance(part)
+}
+
+func (w *sourceWindows) part(section *io.SectionReader, spec SourcePartSpecV1, hashes [][sha256.Size]byte) SourcePartV1 {
+	return SourcePartV1{Kind: spec.Kind, Length: spec.Length, ReadAt: func(dst []byte, off int64) (int, error) {
+		if w.failure != nil {
+			return 0, w.failure
+		}
+		copied := 0
+		for len(dst) > 0 {
+			index := off / scratchBytes
+			start := index * scratchBytes
+			buf := w.scratch[:min(int64(scratchBytes), section.Size()-start)]
+			n, err := section.ReadAt(buf, start)
+			if n != len(buf) || err != nil || sha256.Sum256(buf) != hashes[index] {
+				w.failure = ErrIntegrityV1
+				return copied, w.failure
+			}
+			n = copy(dst, buf[off-start:])
+			dst, off, copied = dst[n:], off+int64(n), copied+n
+		}
+		return copied, nil
+	}}
 }
 
 func (o *SourceOwnerV1) withFiles(account *mdbx.OperationAccount, m SourceManifestV1, preparing bool, use func(*sourceRoot, SourceManifestV1, uint64, sourceUsage) error) error {
 	return o.withManifest(account, m, preparing, func(r *sourceRoot, m SourceManifestV1, size uint64) error {
-		used, err := o.census(r)
+		used, err := o.census(r, false)
 		if err != nil {
 			return err
 		}
@@ -362,13 +628,7 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 		return nil
 	}
 	if !d.removed {
-		name := ".staging-" + d.name
-		if info, err := sourceEntryInfo(r, name, nil); err == nil {
-			d.size = uint64(max(info.Size(), 0))
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if err := o.ops.remove(r.Root, name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := o.unlinkStage(r, d); err != nil {
 			return err
 		}
 		d.removed = true
@@ -378,6 +638,77 @@ func (o *SourceOwnerV1) reconcile(r *sourceRoot) error {
 	}
 	o.debt = sourceDebt{}
 	return nil
+}
+
+func (o *SourceOwnerV1) unlinkStage(r *sourceRoot, d *sourceDebt) error {
+	info, err := o.ownedStageInfo(r, d)
+	if err != nil {
+		return err
+	}
+	o.stage.Clear()
+	if err := o.release.checkDetachedIntent(r); err != nil {
+		return err
+	}
+	d.file = filelock.FileIdentityV1(info)
+	d.size = max(d.qualifiedBytes, uint64(max(info.Size(), 0)))
+	d.unlinkTried = true
+	return o.ops.remove(r.Root, d.leaf())
+}
+
+func (d *sourceDebt) privateInfo(r *sourceRoot) (os.FileInfo, error) {
+	info, err := sourceEntryInfo(r, d.leaf(), nil)
+	if err == nil && d.file != (filelock.IdentityV1{}) && d.file != filelock.FileIdentityV1(info) {
+		return nil, ErrIdentityV1
+	}
+	return info, err
+}
+
+func (o *SourceOwnerV1) retainStage(r *sourceRoot, leaf string, id filelock.IdentityV1) (err error) {
+	if o.limits.Descriptors < 5 {
+		return ErrCapacityV1
+	}
+	if o.stage.File == nil {
+		o.stage.File, err = r.pinFile(leaf, nil, &id)
+	}
+	return err
+}
+
+// observeStage withholds credit on failure and reports the cause if cleanup is reached.
+func (r *sourceRoot) observeStage(d *sourceDebt) *sourceDebt {
+	if d != nil && !d.held {
+		if _, r.stageErr = d.privateInfo(r); r.stageErr != nil {
+			return nil
+		}
+	}
+	return d
+}
+
+func (o *SourceOwnerV1) ownedStageInfo(r *sourceRoot, d *sourceDebt) (os.FileInfo, error) {
+	if d.held {
+		return d.privateInfo(r)
+	}
+	if r.stageErr != nil || o.stage.File == nil {
+		return nil, cmp.Or(r.stageErr, ErrIdentityV1)
+	}
+	if err := o.ops.namespace(detachSource, r, d.leaf(), heldStagePrefix+d.name); err != nil {
+		return nil, err
+	}
+	d.held = true
+	info, err := d.privateInfo(r)
+	if err != nil {
+		_ = o.restoreStage(r, d)
+	}
+	return info, err
+}
+
+func (o *SourceOwnerV1) restoreStage(r *sourceRoot, d *sourceDebt) error {
+	if err := o.retainStage(r, d.leaf(), d.file); err != nil {
+		return err
+	}
+	err := o.ops.namespace(detachSource, r, d.leaf(), publicStagePrefix+d.name)
+	// The pin identifies the original while the next census locates it after the move.
+	d.held = false
+	return cmp.Or(err, o.syncBoundRoot(r))
 }
 
 // PrepareSourceV1 returns a handle after durable publication (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
@@ -393,74 +724,98 @@ func (o *SourceOwnerV1) PrepareSourceV1(account *mdbx.OperationAccount, m Source
 
 func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage, produce func(func(SourcePartV1) error) error) (*PreparedSourceV1, error) {
 	name := m.name(o.id)
-	if o.debt.name != "" && o.debt.name != name {
+	if o.debt.hasOtherName(name) {
 		return nil, ErrBusyV1
 	}
 	f, err := openSourceFile(r, name, nil)
 	if err == nil {
 		defer f.Close()
-		return o.reuse(r, f, m, name, size, used.stage, produce)
+		return o.reuse(r, f, m, name, size, used.observedStage, produce)
 	}
 	if !errors.Is(err, os.ErrNotExist) || o.live[name] != nil {
 		return nil, ErrIntegrityV1
 	}
-	if err := o.admitPublication(r, size, used); err != nil {
+	recheckSpace, err := o.admitPublication(r, size, used)
+	if err != nil {
 		return nil, err
 	}
-	return o.publish(r, m, name, produce, size)
+	return o.publish(r, m, name, produce, size, recheckSpace)
 }
 
-func (o *SourceOwnerV1) admitPublication(r *sourceRoot, size uint64, used sourceUsage) error {
-	if used.stage.name != "" {
+func (o *SourceOwnerV1) admitPublication(r *sourceRoot, size uint64, used sourceUsage) (bool, error) {
+	if used.stageCharged {
 		used.files--
-		used.bytes -= used.stage.size
+		used.bytes -= o.debt.size
 	}
 	if used.files >= o.limits.Files || size > o.limits.Bytes-used.bytes {
-		return ErrCapacityV1
+		return false, ErrCapacityV1
 	}
-	return o.space(r, size)
+	return o.space(r, size, r.observeStage(used.observedStage))
 }
 
-func (o *SourceOwnerV1) prepared(r *sourceRoot, m SourceManifestV1, name string, observed sourceIncarnation) (*PreparedSourceV1, error) {
+func (o *SourceOwnerV1) prepared(r *sourceRoot, pin *os.File, m SourceManifestV1, name string, observed sourceIncarnation, scratch []byte) (*PreparedSourceV1, error) {
 	if err := o.ops.dirSync(r.pin); err != nil {
 		return nil, err
 	}
+	if _, err := o.qualify(pin, m, observed.size, scratch, &observed, ErrIntegrityV1); err != nil {
+		return nil, err
+	}
+	_, stageErr := o.checkNames(r, name, ErrIdentityV1, nil)
 	info, err := r.Lstat(name)
-	if err != nil || observed.file != filelock.FileIdentityV1(info) || o.currentRoot() != nil {
+	if err != nil || o.currentRoot() != nil {
 		return nil, ErrIdentityV1
 	}
+	if err := observed.match(info); err != nil {
+		return nil, err
+	}
 	o.debt = sourceDebt{}
+	if stageErr != nil {
+		return nil, stageErr
+	}
 	token := cmp.Or(o.live[name], &observed)
 	o.live[name] = token
 	return &PreparedSourceV1{manifest: m, name: name, incarnation: token}, nil
 }
 
-func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, produce func(func(SourcePartV1) error) error, size uint64) (_ *PreparedSourceV1, err error) {
+func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, produce func(func(SourcePartV1) error) error, size uint64, recheckSpace bool) (_ *PreparedSourceV1, err error) {
 	w := &sourceFileWriter{o: o}
 	defer func() {
 		if w.file == nil {
 			return
 		}
-		_ = w.file.Close()
+		defer w.file.Close()
 		if o.debt.staging {
 			if cleanup := o.reconcile(r); cleanup != nil {
 				err = errors.Join(err, cleanup)
 			}
 		}
 	}()
-	observed, err := o.writeBundle(r, w, m, name, produce, size)
+	scratch := make([]byte, scratchBytes)
+	observed, err := o.writeBundle(r, w, m, name, produce, size, recheckSpace, scratch)
 	if err != nil {
 		return nil, err
 	}
-	if err := o.finishFile(w.file); err != nil {
-		return nil, err
-	}
-	visible, err := o.renameVisible(r, ".staging-"+name, name)
-	o.debt.staging = !visible
+	o.debt.size, o.debt.qualifiedBytes = observed.size, observed.size
+	pin, err := o.finishPinned(r, o.debt.leaf(), w.file, observed.file)
 	if err != nil {
 		return nil, err
 	}
-	return o.prepared(r, m, name, observed)
+	defer pin.Close()
+	if _, err := o.checkNames(r, name, ErrIdentityV1, nil); err != nil {
+		o.debt.staging = false
+		return nil, err
+	}
+	visibility, err := o.linkVisible(r, o.debt.leaf(), name, observed.file)
+	o.debt.staging = visibility == sourceNotVisible
+	o.debt.unlinkTried = visibility == sourceAliasRemoval
+	if visibility == sourceVisible || o.debt.unlinkTried {
+		o.debt.backing = name
+	}
+	if err != nil {
+		return nil, err
+	}
+	o.debt.removed = true
+	return o.prepared(r, pin, m, name, observed, scratch)
 }
 
 func (o *SourceOwnerV1) finishFile(f *os.File) error {
@@ -470,30 +825,50 @@ func (o *SourceOwnerV1) finishFile(f *os.File) error {
 	return o.ops.close(f)
 }
 
-func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m SourceManifestV1, name string, produce func(func(SourcePartV1) error) error, size uint64) (sourceIncarnation, error) {
-	scratch := make([]byte, scratchBytes)
+// finishPinned closes the synced file and keeps its inode alive through the final name check.
+func (o *SourceOwnerV1) finishPinned(r *sourceRoot, name string, f *os.File, expected filelock.IdentityV1) (*os.File, error) {
+	pin, pinErr := r.pinFile(name, ErrIdentityV1, &expected)
+	if finishErr := o.finishFile(f); finishErr != nil || pinErr != nil {
+		_ = pin.Close()
+		return nil, cmp.Or(finishErr, ErrIdentityV1)
+	}
+	return pin, nil
+}
+
+func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m SourceManifestV1, name string, produce func(func(SourcePartV1) error) error, size uint64, recheckSpace bool, scratch []byte) (sourceIncarnation, error) {
 	hash := sha256.New()
 	out := io.MultiWriter(w, hash)
 	start := func() error {
 		if err := o.reconcile(r); err != nil {
 			return err
 		}
-		f, err := r.OpenFile(".staging-"+name, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		if recheckSpace {
+			if _, err := o.space(r, size, nil); err != nil {
+				return err
+			}
+		}
+		f, err := r.OpenFile(heldStagePrefix+name, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 		if err != nil {
 			return err
 		}
 		w.file = f
-		o.debt = sourceDebt{name: name, size: size, staging: true}
+		o.debt = sourceDebt{name: name, staging: true, held: true}
+		info, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		o.debt.file = filelock.FileIdentityV1(info)
 		_, err = out.Write(m.header(o.id))
 		return cmp.Or(err, o.ops.chmod(f, 0o600))
 	}
-	if err := stream(m, produce, out, scratch, start); err != nil {
+	if err := stream(m, produce, out, scratch, start, true); err != nil {
 		return sourceIncarnation{}, err
 	}
-	if _, err := w.Write(hash.Sum(nil)); err != nil {
+	expected := sourceIncarnation{file: o.debt.file, size: size, footer: [sha256.Size]byte(hash.Sum(nil))}
+	if _, err := w.Write(expected.footer[:]); err != nil {
 		return sourceIncarnation{}, err
 	}
-	return o.qualify(w.file, m, size, scratch, nil, ErrIntegrityV1)
+	return o.qualify(w.file, m, size, scratch, &expected, ErrIntegrityV1)
 }
 
 type sourceFileWriter struct {
@@ -509,16 +884,38 @@ func (w sourceFileWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-func (o *SourceOwnerV1) renameVisible(r *sourceRoot, from, to string) (bool, error) {
-	if _, err := r.Lstat(to); !errors.Is(err, os.ErrNotExist) {
-		return false, ErrIntegrityV1
+type sourceVisibility uint8
+
+const (
+	sourceNotVisible sourceVisibility = iota
+	sourceVisible
+	sourceIndeterminate
+	sourceAliasRemoval
+)
+
+func (o *SourceOwnerV1) linkVisible(r *sourceRoot, from, to string, expected filelock.IdentityV1) (sourceVisibility, error) {
+	err := o.ops.namespace((*sourceRoot).Link, r, from, to)
+	if errors.Is(err, os.ErrExist) {
+		return sourceNotVisible, ErrIntegrityV1
 	}
-	err := o.ops.rename(r.Root, from, to)
-	if err == nil {
-		return true, nil
+	info, statErr := r.Lstat(to)
+	if errors.Is(statErr, os.ErrNotExist) {
+		return sourceNotVisible, cmp.Or(err, ErrIntegrityV1)
 	}
-	_, statErr := r.Lstat(to)
-	return !errors.Is(statErr, os.ErrNotExist), err
+	if statErr != nil {
+		return sourceIndeterminate, cmp.Or(err, statErr)
+	}
+	if !info.Mode().IsRegular() || filelock.FileIdentityV1(info) != expected {
+		return sourceNotVisible, cmp.Or(err, ErrIntegrityV1)
+	}
+	if err != nil {
+		return sourceVisible, err
+	}
+	source, _ := r.Lstat(from)
+	if !os.SameFile(info, source) {
+		return sourceVisible, ErrIdentityV1
+	}
+	return sourceAliasRemoval, o.ops.remove(r.Root, from)
 }
 
 type compareSourceWriter struct {
@@ -536,22 +933,30 @@ func (w *compareSourceWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func (o *SourceOwnerV1) reuse(r *sourceRoot, f *os.File, m SourceManifestV1, name string, size uint64, stage sourceDebt, produce func(func(SourcePartV1) error) error) (*PreparedSourceV1, error) {
+func (o *SourceOwnerV1) reuse(r *sourceRoot, f *os.File, m SourceManifestV1, name string, size uint64, stage *sourceDebt, produce func(func(SourcePartV1) error) error) (*PreparedSourceV1, error) {
 	scratch := make([]byte, scratchBytes)
 	observed, err := o.qualify(f, m, size, scratch, o.live[name], ErrIntegrityV1)
 	if err != nil {
 		return nil, err
 	}
+	r.observeStage(stage)
 	w := &compareSourceWriter{file: f, offset: int64(len(m.header(o.id))), scratch: scratch[scratchBytes/2:]}
-	var start func() error
-	if stage.name != "" {
-		start = func() error { return o.reconcile(r) }
-	}
-	if err := stream(m, produce, w, scratch[:scratchBytes/2], start); err != nil {
+	start := func() error { return o.reconcile(r) }
+	compared := sha256.New()
+	_, _ = compared.Write(m.header(o.id))
+	if err := stream(m, produce, io.MultiWriter(w, compared), scratch[:scratchBytes/2], start, true); err != nil {
 		return nil, err
 	}
-	if err := o.finishFile(f); err != nil {
+	if !bytes.Equal(compared.Sum(nil), observed.footer[:]) {
+		return nil, ErrIntegrityV1
+	}
+	if _, err := o.qualify(f, m, size, scratch, &observed, ErrIntegrityV1); err != nil {
 		return nil, err
 	}
-	return o.prepared(r, m, name, observed)
+	pin, err := o.finishPinned(r, name, f, observed.file)
+	if err != nil {
+		return nil, err
+	}
+	defer pin.Close()
+	return o.prepared(r, pin, m, name, observed, scratch)
 }

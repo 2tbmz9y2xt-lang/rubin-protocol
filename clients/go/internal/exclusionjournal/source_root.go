@@ -6,12 +6,15 @@ import (
 	"os"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/policycontrol"
 	"golang.org/x/sys/unix"
 )
 
 type sourceRoot struct {
 	*os.Root
-	pin *os.File
+	pin, backingPin      *os.File
+	stageErr, backingErr error
+	usage                *sourceUsage
 }
 
 const sourceInitDirectory = "." + sourceDirectory + ".init"
@@ -111,7 +114,7 @@ func publishSourceRoot(parent int) (*os.File, os.FileInfo, error) {
 	if err := pin.Sync(); err != nil {
 		return pin, nil, err
 	}
-	return pin, info, renameSourceInit(parent)
+	return pin, info, renameSourceExclusive(parent, sourceInitDirectory, sourceDirectory)
 }
 
 // openSourceInit replaces only an empty directory at the reserved name and pins the replacement.
@@ -148,7 +151,8 @@ func sourceRootInfo(parent *os.Root) (os.FileInfo, error) {
 	return info, err
 }
 
-func (o *SourceOwnerV1) openSourceRoot() error {
+func (o *SourceOwnerV1) openSourceRoot(stage *policycontrol.SourceStagePinV1) error {
+	o.stage = stage
 	return o.withRoot(o.createSourceRoot, func(r *sourceRoot) error {
 		if err := o.syncBoundRoot(r); err != nil {
 			return err
@@ -156,15 +160,33 @@ func (o *SourceOwnerV1) openSourceRoot() error {
 		if err := o.openRelease(r); err != nil {
 			return err
 		}
-		if _, err := o.census(r); err != nil || o.release == nil {
+		if _, err := o.census(r, true); err != nil {
 			return err
 		}
-		if !o.manifestFits(o.release.manifest, o.release.size) {
-			return ErrCapacityV1
+		if err := o.openReleaseBacking(r); err != nil || !o.debt.held {
+			return err
 		}
-		_, err := o.releaseBacking(r, o.release, make([]byte, scratchBytes))
-		return err
+		return o.restoreStage(r, &o.debt)
 	})
+}
+
+func (o *SourceOwnerV1) openReleaseBacking(r *sourceRoot) error {
+	if o.release == nil {
+		return o.clearReleaseScratch(r)
+	}
+	if !o.manifestFits(o.release.manifest, o.release.size) {
+		return ErrCapacityV1
+	}
+	present, err := o.releaseBacking(r, o.release, make([]byte, scratchBytes))
+	if err != nil || present {
+		return err
+	}
+	if !o.debt.matchesKey(o.release.name) {
+		o.release.phase = releaseBackingGone
+	} else if o.debt.held {
+		return ErrBusyV1
+	}
+	return nil
 }
 
 // syncBoundRoot makes namespace changes durable and verifies current root reachability.
