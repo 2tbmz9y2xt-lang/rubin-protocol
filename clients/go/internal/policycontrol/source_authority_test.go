@@ -99,8 +99,8 @@ func testSourceAuthorityStagingPin(t *testing.T, mode string) {
 			t.Fatal("second construction ran")
 			return nil
 		})
-		sourceAuthorityFailIf(t, err != ErrBusy, "second construction returned %v", err)
-		sourceAuthorityFailIf(t, s.Close() != ErrBusy, "close during source construction")
+		sourceAuthorityFailIf(t, !sameDependentValue(err, ErrBusy), "second construction returned %v", err)
+		sourceAuthorityFailIf(t, !sameDependentValue(s.Close(), ErrBusy), "close during source construction")
 		_, err = pin.Stat()
 		must(t, err)
 		switch mode {
@@ -115,7 +115,7 @@ func testSourceAuthorityStagingPin(t *testing.T, mode string) {
 	if mode == "success" {
 		_, err := pin.Stat()
 		must(t, err)
-		sourceAuthorityFailIf(t, s.Close() != ErrBusy, "borrowed store closed")
+		sourceAuthorityFailIf(t, !sameDependentValue(s.Close(), ErrBusy), "borrowed store closed")
 		_, err = pin.Stat()
 		must(t, err)
 	} else {
@@ -134,12 +134,12 @@ func testSourceAuthorityPinResult(t *testing.T, b *SourceAuthorityBorrowV1, use 
 	t.Helper()
 	if mode == "panic" {
 		defer func() {
-			sourceAuthorityFailIf(t, recover() != cause, "source constructor did not preserve its panic")
+			sourceAuthorityFailIf(t, !sameDependentValue(recover(), cause), "source constructor did not preserve its panic")
 		}()
 	}
 	err := b.WithSourceOwnerClaimV1(use)
 	want := map[string]error{"failure": cause}[mode]
-	sourceAuthorityFailIf(t, err != want, "source constructor returned %v, want %v", err, want)
+	sourceAuthorityFailIf(t, !sameDependentValue(err, want), "source constructor returned %v, want %v", err, want)
 }
 
 func assertSourcePinClosed(t *testing.T, pin *os.File) {

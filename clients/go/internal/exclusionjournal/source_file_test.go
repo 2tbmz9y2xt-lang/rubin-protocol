@@ -562,7 +562,7 @@ func testSourcePhysicalResult(t *testing.T, scene sourceSpaceFixture, mode strin
 		calls++
 		return produce(op, visit)
 	}, want)
-	probes := map[bool]int{true: 1, false: 2}[mode == "fully-funded" || want == cause]
+	probes := map[bool]int{true: 1, false: 2}[mode == "fully-funded" || any(want) == any(cause)]
 	sourceFailIf(t, *checks != probes || calls != 1, "retry probes=%d and producers=%d, want %d and one", *checks, calls, probes)
 	testSourcePhysicalOutcome(t, scene, mode, want, reads, writes)
 }
@@ -1716,14 +1716,15 @@ func testSourceStageRestart(t *testing.T, mode string) {
 	data := []byte("retained staging bytes")
 	held, public := ".stage-hold-"+name, ".staging-"+name
 	var old *PreparedSourceV1
-	if mode == "held-alias" {
+	switch mode {
+	case "held-alias":
 		old = sourcePrepare(t, o, m, parts)
 		data = sourceReadFile(t, filepath.Join(root, name))
 		sourceMust(t, os.Link(filepath.Join(root, name), filepath.Join(root, held)))
-	} else if mode == "legacy-public" {
+	case "legacy-public":
 		public = ".staging-" + strings.ToUpper(name)
 		sourceMust(t, os.WriteFile(filepath.Join(root, public), data, 0o600))
-	} else {
+	default:
 		sourceMust(t, os.WriteFile(filepath.Join(root, held), data, 0o600))
 	}
 	leaf := held
@@ -2085,7 +2086,7 @@ func testSourceProducerRefusesAfterCleanup(t *testing.T, o *SourceOwnerV1, m Sou
 		sourcePrepareResult(t, o, m, produce, cause)
 	} else {
 		caught := catchSourcePanic(func() { sourcePrepareResult(t, o, m, produce, nil) })
-		sourceFailIf(t, caught != cause, "producer panic changed: %v", caught)
+		sourceFailIf(t, caught != any(cause), "producer panic changed: %v", caught)
 	}
 	sourcePresence(t, filepath.Dir(stage), filepath.Base(stage), false)
 }

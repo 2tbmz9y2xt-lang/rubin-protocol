@@ -140,15 +140,8 @@ func nonCaptureName(name string) bool {
 
 // finishCensus includes unlinked charges until their custody is retired.
 func (o *SourceOwnerV1) finishCensus(used sourceUsage, absentRelease *sourceRelease) (sourceUsage, error) {
-	if absentRelease != nil {
-		backing := o.live[absentRelease.name]
-		if backing == nil {
-			if err := o.charge(&used, absentRelease.size); err != nil {
-				return sourceUsage{}, err
-			}
-		} else if backing.issued {
-			used.releaseMissing--
-		}
+	if err := o.chargeAbsentRelease(&used, absentRelease); err != nil {
+		return sourceUsage{}, err
 	}
 	for _, stage := range [...]sourceDebt{used.stage, used.pendingStage} {
 		if stage.name != "" && stage.shared == "" {
@@ -158,6 +151,21 @@ func (o *SourceOwnerV1) finishCensus(used sourceUsage, absentRelease *sourceRele
 		}
 	}
 	return used, nil
+}
+
+// chargeAbsentRelease accounts for an absent backing covered by release intent.
+func (o *SourceOwnerV1) chargeAbsentRelease(used *sourceUsage, release *sourceRelease) error {
+	if release == nil {
+		return nil
+	}
+	backing := o.live[release.name]
+	if backing == nil {
+		return o.charge(used, release.size)
+	}
+	if backing.issued {
+		used.releaseMissing--
+	}
+	return nil
 }
 
 func (used sourceUsage) releaseBindingError() error {
@@ -189,16 +197,17 @@ func (o *SourceOwnerV1) censusCapture(r *sourceRoot, name string, used *sourceUs
 		return ErrIntegrityV1
 	}
 	id := filelock.FileIdentityV1(info)
+	size := sourceFileSize(info)
 	backing := o.live[name]
 	if backing == nil || backing.file == id {
 		used.stage.observeAlias(name, id, "")
 		used.pendingStage.observeAlias(name, id, cmp.Or(o.pendingStage.shared, o.debt.shared))
 	}
 	if backing != nil {
-		used.matchReleasedCapture(backing, id, uint64(info.Size()))
+		used.matchReleasedCapture(backing, id, size)
 		return nil
 	}
-	return o.charge(used, uint64(info.Size()))
+	return o.charge(used, size)
 }
 
 // matchReleasedCapture keeps the established checks for previously issued captures.
@@ -277,6 +286,14 @@ func sourceEntryInfo(r *sourceRoot, name string, unobserved error) (os.FileInfo,
 	return info, nil
 }
 
+func sourceFileSize(info os.FileInfo) uint64 {
+	size := info.Size()
+	if size < 0 {
+		return 0
+	}
+	return uint64(size)
+}
+
 func sameSourceFile(info os.FileInfo, expected filelock.IdentityV1) bool {
 	return info != nil && info.Mode().IsRegular() && filelock.FileIdentityV1(info) == expected
 }
@@ -328,7 +345,7 @@ func readStageEntry(r *sourceRoot, leaf string) (sourceDebt, error) {
 	if err != nil {
 		return sourceDebt{}, err
 	}
-	size := uint64(info.Size())
+	size := sourceFileSize(info)
 	return sourceDebt{name: key, leaf: leaf, size: size, observed: size, file: filelock.FileIdentityV1(info)}, nil
 }
 
@@ -411,7 +428,7 @@ func (d sourceDebt) diskCredit(r *sourceRoot) uint64 {
 	if err != nil || d.file != filelock.FileIdentityV1(info) {
 		return 0
 	}
-	return min(d.observed, uint64(info.Size()), singleLinkAllocatedBytes(info))
+	return min(d.observed, sourceFileSize(info), singleLinkAllocatedBytes(info))
 }
 
 // singleLinkAllocatedBytes converts known exclusive allocations to bytes without overflow.
@@ -757,7 +774,7 @@ func (o *SourceOwnerV1) unlinkStage(r *sourceRoot) error {
 	if d.file != (filelock.IdentityV1{}) && !sameSourceFile(info, d.file) {
 		return ErrIdentityV1
 	}
-	d.size = max(d.qualified, uint64(info.Size()))
+	d.size = max(d.qualified, sourceFileSize(info))
 	d.unlinkTried = true
 	if err := o.ops.remove(r.Root, d.leaf); err != nil {
 		return err
@@ -874,7 +891,7 @@ func (o *SourceOwnerV1) clearUnfundedStage(name string) {
 // captureSlot checks public staging spellings without claiming or changing them.
 func (o *SourceOwnerV1) captureSlot(r *sourceRoot, name string) error {
 	entries, err := o.sourceEntries(r)
-	if err == ErrCapacityV1 {
+	if any(err) == any(ErrCapacityV1) {
 		return err
 	}
 	if err != nil {
@@ -978,7 +995,7 @@ func (o *SourceOwnerV1) startBundle(r *sourceRoot, w *sourceFileWriter, name str
 		return err
 	}
 	o.debt.file = filelock.FileIdentityV1(info)
-	o.debt.size = uint64(info.Size())
+	o.debt.size = sourceFileSize(info)
 	return nil
 }
 
@@ -1036,6 +1053,8 @@ func (o *SourceOwnerV1) linkCapture(r *sourceRoot, name string, observed *source
 	case sourceVisible:
 		o.debt.shared = name
 		observed.uncertain = false
+	case sourceIndeterminate:
+		// Keep the qualified capture bound until visibility is known.
 	}
 	return visibility, out
 }
