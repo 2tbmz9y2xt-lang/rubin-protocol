@@ -411,7 +411,9 @@ func testSourceStageObservation(t *testing.T) {
 		limits.Descriptors = 4
 		_, o, dir := sourceScene(t, limits)
 		m, parts := sourceBundle(1, false)
-		sourcePrepareAndRead(t, o, m, parts)
+		p := sourcePrepare(t, o, m, parts)
+		sourceRead(t, o, m, parts)
+		sourceReleaseResult(t, o, p, true, nil)
 		path := filepath.Join(dir, sourceDirectory, publicStagePrefix+m.name(o.id))
 		sourceMust(t, os.WriteFile(path, []byte("staged"), 0o600))
 		preserved := sourcePreservedEntry(t, path)
