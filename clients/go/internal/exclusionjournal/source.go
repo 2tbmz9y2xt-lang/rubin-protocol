@@ -69,6 +69,7 @@ type SourceLimitsV1 struct {
 type SourceOwnerV1 struct {
 	sourceBinding
 	store   *policycontrol.Store
+	stage   *policycontrol.SourceStagePinV1
 	info    os.FileInfo
 	self    *SourceOwnerV1
 	limits  SourceLimitsV1
@@ -121,7 +122,10 @@ func NewSourceOwnerV1(store *policycontrol.Store, expected policycontrol.Identit
 	o := &SourceOwnerV1{store: store, sourceBinding: sourceBinding{dir, id, parent}, limits: limits, ops: realSourceFS, live: make(map[string]*sourceIncarnation)}
 	o.self = o
 	err = account.WithReservation(limits.WorkingBytesV1(), func() error {
-		return b.WithSourceOwnerClaimV1(o.openSourceRoot)
+		return b.WithSourceOwnerClaimV1(func(stage *policycontrol.SourceStagePinV1) error {
+			o.stage = stage
+			return o.openSourceRoot()
+		})
 	})
 	if any(err) == any(policycontrol.ErrBusy) {
 		return nil, ErrBusyV1

@@ -24,6 +24,28 @@ import (
 
 // TestSourceVerifiedReadWindows changes backing after qualification and before a partial read.
 func TestSourceVerifiedReadWindows(t *testing.T) {
+	t.Run("single-window-conditional-assurance", func(t *testing.T) {
+		m, parts := sourceBundle(1, true)
+		w := newSourceWindows(m)
+		for _, malformed := range []bool{false, true} {
+			data := bytes.Clone(parts[3])
+			if malformed {
+				data = data[:len(data)-1]
+			}
+			reader := bytes.NewReader(data)
+			reads := 0
+			part := SourcePartV1{Kind: OriginalAssuranceV1, Length: uint64(len(data)), ReadAt: func(dst []byte, off int64) (int, error) {
+				reads++
+				return reader.ReadAt(dst, off)
+			}}
+			var want error
+			if malformed {
+				want = ErrIntegrityV1
+			}
+			sourceWantError(t, w.checkAssurance(part), want, "conditional assurance")
+			sourceFailIf(t, reads != 1, "conditional assurance made %d storage reads", reads)
+		}
+	})
 	t.Run("visitor-lifetime-and-funding", func(t *testing.T) {
 		s, o, dir, m, parts, _ := sourcePreparedBundle(t)
 		exact := uint64(65536+4096) + 512*o.limits.Scans + 32*(o.limits.Bytes/65536+6)

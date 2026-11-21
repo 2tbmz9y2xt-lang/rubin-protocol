@@ -198,7 +198,7 @@ func (o *SourceOwnerV1) releaseBacking(r *sourceRoot, d *sourceRelease, scratch 
 // location checks the public name before the private name for a pending intent.
 func (d *sourceRelease) location(r *sourceRoot) (string, error) {
 	if d == nil {
-		if _, err := r.Lstat(releaseDetached); !errors.Is(err, os.ErrNotExist) {
+		if r.requireVacant(releaseDetached, ErrIntegrityV1) != nil {
 			return "", ErrIntegrityV1
 		}
 		return "", nil
@@ -305,7 +305,7 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 }
 
 func (o *SourceOwnerV1) publishMarker(r *sourceRoot, d *sourceRelease, id filelock.IdentityV1) error {
-	pin, err := openSourceFile(r, releaseScratch, nil)
+	pin, err := r.pinFile(releaseScratch, nil, &id)
 	if err != nil {
 		return err
 	}
@@ -353,22 +353,18 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, d *sourceRelease, scratch
 	if err := o.syncBoundRoot(r); err != nil {
 		return err
 	}
-	if err := o.confirmClear(r, d); err != nil {
+	if !d.backingAbsent(r) {
+		return ErrIdentityV1
+	}
+	if r.requireVacant(releaseFile, ErrIntegrityV1) != nil {
+		return ErrIntegrityV1
+	}
+	if err := o.checkStage(r, d, false); err != nil {
 		return err
 	}
 	delete(o.live, d.name)
 	o.release = nil
 	return nil
-}
-
-func (o *SourceOwnerV1) confirmClear(r *sourceRoot, d *sourceRelease) error {
-	if !d.backingAbsent(r) {
-		return ErrIdentityV1
-	}
-	if _, err := r.Lstat(releaseFile); !errors.Is(err, os.ErrNotExist) {
-		return ErrIntegrityV1
-	}
-	return o.checkStage(r, d, false)
 }
 
 // clearReleaseMarker removes a matching release record only after the backing name is observed absent.
@@ -403,12 +399,7 @@ func (o *SourceOwnerV1) removeMarkerAlias(r *sourceRoot) error {
 }
 
 func (d *sourceRelease) backingAbsent(r *sourceRoot) bool {
-	for _, name := range [...]string{d.name, releaseDetached} {
-		if _, err := r.Lstat(name); !errors.Is(err, os.ErrNotExist) {
-			return false
-		}
-	}
-	return true
+	return r.requireVacant(d.name, ErrIdentityV1) == nil && r.requireVacant(releaseDetached, ErrIdentityV1) == nil
 }
 
 func (d *sourceRelease) checkMarker(record []byte, id filelock.IdentityV1, err error) (bool, error) {
@@ -534,18 +525,26 @@ func (o *SourceOwnerV1) checkStage(r *sourceRoot, d *sourceRelease, backingPrese
 		key = o.debt.name
 	}
 	stage, err := r.stageAlias(key)
-	if !errors.Is(err, os.ErrNotExist) {
-		if err != nil {
-			return ErrIntegrityV1
-		}
-		if !backingPresent || stage.file != d.file {
-			return ErrBusyV1
-		}
+	switch {
+	case err == nil && (!backingPresent || stage.file != d.file):
+		return ErrBusyV1
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return ErrIntegrityV1
 	}
 	if !backingPresent {
 		return nil
 	}
-	return d.checkStageSpelling(r, stage, err, o.debt)
+	observed := d.sharedStageKey(o.debt)
+	if key := cmp.Or(observed, d.name); stage.name != key {
+		stage, err = r.stageAlias(key)
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || observed != "" && stage.file != d.file || stage.file == d.file && !stage.held && !validHeldStageKey(observed) {
+		return ErrIdentityV1
+	}
+	return nil
 }
 
 func (r *sourceRoot) stageAlias(key string) (sourceDebt, error) {
@@ -555,7 +554,7 @@ func (r *sourceRoot) stageAlias(key string) (sourceDebt, error) {
 		stage.held = false
 		info, err = sourceEntryInfo(r, stage.leaf(), nil)
 	} else if err == nil {
-		err = stageSlotVacant(r, key, syscall.EEXIST)
+		err = r.requireVacant(publicStagePrefix+key, syscall.EEXIST)
 	}
 	stage.file = filelock.FileIdentityV1(info)
 	return stage, err
@@ -610,24 +609,6 @@ func (d *sourceRelease) sharedStageKey(debt sourceDebt) string {
 	return ""
 }
 
-// checkStageSpelling reuses the same entry unless the recorded alias has a different name.
-func (d *sourceRelease) checkStageSpelling(r *sourceRoot, stage sourceDebt, err error, debt sourceDebt) error {
-	observed := d.sharedStageKey(debt)
-	if validHeldStageKey(observed) {
-		return nil
-	}
-	if key := cmp.Or(observed, d.name); stage.name != key {
-		stage, err = r.stageAlias(key)
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil || stage.file == d.file && !stage.held {
-		return ErrIdentityV1
-	}
-	return nil
-}
-
 func (o *SourceOwnerV1) requireBackingLinks(r *sourceRoot, d *sourceRelease, f *os.File, want uint64) error {
 	links, err := sourceLinks(f)
 	if err == nil && links == want {
@@ -665,10 +646,6 @@ func (o *SourceOwnerV1) dropReleaseAlias(r *sourceRoot, d *sourceRelease, f *os.
 	if err := o.requireBackingLinks(r, d, f, 2); err != nil {
 		return err
 	}
-	return o.removeReleaseStage(r, d, stage, observed)
-}
-
-func (o *SourceOwnerV1) removeReleaseStage(r *sourceRoot, d *sourceRelease, stage sourceDebt, observed string) error {
 	if !stage.held && !validHeldStageKey(observed) {
 		return ErrIdentityV1
 	}

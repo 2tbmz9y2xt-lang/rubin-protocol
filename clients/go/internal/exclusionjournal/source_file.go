@@ -48,8 +48,8 @@ func (d sourceDebt) leaf() string {
 	return publicStagePrefix + d.name
 }
 
-func stageSlotVacant(r *sourceRoot, key string, occupied error) error {
-	_, err := r.Lstat(publicStagePrefix + key)
+func (r *sourceRoot) requireVacant(name string, occupied error) error {
+	_, err := r.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -123,26 +123,6 @@ func isStageLeaf(name string) bool {
 }
 
 func (o *SourceOwnerV1) censusStages(r *sourceRoot, entries []os.DirEntry, reopening bool, used *sourceUsage) error {
-	if err := o.admitHeldStage(r, entries, reopening); err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !isStageLeaf(entry.Name()) {
-			continue
-		}
-		info, err := sourceEntryInfo(r, entry.Name(), nil)
-		if err != nil {
-			return ErrIntegrityV1
-		}
-		if err := o.censusStage(entry.Name(), info); err != nil {
-			return err
-		}
-		used.observedStage = &o.debt
-	}
-	return nil
-}
-
-func (o *SourceOwnerV1) admitHeldStage(r *sourceRoot, entries []os.DirEntry, reopening bool) error {
 	seen := false
 	for _, entry := range entries {
 		key, held := strings.CutPrefix(entry.Name(), heldStagePrefix)
@@ -156,9 +136,18 @@ func (o *SourceOwnerV1) admitHeldStage(r *sourceRoot, entries []os.DirEntry, reo
 		if !reopening && o.debt.name != key {
 			return ErrIdentityV1
 		}
-		if err := stageSlotVacant(r, key, syscall.EEXIST); err != nil {
+		if err := r.requireVacant(publicStagePrefix+key, syscall.EEXIST); err != nil {
 			return err
 		}
+	}
+	for _, entry := range entries {
+		if !isStageLeaf(entry.Name()) {
+			continue
+		}
+		if err := o.censusStage(r, entry.Name()); err != nil {
+			return err
+		}
+		used.observedStage = &o.debt
 	}
 	return nil
 }
@@ -209,24 +198,19 @@ func (o *SourceOwnerV1) countBacking(used *sourceUsage, name string, file filelo
 	}
 }
 
-func (d *sourceDebt) stageCharge(used *sourceUsage) uint64 {
-	if d.unlinkTried && used.observedStage == nil {
-		d.removed = true
-	}
-	if !used.stageCharged {
-		return 0
-	}
-	used.files++
-	return d.size
-}
-
 func (o *SourceOwnerV1) includeAbsent(used sourceUsage, absentRelease *sourceRelease) (sourceUsage, error) {
 	var absentBytes uint64
 	if absentRelease != nil {
 		o.countBacking(&used, absentRelease.name, absentRelease.file, false)
 		absentBytes = absentRelease.size
 	}
-	absentBytes += o.debt.stageCharge(&used)
+	if o.debt.unlinkTried && used.observedStage == nil {
+		o.debt.removed = true
+	}
+	if used.stageCharged {
+		used.files++
+		absentBytes += o.debt.size
+	}
 	if absentBytes > o.limits.Bytes-used.bytes || used.files > o.limits.Files {
 		return sourceUsage{}, ErrCapacityV1
 	}
@@ -306,27 +290,19 @@ func validSourceKey(name string) bool {
 	return err == nil && len(decoded) == sha256.Size
 }
 
-func (o *SourceOwnerV1) censusStage(leaf string, info os.FileInfo) error {
+func (o *SourceOwnerV1) censusStage(r *sourceRoot, leaf string) error {
 	name, held := strings.CutPrefix(leaf, heldStagePrefix)
 	if !held {
 		name = strings.TrimPrefix(leaf, publicStagePrefix)
 	}
-	if !validSourceKey(name) {
+	info, err := sourceEntryInfo(r, leaf, nil)
+	if err != nil || !validSourceKey(name) {
 		return ErrIntegrityV1
 	}
 	file := filelock.FileIdentityV1(info)
-	if err := o.debt.matchStage(name, file, held); err != nil {
-		return err
-	}
-	o.debt = sourceDebt{name: name, size: uint64(max(info.Size(), 0)), file: file, staging: true, held: held}
-	return nil
-}
-
-func (d sourceDebt) matchStage(name string, file filelock.IdentityV1, held bool) error {
+	d := &o.debt
 	switch {
-	case d.name == "":
-		return nil
-	case d.name != name:
+	case d.name != "" && d.name != name:
 		return ErrBusyV1
 	case d.held && !held:
 		return ErrIdentityV1
@@ -334,9 +310,14 @@ func (d sourceDebt) matchStage(name string, file filelock.IdentityV1, held bool)
 		return ErrIntegrityV1
 	case d.file != (filelock.IdentityV1{}) && d.file != file:
 		return ErrIdentityV1
-	default:
-		return nil
 	}
+	if !held {
+		if err := o.retainStage(r, leaf, file); err != nil {
+			return err
+		}
+	}
+	*d = sourceDebt{name: name, size: uint64(max(info.Size(), 0)), file: file, staging: true, held: held}
+	return nil
 }
 
 func (o *SourceOwnerV1) space(r *sourceRoot, required uint64, stage *sourceDebt) (bool, error) {
@@ -519,7 +500,7 @@ func fileExporter(f *os.File, m SourceManifestV1, header int) func(func(SourcePa
 func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, visit func(SourcePartV1) error) error {
 	return o.withFiles(account, m, false, func(r *sourceRoot, m SourceManifestV1, size uint64, _ sourceUsage) error {
 		name := m.name(o.id)
-		if o.debt.name == name || o.release != nil && o.release.name == name {
+		if o.debt.matchesKey(name) || o.release != nil && o.release.name == name {
 			return ErrBusyV1
 		}
 		if visit == nil {
@@ -572,7 +553,7 @@ func (w *sourceWindows) deliver(f *os.File, m SourceManifestV1, header int, visi
 		parts[i] = w.part(f, base, spec, hashes[:n])
 		hashes, base = hashes[n:], base+int64(min(spec.Length, math.MaxInt64))
 		if spec.Kind == OriginalAssuranceV1 {
-			if err := assurance(parts[i]); err != nil {
+			if err := w.checkAssurance(parts[i]); err != nil {
 				return err
 			}
 		}
@@ -584,6 +565,17 @@ func (w *sourceWindows) deliver(f *os.File, m SourceManifestV1, header int, visi
 		}
 	}
 	return nil
+}
+
+func (w *sourceWindows) checkAssurance(part SourcePartV1) error {
+	if part.Length > 1 && part.Length <= uint64(len(w.scratch)) {
+		data := w.scratch[:part.Length]
+		if err := readPartAt(part, data, 0); err != nil {
+			return err
+		}
+		part.ReadAt = bytes.NewReader(data).ReadAt
+	}
+	return assurance(part)
 }
 
 // part copies only ranges backed by a matching complete window.
@@ -643,6 +635,7 @@ func (o *SourceOwnerV1) unlinkStage(r *sourceRoot, d *sourceDebt) error {
 	if err != nil {
 		return err
 	}
+	o.stage.Clear()
 	if err := o.release.canonicalVacant(r); err != nil {
 		return err
 	}
@@ -661,25 +654,21 @@ func (d *sourceDebt) privateInfo(r *sourceRoot) (os.FileInfo, error) {
 	return info, err
 }
 
-func (r *sourceRoot) pinStage(d *sourceDebt) error {
-	if d == nil || d.held || r.stagePin != nil || r.stageErr != nil {
-		return r.stageErr
+func (o *SourceOwnerV1) retainStage(r *sourceRoot, leaf string, id filelock.IdentityV1) (err error) {
+	if o.stage.File == nil {
+		o.stage.File, err = r.pinFile(leaf, nil, &id)
 	}
-	r.stagePin, r.stageErr = r.pinFile(d.leaf(), nil, &d.file)
-	return r.stageErr
+	return err
 }
 
 // observeStage withholds credit on failure and reports the cause if cleanup is reached.
 func (r *sourceRoot) observeStage(d *sourceDebt) *sourceDebt {
-	if r.pinStage(d) != nil {
-		return nil
+	if d != nil && !d.held {
+		if _, r.stageErr = d.privateInfo(r); r.stageErr != nil {
+			return nil
+		}
 	}
 	return d
-}
-
-func (r *sourceRoot) closeStagePin() {
-	_ = r.stagePin.Close()
-	r.stagePin = nil
 }
 
 // ownedStageInfo keeps the original pinned through qualification of the moved stage.
@@ -687,28 +676,37 @@ func (o *SourceOwnerV1) ownedStageInfo(r *sourceRoot, d *sourceDebt) (os.FileInf
 	if d.held {
 		return d.privateInfo(r)
 	}
-	if err := r.pinStage(d); err != nil {
-		return nil, err
+	if r.stageErr != nil {
+		return nil, r.stageErr
 	}
-	defer r.closeStagePin()
+	if o.stage.File == nil {
+		return nil, ErrIdentityV1
+	}
 	if err := o.ops.namespace(detachSource, r, d.leaf(), heldStagePrefix+d.name); err != nil {
 		return nil, err
 	}
 	d.held = true
 	info, err := d.privateInfo(r)
 	if err != nil {
-		r.closeStagePin()
 		_ = o.restoreStage(r, d)
 	}
 	return info, err
 }
 
 func (o *SourceOwnerV1) restoreStage(r *sourceRoot, d *sourceDebt) error {
-	if err := o.ops.namespace(detachSource, r, d.leaf(), publicStagePrefix+d.name); err != nil {
+	if err := o.retainStage(r, d.leaf(), d.file); err != nil {
 		return err
 	}
+	public := publicStagePrefix + d.name
+	err := o.ops.namespace(detachSource, r, d.leaf(), public)
+	if err != nil {
+		info, publicErr := sourceEntryInfo(r, public, nil)
+		if publicErr != nil || filelock.FileIdentityV1(info) != d.file || r.requireVacant(d.leaf(), ErrIdentityV1) != nil {
+			return err
+		}
+	}
 	d.held = false
-	return o.syncBoundRoot(r)
+	return cmp.Or(err, o.syncBoundRoot(r))
 }
 
 // PrepareSourceV1 returns a handle after durable publication (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
@@ -727,7 +725,6 @@ func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, 
 	if o.debt.name != "" && o.debt.name != name {
 		return nil, ErrBusyV1
 	}
-	defer r.closeStagePin()
 	f, err := openSourceFile(r, name, nil)
 	if err == nil {
 		defer f.Close()
@@ -759,14 +756,16 @@ func (o *SourceOwnerV1) prepared(r *sourceRoot, m SourceManifestV1, name string,
 		return nil, err
 	}
 	info, err := r.Lstat(name)
-	if err != nil || observed.file != filelock.FileIdentityV1(info) || o.currentRoot() != nil {
+	if err != nil || o.currentRoot() != nil {
 		return nil, ErrIdentityV1
 	}
-	if stageSlotVacant(r, name, ErrIdentityV1) != nil {
-		o.debt = sourceDebt{}
-		return nil, ErrIdentityV1
+	if err := observed.match(info); err != nil {
+		return nil, err
 	}
 	o.debt = sourceDebt{}
+	if r.requireVacant(publicStagePrefix+name, ErrIdentityV1) != nil {
+		return nil, ErrIdentityV1
+	}
 	token := cmp.Or(o.live[name], &observed)
 	o.live[name] = token
 	return &PreparedSourceV1{manifest: m, name: name, incarnation: token}, nil
@@ -795,7 +794,7 @@ func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, 
 		return nil, err
 	}
 	defer pin.Close()
-	if stageSlotVacant(r, name, ErrIdentityV1) != nil {
+	if r.requireVacant(publicStagePrefix+name, ErrIdentityV1) != nil {
 		return nil, ErrIdentityV1
 	}
 	visibility, err := o.linkVisible(r, o.debt.leaf(), name, observed.file)

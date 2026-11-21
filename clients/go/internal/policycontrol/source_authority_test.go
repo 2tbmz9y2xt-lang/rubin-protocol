@@ -80,12 +80,12 @@ func TestSourceAuthorityCloseOnly(t *testing.T) {
 func checkSourceOwnerClaims(t *testing.T, s *Store) {
 	t.Helper()
 	one, two := sourceBorrow(t, s), sourceBorrow(t, s)
-	claim := func(b *SourceAuthorityBorrowV1, use func() error, want error) {
+	claim := func(b *SourceAuthorityBorrowV1, use func(*SourceStagePinV1) error, want error) {
 		t.Helper()
 		err := b.WithSourceOwnerClaimV1(use)
 		sourceAuthorityFailIf(t, !sameDependentValue(err, want), "source owner claim: %v, want %v", err, want)
 	}
-	unreached := func() error {
+	unreached := func(*SourceStagePinV1) error {
 		t.Fatal("refused source owner claim entered callback")
 		return nil
 	}
@@ -102,8 +102,20 @@ func checkSourceOwnerClaims(t *testing.T, s *Store) {
 	cause := errors.New("source construction refusal")
 	wrapped := fmt.Errorf("construct source: %w", cause)
 	var typedNil *dependentCause
+	var held *os.File
+	retain := func(stage *SourceStagePinV1) {
+		t.Helper()
+		f, err := os.Open(s.dir)
+		must(t, err)
+		stage.File, held = f, f
+		releaseDuringClaim()
+		_, err = f.Stat()
+		must(t, err)
+	}
 	for _, want := range []error{cause, wrapped, typedNil} {
-		claim(one, func() error { releaseDuringClaim(); return want }, want)
+		claim(one, func(stage *SourceStagePinV1) error { retain(stage); return want }, want)
+		_, err := held.Stat()
+		sourceAuthorityFailIf(t, !errors.Is(err, os.ErrClosed), "failed claim kept its file: %v", err)
 		one, two = sourceBorrow(t, s), sourceBorrow(t, s)
 	}
 	func() {
@@ -111,11 +123,13 @@ func checkSourceOwnerClaims(t *testing.T, s *Store) {
 			caught := recover()
 			sourceAuthorityFailIf(t, !sameDependentValue(caught, cause), "owner claim panic: %v", caught)
 		}()
-		claim(one, func() error { releaseDuringClaim(); panic(cause) }, nil)
+		claim(one, func(stage *SourceStagePinV1) error { retain(stage); panic(cause) }, nil)
 	}()
+	_, err := held.Stat()
+	sourceAuthorityFailIf(t, !errors.Is(err, os.ErrClosed), "panicking claim kept its file: %v", err)
 	one, two = sourceBorrow(t, s), sourceBorrow(t, s)
 	calls := 0
-	claim(one, func() error {
+	claim(one, func(*SourceStagePinV1) error {
 		calls++
 		copied := *two
 		claim(&copied, unreached, ErrBusy)
@@ -179,7 +193,7 @@ func checkSourceBorrowClose(t *testing.T, s *Store, before []byte) {
 func checkExpiredSourceBorrows(t *testing.T, one, two *SourceAuthorityBorrowV1) {
 	t.Helper()
 	for _, b := range []*SourceAuthorityBorrowV1{nil, {}, one, two} {
-		err := b.WithSourceOwnerClaimV1(func() error {
+		err := b.WithSourceOwnerClaimV1(func(*SourceStagePinV1) error {
 			t.Fatal("refused source owner claim entered callback")
 			return nil
 		})

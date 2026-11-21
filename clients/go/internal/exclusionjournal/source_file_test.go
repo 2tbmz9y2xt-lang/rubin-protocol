@@ -338,16 +338,20 @@ func TestSourcePartialCleanupRetry(t *testing.T) {
 		sourcePrepareAndRead(t, o, m, parts)
 	})
 	t.Run("stage-incarnation", func(t *testing.T) {
-		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+		s, o, dir, m, parts := sourceBundleScene(t, 1, false)
 		root := filepath.Join(dir, sourceDirectory)
 		stage := filepath.Join(root, ".staging-"+m.name(o.id))
 		sourceMust(t, os.WriteFile(stage, []byte("retained"), 0o600))
+		original := sourceLstat(t, stage)
 		sourceReadRefusal(t, o, m, ErrBusyV1, "retained stage")
-		sourceMust(t, os.Rename(stage, filepath.Join(t.TempDir(), "original")))
+		sourceMust(t, os.Remove(stage))
+		sourceFailIf(t, !sourceHasOpenFile(t, original), "unlinked staging file lost before retry")
 		sourceMust(t, os.WriteFile(stage, []byte("replacement"), 0o600))
 		prior := sourceLstat(t, stage)
 		sourcePrepareRefusal(t, o, m, parts, ErrIdentityV1)
 		sourceFailIf(t, !os.SameFile(prior, sourceLstat(t, stage)) || !bytes.Equal(sourceReadFile(t, stage), []byte("replacement")), "staging retry changed replacement")
+		sourceMust(t, s.Close())
+		sourceFailIf(t, sourceHasOpenFile(t, original), "closed store retained staging file")
 	})
 	t.Run("disk-credit", testSourceStageSpace)
 	t.Run("unrelated-release", testSourceReleaseWithStage)
@@ -403,7 +407,7 @@ func TestSourcePartialCleanupRetry(t *testing.T) {
 
 func testSourceStageObservation(t *testing.T) {
 	t.Run("funded-producer-refusal", func(t *testing.T) {
-		_, o, dir, m, _ := sourceBundleScene(t, 1, false)
+		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 		root := filepath.Join(dir, sourceDirectory)
 		path := filepath.Join(root, publicStagePrefix+m.name(o.id))
 		sourceMust(t, os.WriteFile(path, []byte("partial"), 0o600))
@@ -415,8 +419,10 @@ func testSourceStageObservation(t *testing.T) {
 			return want
 		}, want)
 		unchanged()
-		sourceFailIf(t, sourceHasOpenFile(t, before), "producer refusal retained an open stage")
+		sourceFailIf(t, !sourceHasOpenFile(t, before), "producer refusal lost the stage")
 		assertSourceReleaseCharge(t, o, m, 1, uint64(before.Size()))
+		sourcePrepareAndRead(t, o, m, parts)
+		sourceFailIf(t, sourceHasOpenFile(t, before), "successful retry retained its retired stage")
 	})
 	sourceModes(t, []string{"logical-capacity", "disk-capacity", "producer", "reuse-producer", "reuse-integrity"}, func(t *testing.T, mode string) {
 		m, parts := sourceBundle(1, false)
@@ -477,7 +483,7 @@ func testSourceStageObservation(t *testing.T) {
 }
 
 func testSourceStageClaim(t *testing.T) {
-	sourceModes(t, []string{"mismatch", "occupied-restore", "late-claim"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"mismatch", "occupied-restore", "late-claim", "late-restore-original", "late-restore-replacement"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 		root, name := filepath.Join(dir, sourceDirectory), m.name(o.id)
 		public, held := ".staging-"+name, ".stage-hold-"+name
@@ -488,7 +494,17 @@ func testSourceStageClaim(t *testing.T) {
 		sourceMust(t, os.WriteFile(fixture, []byte("independent"), 0o600))
 		second := sourceLstat(t, fixture)
 		claimed := false
+		previous := filepath.Join(dir, "previous stage")
+		restored := false
 		o.ops.namespace = func(op sourceNameOp, r *sourceRoot, from, to string) error {
+			if from == held && to == public && strings.HasPrefix(mode, "late-restore-") {
+				if mode == "late-restore-original" {
+					sourceMust(t, os.Rename(previous, filepath.Join(root, held)))
+				}
+				sourceMust(t, op(r, from, to))
+				restored = true
+				return syscall.EIO
+			}
 			if from != public {
 				return op(r, from, to)
 			}
@@ -498,7 +514,7 @@ func testSourceStageClaim(t *testing.T) {
 				sourceMust(t, op(r, from, to))
 				return syscall.EIO
 			}
-			sourceMust(t, os.Rename(original, filepath.Join(dir, "previous stage")))
+			sourceMust(t, os.Rename(original, previous))
 			sourceMust(t, os.Rename(fixture, original))
 			sourceMust(t, op(r, from, to))
 			if mode == "occupied-restore" {
@@ -517,9 +533,14 @@ func testSourceStageClaim(t *testing.T) {
 		}
 		sourcePrepareResult(t, o, m, sourceProducer(m, parts), want)
 		sourceFailIf(t, !claimed, "stage claim did not run")
+		sourceFailIf(t, strings.HasPrefix(mode, "late-restore-") && !restored, "restore did not complete")
 		sourcePresence(t, root, name, false)
 		o.ops = realSourceFS
 		switch mode {
+		case "late-restore-original":
+			sourceUnchangedEntry(t, original, before)
+			sourcePresence(t, root, held, false)
+			sourcePrepareAndRead(t, o, m, parts)
 		case "late-claim":
 			sourceUnchangedEntry(t, filepath.Join(root, held), before)
 			assertSourceReleaseCharge(t, o, m, 1, uint64(len("old stage")))
@@ -1082,11 +1103,15 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 }
 
 func testSourceReleaseSpelling(t *testing.T) {
-	t.Run("unqualified-cross-key", func(t *testing.T) {
+	sourceModes(t, []string{"unqualified-cross-key", "unqualified-lowercase-cross-key"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		backing := filepath.Join(root, p.name)
-		stage := filepath.Join(root, publicStagePrefix+strings.ToUpper(sourceForeign(m).name(o.id)))
+		key := sourceForeign(m).name(o.id)
+		if mode == "unqualified-cross-key" {
+			key = strings.ToUpper(key)
+		}
+		stage := filepath.Join(root, publicStagePrefix+key)
 		sourceMust(t, os.Link(backing, stage))
 		sourceRead(t, o, m, parts)
 		sourceMust(t, os.Remove(stage))
@@ -1157,6 +1182,9 @@ func testSourceReleaseSpelling(t *testing.T) {
 		if mode == "mixed-alias-another-name" {
 			sourceMust(t, os.Link(stage, filepath.Join(root, key)))
 			files, used = 2, 2*size
+		}
+		if mode == "same-key-file" {
+			sourceReadRefusal(t, o, m, ErrBusyV1, "stage with alternate key spelling")
 		}
 		if mode == "unrelated-file" || mode == "fresh-mixed-file" {
 			preserved := sourcePreservedEntry(t, stage)
@@ -1575,6 +1603,22 @@ func testSourceBackingLinks(t *testing.T) {
 }
 
 func testSourceMarkerCollision(t *testing.T) {
+	t.Run("changed-scratch", func(t *testing.T) {
+		_, o, dir, _, _, p := sourcePreparedBundle(t)
+		root := filepath.Join(dir, sourceDirectory)
+		scratch := filepath.Join(root, releaseScratch)
+		replacement := filepath.Join(dir, "replacement")
+		sourceMust(t, os.WriteFile(replacement, []byte("independent record"), 0o600))
+		info := sourceLstat(t, replacement)
+		o.ops.close = func(f *os.File) error {
+			sourceMust(t, f.Close())
+			return os.Rename(replacement, scratch)
+		}
+		sourceReleaseResult(t, o, p, true, ErrIdentityV1)
+		sourceUnchangedEntry(t, scratch, info)
+		sourcePresence(t, root, releaseFile, false)
+		sourcePresence(t, root, p.name, true)
+	})
 	_, o, dir, _, _, p := sourcePreparedBundle(t)
 	root := filepath.Join(dir, sourceDirectory)
 	var inserted os.FileInfo
@@ -2683,6 +2727,19 @@ func testSourceHeldRestoreIO(t *testing.T) {
 }
 
 func testSourceProtectedPublication(t *testing.T) {
+	sourceModes(t, []string{"truncated-publication", "truncated-reuse"}, func(t *testing.T, mode string) {
+		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+		if mode == "truncated-reuse" {
+			sourcePrepare(t, o, m, parts)
+		}
+		path := filepath.Join(dir, sourceDirectory, m.name(o.id))
+		o.ops.dirSync = func(pin *os.File) error {
+			sourceMust(t, pin.Sync())
+			return os.Truncate(path, 1)
+		}
+		sourcePrepareResult(t, o, m, sourceProducer(m, parts), ErrIntegrityV1)
+		sourceFailIf(t, sourceLstat(t, path).Size() != 1, "expected truncated source")
+	})
 	t.Run("reuse-with-public-stage", func(t *testing.T) {
 		_, o, dir, m, parts, p := sourcePreparedBundle(t)
 		stage := filepath.Join(dir, sourceDirectory, publicStagePrefix+p.name)
