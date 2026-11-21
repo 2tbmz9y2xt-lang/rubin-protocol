@@ -489,7 +489,6 @@ func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name stri
 	return o.unlinkDetached(r, d, scratch)
 }
 
-// checkStage preserves an independent stage for the same capture.
 func (o *SourceOwnerV1) checkStage(r *sourceRoot, d *sourceRelease, backingPresent bool) error {
 	if _, err := o.census(r, false); err != nil {
 		return err
@@ -500,12 +499,14 @@ func (o *SourceOwnerV1) checkStage(r *sourceRoot, d *sourceRelease, backingPrese
 	}
 	stage, err := r.stageAlias(key)
 	switch {
-	case err != nil && !errors.Is(err, os.ErrNotExist):
+	case errors.Is(err, os.ErrNotExist):
+		if !backingPresent {
+			return nil
+		}
+	case err != nil:
 		return ErrIntegrityV1
-	case err == nil && (!backingPresent || stage.file != d.file):
+	case !backingPresent || stage.file != d.file:
 		return ErrBusyV1
-	case !backingPresent:
-		return nil
 	}
 	return d.checkStageSpelling(r, stage, err, d.sharedStageKey(o.debt))
 }
