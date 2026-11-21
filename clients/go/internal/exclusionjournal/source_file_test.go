@@ -177,6 +177,7 @@ func TestSourceManifestRefusals(t *testing.T) {
 }
 
 func TestSourcePartAndAssuranceRefusals(t *testing.T) {
+	t.Run("producer-end-reads", testSourceProducerEndReads)
 	invalidAssurance := map[string][]byte{
 		"full-extra":        {1, 1},
 		"conditional-short": {2, 1},
@@ -1080,11 +1081,15 @@ func TestSourceSharedCaptureBudget(t *testing.T) {
 
 func TestSourcePositiveInsufficientLimits(t *testing.T) {
 	exact := sourceLimits()
-	exact.RAM = exact.WorkingBytesV1() + exact.retainedRAM()
+	exact.RAM = 65536 + 4096 + 512*exact.Scans + 32*(exact.Bytes/65536+6) + 1024 + 168*exact.Files
 	s, o, _ := sourceScene(t, exact)
 	ram, descriptors, held := exact, exact, sourceHeld(t, o)
 	ram.RAM, descriptors.Descriptors = ram.RAM-1, 3
-	for _, limits := range []SourceLimitsV1{ram, descriptors} {
+	extreme := exact
+	extreme.RAM, extreme.Bytes, extreme.Scans = math.MaxInt64-1, math.MaxInt64-1, uint64(math.MaxInt-65536-4096)/512
+	combined := extreme
+	combined.Bytes = 1
+	for _, limits := range []SourceLimitsV1{ram, descriptors, extreme, combined} {
 		sourceOpen(t, s, sourceID(), limits, ErrCapacityV1)
 	}
 	held("insufficient limits")
@@ -1101,7 +1106,7 @@ func TestSourceBoundedMaximumCopy(t *testing.T) {
 	_, o, dir := sourceScene(t, limits)
 	testSourceUnfundedBacking(t, o, m, parts, filepath.Join(dir, sourceDirectory, ".staging-"+m.name(o.id)))
 	maximum := 0
-	funded := mdbx.TreeLaneMaxBytes - (65536 + 4096 + 64*512) - sourceBackingCharge(parts)
+	funded := mdbx.TreeLaneMaxBytes - (65536 + 4096 + 64*512 + 32*(o.limits.Bytes/65536+6)) - sourceBackingCharge(parts)
 	producer := sourceMappedProducer(m, parts, func(part SourcePartV1, visit func(SourcePartV1) error) error {
 		read := part.ReadAt
 		part.ReadAt = func(dst []byte, off int64) (int, error) { maximum = max(maximum, len(dst)); return read(dst, off) }

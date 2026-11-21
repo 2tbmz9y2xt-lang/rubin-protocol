@@ -202,7 +202,7 @@ func (o *SourceOwnerV1) space(r *sourceRoot, required uint64) error {
 
 func assurance(part SourcePartV1) error {
 	var field [8]byte
-	if n, err := part.ReadAt(field[:1], 0); n != 1 || err != nil {
+	if err := readPartAt(part, field[:1], 0); err != nil {
 		return ErrIntegrityV1
 	}
 	offset := uint64(1)
@@ -229,7 +229,7 @@ func assuranceField(part SourcePartV1, offset uint64) (uint64, error) {
 		return 0, ErrIntegrityV1
 	}
 	var field [8]byte
-	if n, err := part.ReadAt(field[:], int64(min(offset, math.MaxInt64))); n != 8 || err != nil {
+	if err := readPartAt(part, field[:], offset); err != nil {
 		return 0, ErrIntegrityV1
 	}
 	length := binary.LittleEndian.Uint64(field[:])
@@ -240,7 +240,7 @@ func assuranceField(part SourcePartV1, offset uint64) (uint64, error) {
 	return offset + length, nil
 }
 
-func stream(m SourceManifestV1, produce func(func(SourcePartV1) error) error, dst io.Writer, scratch []byte, start func() error) error {
+func stream(m SourceManifestV1, produce func(func(SourcePartV1) error) error, dst io.Writer, scratch []byte, start func() error, checkAssurance bool) error {
 	var digest [sha256.Size]byte
 	err := produce(func(part SourcePartV1) error {
 		if start != nil {
@@ -249,7 +249,7 @@ func stream(m SourceManifestV1, produce func(func(SourcePartV1) error) error, ds
 			}
 			start = nil
 		}
-		if part.Kind == OriginalAssuranceV1 {
+		if checkAssurance && part.Kind == OriginalAssuranceV1 {
 			if err := assurance(part); err != nil {
 				return err
 			}
@@ -272,6 +272,11 @@ func stream(m SourceManifestV1, produce func(func(SourcePartV1) error) error, ds
 }
 
 func (o *SourceOwnerV1) qualify(f *os.File, m SourceManifestV1, size uint64, scratch []byte, expected *sourceIncarnation, shapeError error) (sourceIncarnation, error) {
+	return o.qualifyWindows(f, m, size, scratch, expected, shapeError, nil)
+}
+
+// qualifyWindows binds the optional window digests to the bytes used for the footer check.
+func (o *SourceOwnerV1) qualifyWindows(f *os.File, m SourceManifestV1, size uint64, scratch []byte, expected *sourceIncarnation, shapeError error, windows *sourceWindows) (sourceIncarnation, error) {
 	var observed sourceIncarnation
 	file, actual, err := o.sourceFileHeader(f, m, size, expected, shapeError)
 	if err != nil {
@@ -281,7 +286,13 @@ func (o *SourceOwnerV1) qualify(f *os.File, m SourceManifestV1, size uint64, scr
 	observed.size = size
 	hash := sha256.New()
 	_, _ = hash.Write(actual)
-	if err := stream(m, fileExporter(f, m, len(actual)), hash, scratch, nil); err != nil {
+	var out io.Writer = hash
+	if windows != nil {
+		*windows = newSourceWindows(m)
+		scratch = windows.scratch
+		out = io.MultiWriter(hash, windows)
+	}
+	if err := stream(m, fileExporter(f, m, len(actual)), out, scratch, nil, windows == nil); err != nil {
 		return observed, err
 	}
 	_, err = f.ReadAt(observed.footer[:], int64(min(size, math.MaxInt64))-sha256.Size)
@@ -338,11 +349,91 @@ func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m S
 			return err
 		}
 		defer f.Close()
-		if _, err := o.qualify(f, m, size, make([]byte, scratchBytes), o.live[name], ErrIntegrityV1); err != nil {
+		var windows sourceWindows
+		if _, err := o.qualifyWindows(f, m, size, nil, o.live[name], ErrIntegrityV1, &windows); err != nil {
 			return err
 		}
-		return fileExporter(f, m, len(m.header(o.id)))(visit)
+		return windows.deliver(f, m, len(m.header(o.id)), visit)
 	})
+}
+
+type sourceWindows struct {
+	hashes  [][sha256.Size]byte
+	scratch []byte
+	failure error
+}
+
+func newSourceWindows(m SourceManifestV1) sourceWindows {
+	var count uint64
+	for _, part := range m.Parts {
+		count += sourceWindowCount(part.Length)
+	}
+	return sourceWindows{hashes: make([][sha256.Size]byte, 0, count), scratch: make([]byte, scratchBytes)}
+}
+
+func sourceWindowCount(length uint64) uint64 {
+	return (length + scratchBytes - 1) / scratchBytes
+}
+
+func (w *sourceWindows) Write(b []byte) (int, error) {
+	w.hashes = append(w.hashes, sha256.Sum256(b))
+	return len(b), nil
+}
+
+func (w *sourceWindows) deliver(f *os.File, m SourceManifestV1, header int, visit func(SourcePartV1) error) error {
+	var parts [6]SourcePartV1
+	hashes, base := w.hashes, int64(header)
+	for i, spec := range m.Parts {
+		n := sourceWindowCount(spec.Length)
+		section := io.NewSectionReader(f, base, int64(min(spec.Length, math.MaxInt64)))
+		parts[i] = w.part(section, spec, hashes[:n])
+		hashes, base = hashes[n:], base+section.Size()
+		if spec.Kind == OriginalAssuranceV1 {
+			if err := w.checkAssurance(parts[i]); err != nil {
+				return err
+			}
+		}
+	}
+	for _, part := range parts[:len(m.Parts)] {
+		err := visitPart(part, visit)
+		if err := cmp.Or(w.failure, err); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *sourceWindows) checkAssurance(part SourcePartV1) error {
+	if part.Length > 1 && part.Length <= uint64(len(w.scratch)) {
+		data := w.scratch[:part.Length]
+		if err := readPartAt(part, data, 0); err != nil {
+			return err
+		}
+		part.ReadAt = bytes.NewReader(data).ReadAt
+	}
+	return assurance(part)
+}
+
+func (w *sourceWindows) part(section *io.SectionReader, spec SourcePartSpecV1, hashes [][sha256.Size]byte) SourcePartV1 {
+	return SourcePartV1{Kind: spec.Kind, Length: spec.Length, ReadAt: func(dst []byte, off int64) (int, error) {
+		if w.failure != nil {
+			return 0, w.failure
+		}
+		copied := 0
+		for len(dst) > 0 {
+			index := off / scratchBytes
+			start := index * scratchBytes
+			buf := w.scratch[:min(int64(scratchBytes), section.Size()-start)]
+			n, err := section.ReadAt(buf, start)
+			if n != len(buf) || err != nil || sha256.Sum256(buf) != hashes[index] {
+				w.failure = ErrIntegrityV1
+				return copied, w.failure
+			}
+			n = copy(dst, buf[off-start:])
+			dst, off, copied = dst[n:], off+int64(n), copied+n
+		}
+		return copied, nil
+	}}
 }
 
 func (o *SourceOwnerV1) withFiles(account *mdbx.OperationAccount, m SourceManifestV1, preparing bool, use func(*sourceRoot, SourceManifestV1, uint64, sourceUsage) error) error {
@@ -487,7 +578,7 @@ func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m Source
 		_, err = out.Write(m.header(o.id))
 		return cmp.Or(err, o.ops.chmod(f, 0o600))
 	}
-	if err := stream(m, produce, out, scratch, start); err != nil {
+	if err := stream(m, produce, out, scratch, start, true); err != nil {
 		return sourceIncarnation{}, err
 	}
 	if _, err := w.Write(hash.Sum(nil)); err != nil {
@@ -547,7 +638,7 @@ func (o *SourceOwnerV1) reuse(r *sourceRoot, f *os.File, m SourceManifestV1, nam
 	if stage.name != "" {
 		start = func() error { return o.reconcile(r) }
 	}
-	if err := stream(m, produce, w, scratch[:scratchBytes/2], start); err != nil {
+	if err := stream(m, produce, w, scratch[:scratchBytes/2], start, true); err != nil {
 		return nil, err
 	}
 	if err := o.finishFile(f); err != nil {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -21,6 +22,325 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/policycontrol"
 )
+
+type sourceCountedFile struct {
+	*os.File
+	reads int
+}
+
+func (f *sourceCountedFile) ReadAt(dst []byte, off int64) (int, error) {
+	f.reads++
+	return f.File.ReadAt(dst, off)
+}
+
+// TestSourceVerifiedReadWindows changes backing after qualification and before a partial read.
+func TestSourceVerifiedReadWindows(t *testing.T) {
+	t.Run("refused-file-allocates-less-than-one-window", func(t *testing.T) {
+		_, o, _, m, _, _ := sourcePreparedBundle(t)
+		m.Parts[0].Length++
+		sourceAccount(t, func(a *mdbx.OperationAccount) {
+			visit := func(SourcePartV1) error { t.Fatal("refused file was visited"); return nil }
+			check := func(reason string) {
+				t.Helper()
+				sourceWantError(t, o.WithCapturedSourceV1(a, m, visit), ErrIntegrityV1, reason)
+				var before, after runtime.MemStats
+				runtime.ReadMemStats(&before)
+				err := o.WithCapturedSourceV1(a, m, visit)
+				runtime.ReadMemStats(&after)
+				sourceWantError(t, err, ErrIntegrityV1, reason)
+				allocated := after.TotalAlloc - before.TotalAlloc
+				t.Logf("%s: allocated %d bytes", reason, allocated)
+				sourceFailIf(t, allocated >= 64<<10, "%s: allocated %d bytes on refusal", reason, allocated)
+			}
+			check("size mismatch")
+			m.Parts[1].Length--
+			check("header mismatch at matching size")
+		})
+	})
+	t.Run("conditional-length-crosses-window", func(t *testing.T) {
+		_, o, _, m, parts := sourceBundleScene(t, 1, false)
+		record := []byte{2}
+		for _, field := range [][]byte{bytes.Repeat([]byte{0x41}, 65536-4-9), {2, 3}, {4}, {5}} {
+			record = binary.LittleEndian.AppendUint64(record, uint64(len(field)))
+			record = append(record, field...)
+		}
+		parts[3], m.Parts[3].Length = record, uint64(len(record))
+		sourcePrepareAndRead(t, o, m, parts)
+	})
+	t.Run("single-window-conditional-assurance", func(t *testing.T) {
+		m, parts := sourceBundle(1, true)
+		for _, malformed := range []bool{false, true} {
+			w := newSourceWindows(m)
+			data := bytes.Clone(parts[3])
+			if malformed {
+				data = data[:len(data)-1]
+			}
+			path := filepath.Join(t.TempDir(), "assurance")
+			sourceMust(t, os.WriteFile(path, data, 0o600))
+			f, err := os.Open(path)
+			sourceMust(t, err)
+			spec := SourcePartSpecV1{Kind: OriginalAssuranceV1, Length: uint64(len(data))}
+			file := &sourceCountedFile{File: f}
+			part := w.part(io.NewSectionReader(file, 0, int64(len(data))), spec, [][sha256.Size]byte{sha256.Sum256(data)})
+			var want error
+			if malformed {
+				want = ErrIntegrityV1
+			}
+			sourceWantError(t, w.checkAssurance(part), want, "conditional assurance")
+			sourceMust(t, f.Close())
+			sourceFailIf(t, file.reads != 1, "conditional assurance made %d file reads", file.reads)
+			n, err := part.ReadAt(nil, 0)
+			sourceFailIf(t, n != 0 || err != nil || file.reads != 1, "empty live read: %d/%v, reads=%d", n, err, file.reads)
+			n, err = part.ReadAt(make([]byte, 1), 0)
+			sourceFailIf(t, n != 0 || any(err) != any(ErrIntegrityV1) || file.reads != 2, "closed backing: %d/%v, reads=%d", n, err, file.reads)
+			n, err = part.ReadAt(nil, 0)
+			sourceFailIf(t, n != 0 || any(err) != any(ErrIntegrityV1) || file.reads != 2, "empty failed read: %d/%v, reads=%d", n, err, file.reads)
+		}
+	})
+	t.Run("visitor-lifetime-and-funding", func(t *testing.T) {
+		s, o, dir, m, parts, _ := sourcePreparedBundle(t)
+		exact := uint64(65536+4096) + 512*o.limits.Scans + 32*(o.limits.Bytes/65536+6)
+		limits := o.limits
+		limits.RAM = exact + 1024 + 168*limits.Files
+		o = sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), limits, nil)
+		visitorErr := errors.New("visitor result")
+		var escaped SourcePartV1
+		sourceAccount(t, func(a *mdbx.OperationAccount) {
+			sourceMust(t, a.WithReservation(mdbx.TreeLaneMaxBytes-exact+1, func() error {
+				err := o.WithCapturedSourceV1(a, m, func(SourcePartV1) error { t.Fatal("unfunded read entered visitor"); return nil })
+				sourceFailIf(t, !mdbx.IsOperationReservationCapacity(err), "unfunded read: %v", err)
+				return nil
+			}))
+			sourceMust(t, a.WithReservation(mdbx.TreeLaneMaxBytes-exact, func() error {
+				err := o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error { escaped = part; return visitorErr })
+				sourceWantError(t, err, visitorErr, "visitor result")
+				func() {
+					defer func() { sourceFailIf(t, recover() != any(visitorErr), "readback changed visitor panic") }()
+					_ = o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error { escaped = part; panic(visitorErr) })
+				}()
+				n, err := escaped.ReadAt(make([]byte, 1), 0)
+				sourceFailIf(t, n != 0 || any(err) != any(ErrUnavailableV1), "expired retained reader: %d/%v", n, err)
+				sourceReadOn(t, a, o, m, parts)
+				return a.WithReservation(exact, func() error { return nil })
+			}))
+		})
+		sourceRead(t, o, m, parts)
+	})
+	t.Run("aggregate-funding", func(t *testing.T) {
+		_, o, _, m, parts, _ := sourcePreparedBundle(t)
+		exact := uint64(65536+4096) + 512*o.limits.Scans + 32*(o.limits.Bytes/65536+6)
+		owner, err := mdbx.NewOperationReservationOwner(mdbx.MinReservationLimit)
+		sourceMust(t, err)
+		hold := func(bytes uint64, use func() error) error {
+			return owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+				return a.WithReservation(bytes, use)
+			})
+		}
+		sourceMust(t, hold(mdbx.TreeLaneMaxBytes, func() error {
+			return hold(mdbx.MinReservationLimit-mdbx.TreeLaneMaxBytes-exact, func() error {
+				return owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+					sourceMust(t, owner.WithReservation(1, func() error {
+						err := o.WithCapturedSourceV1(a, m, func(SourcePartV1) error { t.Fatal("aggregate shortage entered visitor"); return nil })
+						sourceFailIf(t, !mdbx.IsOperationReservationCapacity(err), "aggregate shortage: %v", err)
+						return nil
+					}))
+					sourceReadOn(t, a, o, m, parts)
+					return a.WithReservation(exact, func() error { return nil })
+				})
+			})
+		}))
+	})
+	t.Run("invalid-assurance-before-visit", func(t *testing.T) {
+		s, o, dir, m, parts := sourceBundleScene(t, 1, false)
+		p := sourcePrepare(t, o, m, parts)
+		path := filepath.Join(dir, sourceDirectory, p.name)
+		image := sourceReadFile(t, path)
+		offset := len(m.header(o.id)) + len(parts[0]) + len(parts[1]) + len(parts[2])
+		image[offset] = 0
+		end := len(image) - 32
+		digest := sha256.Sum256(image[:end])
+		copy(image[end:], digest[:])
+		sourceMust(t, os.WriteFile(path, image, 0o600))
+		fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
+		sourceReadRefusal(t, fresh, m, ErrIntegrityV1, "malformed retained assurance")
+	})
+	t.Run("panic-after-failed-window", func(t *testing.T) {
+		_, o, dir, m, parts, p := sourcePreparedBundle(t)
+		f, err := os.OpenFile(filepath.Join(dir, sourceDirectory, p.name), os.O_RDWR, 0)
+		sourceMust(t, err)
+		defer f.Close()
+		offset := int64(len(m.header(o.id)))
+		cause := errors.New("visitor panic")
+		var escaped SourcePartV1
+		sourceAccount(t, func(a *mdbx.OperationAccount) {
+			func() {
+				defer func() { sourceFailIf(t, recover() != any(cause), "changed visitor panic") }()
+				_ = o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error {
+					escaped = part
+					_, err := f.WriteAt([]byte{parts[0][0] ^ 1}, offset)
+					sourceMust(t, err)
+					n, err := part.ReadAt(make([]byte, 1), 0)
+					sourceFailIf(t, n != 0 || any(err) != any(ErrIntegrityV1), "changed byte: %d/%v", n, err)
+					panic(cause)
+				})
+			}()
+			n, err := escaped.ReadAt(nil, 0)
+			sourceFailIf(t, n != 0 || any(err) != any(ErrUnavailableV1), "escaped failed reader: %d/%v", n, err)
+			_, err = f.WriteAt(parts[0][:1], offset)
+			sourceMust(t, err)
+			sourceReadOn(t, a, o, m, parts)
+		})
+	})
+	for _, tc := range []struct {
+		offset int64
+		result error
+	}{
+		{65534, nil},
+		{65536 + 36, nil},
+		{65536 + 36, errors.New("visitor result")},
+		{65536 + 36, ErrIntegrityV1},
+		{65536 + 36, fmt.Errorf("wrapped: %w", ErrIntegrityV1)},
+	} {
+		t.Run(fmt.Sprintf("offset=%d/result=%v", tc.offset, tc.result), func(t *testing.T) {
+			_, o, dir, m, parts := sourceBundleScene(t, 1, false)
+			parts[0] = bytes.Repeat([]byte{0x21}, 65536+37)
+			copy(parts[0][65536:], []byte{0x31, 0x32})
+			m.Parts[0].Length = uint64(len(parts[0]))
+			p := sourcePrepare(t, o, m, parts)
+			f, err := os.OpenFile(filepath.Join(dir, sourceDirectory, p.name), os.O_RDWR, 0)
+			sourceMust(t, err)
+			defer f.Close()
+			base := int64(len(m.header(o.id)))
+			var visits int
+			sourceAccount(t, func(a *mdbx.OperationAccount) {
+				err := o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error {
+					visits++
+					n, readErr := part.ReadAt(nil, 0)
+					sourceFailIf(t, n != 0 || readErr != nil, "empty live read: %d/%v", n, readErr)
+					var intact [4]byte
+					n, readErr = part.ReadAt(intact[:], 65534)
+					sourceFailIf(t, readErr != nil || n != 4 || !bytes.Equal(intact[:], parts[0][65534:65538]), "intact crossing: %x/%d/%v", intact, n, readErr)
+					_, err := f.WriteAt([]byte{0x20}, base+tc.offset)
+					sourceMust(t, err)
+					buf := [4]byte{0xfe, 0xfe, 0xfe, 0xfe}
+					n, readErr = part.ReadAt(buf[:], 65534)
+					want, wantN := [4]byte{0x21, 0x21, 0xfe, 0xfe}, 2
+					if tc.offset == 65534 {
+						want, wantN = [4]byte{0xfe, 0xfe, 0xfe, 0xfe}, 0
+					}
+					sourceFailIf(t, any(readErr) != any(ErrIntegrityV1) || n != wantN || buf != want, "changed crossing: %x/%d/%v", buf, n, readErr)
+					n, readErr = part.ReadAt(buf[:1], 0)
+					sourceFailIf(t, n != 0 || any(readErr) != any(ErrIntegrityV1), "read after failed window: %d/%v", n, readErr)
+					n, readErr = part.ReadAt(nil, int64(part.Length))
+					sourceFailIf(t, n != 0 || any(readErr) != any(ErrIntegrityV1), "empty read after failed window: %d/%v", n, readErr)
+					return tc.result
+				})
+				sourceWantError(t, err, ErrIntegrityV1, "changed retained window")
+			})
+			sourceFailIf(t, visits != 1, "visits after changed window: %d", visits)
+			_, err = f.WriteAt([]byte{0x21}, base+tc.offset)
+			sourceMust(t, err)
+			sourceRead(t, o, m, parts)
+		})
+	}
+}
+
+func testSourceProducerEndReads(t *testing.T) {
+	for _, reuse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("assurance-copy/end/reuse=%t", reuse), func(t *testing.T) {
+			testSourceProducerRead(t, "assurance-copy", "end", reuse)
+		})
+	}
+	for _, site := range []string{"copy", "flag", "field"} {
+		for _, mode := range []string{"full", "end", "early", "short", "short-nil", "wrapped", "other"} {
+			if site == "field" && mode == "end" {
+				continue // Every valid conditional length field precedes its nonempty payload.
+			}
+			for _, reuse := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/reuse=%t", site, mode, reuse), func(t *testing.T) {
+					testSourceProducerRead(t, site, mode, reuse)
+				})
+			}
+		}
+	}
+}
+
+func testSourceProducerRead(t *testing.T, site, mode string, reuse bool) {
+	t.Helper()
+	_, o, dir, m, parts := sourceBundleScene(t, 1, site == "field" || site == "flag" && mode == "early")
+	parts[0] = bytes.Repeat([]byte{1}, 65539)
+	m.Parts[0].Length = uint64(len(parts[0]))
+	if reuse {
+		sourcePrepare(t, o, m, parts)
+	}
+	kind := OriginalAssuranceV1
+	if site == "copy" {
+		kind = BoundBodyV1
+	}
+	var reached, later int
+	var flagRead bool
+	produce := sourceMappedProducer(m, parts, func(p SourcePartV1, visit func(SourcePartV1) error) error {
+		if p.Kind == kind {
+			read := p.ReadAt
+			p.ReadAt = func(dst []byte, off int64) (int, error) {
+				n, err := read(dst, off)
+				if reached != 0 {
+					later++
+					return n, err
+				}
+				match := off == 0 && len(dst) == 1
+				switch site {
+				case "assurance-copy":
+					match = flagRead && off == 0 && uint64(len(dst)) == p.Length
+					flagRead = true
+				case "field":
+					match = off == 1 && len(dst) == 8
+				case "copy":
+					end := uint64(off)+uint64(n) == p.Length
+					match = end == (mode != "early")
+				}
+				if !match {
+					return n, err
+				}
+				reached++
+				if mode == "full" {
+					return n, nil
+				}
+				return sourceEndResult(mode, n)
+			}
+		}
+		return visit(p)
+	})
+	var want error
+	if mode != "end" && mode != "full" {
+		want = ErrIntegrityV1
+	}
+	sourcePrepareResult(t, o, m, produce, want)
+	sourceFailIf(t, reached != 1, "selected producer read was never reached")
+	if want != nil {
+		sourceFailIf(t, later != 0, "producer made %d further reads after a failed %s", later, site)
+	}
+	if reuse || want == nil {
+		sourceRead(t, o, m, parts)
+	} else {
+		sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "failed producer left an entry")
+	}
+}
+
+func sourceEndResult(mode string, n int) (int, error) {
+	switch mode {
+	case "short":
+		return n - 1, io.EOF
+	case "short-nil":
+		return n - 1, nil
+	case "wrapped":
+		return n, fmt.Errorf("part: %w", io.EOF)
+	case "other":
+		return n, io.ErrUnexpectedEOF
+	default:
+		return n, io.EOF
+	}
+}
 
 func sourceID() policycontrol.Identity {
 	return policycontrol.Identity{InstallationID: [32]byte{1}, ChainID: [32]byte{2}, GenesisHash: [32]byte{3}, Profile: 1}
@@ -193,18 +513,29 @@ func sourceAfterFirstPart(m SourceManifestV1, parts [][]byte, after func() error
 
 func sourceRead(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, want [][]byte, beforeFirst ...func()) {
 	t.Helper()
+	sourceAccount(t, func(a *mdbx.OperationAccount) {
+		sourceReadOn(t, a, o, m, want, beforeFirst...)
+	})
+}
+
+func sourceReadOn(t *testing.T, a *mdbx.OperationAccount, o *SourceOwnerV1, m SourceManifestV1, want [][]byte, beforeFirst ...func()) {
+	t.Helper()
 	kinds := map[bool][]byte{false: {1, 2, 3, 4, 5, 6}, true: {7, 8, 3, 4, 9}}[m.Class == 3]
 	i := 0
-	sourceAccount(t, func(a *mdbx.OperationAccount) {
-		sourceMust(t, o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error {
-			if i == 0 && len(beforeFirst) != 0 {
-				beforeFirst[0]()
-			}
-			sourceCheckPart(t, part, i, kinds, want)
-			i++
-			return nil
-		}))
-	})
+	var previous SourcePartV1
+	sourceMust(t, o.WithCapturedSourceV1(a, m, func(part SourcePartV1) error {
+		if previous.ReadAt != nil {
+			n, err := previous.ReadAt(nil, 0)
+			sourceFailIf(t, n != 0 || any(err) != any(ErrUnavailableV1), "prior reader during part %d: %d/%v", i, n, err)
+		}
+		previous = part
+		if i == 0 && len(beforeFirst) != 0 {
+			beforeFirst[0]()
+		}
+		sourceCheckPart(t, part, i, kinds, want)
+		i++
+		return nil
+	}))
 	sourceFailIf(t, i != len(want), "part count=%d, want %d", i, len(want))
 }
 
