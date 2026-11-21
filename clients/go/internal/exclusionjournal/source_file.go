@@ -34,6 +34,7 @@ type sourceDebt struct {
 	staging, removed bool
 
 	backing           string
+	qualifiedBytes    uint64
 	file              filelock.IdentityV1
 	unlinkTried, held bool
 }
@@ -191,28 +192,27 @@ func (o *SourceOwnerV1) countEntry(r *sourceRoot, name, backing string, used *so
 	return o.censusFile(logical, info, used)
 }
 
-func (o *SourceOwnerV1) countBacking(used *sourceUsage, name string, file filelock.IdentityV1, stageSeenTogether bool) {
+func (o *SourceOwnerV1) countBacking(used *sourceUsage, name string, file filelock.IdentityV1, size uint64, stageSeenTogether bool) uint64 {
 	used.files++
 	if o.live[name] != nil {
 		used.missing--
 	}
-	debt := &o.debt
-	if file != debt.file {
-		return
+	if file == o.debt.file {
+		if stageSeenTogether && (o.debt.backing == "" || name == o.debt.name) {
+			o.debt.backing = name
+		}
+		if name == o.debt.backing {
+			used.stageCharged = false
+			size = max(size, o.debt.qualifiedBytes)
+		}
 	}
-	if stageSeenTogether && (debt.backing == "" || name == debt.name) {
-		debt.backing = name
-	}
-	if name == debt.backing {
-		used.stageCharged = false
-	}
+	return size
 }
 
 func (o *SourceOwnerV1) includeAbsent(r *sourceRoot, used sourceUsage, absentRelease *sourceRelease) (sourceUsage, error) {
 	var absentBytes uint64
 	if absentRelease != nil {
-		o.countBacking(&used, absentRelease.name, absentRelease.file, false)
-		absentBytes = absentRelease.size
+		absentBytes = o.countBacking(&used, absentRelease.name, absentRelease.file, absentRelease.size, false)
 	}
 	if o.debt.unlinkTried && used.observedStage == nil {
 		o.debt.removed = true
@@ -233,7 +233,6 @@ func (o *SourceOwnerV1) includeAbsent(r *sourceRoot, used sourceUsage, absentRel
 }
 
 func (o *SourceOwnerV1) censusFile(logical string, info os.FileInfo, used *sourceUsage) error {
-	size := uint64(max(info.Size(), 0))
 	if token := o.live[logical]; token != nil {
 		if err := token.match(info); err != nil {
 			return err
@@ -242,7 +241,7 @@ func (o *SourceOwnerV1) censusFile(logical string, info os.FileInfo, used *sourc
 	if !validSourceKey(logical) {
 		return ErrIntegrityV1
 	}
-	o.countBacking(used, logical, filelock.FileIdentityV1(info), used.observedStage != nil)
+	size := o.countBacking(used, logical, filelock.FileIdentityV1(info), uint64(max(info.Size(), 0)), used.observedStage != nil)
 	if size > o.limits.Bytes-used.bytes {
 		return ErrCapacityV1
 	}
@@ -310,7 +309,7 @@ func (o *SourceOwnerV1) censusStage(r *sourceRoot, leaf string, alreadySeen bool
 	if err != nil || !validSourceKey(name) {
 		return ErrIntegrityV1
 	}
-	next := sourceDebt{name: name, size: uint64(max(info.Size(), 0)), file: filelock.FileIdentityV1(info), staging: true, held: held}
+	next := sourceDebt{name: name, size: max(o.debt.qualifiedBytes, uint64(max(info.Size(), 0))), qualifiedBytes: o.debt.qualifiedBytes, file: filelock.FileIdentityV1(info), staging: true, held: held}
 	if o.debt.hasOtherName(name) && (alreadySeen || o.debt.sharedKey(next.file) == "") {
 		return ErrBusyV1
 	}
@@ -651,7 +650,7 @@ func (o *SourceOwnerV1) unlinkStage(r *sourceRoot, d *sourceDebt) error {
 		return err
 	}
 	d.file = filelock.FileIdentityV1(info)
-	d.size = uint64(max(info.Size(), 0))
+	d.size = max(d.qualifiedBytes, uint64(max(info.Size(), 0)))
 	d.unlinkTried = true
 	return o.ops.remove(r.Root, d.leaf())
 }
@@ -796,7 +795,7 @@ func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, 
 	if err != nil {
 		return nil, err
 	}
-	o.debt.size = observed.size
+	o.debt.size, o.debt.qualifiedBytes = observed.size, observed.size
 	pin, err := o.finishPinned(r, o.debt.leaf(), w.file, observed.file)
 	if err != nil {
 		return nil, err

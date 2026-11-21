@@ -3179,7 +3179,7 @@ func testSourceProtectedPublication(t *testing.T) {
 			})
 		})
 	}
-	sourceModes(t, []string{"truncated-publication", "truncated-reuse", "corrupt-publication", "corrupt-reuse"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"truncated-publication", "truncated-linked-publication", "truncated-reuse", "corrupt-publication", "corrupt-reuse"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 		if strings.HasSuffix(mode, "-reuse") {
 			sourcePrepare(t, o, m, parts)
@@ -3194,9 +3194,24 @@ func testSourceProtectedPublication(t *testing.T) {
 			}
 			return os.Truncate(path, 1)
 		}
-		sourcePrepareResult(t, o, m, sourceProducer(m, parts), ErrIntegrityV1)
+		want := ErrIntegrityV1
+		if mode == "truncated-linked-publication" {
+			o.ops.namespace = renameSourceFault(t, syscall.EIO, true, false)
+			want = syscall.EIO
+		}
+		sourcePrepareResult(t, o, m, sourceProducer(m, parts), want)
+		if mode == "truncated-linked-publication" {
+			sourceMust(t, os.Truncate(path, 1))
+		}
 		if strings.HasPrefix(mode, "truncated-") {
 			sourceFailIf(t, sourceLstat(t, path).Size() != 1, "expected truncated source")
+		}
+		if strings.HasPrefix(mode, "truncated-") && strings.HasSuffix(mode, "-publication") {
+			size, err := m.SizeV1()
+			sourceMust(t, err)
+			assertSourceReleaseCharge(t, o, m, 1, size)
+			sourcePrepareRefusal(t, o, m, parts, ErrIntegrityV1)
+			assertSourceReleaseCharge(t, o, m, 1, size)
 		}
 	})
 	t.Run("reuse-with-public-stage", func(t *testing.T) {
