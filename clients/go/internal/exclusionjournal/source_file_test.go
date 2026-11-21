@@ -1035,6 +1035,46 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 		sourceMust(t, err)
 		sourceFailIf(t, o.release == nil || o.release.size != size || o.live[p.name] != p.incarnation, "refused clear returned capture charge")
 	})
+	sourceModes(t, []string{"backing-after-scratch", "stage-after-scratch"}, func(t *testing.T, mode string) {
+		s, o, dir, m, parts, p := sourcePreparedBundle(t)
+		sourceReleaseWithFault(t, o, p, "marker-clear", syscall.EIO)
+		o.ops = realSourceFS
+		root := filepath.Join(dir, sourceDirectory)
+		marker := filepath.Join(root, releaseFile)
+		keepMarker := sourcePreservedEntry(t, marker)
+		sourceMust(t, os.Link(marker, filepath.Join(root, releaseScratch)))
+		leaf, want := p.name, ErrIdentityV1
+		if mode == "stage-after-scratch" {
+			leaf, want = publicStagePrefix+p.name, ErrBusyV1
+		}
+		path := filepath.Join(root, leaf)
+		o.ops.remove = func(r *os.Root, name string) error {
+			if err := r.Remove(name); err != nil || name != releaseScratch {
+				return err
+			}
+			return os.WriteFile(path, []byte("independent"), 0o600)
+		}
+		sourceReleaseResult(t, o, p, true, want)
+		keepMarker()
+		keepEntry := sourcePreservedEntry(t, path)
+		sourcePresence(t, root, releaseScratch, false)
+		o.ops = realSourceFS
+		sourceReleaseResult(t, o, p, true, want)
+		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+		keepEntry()
+		keepMarker()
+		sourceMust(t, os.Remove(path))
+		if mode == "backing-after-scratch" {
+			o = sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
+			p = nil
+		}
+		size, err := m.SizeV1()
+		sourceMust(t, err)
+		assertSourceReleaseCharge(t, o, m, 1, size)
+		sourceReleaseResult(t, o, p, true, nil)
+		sourcePresence(t, root, releaseFile, false)
+		sourcePrepareAndRead(t, o, sourceForeign(m), parts)
+	})
 	t.Run("pending-independent-stage", func(t *testing.T) {
 		for _, fault := range []string{"intent-sync", "unlink", "unlink-sync", "marker-clear", "unlink-sync-after-alias", "marker-clear-after-alias", "uppercase-intent-sync", "uppercase-marker-clear"} {
 			t.Run(fault, func(t *testing.T) {

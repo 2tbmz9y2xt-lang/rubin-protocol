@@ -350,7 +350,14 @@ func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) erro
 	if err != nil || !present {
 		return err
 	}
-	if err := r.checkMarkerAlias(o.ops.remove); err != nil {
+	removeScratch := func(root *os.Root, name string) error {
+		if err := o.ops.remove(root, name); err != nil {
+			return err
+		}
+		present, err = o.releaseBoundary(r, d)
+		return err
+	}
+	if err := r.checkMarkerAlias(removeScratch); err != nil || !present {
 		return err
 	}
 	d.phase = releaseMarkerClearing
@@ -578,8 +585,15 @@ func (o *SourceOwnerV1) unlinkDetached(r *sourceRoot, d *sourceRelease, scratch 
 	if _, err := o.qualify(f, d.manifest, d.size, scratch, &d.sourceIncarnation, ErrIntegrityV1); err != nil {
 		return o.restoreBacking(r, d, err)
 	}
-	if err := o.singleBackingLink(r, d, f); err != nil {
+	if err := o.dropReleaseAlias(r, d, f); err != nil {
 		return err
+	}
+	if err := o.authorizeUnlink(r, d, f, 1); err != nil {
+		return err
+	}
+	if o.debt.sharedKey(d.file) != "" {
+		o.stage.Clear()
+		o.debt = sourceDebt{}
 	}
 	removeErr := o.ops.remove(r.Root, releaseDetached)
 	links, statErr := sourceLinks(f)
@@ -614,20 +628,6 @@ func (o *SourceOwnerV1) authorizeUnlink(r *sourceRoot, d *sourceRelease, f *os.F
 		return o.restoreBacking(r, d, cmp.Or(err, ErrIdentityV1))
 	}
 	return d.checkDetachedIntent(r)
-}
-
-func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os.File) error {
-	if err := o.dropReleaseAlias(r, d, f); err != nil {
-		return err
-	}
-	if err := o.authorizeUnlink(r, d, f, 1); err != nil {
-		return err
-	}
-	if o.debt.sharedKey(d.file) != "" {
-		o.stage.Clear()
-		o.debt = sourceDebt{}
-	}
-	return nil
 }
 
 func (o *SourceOwnerV1) dropReleaseAlias(r *sourceRoot, d *sourceRelease, f *os.File) error {
