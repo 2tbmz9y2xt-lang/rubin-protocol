@@ -468,10 +468,10 @@ func (d *sourceRelease) canonicalVacant(r *sourceRoot) error {
 	if d == nil {
 		return nil
 	}
-	switch err := r.requireVacant(d.name, ErrIdentityV1); err {
-	case nil:
+	switch err := r.requireVacant(d.name, ErrIdentityV1); {
+	case err == nil:
 		return nil
-	case ErrIdentityV1:
+	case errors.Is(err, ErrIdentityV1):
 		_, err = d.location(r, nil)
 		return cmp.Or(err, ErrIdentityV1)
 	default:
@@ -526,7 +526,7 @@ func (d *sourceRelease) stageAt(r *sourceRoot, key, observed string, backingPres
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return nil
-	case err != nil && err != syscall.EEXIST:
+	case err != nil && !errors.Is(err, syscall.EEXIST):
 		return malformed
 	case !backingPresent || stage.file != d.file:
 		return conflict
