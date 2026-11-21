@@ -311,10 +311,10 @@ func (o *SourceOwnerV1) censusStage(r *sourceRoot, leaf string) error {
 	case d.file != (filelock.IdentityV1{}) && d.file != file:
 		return ErrIdentityV1
 	}
-	if !held {
-		if err := o.retainStage(r, leaf, file); err != nil {
-			return err
-		}
+	if held {
+		o.stage.Clear()
+	} else if err := o.retainStage(r, leaf, file); err != nil {
+		return err
 	}
 	*d = sourceDebt{name: name, size: uint64(max(info.Size(), 0)), file: file, staging: true, held: held}
 	return nil
@@ -655,6 +655,9 @@ func (d *sourceDebt) privateInfo(r *sourceRoot) (os.FileInfo, error) {
 }
 
 func (o *SourceOwnerV1) retainStage(r *sourceRoot, leaf string, id filelock.IdentityV1) (err error) {
+	if o.limits.Descriptors < 5 {
+		return ErrCapacityV1
+	}
 	if o.stage.File == nil {
 		o.stage.File, err = r.pinFile(leaf, nil, &id)
 	}

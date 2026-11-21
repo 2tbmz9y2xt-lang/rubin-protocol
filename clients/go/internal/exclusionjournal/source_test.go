@@ -207,7 +207,7 @@ func sourceID() policycontrol.Identity {
 }
 
 func sourceLimits() SourceLimitsV1 {
-	return SourceLimitsV1{Bytes: 8 << 20, Files: 8, Scans: 64, RAM: 1 << 20, Headers: 256, Descriptors: 4, Overhead: 4096}
+	return SourceLimitsV1{Bytes: 8 << 20, Files: 8, Scans: 64, RAM: 1 << 20, Headers: 256, Descriptors: 5, Overhead: 4096}
 }
 
 func sourceMust(t *testing.T, err error) {

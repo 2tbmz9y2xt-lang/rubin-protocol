@@ -301,10 +301,6 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	if err != nil {
 		return err
 	}
-	return o.publishMarker(r, d, id)
-}
-
-func (o *SourceOwnerV1) publishMarker(r *sourceRoot, d *sourceRelease, id filelock.IdentityV1) error {
 	pin, err := r.pinFile(releaseScratch, nil, &id)
 	if err != nil {
 		return err

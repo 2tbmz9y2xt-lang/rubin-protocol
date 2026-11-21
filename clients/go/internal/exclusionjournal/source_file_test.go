@@ -406,6 +406,22 @@ func TestSourcePartialCleanupRetry(t *testing.T) {
 }
 
 func testSourceStageObservation(t *testing.T) {
+	t.Run("descriptor-limit", func(t *testing.T) {
+		limits := sourceLimits()
+		limits.Descriptors = 4
+		_, o, dir := sourceScene(t, limits)
+		m, parts := sourceBundle(1, false)
+		sourcePrepareAndRead(t, o, m, parts)
+		path := filepath.Join(dir, sourceDirectory, publicStagePrefix+m.name(o.id))
+		sourceMust(t, os.WriteFile(path, []byte("staged"), 0o600))
+		preserved := sourcePreservedEntry(t, path)
+		sourcePrepareResult(t, o, m, func(*SourceOperationV1, func(SourcePartV1) error) error {
+			t.Fatal("unfunded staging pin admitted the producer")
+			return nil
+		}, ErrCapacityV1)
+		preserved()
+		sourceFailIf(t, sourceHasOpenFile(t, sourceLstat(t, path)), "unfunded staging pin held a file")
+	})
 	t.Run("funded-producer-refusal", func(t *testing.T) {
 		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 		root := filepath.Join(dir, sourceDirectory)
@@ -544,6 +560,7 @@ func testSourceStageClaim(t *testing.T) {
 		case "late-claim":
 			sourceUnchangedEntry(t, filepath.Join(root, held), before)
 			assertSourceReleaseCharge(t, o, m, 1, uint64(len("old stage")))
+			sourceFailIf(t, sourceHasOpenFile(t, before), "qualified private stage retained the public pin")
 			sourcePrepareAndRead(t, o, m, parts)
 		case "occupied-restore":
 			sourceUnchangedEntry(t, filepath.Join(root, held), second)
