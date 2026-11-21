@@ -312,7 +312,7 @@ func (o *SourceOwnerV1) censusStage(r *sourceRoot, leaf string, alreadySeen bool
 		return ErrIntegrityV1
 	}
 	next := sourceDebt{name: name, size: uint64(max(info.Size(), 0)), file: filelock.FileIdentityV1(info), staging: true, held: held}
-	if o.debt.hasOtherName(name) && (alreadySeen || !strings.EqualFold(o.debt.sharedKey(next.file), name)) {
+	if o.debt.hasOtherName(name) && (alreadySeen || o.debt.sharedKey(next.file) == "") {
 		return ErrBusyV1
 	}
 	if err := o.qualifyStage(r, next); err != nil {
@@ -557,7 +557,6 @@ func (w *sourceWindows) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// deliver checks assurance through the verified reader before exposing any part.
 func (w *sourceWindows) deliver(f *os.File, m SourceManifestV1, header int, visit func(SourcePartV1) error) error {
 	var parts [6]SourcePartV1
 	hashes, base := w.hashes, int64(header)
@@ -592,7 +591,6 @@ func (w *sourceWindows) checkAssurance(part SourcePartV1) error {
 	return assurance(part)
 }
 
-// part copies only ranges backed by a matching complete window.
 func (w *sourceWindows) part(section *io.SectionReader, spec SourcePartSpecV1, hashes [][sha256.Size]byte) SourcePartV1 {
 	return SourcePartV1{Kind: spec.Kind, Length: spec.Length, ReadAt: func(dst []byte, off int64) (int, error) {
 		if w.failure != nil {
@@ -687,7 +685,6 @@ func (r *sourceRoot) observeStage(d *sourceDebt) *sourceDebt {
 	return d
 }
 
-// ownedStageInfo keeps the original pinned through qualification of the moved stage.
 func (o *SourceOwnerV1) ownedStageInfo(r *sourceRoot, d *sourceDebt) (os.FileInfo, error) {
 	if d.held {
 		return d.privateInfo(r)
@@ -765,6 +762,7 @@ func (o *SourceOwnerV1) prepared(r *sourceRoot, pin *os.File, m SourceManifestV1
 	if _, err := o.qualify(pin, m, observed.size, scratch, &observed, ErrIntegrityV1); err != nil {
 		return nil, err
 	}
+	_, stageErr := o.checkNames(r, name, ErrIdentityV1, nil)
 	info, err := r.Lstat(name)
 	if err != nil || o.currentRoot() != nil {
 		return nil, ErrIdentityV1
@@ -773,8 +771,8 @@ func (o *SourceOwnerV1) prepared(r *sourceRoot, pin *os.File, m SourceManifestV1
 		return nil, err
 	}
 	o.debt = sourceDebt{}
-	if err := o.checkNames(r, name, ErrIdentityV1, nil); err != nil {
-		return nil, err
+	if stageErr != nil {
+		return nil, stageErr
 	}
 	token := cmp.Or(o.live[name], &observed)
 	o.live[name] = token
@@ -805,7 +803,7 @@ func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, 
 		return nil, err
 	}
 	defer pin.Close()
-	if err := o.checkNames(r, name, ErrIdentityV1, nil); err != nil {
+	if _, err := o.checkNames(r, name, ErrIdentityV1, nil); err != nil {
 		o.debt.staging = false
 		return nil, err
 	}

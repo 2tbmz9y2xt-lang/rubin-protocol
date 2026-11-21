@@ -212,13 +212,12 @@ func (d *sourceRelease) location(r *sourceRoot, canonicalPinErr error) (string, 
 }
 
 func (inc *sourceIncarnation) match(info os.FileInfo) error {
-	if info == nil {
+	switch {
+	case info == nil:
 		return ErrIntegrityV1
-	}
-	if filelock.FileIdentityV1(info) != inc.file {
+	case filelock.FileIdentityV1(info) != inc.file:
 		return ErrIdentityV1
-	}
-	if uint64(max(info.Size(), 0)) != inc.size {
+	case uint64(max(info.Size(), 0)) != inc.size:
 		return ErrIntegrityV1
 	}
 	return nil
@@ -236,7 +235,6 @@ func (o *SourceOwnerV1) openRelease(r *sourceRoot) error {
 	return err
 }
 
-// checkMarkerAlias permits removal only of a second name for the visible marker.
 func (r *sourceRoot) checkMarkerAlias(remove func(*os.Root, string) error) error {
 	scratch, err := sourceEntryInfo(r, releaseScratch, nil)
 	if errors.Is(err, os.ErrNotExist) {
@@ -338,8 +336,8 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, d *sourceRelease, scratch
 	if err := o.syncBoundRoot(r); err != nil {
 		return err
 	}
-	if _, err := o.releaseBoundary(r, d, true); err != nil {
-		return err
+	if present, err := o.releaseBoundary(r, d); err != nil || present {
+		return cmp.Or(err, ErrIntegrityV1)
 	}
 	delete(o.live, d.name)
 	o.release = nil
@@ -348,7 +346,7 @@ func (o *SourceOwnerV1) continueRelease(r *sourceRoot, d *sourceRelease, scratch
 
 // clearReleaseMarker removes a matching release record only after the backing name is observed absent.
 func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) error {
-	present, err := o.releaseBoundary(r, d, false)
+	present, err := o.releaseBoundary(r, d)
 	if err != nil || !present {
 		return err
 	}
@@ -359,24 +357,33 @@ func (o *SourceOwnerV1) clearReleaseMarker(r *sourceRoot, d *sourceRelease) erro
 	return o.ops.remove(r.Root, releaseFile)
 }
 
-func (o *SourceOwnerV1) releaseBoundary(r *sourceRoot, d *sourceRelease, final bool) (bool, error) {
+func (o *SourceOwnerV1) releaseBoundary(r *sourceRoot, d *sourceRelease) (bool, error) {
 	if r.requireVacant(d.name, ErrIdentityV1) != nil || r.requireVacant(releaseDetached, ErrIdentityV1) != nil {
 		return false, ErrIdentityV1
 	}
 	present, err := d.checkMarker(readRelease(r))
-	if err != nil || present && final || !present && d.phase != releaseMarkerClearing {
+	if err != nil || !present && d.phase != releaseMarkerClearing {
 		return false, cmp.Or(err, ErrIntegrityV1)
 	}
-	return present, o.checkNames(r, d.name, nil, nil)
+	listed, err := o.checkNames(r, d.name, nil, nil)
+	if listed != present {
+		return false, cmp.Or(err, ErrIntegrityV1)
+	}
+	return present, err
 }
 
-func (o *SourceOwnerV1) checkNames(r *sourceRoot, name string, publishing error, moving *sourceRelease) error {
+func (o *SourceOwnerV1) checkNames(r *sourceRoot, name string, publishing error, moving *sourceRelease) (markerListed bool, err error) {
 	entries, err := o.entries(r, publishing)
 	final := publishing == nil && moving == nil
 	for _, entry := range entries {
 		leaf := entry.Name()
-		if final && (leaf == name || leaf == releaseDetached) {
-			return ErrIdentityV1
+		switch leaf {
+		case releaseFile:
+			markerListed = true
+		case name, releaseDetached:
+			if final {
+				return false, ErrIdentityV1
+			}
 		}
 		if key, matches := boundaryStage(leaf, name, final); matches {
 			if moving != nil {
@@ -387,7 +394,7 @@ func (o *SourceOwnerV1) checkNames(r *sourceRoot, name string, publishing error,
 			}
 		}
 	}
-	return err
+	return markerListed, err
 }
 
 func boundaryStage(leaf, name string, final bool) (string, bool) {
@@ -465,18 +472,16 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 }
 
 func (d *sourceRelease) canonicalVacant(r *sourceRoot) error {
-	if d == nil {
-		return nil
+	if d != nil {
+		switch _, err := r.Lstat(d.name); {
+		case err == nil:
+			_, err = d.location(r, nil)
+			return cmp.Or(err, ErrIdentityV1)
+		case !errors.Is(err, os.ErrNotExist):
+			return ErrIntegrityV1
+		}
 	}
-	switch err := r.requireVacant(d.name, ErrIdentityV1); {
-	case err == nil:
-		return nil
-	case errors.Is(err, ErrIdentityV1):
-		_, err = d.location(r, nil)
-		return cmp.Or(err, ErrIdentityV1)
-	default:
-		return ErrIntegrityV1
-	}
+	return nil
 }
 
 func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name string, scratch []byte) error {
@@ -493,7 +498,7 @@ func (o *SourceOwnerV1) detachBacking(r *sourceRoot, d *sourceRelease, name stri
 	case "":
 		return nil
 	case d.name:
-		if err := o.checkNames(r, name, nil, d); err != nil {
+		if _, err := o.checkNames(r, name, nil, d); err != nil {
 			return err
 		}
 		if err := o.ops.namespace(detachSource, r, name, releaseDetached); err != nil {
@@ -512,13 +517,11 @@ func (o *SourceOwnerV1) checkStage(r *sourceRoot, d *sourceRelease, backingPrese
 		key = o.debt.name
 	}
 	observed := o.debt.sharedKey(d.file)
-	if err := d.stageAt(r, key, observed, backingPresent, ErrIntegrityV1, ErrBusyV1); err != nil {
-		return err
-	}
-	if backingPresent && observed != "" && observed != key {
+	err := d.stageAt(r, key, observed, backingPresent, ErrIntegrityV1, ErrBusyV1)
+	if err == nil && backingPresent && observed != "" && observed != key {
 		return d.stageAt(r, observed, observed, true, ErrIdentityV1, ErrIdentityV1)
 	}
-	return nil
+	return err
 }
 
 func (d *sourceRelease) stageAt(r *sourceRoot, key, observed string, backingPresent bool, malformed, conflict error) error {
@@ -532,9 +535,8 @@ func (d *sourceRelease) stageAt(r *sourceRoot, key, observed string, backingPres
 		return conflict
 	case err != nil || !stage.claimable(observed):
 		return ErrIdentityV1
-	default:
-		return nil
 	}
+	return nil
 }
 
 func (stage sourceDebt) claimable(observed string) bool {
@@ -601,12 +603,15 @@ func (debt sourceDebt) sharedKey(file filelock.IdentityV1) string {
 	return ""
 }
 
-func (o *SourceOwnerV1) requireBackingLinks(r *sourceRoot, d *sourceRelease, f *os.File, want uint64) error {
+func (o *SourceOwnerV1) authorizeUnlink(r *sourceRoot, d *sourceRelease, f *os.File, wantLinks uint64) error {
 	links, err := sourceLinks(f)
-	if err == nil && links == want {
-		return nil
+	if err != nil || links != wantLinks {
+		return o.restoreBacking(r, d, cmp.Or(err, ErrIdentityV1))
 	}
-	return o.restoreBacking(r, d, cmp.Or(err, ErrIdentityV1))
+	if present, _ := d.checkMarker(readRelease(r)); !present {
+		return ErrIntegrityV1
+	}
+	return nil
 }
 
 // singleBackingLink retires the shared stage charge once the backing has exactly one link.
@@ -614,7 +619,7 @@ func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os
 	if err := o.dropReleaseAlias(r, d, f); err != nil {
 		return err
 	}
-	if err := o.requireBackingLinks(r, d, f, 1); err != nil {
+	if err := o.authorizeUnlink(r, d, f, 1); err != nil {
 		return err
 	}
 	if o.debt.sharedKey(d.file) != "" {
@@ -633,7 +638,7 @@ func (o *SourceOwnerV1) dropReleaseAlias(r *sourceRoot, d *sourceRelease, f *os.
 	if err != nil || stage.file != d.file {
 		return o.restoreBacking(r, d, ErrIdentityV1)
 	}
-	if err := o.requireBackingLinks(r, d, f, 2); err != nil {
+	if err := o.authorizeUnlink(r, d, f, 2); err != nil {
 		return err
 	}
 	if !stage.claimable(observed) {

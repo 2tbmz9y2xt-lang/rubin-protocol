@@ -163,13 +163,10 @@ func (o *SourceOwnerV1) openSourceRoot(stage *policycontrol.SourceStagePinV1) er
 		if _, err := o.census(r, true); err != nil {
 			return err
 		}
-		if err := o.openReleaseBacking(r); err != nil {
+		if err := o.openReleaseBacking(r); err != nil || !o.debt.held {
 			return err
 		}
-		if o.debt.held {
-			return o.restoreStage(r, &o.debt)
-		}
-		return nil
+		return o.restoreStage(r, &o.debt)
 	})
 }
 

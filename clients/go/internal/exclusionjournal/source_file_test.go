@@ -1154,7 +1154,10 @@ func testSourceFinalStage(t *testing.T) {
 				sourceMust(t, os.Rename(filepath.Join(root, p.name), path))
 			}
 			keep := sourcePreservedEntry(t, path)
-			err := o.withRoot(o.bindRoot, func(r *sourceRoot) error { return o.checkNames(r, p.name, nil, nil) })
+			err := o.withRoot(o.bindRoot, func(r *sourceRoot) error {
+				_, err := o.checkNames(r, p.name, nil, nil)
+				return err
+			})
 			sourceWantError(t, err, ErrIdentityV1, "backing observed in final directory listing")
 			keep()
 		}
@@ -1223,18 +1226,28 @@ func testSourceFinalStage(t *testing.T) {
 		o.ops = realSourceFS
 		sourceReleaseResult(t, o, p, true, nil)
 	})
-	t.Run("observed-alias-changed-case", func(t *testing.T) {
+	sourceModes(t, []string{"observed-alias-changed-case", "observed-alias-changed-key"}, func(t *testing.T, mode string) {
 		_, o, dir, m, _, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		backing := filepath.Join(root, p.name)
 		lower := filepath.Join(root, publicStagePrefix+p.name)
-		mixed := filepath.Join(root, publicStagePrefix+strings.ToUpper(p.name[:32])+p.name[32:])
+		key := strings.ToUpper(p.name[:32]) + p.name[32:]
+		if mode == "observed-alias-changed-key" {
+			key = sourceForeign(m).name(o.id)
+		}
+		renamed := filepath.Join(root, publicStagePrefix+key)
 		sourceMust(t, os.Link(backing, lower))
 		sourceReadRefusal(t, o, m, ErrBusyV1, "observed stage")
 		aside := filepath.Join(dir, "alias")
 		sourceMust(t, os.Rename(lower, aside))
-		sourceMust(t, os.Rename(aside, mixed))
-		keepBacking, keepStage := sourcePreservedEntry(t, backing), sourcePreservedEntry(t, mixed)
+		sourceMust(t, os.Rename(aside, renamed))
+		if mode == "observed-alias-changed-key" {
+			sourceReleaseResult(t, o, p, true, nil)
+			sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "release retained renamed alias or backing")
+			assertSourceReleaseCharge(t, o, m, 0, 0)
+			return
+		}
+		keepBacking, keepStage := sourcePreservedEntry(t, backing), sourcePreservedEntry(t, renamed)
 		sourceReleaseResult(t, o, p, true, ErrIdentityV1)
 		keepBacking()
 		keepStage()
@@ -1593,6 +1606,43 @@ func testSourcePrivateNames(t *testing.T) {
 }
 
 func testSourceDetachedRelease(t *testing.T) {
+	sourceModes(t, []string{"marker-missing", "marker-different", "marker-missing-with-alias"}, func(t *testing.T, mode string) {
+		_, o, dir, m, parts, p := sourcePreparedBundle(t)
+		root := filepath.Join(dir, sourceDirectory)
+		marker, saved := filepath.Join(root, releaseFile), filepath.Join(dir, "saved-marker")
+		backing := sourceLstat(t, filepath.Join(root, p.name))
+		data := sourceReadFile(t, filepath.Join(root, p.name))
+		alias := publicStagePrefix + p.name
+		if mode == "marker-missing-with-alias" {
+			sourceMust(t, os.Link(filepath.Join(root, p.name), filepath.Join(root, alias)))
+		}
+		o.ops.namespace = func(op sourceNameOp, r *sourceRoot, from, to string) error {
+			if err := op(r, from, to); err != nil {
+				return err
+			}
+			if to == releaseDetached {
+				sourceMust(t, os.Rename(marker, saved))
+				if mode == "marker-different" {
+					sourceMust(t, os.WriteFile(marker, sourceReadFile(t, saved), 0o600))
+				}
+			}
+			return nil
+		}
+		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
+		detached := filepath.Join(root, releaseDetached)
+		sourceUnchangedEntry(t, detached, backing)
+		sourceFailIf(t, !bytes.Equal(data, sourceReadFile(t, detached)), "release changed detached contents")
+		if mode == "marker-missing-with-alias" {
+			sourceUnchangedEntry(t, filepath.Join(root, alias), backing)
+		}
+		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+		sourcePresence(t, root, releaseFile, mode == "marker-different")
+		sourceMust(t, os.Rename(saved, marker))
+		o.ops = realSourceFS
+		sourceReleaseResult(t, o, p, true, nil)
+		sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "retry left pending entries")
+		sourcePrepareAndRead(t, o, sourceForeign(m), parts)
+	})
 	for _, stage := range []string{"before-detach", "after-detach", "before-unlink", "after-unlink"} {
 		for _, reopen := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/reopen=%t", stage, reopen), func(t *testing.T) {

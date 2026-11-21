@@ -101,8 +101,16 @@ func TestSourceVerifiedReadWindows(t *testing.T) {
 		fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
 		sourceReadRefusal(t, fresh, m, ErrIntegrityV1, "malformed retained assurance")
 	})
-	for _, result := range []error{nil, errors.New("visitor result"), fmt.Errorf("wrapped: %w", io.EOF)} {
-		t.Run(fmt.Sprint(result), func(t *testing.T) {
+	for _, tc := range []struct {
+		offset int64
+		result error
+	}{
+		{65534, nil},
+		{65536 + 36, nil},
+		{65536 + 36, errors.New("visitor result")},
+		{65536 + 36, fmt.Errorf("wrapped: %w", io.EOF)},
+	} {
+		t.Run(fmt.Sprintf("offset=%d/result=%v", tc.offset, tc.result), func(t *testing.T) {
 			_, o, dir, m, parts := sourceBundleScene(t, 1, false)
 			parts[0] = bytes.Repeat([]byte{0x21}, 65536+37)
 			m.Parts[0].Length = uint64(len(parts[0]))
@@ -118,19 +126,23 @@ func TestSourceVerifiedReadWindows(t *testing.T) {
 					var intact [4]byte
 					n, readErr := part.ReadAt(intact[:], 65534)
 					sourceFailIf(t, readErr != nil || n != 4 || !bytes.Equal(intact[:], parts[0][65534:65538]), "intact crossing: %x/%d/%v", intact, n, readErr)
-					_, err := f.WriteAt([]byte{0x20}, base+65536+36)
+					_, err := f.WriteAt([]byte{0x20}, base+tc.offset)
 					sourceMust(t, err)
 					buf := [4]byte{0xfe, 0xfe, 0xfe, 0xfe}
 					n, readErr = part.ReadAt(buf[:], 65534)
-					sourceFailIf(t, any(readErr) != any(ErrIntegrityV1) || n != 2 || buf != [4]byte{0x21, 0x21, 0xfe, 0xfe}, "changed crossing: %x/%d/%v", buf, n, readErr)
+					want, wantN := [4]byte{0x21, 0x21, 0xfe, 0xfe}, 2
+					if tc.offset == 65534 {
+						want, wantN = [4]byte{0xfe, 0xfe, 0xfe, 0xfe}, 0
+					}
+					sourceFailIf(t, any(readErr) != any(ErrIntegrityV1) || n != wantN || buf != want, "changed crossing: %x/%d/%v", buf, n, readErr)
 					n, readErr = part.ReadAt(buf[:1], 0)
 					sourceFailIf(t, n != 0 || any(readErr) != any(ErrIntegrityV1), "read after failed window: %d/%v", n, readErr)
-					return result
+					return tc.result
 				})
 				sourceWantError(t, err, ErrIntegrityV1, "changed retained window")
 			})
 			sourceFailIf(t, visits != 1, "visits after changed window: %d", visits)
-			_, err = f.WriteAt([]byte{0x21}, base+65536+36)
+			_, err = f.WriteAt([]byte{0x21}, base+tc.offset)
 			sourceMust(t, err)
 			sourceRead(t, o, m, parts)
 		})
