@@ -757,8 +757,11 @@ func (o *SourceOwnerV1) admitPublication(r *sourceRoot, size uint64, used source
 	return o.space(r, size, r.observeStage(used.observedStage))
 }
 
-func (o *SourceOwnerV1) prepared(r *sourceRoot, m SourceManifestV1, name string, observed sourceIncarnation) (*PreparedSourceV1, error) {
+func (o *SourceOwnerV1) prepared(r *sourceRoot, pin *os.File, m SourceManifestV1, name string, observed sourceIncarnation, scratch []byte) (*PreparedSourceV1, error) {
 	if err := o.ops.dirSync(r.pin); err != nil {
+		return nil, err
+	}
+	if _, err := o.qualify(pin, m, observed.size, scratch, &observed, ErrIntegrityV1); err != nil {
 		return nil, err
 	}
 	info, err := r.Lstat(name)
@@ -790,7 +793,8 @@ func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, 
 			}
 		}
 	}()
-	observed, err := o.writeBundle(r, w, m, name, produce, size, recheckSpace)
+	scratch := make([]byte, scratchBytes)
+	observed, err := o.writeBundle(r, w, m, name, produce, size, recheckSpace, scratch)
 	if err != nil {
 		return nil, err
 	}
@@ -813,7 +817,7 @@ func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, 
 		return nil, err
 	}
 	o.debt.removed = true
-	return o.prepared(r, m, name, observed)
+	return o.prepared(r, pin, m, name, observed, scratch)
 }
 
 func (o *SourceOwnerV1) finishFile(f *os.File) error {
@@ -833,8 +837,7 @@ func (o *SourceOwnerV1) finishPinned(r *sourceRoot, name string, f *os.File, exp
 	return pin, nil
 }
 
-func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m SourceManifestV1, name string, produce func(func(SourcePartV1) error) error, size uint64, recheckSpace bool) (sourceIncarnation, error) {
-	scratch := make([]byte, scratchBytes)
+func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m SourceManifestV1, name string, produce func(func(SourcePartV1) error) error, size uint64, recheckSpace bool, scratch []byte) (sourceIncarnation, error) {
 	hash := sha256.New()
 	out := io.MultiWriter(w, hash)
 	start := func() error {
@@ -863,15 +866,11 @@ func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m Source
 	if err := stream(m, produce, out, scratch, start, true); err != nil {
 		return sourceIncarnation{}, err
 	}
-	written := [sha256.Size]byte(hash.Sum(nil))
-	if _, err := w.Write(written[:]); err != nil {
+	expected := sourceIncarnation{file: o.debt.file, size: size, footer: [sha256.Size]byte(hash.Sum(nil))}
+	if _, err := w.Write(expected.footer[:]); err != nil {
 		return sourceIncarnation{}, err
 	}
-	observed, err := o.qualify(w.file, m, size, scratch, nil, ErrIntegrityV1)
-	if err == nil && observed.footer != written {
-		err = ErrIntegrityV1
-	}
-	return observed, err
+	return o.qualify(w.file, m, size, scratch, &expected, ErrIntegrityV1)
 }
 
 type sourceFileWriter struct {
@@ -962,5 +961,5 @@ func (o *SourceOwnerV1) reuse(r *sourceRoot, f *os.File, m SourceManifestV1, nam
 		return nil, err
 	}
 	defer pin.Close()
-	return o.prepared(r, m, name, observed)
+	return o.prepared(r, pin, m, name, observed, scratch)
 }

@@ -616,9 +616,7 @@ func (o *SourceOwnerV1) singleBackingLink(r *sourceRoot, d *sourceRelease, f *os
 		return err
 	}
 	if d.sharedStageKey(o.debt) != "" {
-		if !o.debt.unlinkTried {
-			return o.restoreBacking(r, d, ErrIdentityV1)
-		}
+		o.stage.Clear()
 		o.debt = sourceDebt{}
 	}
 	return nil

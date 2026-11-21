@@ -1153,9 +1153,10 @@ func testSourceReleaseSpelling(t *testing.T) {
 		sourceFailIf(t, target != p.name, "stage link target changed to %q", target)
 		sourcePrepareRefusal(t, o, m, parts, ErrBusyV1)
 	})
-	sourceModes(t, []string{"mixed-alias", "mixed-alias-another-name", "same-key-file", "same-key-before-content", "pending-absent-file", "pending-cross-key", "late-alias", "late-alias-live", "unrelated-file", "fresh-mixed-file"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"mixed-alias", "mixed-alias-another-name", "same-key-file", "same-key-before-content", "pending-absent-file", "pending-cross-key", "pending-cross-key-live", "late-alias", "late-alias-live", "unrelated-file", "fresh-mixed-file"}, func(t *testing.T, mode string) {
 		s, o, dir, m, parts, p := sourcePreparedBundle(t)
 		lateAlias := strings.HasPrefix(mode, "late-alias")
+		crossKey := strings.HasPrefix(mode, "pending-cross-key")
 		root := filepath.Join(dir, sourceDirectory)
 		key := sourceForeign(m).name(o.id)
 		if strings.HasPrefix(mode, "same-key-") || mode == "pending-absent-file" {
@@ -1169,7 +1170,7 @@ func testSourceReleaseSpelling(t *testing.T) {
 		stage := filepath.Join(root, publicStagePrefix+key)
 		size, err := m.SizeV1()
 		sourceMust(t, err)
-		if mode == "pending-cross-key" || lateAlias {
+		if crossKey || lateAlias {
 			sourceReleaseWithFault(t, o, p, "intent-sync", syscall.EIO)
 			o.ops = realSourceFS
 		}
@@ -1222,7 +1223,7 @@ func testSourceReleaseSpelling(t *testing.T) {
 		}
 		if !lateAlias {
 			var unchanged func(string)
-			if mode == "pending-cross-key" {
+			if crossKey {
 				marker := sourcePreservedEntry(t, filepath.Join(root, releaseFile))
 				alias := sourcePreservedEntry(t, stage)
 				backing := sourcePreservedEntry(t, filepath.Join(root, p.name))
@@ -1259,15 +1260,16 @@ func testSourceReleaseSpelling(t *testing.T) {
 			preserved()
 		}
 		o.ops = realSourceFS
-		if mode == "pending-cross-key" || lateAlias {
+		if crossKey || lateAlias {
 			sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
 			sourceMust(t, os.Remove(stage))
-			if mode != "late-alias-live" {
+			if !strings.HasSuffix(mode, "-live") {
 				o = sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
 				p = nil
 			}
 			sourceReleaseResult(t, o, p, true, nil)
 			sourceFailIf(t, len(sourceEntries(t, dir)) != 0, "resumed release retained an entry")
+			sourcePrepareAndRead(t, o, sourceForeign(m), parts)
 		}
 	})
 }
@@ -2750,18 +2752,25 @@ func testSourceHeldRestoreIO(t *testing.T) {
 }
 
 func testSourceProtectedPublication(t *testing.T) {
-	sourceModes(t, []string{"truncated-publication", "truncated-reuse"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"truncated-publication", "truncated-reuse", "corrupt-publication", "corrupt-reuse"}, func(t *testing.T, mode string) {
 		_, o, dir, m, parts := sourceBundleScene(t, 1, false)
-		if mode == "truncated-reuse" {
+		if strings.HasSuffix(mode, "-reuse") {
 			sourcePrepare(t, o, m, parts)
 		}
 		path := filepath.Join(dir, sourceDirectory, m.name(o.id))
 		o.ops.dirSync = func(pin *os.File) error {
 			sourceMust(t, pin.Sync())
+			if strings.HasPrefix(mode, "corrupt-") {
+				data := sourceReadFile(t, path)
+				data[len(m.header(o.id))] ^= 1
+				return os.WriteFile(path, data, 0o600)
+			}
 			return os.Truncate(path, 1)
 		}
 		sourcePrepareResult(t, o, m, sourceProducer(m, parts), ErrIntegrityV1)
-		sourceFailIf(t, sourceLstat(t, path).Size() != 1, "expected truncated source")
+		if strings.HasPrefix(mode, "truncated-") {
+			sourceFailIf(t, sourceLstat(t, path).Size() != 1, "expected truncated source")
+		}
 	})
 	t.Run("reuse-with-public-stage", func(t *testing.T) {
 		_, o, dir, m, parts, p := sourcePreparedBundle(t)
