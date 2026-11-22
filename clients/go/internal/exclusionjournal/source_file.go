@@ -47,6 +47,7 @@ type sourceUsage struct {
 	files, bytes        uint64
 	stage, pendingStage sourceDebt
 	releaseMissing      int
+	releaseMismatch     error
 	stageReached        bool
 }
 
@@ -143,10 +144,10 @@ func (o *SourceOwnerV1) censusCaptures(r *sourceRoot, entries []os.DirEntry, use
 	return o.finishCensus(used, absentRelease)
 }
 
-// skipCapture records stage visitation in the order of the capture census.
+// skipCapture records stage visitation before the first issued capture mismatch.
 func (used *sourceUsage) skipCapture(name string) bool {
 	if name == used.stage.leaf {
-		used.stageReached = true
+		used.stageReached = used.releaseMismatch == nil
 		return true
 	}
 	return strings.HasPrefix(name, publicStagePrefix) || strings.HasPrefix(name, heldStagePrefix) ||
@@ -234,13 +235,14 @@ func (o *SourceOwnerV1) censusCapture(r *sourceRoot, name string, used *sourceUs
 // chargeBoundCapture adds excess bytes or a separate file beside retained staging.
 func (o *SourceOwnerV1) chargeBoundCapture(used *sourceUsage, name string, backing *sourceIncarnation, id filelock.IdentityV1, size uint64) error {
 	if backing.issued {
-		if backing.file != id {
-			return ErrIdentityV1
-		}
-		if backing.size != size {
-			return ErrIntegrityV1
-		}
 		used.releaseMissing--
+		switch {
+		case used.releaseMismatch != nil:
+		case backing.file != id:
+			used.releaseMismatch = ErrIdentityV1
+		case backing.size != size:
+			used.releaseMismatch = ErrIntegrityV1
+		}
 		return nil
 	}
 	reserved := backing.size
@@ -725,7 +727,7 @@ func (w *sourceWindows) part(section *io.SectionReader, spec SourcePartSpecV1, h
 func (o *SourceOwnerV1) withFiles(account *mdbx.OperationAccount, m SourceManifestV1, preparing bool, use func(*sourceRoot, SourceManifestV1, uint64, sourceUsage) error) error {
 	return o.withManifest(account, m, preparing, func(r *sourceRoot, m SourceManifestV1, size uint64) error {
 		used, err := o.census(r)
-		if err != nil {
+		if err := cmp.Or(used.releaseMismatch, err); err != nil {
 			return err
 		}
 		if err := used.releaseBindingError(); err != nil {

@@ -74,7 +74,7 @@ func (o *SourceOwnerV1) hasReleaseAuthority(p *PreparedSourceV1) bool {
 // releaseCensus preserves the release admission charge for a newly observed public alias.
 func (o *SourceOwnerV1) releaseCensus(r *sourceRoot) error {
 	used, err := o.census(r)
-	if err != nil {
+	if err := cmp.Or(used.releaseMismatch, err); err != nil {
 		return o.refuseReleaseCensus(used, err)
 	}
 	if used.stage.held() {

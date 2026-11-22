@@ -2163,8 +2163,10 @@ func testSourceIssuedSizePriority(t *testing.T, mode string) {
 	t.Helper()
 	m, parts := sourceBundle(1, false)
 	limits := sourceLimits()
+	var censusWant error
 	if mode == "release-issued-size" {
 		limits.Files = 1
+		censusWant = ErrCapacityV1
 	} else {
 		limits.Files, limits.Descriptors = 2, 4
 	}
@@ -2182,7 +2184,7 @@ func testSourceIssuedSizePriority(t *testing.T, mode string) {
 	sourcePrepareRefusal(t, o, m, parts, ErrIntegrityV1)
 	sourceReadRefusal(t, o, m, ErrIntegrityV1, "issued backing size")
 	before("issued backing admission")
-	checkSourceReleaseCensusOrder(t, o, p, stage)
+	checkSourceReleaseCensusOrder(t, o, p, stage, uint64(original.Size()), censusWant)
 	sourcePresence(t, root, releaseFile, false)
 	sourcePresence(t, root, releaseScratch, false)
 	sourceUnchangedEntry(t, path, original)
@@ -2238,8 +2240,13 @@ func checkSourceStageAdmission(t *testing.T, o *SourceOwnerV1, m SourceManifestV
 	before("independent stage admission")
 }
 
-func checkSourceReleaseCensusOrder(t *testing.T, o *SourceOwnerV1, p *PreparedSourceV1, stage string) {
+func checkSourceReleaseCensusOrder(t *testing.T, o *SourceOwnerV1, p *PreparedSourceV1, stage string, size uint64, censusWant error) {
 	t.Helper()
+	wantFiles, wantBytes := uint64(1), size
+	if censusWant == nil {
+		wantFiles++
+		wantBytes++
+	}
 	var stageFirst bool
 	sourceMust(t, o.withRoot(o.bindRoot, func(r *sourceRoot) error {
 		entries, err := o.sourceEntries(r)
@@ -2248,8 +2255,13 @@ func checkSourceReleaseCensusOrder(t *testing.T, o *SourceOwnerV1, p *PreparedSo
 		stageFirst = entries[0].Name() == stage
 		for range 2 {
 			used, err := o.censusFiles(r, entries)
-			sourceWantError(t, o.refuseReleaseCensus(used, err), ErrIntegrityV1, "issued backing size in census order")
-			checkSourceReleaseStageObservation(t, o, p, stage, entries[0].Name() == stage)
+			sourceWantError(t, err, censusWant, "logical stage charge")
+			sourceWantError(t, used.releaseMismatch, ErrIntegrityV1, "observed issued backing size")
+			sourceFailIf(t, used.files != wantFiles || used.bytes != wantBytes, "census retained %d files/%d bytes, want %d/%d", used.files, used.bytes, wantFiles, wantBytes)
+			visited := entries[0].Name() == stage
+			sourceFailIf(t, used.stageReached != visited, "stage visited before mismatch = %t, want %t", used.stageReached, visited)
+			sourceWantError(t, o.refuseReleaseCensus(used, used.releaseMismatch), ErrIntegrityV1, "recording stage observation preserves the error")
+			checkSourceReleaseStageObservation(t, o, p, stage, visited)
 			o.debt = sourceDebt{}
 			slices.Reverse(entries)
 		}
