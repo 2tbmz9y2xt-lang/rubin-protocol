@@ -47,7 +47,7 @@ type sourceUsage struct {
 	files, bytes        uint64
 	stage, pendingStage sourceDebt
 	releaseMissing      int
-	releaseMismatch     error
+	stageReached        bool
 }
 
 var realSourceFS = sourceFS{statfs: syscall.Fstatfs, write: (*os.File).Write, fileSync: (*os.File).Sync, close: (*os.File).Close, chmod: (*os.File).Chmod, namespace: runSourceNamespace, remove: (*os.Root).Remove, dirSync: (*os.File).Sync}
@@ -94,15 +94,20 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry) (sourc
 	}
 	used := sourceUsage{stage: stage, pendingStage: pending}
 	if err := o.chargeBindings(&used); err != nil {
-		return sourceUsage{}, err
+		return used, err
 	}
 	return o.censusCaptures(r, entries, used)
 }
 
 // chargeBindings retains the admitted charge of each bound logical capture.
 func (o *SourceOwnerV1) chargeBindings(used *sourceUsage) error {
-	for _, backing := range o.live {
-		if err := o.charge(used, backing.size); err != nil {
+	for name, backing := range o.live {
+		size := backing.size
+		if o.retainedAlias(used.stage, name, backing.file) {
+			used.stage.shared = name
+			size = max(size, used.stage.size)
+		}
+		if err := o.charge(used, size); err != nil {
 			return err
 		}
 		if backing.issued {
@@ -112,19 +117,24 @@ func (o *SourceOwnerV1) chargeBindings(used *sourceUsage) error {
 	return nil
 }
 
+// retainedAlias matches protected staging to its acknowledged capture binding.
+func (o *SourceOwnerV1) retainedAlias(stage sourceDebt, name string, file filelock.IdentityV1) bool {
+	return o.debt.shared == name && stage.name == name && stage.held() && stage.file == file
+}
+
 // censusCaptures checks named backing and tracks the existing release intent.
 func (o *SourceOwnerV1) censusCaptures(r *sourceRoot, entries []os.DirEntry, used sourceUsage) (sourceUsage, error) {
 	absentRelease := o.release
 	for _, entry := range entries {
 		name := entry.Name()
 		if name == releaseFile && o.release == nil {
-			return sourceUsage{}, ErrIntegrityV1
+			return used, ErrIntegrityV1
 		}
-		if nonCaptureName(name) {
+		if used.skipCapture(name) {
 			continue
 		}
 		if err := o.censusCapture(r, name, &used); err != nil {
-			return sourceUsage{}, err
+			return used, err
 		}
 		if absentRelease != nil && name == absentRelease.name {
 			absentRelease = nil
@@ -133,7 +143,12 @@ func (o *SourceOwnerV1) censusCaptures(r *sourceRoot, entries []os.DirEntry, use
 	return o.finishCensus(used, absentRelease)
 }
 
-func nonCaptureName(name string) bool {
+// skipCapture records stage visitation in the order of the capture census.
+func (used *sourceUsage) skipCapture(name string) bool {
+	if name == used.stage.leaf {
+		used.stageReached = true
+		return true
+	}
 	return strings.HasPrefix(name, publicStagePrefix) || strings.HasPrefix(name, heldStagePrefix) ||
 		name == releaseFile || name == releaseScratch
 }
@@ -141,12 +156,12 @@ func nonCaptureName(name string) bool {
 // finishCensus includes unlinked charges until their custody is retired.
 func (o *SourceOwnerV1) finishCensus(used sourceUsage, absentRelease *sourceRelease) (sourceUsage, error) {
 	if err := o.chargeAbsentRelease(&used, absentRelease); err != nil {
-		return sourceUsage{}, err
+		return used, err
 	}
 	for _, stage := range [...]sourceDebt{used.stage, used.pendingStage} {
 		if stage.name != "" && stage.shared == "" {
 			if err := o.charge(&used, stage.size); err != nil {
-				return sourceUsage{}, err
+				return used, err
 			}
 		}
 	}
@@ -169,9 +184,6 @@ func (o *SourceOwnerV1) chargeAbsentRelease(used *sourceUsage, release *sourceRe
 }
 
 func (used sourceUsage) releaseBindingError() error {
-	if used.releaseMismatch != nil {
-		return used.releaseMismatch
-	}
 	if used.releaseMissing != 0 {
 		return ErrIntegrityV1
 	}
@@ -179,10 +191,20 @@ func (used sourceUsage) releaseBindingError() error {
 }
 
 func (o *SourceOwnerV1) charge(used *sourceUsage, size uint64) error {
-	if size > o.limits.Bytes-used.bytes || used.files >= o.limits.Files {
+	if used.files >= o.limits.Files {
 		return ErrCapacityV1
 	}
+	if err := o.chargeBytes(used, size); err != nil {
+		return err
+	}
 	used.files++
+	return nil
+}
+
+func (o *SourceOwnerV1) chargeBytes(used *sourceUsage, size uint64) error {
+	if size > o.limits.Bytes-used.bytes {
+		return ErrCapacityV1
+	}
 	used.bytes += size
 	return nil
 }
@@ -204,25 +226,31 @@ func (o *SourceOwnerV1) censusCapture(r *sourceRoot, name string, used *sourceUs
 		used.pendingStage.observeAlias(name, id, cmp.Or(o.pendingStage.shared, o.debt.shared))
 	}
 	if backing != nil {
-		used.matchReleasedCapture(backing, id, size)
-		return nil
+		return o.chargeBoundCapture(used, name, backing, id, size)
 	}
 	return o.charge(used, size)
 }
 
-// matchReleasedCapture keeps the established checks for previously issued captures.
-func (used *sourceUsage) matchReleasedCapture(backing *sourceIncarnation, id filelock.IdentityV1, size uint64) {
-	if !backing.issued {
-		return
+// chargeBoundCapture adds excess bytes or a separate file beside retained staging.
+func (o *SourceOwnerV1) chargeBoundCapture(used *sourceUsage, name string, backing *sourceIncarnation, id filelock.IdentityV1, size uint64) error {
+	if backing.issued {
+		if backing.file != id {
+			return ErrIdentityV1
+		}
+		if backing.size != size {
+			return ErrIntegrityV1
+		}
+		used.releaseMissing--
+		return nil
 	}
-	used.releaseMissing--
-	switch {
-	case used.releaseMismatch != nil:
-	case backing.file != id:
-		used.releaseMismatch = ErrIdentityV1
-	case backing.size != size:
-		used.releaseMismatch = ErrIntegrityV1
+	reserved := backing.size
+	if o.retainedAlias(used.stage, name, backing.file) {
+		if id != backing.file {
+			return o.charge(used, size)
+		}
+		reserved = max(reserved, used.stage.size)
 	}
+	return o.chargeBytes(used, size-min(size, reserved))
 }
 
 func (d *sourceDebt) observeAlias(name string, id filelock.IdentityV1, previous string) {
@@ -414,21 +442,29 @@ func (o *SourceOwnerV1) space(r *sourceRoot, required uint64, stage sourceDebt) 
 	if available >= full {
 		return false, nil
 	}
-	if full-available > min(required, stage.diskCredit(r)) {
+	if full-available > stage.diskCredit(r, required) {
 		return false, ErrCapacityV1
 	}
 	return true, nil
 }
 
-func (d sourceDebt) diskCredit(r *sourceRoot) uint64 {
+func (d sourceDebt) diskCredit(r *sourceRoot, required uint64) uint64 {
 	if d.name == "" || d.removed || d.shared != "" {
 		return 0
 	}
 	info, err := sourceEntryInfo(r, d.leaf, nil)
-	if err != nil || d.file != filelock.FileIdentityV1(info) {
+	if err != nil {
 		return 0
 	}
-	return min(d.observed, sourceFileSize(info), singleLinkAllocatedBytes(info))
+	return d.allocationCredit(info, required)
+}
+
+// allocationCredit bounds the current allocation credit of the observed stage.
+func (d sourceDebt) allocationCredit(info os.FileInfo, required uint64) uint64 {
+	if d.file != filelock.FileIdentityV1(info) {
+		return 0
+	}
+	return min(required, d.observed, sourceFileSize(info), singleLinkAllocatedBytes(info))
 }
 
 // singleLinkAllocatedBytes converts known exclusive allocations to bytes without overflow.
@@ -576,10 +612,7 @@ func fileExporter(f *os.File, m SourceManifestV1, header int) func(func(SourcePa
 
 // WithCapturedSourceV1 qualifies retained bytes before visiting (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
 func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, visit func(SourcePartV1) error) error {
-	return o.withFiles(account, m, false, func(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage) error {
-		if err := used.releaseBindingError(); err != nil {
-			return err
-		}
+	return o.withFiles(account, m, false, func(r *sourceRoot, m SourceManifestV1, size uint64, _ sourceUsage) error {
 		return o.readCapture(r, m, size, visit)
 	})
 }
@@ -693,6 +726,9 @@ func (o *SourceOwnerV1) withFiles(account *mdbx.OperationAccount, m SourceManife
 	return o.withManifest(account, m, preparing, func(r *sourceRoot, m SourceManifestV1, size uint64) error {
 		used, err := o.census(r)
 		if err != nil {
+			return err
+		}
+		if err := used.releaseBindingError(); err != nil {
 			return err
 		}
 		if err := o.adoptStage(r, used); err != nil {
@@ -821,9 +857,6 @@ func (o *SourceOwnerV1) PrepareSourceV1(account *mdbx.OperationAccount, m Source
 }
 
 func (o *SourceOwnerV1) prepare(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage, produce func(func(SourcePartV1) error) error) (*PreparedSourceV1, error) {
-	if err := used.releaseBindingError(); err != nil {
-		return nil, err
-	}
 	name := m.name(o.id)
 	if o.debt.otherKey(name) || o.pendingStage.otherKey(name) {
 		return nil, ErrBusyV1
@@ -873,7 +906,7 @@ func (o *SourceOwnerV1) prepared(r *sourceRoot, pin *os.File, m SourceManifestV1
 	if _, err := o.qualify(pin, m, token.size, scratch, token, ErrIntegrityV1); err != nil {
 		return nil, err
 	}
-	if err := o.captureSlot(r, name); err != nil {
+	if err := o.finalCaptureName(r, name, token); err != nil {
 		return nil, err
 	}
 	o.clearUnfundedStage(name)
@@ -888,22 +921,46 @@ func (o *SourceOwnerV1) clearUnfundedStage(name string) {
 	}
 }
 
-// captureSlot checks public staging spellings without claiming or changing them.
-func (o *SourceOwnerV1) captureSlot(r *sourceRoot, name string) error {
-	entries, err := o.sourceEntries(r)
-	if any(err) == any(ErrCapacityV1) {
+// finalCaptureName rechecks the qualified file at its published name after the slot observation.
+func (o *SourceOwnerV1) finalCaptureName(r *sourceRoot, name string, token *sourceIncarnation) error {
+	present, err := o.captureSlot(r, name)
+	if err != nil {
 		return err
 	}
-	if err != nil {
+	if !present {
 		return ErrIdentityV1
 	}
+	info, err := r.Lstat(name)
+	if err != nil || !sameSourceFile(info, token.file) {
+		return ErrIdentityV1
+	}
+	if sourceFileSize(info) != token.size {
+		return ErrIntegrityV1
+	}
+	return o.currentRoot()
+}
+
+// captureSlot checks public staging spellings and observes the exact capture name.
+func (o *SourceOwnerV1) captureSlot(r *sourceRoot, name string) (bool, error) {
+	entries, err := o.sourceEntries(r)
+	if any(err) == any(ErrCapacityV1) {
+		return false, err
+	}
+	if err != nil {
+		return false, ErrIdentityV1
+	}
+	present := false
 	for _, entry := range entries {
-		key, public := strings.CutPrefix(entry.Name(), publicStagePrefix)
+		leaf := entry.Name()
+		if leaf == name {
+			present = true
+		}
+		key, public := strings.CutPrefix(leaf, publicStagePrefix)
 		if public && sourceHexKey(key) && strings.EqualFold(name, key) {
-			return ErrIdentityV1
+			return false, ErrIdentityV1
 		}
 	}
-	return nil
+	return present, nil
 }
 
 // publish keeps known capture custody apart from its temporary service alias.
@@ -922,7 +979,7 @@ func (o *SourceOwnerV1) publish(r *sourceRoot, m SourceManifestV1, name string, 
 		return nil, err
 	}
 	defer pin.Close()
-	if err := o.captureSlot(r, name); err != nil {
+	if _, err := o.captureSlot(r, name); err != nil {
 		cleanup = false
 		return nil, err
 	}
@@ -1047,14 +1104,12 @@ func (o *SourceOwnerV1) linkCapture(r *sourceRoot, name string, observed *source
 	o.live[name] = observed
 	err := o.ops.namespace((*sourceRoot).Link, r, o.debt.leaf, name)
 	visibility, out := observeLink(r, name, observed.file, err)
-	switch visibility {
-	case sourceNotVisible:
+	switch {
+	case visibility == sourceNotVisible:
 		delete(o.live, name)
-	case sourceVisible:
+	case err == nil || visibility == sourceVisible:
 		o.debt.shared = name
 		observed.uncertain = false
-	case sourceIndeterminate:
-		// Keep the qualified capture bound until visibility is known.
 	}
 	return visibility, out
 }
@@ -1063,14 +1118,18 @@ func observeLink(r *sourceRoot, name string, id filelock.IdentityV1, err error) 
 	if errors.Is(err, os.ErrExist) {
 		return sourceNotVisible, ErrIntegrityV1
 	}
+	disagrees := sourceIndeterminate
+	if err != nil {
+		disagrees = sourceNotVisible
+	}
 	info, statErr := r.Lstat(name)
 	switch {
 	case errors.Is(statErr, os.ErrNotExist):
-		return sourceNotVisible, cmp.Or(err, ErrIntegrityV1)
+		return disagrees, cmp.Or(err, ErrIntegrityV1)
 	case statErr != nil:
 		return sourceIndeterminate, cmp.Or(err, statErr)
 	case !sameSourceFile(info, id):
-		return sourceNotVisible, cmp.Or(err, ErrIdentityV1)
+		return disagrees, cmp.Or(err, ErrIdentityV1)
 	}
 	return sourceVisible, err
 }

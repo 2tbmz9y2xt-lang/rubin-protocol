@@ -75,25 +75,29 @@ func (o *SourceOwnerV1) hasReleaseAuthority(p *PreparedSourceV1) bool {
 func (o *SourceOwnerV1) releaseCensus(r *sourceRoot) error {
 	used, err := o.census(r)
 	if err != nil {
-		return err
-	}
-	if used.releaseMismatch != nil {
-		return used.releaseMismatch
+		return o.refuseReleaseCensus(used, err)
 	}
 	if used.stage.held() {
 		return ErrIntegrityV1
 	}
 	if used.stage.shared != "" {
 		if err := o.charge(&used, used.stage.size); err != nil {
-			o.debt = used.stage
-			o.debt.unfunded = true
-			return err
+			return o.refuseReleaseCensus(used, err)
 		}
 	}
 	if err := used.releaseBindingError(); err != nil {
-		return err
+		return o.refuseReleaseCensus(used, err)
 	}
 	return o.adoptStage(r, used)
+}
+
+// refuseReleaseCensus remembers a public stage already visited by the census.
+func (o *SourceOwnerV1) refuseReleaseCensus(used sourceUsage, err error) error {
+	if used.stageReached && !used.stage.held() {
+		o.debt = used.stage
+		o.debt.unfunded = true
+	}
+	return err
 }
 
 func (o *SourceOwnerV1) releaseRecord(d *sourceRelease) []byte {

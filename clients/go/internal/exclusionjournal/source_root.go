@@ -216,13 +216,14 @@ func (o *SourceOwnerV1) restoreHeldStage(r *sourceRoot, stage sourceDebt) error 
 	if err := o.syncBoundRoot(r); err != nil {
 		return err
 	}
-	info, err := r.Lstat(public)
-	if err != nil || !sameSourceFile(info, stage.file) {
+	used, err := o.census(r)
+	if err != nil {
+		return err
+	}
+	if used.stage.leaf != public || used.stage.file != stage.file {
 		return ErrIdentityV1
 	}
-	stage.leaf = public
-	o.debt = stage
-	return nil
+	return o.adoptStage(r, used)
 }
 
 // syncBoundRoot makes namespace changes durable and verifies current root reachability.
