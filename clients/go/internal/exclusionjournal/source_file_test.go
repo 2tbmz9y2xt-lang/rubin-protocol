@@ -121,6 +121,15 @@ func sourcePrepareRefusal(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, _ 
 	held("refused source preparation")
 }
 
+func sourceKeyOnlyRetry(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte) {
+	t.Helper()
+	ops := o.ops
+	sourceFault(o, "rename", ErrIdentityV1, func() { t.Fatal("key-only retry reached namespace mutation") })
+	defer func() { o.ops = ops }()
+	sourcePrepareRefusal(t, o, m, parts, ErrIdentityV1)
+	sourceFailIf(t, o.observedStage != m.name(o.id) || o.stage.File != nil, "refusal did not retain only the staging key")
+}
+
 func refusedSourceProducer(t *testing.T) SourceExporterV1 {
 	return func(*SourceOperationV1, func(SourcePartV1) error) error {
 		t.Fatal("refused preparation entered the producer")
@@ -960,6 +969,16 @@ func checkSourceQuotaOverlap(t *testing.T, s *policycontrol.Store, o *SourceOwne
 		sourceMust(t, os.WriteFile(extra, nil, 0o600))
 		sourceReadRefusal(t, o, anchor, ErrCapacityV1, "independent canonical name")
 		sourceMust(t, os.Remove(extra))
+		sourceKeyOnlyRetry(t, o, next, parts)
+		sourceUnchangedEntry(t, stage, info, []byte{1})
+		sourceFailIf(t, o.stage.Quota != quota, "key-only retry changed the pending quota pin")
+		fresh := sourceOpen(t, sourceReopenStore(t, s, o.dir), sourceID(), o.limits, nil)
+		checkSourcePinClosed(t, quota, o.stage.Quota)
+		sourceUnchangedEntry(t, path, original)
+		sourceRead(t, fresh, anchor, anchorParts)
+		sourcePrepareAndRead(t, fresh, next, parts)
+		assertSourceReleaseCharge(t, fresh, anchor, 2, o.limits.Bytes)
+		return
 	default:
 		sourceRead(t, o, anchor, anchorParts, func() {
 			count := len(sourceOpenFileModes(t, sourceLstat(t, root))) + len(sourceOpenFileModes(t, original)) + len(sourceOpenFileModes(t, info))
@@ -974,9 +993,7 @@ func checkSourceQuotaOverlap(t *testing.T, s *policycontrol.Store, o *SourceOwne
 	}
 	moved := filepath.Join(o.dir, "held-public-stage")
 	sourceMust(t, os.Rename(stage, moved))
-	if mode != "quota-partial" {
-		sourceMust(t, os.WriteFile(stage, []byte{2}, 0o600))
-	}
+	sourceMust(t, os.WriteFile(stage, []byte{2}, 0o600))
 	if active {
 		sourcePrepareRefusal(t, o, next, parts, ErrIdentityV1)
 		sourceFailIf(t, o.stage.File != pin || o.stage.Quota != quota, "substitution changed the held descriptors")
@@ -994,10 +1011,8 @@ func checkSourceQuotaOverlap(t *testing.T, s *policycontrol.Store, o *SourceOwne
 			sourceFailIf(t, err != nil || o.stage.Quota != quota || !os.SameFile(held, original), "stage loss changed the pending quota: %v", err)
 		})
 		unchanged("disjoint read after loss of the staging name")
-		if mode != "quota-partial" {
-			sourcePrepareRefusal(t, o, next, parts, ErrIdentityV1)
-			sourceMust(t, os.Remove(stage))
-		}
+		sourcePrepareRefusal(t, o, next, parts, ErrIdentityV1)
+		sourceMust(t, os.Remove(stage))
 		sourceRetryAfterFault(t, o, next, parts)
 	}
 	sourceUnchangedEntry(t, moved, info, []byte{1})
@@ -2710,42 +2725,37 @@ func checkSourceReleaseCensusOrder(t *testing.T, o *SourceOwnerV1, stage string,
 
 func testSourceRefusedStageObservation(t *testing.T, mode string) {
 	m, parts, size, limits := sourceSizedBundle(t)
-	byteLimit := strings.HasSuffix(mode, "-bytes")
-	if byteLimit {
+	switch mode {
+	case "prepare-observed-bytes":
 		limits.Bytes = size + 1
-	} else {
-		limits.Files = 1
+	case "read-observed-bytes":
+		limits.Bytes = 2 * size
+	default:
+		limits.Files = 2
 	}
 	_, o, dir, p := sourcePreparedScene(t, limits, m, parts)
 	paths := sourcePaths(dir, p.name)
 	original, image := sourceLstat(t, paths.capture), sourceReadFile(t, paths.capture)
-	other := sourceForeign(m)
-	_, donor, donorDir := sourceScene(t, sourceLimits())
-	extra := sourcePrepare(t, donor, other, parts).name
-	sourceMust(t, os.WriteFile(filepath.Join(paths.root, extra), sourceReadFile(t, filepath.Join(donorDir, sourceDirectory, extra)), 0o600))
+	extra := sourceForeign(m).name(o.id)
+	sourceMust(t, os.WriteFile(filepath.Join(paths.root, extra), image, 0o600))
 	sourceMust(t, os.WriteFile(paths.stage, []byte{1}, 0o600))
-	visited := checkSourceRefusedVisitOrder(t, o, p.name, extra, filepath.Base(paths.stage), byteLimit)
+	visited := checkSourceRefusedVisitOrder(t, o, p.name, extra, filepath.Base(paths.stage), mode == "prepare-observed-bytes")
 	if strings.HasPrefix(mode, "prepare-") {
 		sourcePrepareRefusal(t, o, m, parts, ErrCapacityV1)
 	} else {
 		sourceReadRefusal(t, o, m, ErrCapacityV1, "observed independent stage")
 	}
-	var witness *os.File
-	if byteLimit && visited {
-		witness = checkSourceStageWitness(t, o, sourceLstat(t, paths.stage))
+	sourceMust(t, os.Remove(filepath.Join(paths.root, extra)))
+	if visited {
+		sourceKeyOnlyRetry(t, o, m, parts)
 	}
 	sourceMust(t, os.Remove(paths.stage))
-	sourceMust(t, os.Remove(filepath.Join(paths.root, extra)))
 	checkSourceReleaseAfterScan(t, o, p, visited)
-	if !visited {
-		return
+	if visited {
+		sourceUnchangedEntry(t, paths.capture, original, image)
+		sourceRetryAndRead(t, o, m, parts, p.incarnation)
+		sourceReleaseResult(t, o, p, true, nil)
 	}
-	if witness != nil {
-		checkSourcePinClosed(t, witness, o.stage.File)
-	}
-	sourceUnchangedEntry(t, paths.capture, original, image)
-	sourceRetryAndRead(t, o, m, parts, p.incarnation)
-	sourceReleaseResult(t, o, p, true, nil)
 }
 
 func checkSourceReleaseAfterScan(t *testing.T, o *SourceOwnerV1, p *PreparedSourceV1, stageReached bool) {
@@ -2765,19 +2775,18 @@ func checkSourceReleaseRefusal(t *testing.T, o *SourceOwnerV1, p *PreparedSource
 	o.ops.statfs = statfs
 }
 
-func checkSourceRefusedVisitOrder(t *testing.T, o *SourceOwnerV1, backing, extra, stage string, byteLimit bool) bool {
+func checkSourceRefusedVisitOrder(t *testing.T, o *SourceOwnerV1, backing, extra, stage string, earlyByteRefusal bool) bool {
 	t.Helper()
 	var visited bool
 	withSourceEntries(t, o, func(r *sourceRoot, entries []os.DirEntry) {
 		observed := sourceEntriesByName(entries)
 		stagePosition := slices.IndexFunc(entries, func(entry os.DirEntry) bool { return entry.Name() == stage })
 		sourceFailIf(t, len(entries) != 3 || stagePosition < 0, "observed stage fixture has an unexpected directory listing")
-		visited = !byteLimit || stagePosition < 2
+		visited = !earlyByteRefusal || stagePosition < 2
 		for _, order := range [][3]string{{extra, stage, backing}, {backing, extra, stage}} {
-			input := []os.DirEntry{observed[order[0]], observed[order[1]], observed[order[2]]}
-			used, err := o.censusFiles(r, input, false)
+			used, err := o.censusFiles(r, []os.DirEntry{observed[order[0]], observed[order[1]], observed[order[2]]}, false)
 			sourceWantError(t, err, ErrCapacityV1, "independent objects exceed logical capacity")
-			want := !byteLimit || order[1] == stage
+			want := !earlyByteRefusal || order[1] == stage
 			sourceFailIf(t, used.stageReached != want, "directory order %v visited stage %t, want %t", order, used.stageReached, want)
 		}
 	})
@@ -3043,15 +3052,13 @@ func testSourceObservedStageCustody(t *testing.T, mode string) {
 	stage := filepath.Join(dir, sourceDirectory, ".staging-"+p.name)
 	sourceMust(t, os.WriteFile(stage, []byte{1, 2}, 0o600))
 	sourcePrepareRefusal(t, o, m, parts, ErrCapacityV1)
-	sourceFailIf(t, o.stage.File != nil, "logical capacity admitted an unfunded witness")
 	original := sourceLstat(t, stage)
 	if mode == "observed-replacement" {
 		sourceMust(t, os.Rename(stage, filepath.Join(dir, "previous-stage")))
 	}
 	current := writeSourceEntry(t, stage, []byte{3})
 	sourceFailIf(t, os.SameFile(original, current) != (mode == "observed-same-inode"), "stage fixture has the wrong identity")
-	sourceFault(o, "rename", ErrIdentityV1, func() { t.Fatal("unpinned stage observation reached namespace mutation") })
-	sourcePrepareRefusal(t, o, m, parts, ErrIdentityV1)
+	sourceKeyOnlyRetry(t, o, m, parts)
 	sourceUnchangedEntry(t, stage, current, []byte{3})
 	sourceMust(t, os.Remove(stage))
 	sourceRetryAfterFault(t, o, m, parts)
@@ -3073,14 +3080,14 @@ func testSourceStageWitness(t *testing.T, mode string) {
 	stage := filepath.Join(root, leaf)
 	data := []byte{1}
 	original := writeSourceEntry(t, stage, data)
-	if mode != "disjoint-first-four" {
+	if mode == "disjoint-four" {
 		extra := filepath.Join(root, sourceForeign(second).name(o.id))
 		sourceMust(t, os.WriteFile(extra, nil, 0o600))
 		sourcePrepareRefusal(t, o, first, parts, ErrCapacityV1)
 		sourceMust(t, os.Remove(extra))
 	}
+	sourceRead(t, o, second, parts)
 	if limits.Descriptors == 4 {
-		sourceRead(t, o, second, parts)
 		sourceFailIf(t, o.stage.File != nil || o.observedStage != p.name, "disjoint read lost the unpinned staging observation")
 		if mode == "disjoint-four" {
 			sourceUnchangedEntry(t, stage, original)
@@ -3204,12 +3211,12 @@ func checkSourcePartialAliasOrders(t *testing.T, o *SourceOwnerV1, name, stage, 
 			used, err := o.censusFiles(r, order, false)
 			sourceWantError(t, err, ErrIntegrityV1, "malformed capture name")
 			sourceFailIf(t, !used.stageReached || used.stage.shared != (i == 1 && aliased), "order %d did not observe the expected staging or capture", i)
-			sourceFailIf(t, o.stageWitnessFits(r, used.stage) != aliased, "order %d counted the stage against the wrong file", i)
+			sourceFailIf(t, o.stageWitnessFits(r, used.stage, order) != aliased, "order %d counted the stage against the wrong file", i)
 		}
 		used, _ := o.censusFiles(r, before, false)
 		path, displaced := filepath.Join(o.dir, sourceDirectory, name), filepath.Join(o.dir, "displaced-capture")
 		sourceMust(t, os.Rename(path, displaced))
-		sourceFailIf(t, o.stageWitnessFits(r, used.stage), "an absent backing funded a stage alias")
+		sourceFailIf(t, o.stageWitnessFits(r, used.stage, before), "an absent backing funded a stage alias")
 		sourceMust(t, os.Rename(displaced, path))
 		entries, err := o.sourceEntries(r)
 		sourceMust(t, err)
@@ -3232,33 +3239,34 @@ func testSourceGrownAliasWitness(t *testing.T, mode string) {
 	}
 	_, o, dir := sourceScene(t, limits)
 	paths := sourcePaths(dir, m.name(o.id))
-	leaf := publicStagePrefix + paths.key
 	sourceLeaveUnissued(t, o, m, parts, paths.stage, nil)
+	if !byteLimited {
+		o = sourceOpen(t, sourceReopenStore(t, o.store, dir), sourceID(), limits, nil)
+		sourceRead(t, o, m, parts)
+	}
 	binding := o.live[paths.key]
-	sourceFailIf(t, binding == nil || binding.issued, "slot refusal lost the unissued binding")
+	sourceFailIf(t, byteLimited != (binding != nil) || binding != nil && binding.issued, "capture has the wrong live binding")
 	image := sourceReadFile(t, paths.capture)
 	sourceMust(t, os.WriteFile(paths.capture, append(slices.Clone(image), 1), 0o600))
 	sourceMust(t, os.Link(paths.capture, paths.stage))
 	extra := filepath.Join(paths.root, sourceForeign(m).name(o.id))
 	sourceMust(t, os.WriteFile(extra, nil, 0o600))
 	original := sourceLstat(t, paths.stage)
-	var reached bool
-	if byteLimited {
-		reached = checkSourceUnfundedGrownWitness(t, o, m, parts)
-	} else {
-		sourcePrepareRefusal(t, o, m, parts, ErrCapacityV1)
-		checkSourceStageWitness(t, o, original)
-	}
+	reached := !byteLimited || checkSourceUnfundedGrownWitness(t, o, paths.key)
+	sourcePrepareRefusal(t, o, m, parts, ErrCapacityV1)
 	sourceMust(t, os.Remove(extra))
 	sourceMust(t, os.WriteFile(paths.capture, image, 0o600))
 	if reached {
-		sourcePrepareRefusal(t, o, m, parts, ErrIdentityV1)
-		sourceUnchangedEntry(t, paths.stage, original)
-		sourceMust(t, os.Remove(paths.stage))
+		sourceKeyOnlyRetry(t, o, m, parts)
+		sourceUnchangedEntry(t, paths.stage, original, image)
+		fresh := sourceOpen(t, sourceReopenStore(t, o.store, dir), sourceID(), limits, nil)
+		testSourceReopenedPin(t, fresh, m, parts, nil, filepath.Base(paths.stage), original, size)
+		sourceUnchangedEntry(t, paths.capture, original, image)
+		return
 	}
-	sourceFailIf(t, sourcePrepare(t, o, m, parts).incarnation != binding, "witness retry replaced the qualified capture")
-	sourcePresence(t, paths.root, leaf, false)
-	sourceRead(t, o, m, parts)
+	sourceFailIf(t, o.stage.File != nil || o.observedStage != "", "unreached stage retained a key or descriptor")
+	sourceRetryAndRead(t, o, m, parts, binding)
+	sourcePresence(t, paths.root, filepath.Base(paths.stage), false)
 }
 
 func sourceLeaveUnissued(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte, stage string, data []byte) {
@@ -3272,9 +3280,8 @@ func sourceLeaveUnissued(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, par
 	sourceMust(t, os.Remove(stage))
 }
 
-func checkSourceUnfundedGrownWitness(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte) (reached bool) {
+func checkSourceUnfundedGrownWitness(t *testing.T, o *SourceOwnerV1, backing string) (reached bool) {
 	t.Helper()
-	backing := m.name(o.id)
 	stage := publicStagePrefix + backing
 	withSourceEntries(t, o, func(r *sourceRoot, entries []os.DirEntry) {
 		stageIndex := slices.IndexFunc(entries, func(entry os.DirEntry) bool { return entry.Name() == stage })
@@ -3283,24 +3290,11 @@ func checkSourceUnfundedGrownWitness(t *testing.T, o *SourceOwnerV1, m SourceMan
 		reached = stageIndex < backingIndex
 		for _, wantReached := range [2]bool{reached, !reached} {
 			used, err := o.censusFiles(r, entries, false)
-			admission := used.admissionError(err)
-			funded := wantReached && o.stageWitnessFits(r, used.stage)
-			t.Cleanup(func() {
-				sourceWantError(t, admission, ErrCapacityV1, "grown stage at exact byte limit")
-				sourceFailIf(t, used.stageReached != wantReached, "grown stage reached = %t, want %t", used.stageReached, wantReached)
-				sourceFailIf(t, funded, "byte limit funded a grown stage witness")
-			})
+			sourceWantError(t, used.admissionError(err), ErrCapacityV1, "grown stage at exact byte limit")
+			sourceFailIf(t, used.stageReached != wantReached, "grown stage reached = %t, want %t", used.stageReached, wantReached)
+			sourceFailIf(t, wantReached && o.stageWitnessFits(r, used.stage, entries), "byte limit funded a grown stage witness")
 			entries[stageIndex], entries[backingIndex] = entries[backingIndex], entries[stageIndex]
 		}
-	})
-	wantObserved := ""
-	if reached {
-		wantObserved = backing
-	}
-	sourcePrepareRefusal(t, o, m, parts, ErrCapacityV1)
-	pin, observed := o.stage.File, o.observedStage
-	t.Cleanup(func() {
-		sourceFailIf(t, pin != nil || observed != wantObserved, "grown stage pin = %v, observed = %q, want nil/%q", pin, observed, wantObserved)
 	})
 	return reached
 }

@@ -51,7 +51,8 @@ type sourceUsage struct {
 	quota                                                os.FileInfo
 	releaseMissing                                       int
 	stageErr, visitErr                                   error
-	stageReached, overBytes, forRelease                  bool
+	stageReached, overBytes, forRelease, completeCharge  bool
+	entries                                              []os.DirEntry
 }
 
 var realSourceFS = sourceFS{statfs: syscall.Fstatfs, write: (*os.File).Write, fileSync: (*os.File).Sync, close: (*os.File).Close, chmod: (*os.File).Chmod, namespace: runSourceNamespace, remove: (*os.Root).Remove, dirSync: (*os.File).Sync}
@@ -82,7 +83,9 @@ func (o *SourceOwnerV1) census(r *sourceRoot, forRelease bool) (sourceUsage, err
 		return sourceUsage{}, err
 	}
 	o.resolvePublications(r)
-	return o.censusFiles(r, entries, forRelease)
+	used, err := o.censusFiles(r, entries, forRelease)
+	used.entries = entries
+	return used, err
 }
 
 func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, forRelease bool) (sourceUsage, error) {
@@ -254,7 +257,7 @@ func (o *SourceOwnerV1) chargeBytes(used *sourceUsage, size uint64) {
 
 // visitCensusBytes charges entries in directory order until the first refusal.
 func (o *SourceOwnerV1) visitCensusBytes(used *sourceUsage, size, aliasBytes uint64, alias bool) {
-	if used.visitErr != nil {
+	if used.visitErr != nil || used.completeCharge {
 		return
 	}
 	if covered := min(aliasBytes, used.stage.size); alias && !used.forRelease && covered > used.aliasBytes {
@@ -309,7 +312,7 @@ func (o *SourceOwnerV1) chargeBoundCapture(used *sourceUsage, backing *sourceInc
 		return
 	}
 	excess := size - min(size, reserved)
-	if !shared && backing.issued {
+	if !shared && backing.issued && !used.completeCharge {
 		excess = 0
 	}
 	o.chargeReservedCapture(used, backing, id, size, reserved, excess)
@@ -805,7 +808,7 @@ func (o *SourceOwnerV1) rememberPublicStage(r *sourceRoot, used sourceUsage, fun
 	if !used.stageReached || stage.held() || o.debt.name != "" || o.observedStage != "" {
 		return
 	}
-	if funded || o.stageWitnessFits(r, stage) {
+	if funded || o.stageWitnessFits(r, stage, used.entries) {
 		o.retainStageWitness(r, stage)
 	}
 	o.observedStage = stage.name
@@ -819,22 +822,29 @@ func (o *SourceOwnerV1) retainStageWitness(r *sourceRoot, stage sourceDebt) {
 	}
 }
 
-func (o *SourceOwnerV1) stageWitnessFits(r *sourceRoot, stage sourceDebt) bool {
+// stageWitnessFits charges the full bounded listing without changing the admission error.
+func (o *SourceOwnerV1) stageWitnessFits(r *sourceRoot, stage sourceDebt, entries []os.DirEntry) bool {
 	stage.shared, stage.binding = false, nil
 	reserved := o.stagingUsage(stage)
-	for name, backing := range o.live {
-		id := backing.file
-		if id == stage.file || id == reserved.pendingStage.file {
-			if info, _ := r.Lstat(name); sameSourceFile(info, id) {
-				reserved.coverQuota(id, backing.size, true)
-				if b := reserved.stage.binding; id == stage.file && (b == nil || b.size < backing.size) {
-					reserved.stage.binding = backing
-				}
+	reserved.completeCharge = true
+	o.chargeBindings(&reserved)
+	absentRelease := o.release
+	for _, entry := range entries {
+		name := entry.Name()
+		switch {
+		case sourceHexKey(name):
+			if o.censusCapture(r, name, &reserved) != nil {
+				return false
 			}
+		case name == stage.leaf:
+		case strings.HasPrefix(name, publicStagePrefix), strings.HasPrefix(name, heldStagePrefix):
+			return false
+		}
+		if absentRelease != nil && name == absentRelease.name {
+			absentRelease = nil
 		}
 	}
-	o.chargeBindings(&reserved)
-	_, err := o.finishCensus(reserved, o.release)
+	_, err := o.finishCensus(reserved, absentRelease)
 	return err == nil
 }
 
