@@ -2450,7 +2450,7 @@ func testSourceStageDescriptorBudget(t *testing.T) {
 
 func testSourceChargedLogicalNames(t *testing.T) {
 	m, parts, size, limits := sourceSizedBundle(t)
-	limits.Files, limits.Bytes = 3, size+1
+	limits.Files, limits.Bytes = 3, 2*size
 	_, o, dir := sourceScene(t, limits)
 	paths := sourcePaths(dir, m.name(o.id))
 	alias := filepath.Join(paths.root, sourceForeign(m).name(o.id))
@@ -2458,6 +2458,8 @@ func testSourceChargedLogicalNames(t *testing.T) {
 	original := sourceReadFile(t, paths.capture)
 	sourceMust(t, os.Link(paths.capture, alias))
 	sourceMust(t, os.Truncate(paths.capture, 1))
+	sourceFault(o, "statfs", ErrCapacityV1, func() { t.Fatal("one-byte quota overrun reached disk admission") })
+	sourcePrepareRefusal(t, o, sourceForeign(sourceForeign(m)), parts, ErrCapacityV1)
 	withSourceEntries(t, o, func(r *sourceRoot, entries []os.DirEntry) {
 		for range 2 {
 			used, err := o.censusFiles(r, entries, false)
@@ -2466,10 +2468,9 @@ func testSourceChargedLogicalNames(t *testing.T) {
 			slices.Reverse(entries)
 		}
 	})
-	sourcePrepareRefusal(t, o, sourceForeign(sourceForeign(m)), parts, ErrCapacityV1)
 	sourceMust(t, os.Remove(alias))
 	sourceMust(t, os.WriteFile(paths.capture, original, 0o600))
-	sourcePrepareAndRead(t, o, m, parts)
+	sourceRetryAfterFault(t, o, m, parts)
 }
 
 func testSourceGrownPendingBacking(t *testing.T) {
