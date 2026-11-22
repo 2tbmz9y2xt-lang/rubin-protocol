@@ -657,11 +657,13 @@ func (o *SourceOwnerV1) sourceFileHeader(f *os.File, m SourceManifestV1, size ui
 		return filelock.IdentityV1{}, nil, shapeError
 	}
 	file := filelock.FileIdentityV1(info)
-	if expected != nil && file != expected.file {
-		return file, nil, ErrIdentityV1
-	}
-	if expected != nil && size != expected.size {
-		return file, nil, shapeError
+	if expected != nil {
+		if file != expected.file {
+			return file, nil, ErrIdentityV1
+		}
+		if size != expected.size {
+			return file, nil, shapeError
+		}
 	}
 	header := m.header(o.id)
 	actual := make([]byte, len(header))
@@ -1076,9 +1078,7 @@ func (o *SourceOwnerV1) captureSlot(r *sourceRoot, name string) (bool, error) {
 	present := false
 	for _, entry := range entries {
 		leaf := entry.Name()
-		if leaf == name {
-			present = true
-		}
+		present = present || leaf == name
 		if samePublicStage(leaf, name) {
 			return false, ErrIdentityV1
 		}

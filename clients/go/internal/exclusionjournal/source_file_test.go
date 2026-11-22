@@ -2285,18 +2285,18 @@ func testSourceIndeterminateBinding(t *testing.T, mode string) {
 	expected := o.live[paths.key]
 	sourceFailIf(t, expected == nil || !expected.uncertain || expected.issued, "indeterminate publication lost its qualified binding")
 	before, original := sourceLstat(t, paths.held), sourceReadFile(t, paths.held)
-	want := ErrIdentityV1
-	if mode == "foreign-file" {
+	want := ErrIntegrityV1
+	switch mode {
+	case "foreign-file":
+		want = ErrIdentityV1
 		sourceMust(t, os.WriteFile(paths.capture, sourceResealed(original, len(m.header(o.id))), 0o600))
 		assertSourceReleaseCharge(t, o, m, 2, 2*uint64(len(original)))
-	} else if mode == "foreign-short" {
+	case "foreign-short":
 		sourceMust(t, os.WriteFile(paths.capture, []byte{1}, 0o600))
 		sourceRead(t, o, anchor, parts)
 		assertSourceReleaseCharge(t, o, m, 3, limits.Bytes)
-		want = ErrIntegrityV1
-	} else {
+	default:
 		sourceMust(t, os.Mkdir(paths.capture, 0o700))
-		want = ErrIntegrityV1
 	}
 	foreign := sourceLstat(t, paths.capture)
 	sourcePrepareRefusal(t, o, m, parts, want)
@@ -3220,12 +3220,9 @@ func checkSourcePartialAliasOrders(t *testing.T, o *SourceOwnerV1, name, stage, 
 		sourceMust(t, os.Rename(displaced, path))
 		entries, err := o.sourceEntries(r)
 		sourceMust(t, err)
-		for _, entry := range entries {
-			if key := entry.Name(); key == stage || key == malformed {
-				reached = key == stage
-				break
-			}
-		}
+		first := slices.IndexFunc(entries, func(e os.DirEntry) bool { return e.Name() == stage || e.Name() == malformed })
+		sourceFailIf(t, first < 0, "staging and malformed entries are absent")
+		reached = entries[first].Name() == stage
 	})
 	return reached
 }
