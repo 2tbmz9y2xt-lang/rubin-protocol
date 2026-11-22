@@ -382,7 +382,7 @@ func (o *SourceOwnerV1) resolvePublications(r *sourceRoot) {
 func (o *SourceOwnerV1) forgetPublication(name string, backing *sourceIncarnation) {
 	delete(o.live, name)
 	if o.debt.binding == backing {
-		o.debt.binding = nil
+		o.debt.binding, o.debt.shared = nil, false
 	}
 }
 
@@ -1222,7 +1222,8 @@ const (
 // linkCapture records the inode before attempting the link.
 func (o *SourceOwnerV1) linkCapture(r *sourceRoot, name string, observed *sourceIncarnation) (sourceVisibility, error) {
 	observed.uncertain = true
-	o.live[name], o.debt.binding = observed, observed
+	o.live[name] = observed
+	o.debt.binding, o.debt.shared = observed, true
 	err := o.ops.namespace((*sourceRoot).Link, r, o.debt.leaf, name)
 	visibility, out := observeLink(r, name, observed.file, err)
 	switch {
