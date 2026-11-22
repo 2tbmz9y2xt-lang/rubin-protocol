@@ -235,14 +235,7 @@ func (o *SourceOwnerV1) censusCapture(r *sourceRoot, name string, used *sourceUs
 // chargeBoundCapture adds excess bytes or a separate file beside retained staging.
 func (o *SourceOwnerV1) chargeBoundCapture(used *sourceUsage, name string, backing *sourceIncarnation, id filelock.IdentityV1, size uint64) error {
 	if backing.issued {
-		used.releaseMissing--
-		switch {
-		case used.releaseMismatch != nil:
-		case backing.file != id:
-			used.releaseMismatch = ErrIdentityV1
-		case backing.size != size:
-			used.releaseMismatch = ErrIntegrityV1
-		}
+		used.observeIssuedCapture(backing, id, size)
 		return nil
 	}
 	reserved := backing.size
@@ -253,6 +246,18 @@ func (o *SourceOwnerV1) chargeBoundCapture(used *sourceUsage, name string, backi
 		reserved = max(reserved, used.stage.size)
 	}
 	return o.chargeBytes(used, size-min(size, reserved))
+}
+
+// observeIssuedCapture records the first mismatch in an issued backing.
+func (used *sourceUsage) observeIssuedCapture(backing *sourceIncarnation, id filelock.IdentityV1, size uint64) {
+	used.releaseMissing--
+	switch {
+	case used.releaseMismatch != nil:
+	case backing.file != id:
+		used.releaseMismatch = ErrIdentityV1
+	case backing.size != size:
+		used.releaseMismatch = ErrIntegrityV1
+	}
 }
 
 func (d *sourceDebt) observeAlias(name string, id filelock.IdentityV1, previous string) {
