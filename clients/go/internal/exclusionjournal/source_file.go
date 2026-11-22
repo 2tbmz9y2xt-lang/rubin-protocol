@@ -372,10 +372,17 @@ func (o *SourceOwnerV1) resolvePublications(r *sourceRoot) {
 		info, err := r.Lstat(name)
 		switch {
 		case errors.Is(err, os.ErrNotExist):
-			delete(o.live, name)
+			o.forgetPublication(name, backing)
 		case err == nil && sameSourceFile(info, backing.file):
 			backing.uncertain = false
 		}
+	}
+}
+
+func (o *SourceOwnerV1) forgetPublication(name string, backing *sourceIncarnation) {
+	delete(o.live, name)
+	if o.debt.binding == backing {
+		o.debt.binding = nil
 	}
 }
 
@@ -652,6 +659,9 @@ func (o *SourceOwnerV1) sourceFileHeader(f *os.File, m SourceManifestV1, size ui
 	file := filelock.FileIdentityV1(info)
 	if expected != nil && file != expected.file {
 		return file, nil, ErrIdentityV1
+	}
+	if expected != nil && size != expected.size {
+		return file, nil, shapeError
 	}
 	header := m.header(o.id)
 	actual := make([]byte, len(header))
@@ -1149,41 +1159,34 @@ func (o *SourceOwnerV1) finishPinned(r *sourceRoot, name string, f *os.File, id 
 	return pin, nil
 }
 
-func (o *SourceOwnerV1) startBundle(r *sourceRoot, w *sourceFileWriter, name string, size uint64, recheck bool) error {
-	if err := o.reconcile(r); err != nil {
-		return err
-	}
-	if recheck {
-		if _, err := o.space(r, size, sourceDebt{}); err != nil {
-			return err
-		}
-	}
-	leaf := heldStagePrefix + name
-	f, err := r.OpenFile(leaf, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return err
-	}
-	w.file = f
-	o.debt = sourceDebt{name: name, leaf: leaf, size: size}
-	info, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	o.debt.file = filelock.FileIdentityV1(info)
-	o.debt.size = sourceFileSize(info)
-	return nil
-}
-
 // writeBundle verifies the file against the producer digest.
 func (o *SourceOwnerV1) writeBundle(r *sourceRoot, w *sourceFileWriter, m SourceManifestV1, name string, produce func(func(SourcePartV1) error) error, size uint64, recheck bool, scratch []byte) (sourceIncarnation, error) {
 	hash := sha256.New()
 	out := io.MultiWriter(w, hash)
 	start := func() error {
-		if err := o.startBundle(r, w, name, size, recheck); err != nil {
+		if err := o.reconcile(r); err != nil {
 			return err
 		}
-		_, err := out.Write(m.header(o.id))
-		return cmp.Or(err, o.ops.chmod(w.file, 0o600))
+		if recheck {
+			if _, err := o.space(r, size, sourceDebt{}); err != nil {
+				return err
+			}
+		}
+		leaf := heldStagePrefix + name
+		f, err := r.OpenFile(leaf, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
+			return err
+		}
+		w.file = f
+		o.debt = sourceDebt{name: name, leaf: leaf, size: size}
+		info, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		o.debt.file = filelock.FileIdentityV1(info)
+		o.debt.size = sourceFileSize(info)
+		_, err = out.Write(m.header(o.id))
+		return cmp.Or(err, o.ops.chmod(f, 0o600))
 	}
 	if err := stream(m, produce, out, scratch, start, true); err != nil {
 		return sourceIncarnation{}, err
@@ -1219,14 +1222,14 @@ const (
 // linkCapture records the inode before attempting the link.
 func (o *SourceOwnerV1) linkCapture(r *sourceRoot, name string, observed *sourceIncarnation) (sourceVisibility, error) {
 	observed.uncertain = true
-	o.live[name] = observed
+	o.live[name], o.debt.binding = observed, observed
 	err := o.ops.namespace((*sourceRoot).Link, r, o.debt.leaf, name)
 	visibility, out := observeLink(r, name, observed.file, err)
 	switch {
 	case visibility == sourceNotVisible:
-		delete(o.live, name)
+		o.forgetPublication(name, observed)
 	case err == nil || visibility == sourceVisible:
-		o.debt.binding, observed.uncertain = observed, false
+		observed.uncertain = false
 	}
 	return visibility, out
 }
