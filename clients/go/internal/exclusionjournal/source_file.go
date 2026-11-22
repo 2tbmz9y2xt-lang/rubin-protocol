@@ -159,11 +159,7 @@ func (o *SourceOwnerV1) censusCaptures(r *sourceRoot, entries []os.DirEntry, use
 	if stopErr != nil {
 		return used, stopErr
 	}
-	used, err := o.finishCensus(used, absentRelease)
-	if err == nil && used.stage.name == "" {
-		err = used.stageErr
-	}
-	return used, err
+	return o.finishCensus(used, absentRelease)
 }
 
 func (o *SourceOwnerV1) censusEntry(r *sourceRoot, name string, used *sourceUsage) error {
@@ -208,7 +204,7 @@ func (o *SourceOwnerV1) finishCensus(used sourceUsage, absentRelease *sourceRele
 	if used.overBytes || used.files > o.limits.Files || any(used.visitErr) == any(ErrCapacityV1) {
 		return used, ErrCapacityV1
 	}
-	return used, nil
+	return used, used.stageErr
 }
 
 // chargeStages counts shared backing once (RUBIN_COMPACT_BLOCKS.md Section 10).
@@ -786,7 +782,7 @@ func (w *sourceWindows) part(section *io.SectionReader, spec SourcePartSpecV1, h
 
 func (o *SourceOwnerV1) withFiles(account *mdbx.OperationAccount, m SourceManifestV1, preparing bool, use func(*sourceRoot, SourceManifestV1, uint64, sourceUsage) error) error {
 	return o.withManifest(account, m, preparing, func(r *sourceRoot, m SourceManifestV1, size uint64) error {
-		o.retireStageWitness(r)
+		_ = o.retireStageWitness(r)
 		used, err := o.census(r, false)
 		err = used.admissionError(err)
 		adopt := preparing || used.stage.name == m.name(o.id)

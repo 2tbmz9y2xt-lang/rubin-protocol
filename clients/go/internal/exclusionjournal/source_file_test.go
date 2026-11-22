@@ -2852,7 +2852,7 @@ func testSourceStageRefusalOrder(t *testing.T, mode string) {
 	var original os.FileInfo
 	if p == nil {
 		sourceMust(t, os.WriteFile(path, nil, 0o600))
-		if want == ErrCapacityV1 {
+		if errors.Is(want, ErrCapacityV1) {
 			sourceMust(t, os.Truncate(path, int64(o.limits.Bytes)+1))
 		}
 	} else {
