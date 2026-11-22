@@ -84,15 +84,17 @@ func (o *SourceOwnerV1) census(r *sourceRoot, forRelease bool) (sourceUsage, err
 	}
 	o.resolvePublications(r)
 	used, err := o.censusFiles(r, entries, forRelease)
+	if used.stageReached && used.stage.held() && o.debt.file == used.stage.file {
+		o.debt.leaf = used.stage.leaf
+		o.stage.Clear()
+	}
 	used.entries = entries
 	return used, err
 }
 
 func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, forRelease bool) (sourceUsage, error) {
 	if o.debt.unlinkTried {
-		if _, err := r.Lstat(o.debt.leaf); errors.Is(err, os.ErrNotExist) {
-			o.pendingStage, o.debt = o.debt, sourceDebt{}
-		}
+		_ = o.observeStageRemoval(r)
 	}
 	stage, prefix, stopErr := censusStage(r, entries)
 	if stopErr != nil && stage.held() {
@@ -957,16 +959,22 @@ func (o *SourceOwnerV1) removeStage(r *sourceRoot, d *sourceDebt) error {
 	}
 	d.unlinkTried = true
 	err := o.ops.remove(r.Root, d.leaf)
+	return cmp.Or(err, o.observeStageRemoval(r))
+}
+
+// observeStageRemoval resolves an attempted unlink against the protected name.
+func (o *SourceOwnerV1) observeStageRemoval(r *sourceRoot) error {
+	d := &o.debt
 	info, observed := r.Lstat(d.leaf)
 	switch {
 	case errors.Is(observed, os.ErrNotExist):
 		o.pendingStage, o.debt = *d, sourceDebt{}
-		return err
+		return nil
 	case sameSourceFile(info, d.file):
 		d.unlinkTried = false
 		o.stage.ClearQuota()
 	}
-	return cmp.Or(err, ErrIdentityV1)
+	return ErrIdentityV1
 }
 
 // claimStage verifies the pinned inode after renaming it.
