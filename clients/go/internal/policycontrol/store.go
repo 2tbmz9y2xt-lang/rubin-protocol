@@ -411,10 +411,10 @@ func (s *Store) Close() error {
 	return s.closeLocked()
 }
 
-// closeLocked disposes pending state and source custody before releasing the lock.
 func (s *Store) closeLocked() error {
 	if s.sourceStage != nil {
 		s.sourceStage.Clear()
+		s.sourceStage.ClearQuota()
 		s.sourceStage = nil
 	}
 	if s.tx != nil {

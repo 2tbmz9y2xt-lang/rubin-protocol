@@ -89,20 +89,23 @@ func testSourceAuthorityStagingPin(t *testing.T, mode string) {
 	path := filepath.Join(s.dir, "stage")
 	must(t, os.WriteFile(path, []byte("staged source"), 0o600))
 	b, second := sourceBorrow(t, s), sourceBorrow(t, s)
-	pin, err := os.Open(path)
-	must(t, err)
-	t.Cleanup(func() { _ = pin.Close() })
+	pins := [2]*os.File{}
+	for i := range pins {
+		pin, err := os.Open(path)
+		must(t, err)
+		pins[i] = pin
+		t.Cleanup(func() { _ = pin.Close() })
+	}
 	cause := errors.New("source construction stopped")
 	use := func(stage *SourceStagePinV1) error {
-		stage.File = pin
+		stage.File, stage.Quota = pins[0], pins[1]
 		err := second.WithSourceOwnerClaimV1(func(*SourceStagePinV1) error {
 			t.Fatal("second construction ran")
 			return nil
 		})
 		sourceAuthorityFailIf(t, !sameDependentValue(err, ErrBusy), "second construction returned %v", err)
 		sourceAuthorityFailIf(t, !sameDependentValue(s.Close(), ErrBusy), "close during source construction")
-		_, err = pin.Stat()
-		must(t, err)
+		assertSourcePinStatus(t, pins, nil)
 		switch mode {
 		case "panic":
 			panic(cause)
@@ -113,19 +116,17 @@ func testSourceAuthorityStagingPin(t *testing.T, mode string) {
 	}
 	testSourceAuthorityPinResult(t, b, use, mode, cause)
 	if mode == "success" {
-		_, err := pin.Stat()
-		must(t, err)
+		assertSourcePinStatus(t, pins, nil)
 		sourceAuthorityFailIf(t, !sameDependentValue(s.Close(), ErrBusy), "borrowed store closed")
-		_, err = pin.Stat()
-		must(t, err)
+		assertSourcePinStatus(t, pins, nil)
 	} else {
-		assertSourcePinClosed(t, pin)
+		assertSourcePinStatus(t, pins, os.ErrClosed)
 		must(t, second.WithSourceOwnerClaimV1(func(*SourceStagePinV1) error { return nil }))
 	}
 	b.ReleaseV1()
 	second.ReleaseV1()
 	must(t, s.Close())
-	assertSourcePinClosed(t, pin)
+	assertSourcePinStatus(t, pins, os.ErrClosed)
 	sourceBorrowRefusal(t, s, ErrClosed, false)
 	must(t, s.Close())
 }
@@ -142,10 +143,12 @@ func testSourceAuthorityPinResult(t *testing.T, b *SourceAuthorityBorrowV1, use 
 	sourceAuthorityFailIf(t, !sameDependentValue(err, want), "source constructor returned %v, want %v", err, want)
 }
 
-func assertSourcePinClosed(t *testing.T, pin *os.File) {
+func assertSourcePinStatus(t *testing.T, pins [2]*os.File, want error) {
 	t.Helper()
-	_, err := pin.Stat()
-	sourceAuthorityFailIf(t, !errors.Is(err, os.ErrClosed), "staging descriptor remained live: %v", err)
+	for _, pin := range pins {
+		_, err := pin.Stat()
+		sourceAuthorityFailIf(t, !errors.Is(err, want), "source descriptor status: %v, want %v", err, want)
+	}
 }
 
 func checkSourceOwnerClaims(t *testing.T, s *Store) {

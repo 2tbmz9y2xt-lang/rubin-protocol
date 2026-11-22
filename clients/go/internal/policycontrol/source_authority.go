@@ -18,17 +18,21 @@ type sourceAuthorityStateV1 struct {
 	live  bool
 }
 
-// SourceStagePinV1 holds a staging descriptor for the lifetime of the source claim.
+// SourceStagePinV1 holds the staging file and the file still charged until directory sync.
 type SourceStagePinV1 struct {
-	File *os.File
+	File, Quota *os.File
 }
 
-// Clear closes and forgets the pinned staging file.
+// Clear closes the staging file.
 func (p *SourceStagePinV1) Clear() {
-	if p.File != nil {
-		_ = p.File.Close()
-		p.File = nil
-	}
+	_ = p.File.Close()
+	p.File = nil
+}
+
+// ClearQuota closes the file held for quota accounting.
+func (p *SourceStagePinV1) ClearQuota() {
+	_ = p.Quota.Close()
+	p.Quota = nil
 }
 
 // BorrowSourceAuthorityV1 admits a source lifetime without holding a transaction or mutex.
@@ -99,6 +103,7 @@ func (b *SourceAuthorityBorrowV1) WithSourceOwnerClaimV1(use func(*SourceStagePi
 		s.mu.Lock()
 		if !success {
 			stage.Clear()
+			stage.ClearQuota()
 			s.sourceStage = nil
 		}
 		s.sourceBorrows--

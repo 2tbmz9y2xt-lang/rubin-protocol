@@ -35,6 +35,9 @@ type sourceRelease struct {
 func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccount, p *PreparedSourceV1, neverReferenced bool) error {
 	return o.operation(account, func() error {
 		if err := o.releaseAdmission(p, neverReferenced); err != nil {
+			if any(err) == any(ErrBusyV1) && o.debt.name == "" && o.stage.File != nil {
+				_ = o.withRoot(o.bindRoot, o.retireStageWitness)
+			}
 			return err
 		}
 		return o.withRoot(o.bindRoot, func(r *sourceRoot) error {
@@ -58,7 +61,7 @@ func (o *SourceOwnerV1) releaseAdmission(p *PreparedSourceV1, proof bool) error 
 	if !proof || !o.hasReleaseAuthority(p) {
 		return ErrIntegrityV1
 	}
-	if p != nil && (o.debt.name != "" || o.pendingStage.name != "" || o.release != nil && o.release.name != p.name) {
+	if p != nil && (cmp.Or(o.debt.name, o.pendingStage.name, o.observedStage) != "" || o.release != nil && o.release.name != p.name) {
 		return ErrBusyV1
 	}
 	return nil
@@ -71,31 +74,16 @@ func (o *SourceOwnerV1) hasReleaseAuthority(p *PreparedSourceV1) bool {
 	return p.incarnation != nil && p.incarnation.issued && o.live[p.name] == p.incarnation
 }
 
-// releaseCensus preserves the release admission charge for a newly observed public alias.
 func (o *SourceOwnerV1) releaseCensus(r *sourceRoot) error {
-	used, err := o.census(r)
-	if err := cmp.Or(used.releaseMismatch, err); err != nil {
-		return o.refuseReleaseCensus(used, err)
-	}
-	if used.stage.held() {
+	used, err := o.census(r, true)
+	err = used.admissionError(err)
+	if err == nil && used.stage.held() {
 		return ErrIntegrityV1
 	}
-	if used.stage.shared != "" {
-		if err := o.charge(&used, used.stage.size); err != nil {
-			return o.refuseReleaseCensus(used, err)
-		}
-	}
-	if err := used.releaseBindingError(); err != nil {
-		return o.refuseReleaseCensus(used, err)
-	}
-	return o.adoptStage(r, used)
-}
-
-// refuseReleaseCensus remembers a public stage already visited by the census.
-func (o *SourceOwnerV1) refuseReleaseCensus(used sourceUsage, err error) error {
-	if used.stageReached && !used.stage.held() {
-		o.debt = used.stage
-		o.debt.unfunded = true
+	if err != nil || o.limits.Descriptors < 5 {
+		o.rememberPublicStage(r, used, false)
+	} else if o.adoptStage(r, used) != nil {
+		o.observedStage = used.stage.name
 	}
 	return err
 }

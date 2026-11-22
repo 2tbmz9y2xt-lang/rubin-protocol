@@ -68,17 +68,18 @@ type SourceLimitsV1 struct {
 // SourceOwnerV1 binds source operations to one actual Store instance and its protected directory.
 type SourceOwnerV1 struct {
 	sourceBinding
-	store        *policycontrol.Store
-	info         os.FileInfo
-	self         *SourceOwnerV1
-	limits       SourceLimitsV1
-	busy         atomic.Bool
-	ops          sourceFS
-	debt         sourceDebt
-	pendingStage sourceDebt
-	stage        *policycontrol.SourceStagePinV1
-	release      *sourceRelease
-	live         map[string]*sourceIncarnation
+	store         *policycontrol.Store
+	info          os.FileInfo
+	self          *SourceOwnerV1
+	limits        SourceLimitsV1
+	busy          atomic.Bool
+	ops           sourceFS
+	debt          sourceDebt
+	pendingStage  sourceDebt
+	observedStage string
+	stage         *policycontrol.SourceStagePinV1
+	release       *sourceRelease
+	live          map[string]*sourceIncarnation
 }
 
 type sourceBinding struct {
