@@ -270,6 +270,9 @@ TX_REASON=""; txgen_datadir_guard "${TXGEN_BIN}" --datadir "${GO_DIR}" || { echo
 GO_DIR="${probe_root}/rust-alias"; rm -f -- "${SPAWNED}"; TX_REASON=""
 if submit_go_tx; then echo "FAIL: submit_go_tx accepted the Rust datadir" >&2; exit 1; fi
 [[ "${TX_REASON}" == cross_client_datadir_argv && ! -e "${SPAWNED}" ]] || { echo "FAIL: submit_go_tx reason ${TX_REASON} or txgen spawned" >&2; exit 1; }
+rm -f -- "${SPAWNED}"; TX_REASON=""
+if submit_rust_tx; then echo "FAIL: submit_rust_tx accepted the Rust datadir" >&2; exit 1; fi
+[[ "${TX_REASON}" == cross_client_datadir_argv && ! -e "${SPAWNED}" ]] || { echo "FAIL: submit_rust_tx reason ${TX_REASON} or txgen spawned" >&2; exit 1; }
 SH
   bash "${probe}" "${lib}" "${probe_root}"
 }
@@ -285,7 +288,13 @@ source "$1"
 probe_root="$2"
 MESH_TIMEOUT=1; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"; TX_PATH_MODE=0; RUST_RESTART_MODE=0; PARTITION_HEAL_REORG_MODE=0
 INITIAL_GO_TIP_JSON="${probe_root}/go-tip.json"; INITIAL_RUST_TIP_JSON="${probe_root}/rust-tip.json"
-capture_rpc_sidecar() { local src; [[ "$1" == go ]] && src="${GO_TIP_INPUT}" || src="${RUST_TIP_INPUT}"; cp -- "${src}" "$5"; }
+RUST_CAPTURE_FAILS=0
+capture_rpc_sidecar() {
+  printf '%s\n' "$4" >>"${probe_root}/captures-$1"
+  [[ "$1" == go ]] && { cp -- "${GO_TIP_INPUT}" "$5"; return; }
+  (( $(wc -l <"${probe_root}/captures-rust") > RUST_CAPTURE_FAILS )) || return 1
+  cp -- "${RUST_TIP_INPUT}" "$5"
+}
 tip() { printf '{"best_known_height":%s,"has_tip":%s,"height":%s,"in_ibd":false,"tip_hash":%s}\n' "$2" "$3" "$2" "$4" >"${probe_root}/$1.json"; printf '%s\n' "${probe_root}/$1.json"; }
 aa="\"$(printf 'a%.0s' {1..64})\""; bb="\"$(printf 'b%.0s' {1..64})\""
 go101="$(tip go101 101 true "${aa}")"; rust101="$(tip rust101 101 true "${aa}")"; rust100="$(tip rust100 100 true "${bb}")"; rust101b="$(tip rust101b 101 true "${bb}")"
@@ -306,6 +315,12 @@ expect_match "${go101}" "${rust101}"
 expect_reason initial_convergence_timeout "${go101}" "${rust100}"
 expect_reason initial_convergence_timeout "${go101}" "${rust101b}"
 expect_reason initial_convergence_go_tip_tip_absent "${absent}" "${absent}"
+rm -f -- "${probe_root}/captures-go" "${probe_root}/captures-rust"; MESH_TIMEOUT=3; RUST_CAPTURE_FAILS=1
+expect_match "${go101}" "${rust101}"
+[[ "$(wc -l <"${probe_root}/captures-go")" -eq 1 && "$(wc -l <"${probe_root}/captures-rust")" -eq 2 ]] || { echo "FAIL: Go tip captures $(wc -l <"${probe_root}/captures-go"), Rust tip captures $(wc -l <"${probe_root}/captures-rust"), want 1 and 2" >&2; exit 1; }
+MESH_TIMEOUT=1; RUST_CAPTURE_FAILS=1000
+expect_reason initial_convergence_timeout "${go101}" "${rust101}"
+RUST_CAPTURE_FAILS=0
 TX_PATH_MODE=0
 expect_match "${absent}" "${absent}"
 expect_reason initial_convergence_timeout "${absent}" "${rust_zero}"
@@ -327,7 +342,18 @@ for name, size in (("116", 116), ("148", 148)):
     header = bytes(range(size))
     for impl in ("go", "rust"):
         json.dump({"block_hex": (header + bytes(8)).hex(), "hash": hashlib.sha3_256(header).hexdigest()}, open(f"{root}/block-{name}-{impl}.json", "w"))
-json.dump({"network": "devnet", "chain_id_hex": "dd" * 32, "genesis_hash_hex": "ee" * 32}, open(f"{root}/ident.json", "w"))
+h116, h148 = bytes(range(116)), bytes(range(148))
+for impl, block_hex, block_hash in (("go", h116 + bytes(8), hashlib.sha3_256(h116).hexdigest()), ("rust", h148 + bytes(8), hashlib.sha3_256(h148).hexdigest())):
+    json.dump({"block_hex": block_hex.hex(), "hash": block_hash}, open(f"{root}/block-differ-{impl}.json", "w"))
+    json.dump({"block_hex": (h148 + bytes(8)).hex(), "hash": hashlib.sha3_256(h116).hexdigest() if impl == "go" else "ff" * 32}, open(f"{root}/block-nomatch-{impl}.json", "w"))
+ident = {"network": "devnet", "chain_id_hex": "dd" * 32, "genesis_hash_hex": "ee" * 32}
+json.dump(ident, open(f"{root}/ident.json", "w"))
+block = json.load(open(f"{root}/block-116-go.json"))
+for name, base in (("ident", ident), ("block", block)):
+    for key in base:
+        json.dump({k: v for k, v in base.items() if k != key}, open(f"{root}/bad-{name}-no-{key}.json", "w"))
+        json.dump({**base, key: None}, open(f"{root}/bad-{name}-null-{key}.json", "w"))
+        json.dump({**base, key: 7}, open(f"{root}/bad-{name}-number-{key}.json", "w"))
 json.dump({"has_tip": True, "height": 101, "tip_hash": "cc" * 32}, open(f"{root}/tip.json", "w"))
 json.dump([], open(f"{root}/array.json", "w"))
 PY
@@ -339,12 +365,12 @@ main="$2"; p="$3"
 TX_PATH_MODE=3; RUST_RESTART_MODE=0; PARTITION_HEAL_REORG_MODE=0; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"; REPO_ROOT="${p}"
 GO_NODE_BIN="${p}/ident.json"; RUST_NODE_BIN="${p}/ident.json"; TXGEN_BIN="${p}/ident.json"; GO_DIR="${p}/node-go"; RUST_DIR="${p}/node-rust"; RUST_EXACT_EMPTY_BEFORE_FIRST_START=true
 CHAIN_IDENTITY_JSON="${p}/cap/ident.json"; GENESIS_GO_BLOCK_JSON="${p}/cap/go.json"; GENESIS_RUST_BLOCK_JSON="${p}/cap/rust.json"; INITIAL_GO_TIP_JSON="${p}/tip.json"; INITIAL_RUST_TIP_JSON="${p}/tip.json"
-STORE_NEUTRALITY_JSON="${p}/out/sidecar.json"; BLOCKS=116; FAIL_CAPTURE=""; ARRAY_CAPTURE=""; FAIL_GIT=""
+STORE_NEUTRALITY_JSON="${p}/out/sidecar.json"; BLOCKS=116; FAIL_CAPTURE=""; BAD_CAPTURE=""; BAD_SRC=""; FAIL_GIT=""
 capture_rpc_sidecar() {
   local src="${p}/block-${BLOCKS}-$1.json"
   [[ "$1 $4" == "${FAIL_CAPTURE}" ]] && return 1
   [[ "$4" == /chain_identity ]] && src="${p}/ident.json"
-  [[ "$1 $4" == "${ARRAY_CAPTURE}" ]] && src="${p}/array.json"
+  [[ "$1 $4" == "${BAD_CAPTURE}" ]] && src="${BAD_SRC}"
   cp -- "${src}" "$5"
 }
 git() { [[ "$3" == "${FAIL_GIT}" ]] && return 128; [[ "$3" == rev-parse ]] && printf '%s\n' "$(printf 'a%.0s' {1..40})"; return 0; }
@@ -354,14 +380,22 @@ expect_end() {
   got="$(source "${main}"; printf 'completed\n')"
   [[ "${got}" == "$1" ]] || { echo "FAIL: sidecar producer ended with ${got}, want $1" >&2; exit 1; }
 }
-expect_heights() { python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["header_bytes"] != {"go": int(sys.argv[2]), "rust": int(sys.argv[2])})' "${STORE_NEUTRALITY_JSON}" "$1" || { echo "FAIL: sidecar header_bytes is not $1" >&2; exit 1; }; }
-BLOCKS=148; expect_end completed; expect_heights 148
-BLOCKS=116; expect_end completed; expect_heights 116
+expect_heights() { python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["header_bytes"] != {"go": int(sys.argv[2]), "rust": int(sys.argv[3])})' "${STORE_NEUTRALITY_JSON}" "$1" "$2" || { echo "FAIL: sidecar header_bytes is not go $1 rust $2" >&2; exit 1; }; }
+BLOCKS=148; expect_end completed; expect_heights 148 148
+BLOCKS=nomatch; expect_end completed; expect_heights 116 0
+BLOCKS=differ; expect_end completed; expect_heights 116 148
+BLOCKS=116; expect_end completed; expect_heights 116 116
+bad_captures=0
+for bad in "${p}"/bad-ident-*.json; do BAD_CAPTURE="go /chain_identity"; BAD_SRC="${bad}"; expect_end store_neutrality_chain_identity_capture_failed; bad_captures=$((bad_captures + 1)); done
+for bad in "${p}"/bad-block-*.json; do
+  for capture in "go /get_block?height=0" "rust /get_block?height=0"; do BAD_CAPTURE="${capture}"; BAD_SRC="${bad}"; expect_end store_neutrality_genesis_capture_failed; bad_captures=$((bad_captures + 1)); done
+done
+(( bad_captures == 21 )) || { echo "FAIL: producer member cases ran ${bad_captures}, want 21" >&2; exit 1; }
 FAIL_CAPTURE="go /chain_identity"; expect_end store_neutrality_chain_identity_capture_failed; FAIL_CAPTURE=""
-ARRAY_CAPTURE="go /chain_identity"; expect_end store_neutrality_chain_identity_capture_failed; ARRAY_CAPTURE=""
+BAD_CAPTURE="go /chain_identity"; BAD_SRC="${p}/array.json"; expect_end store_neutrality_chain_identity_capture_failed
 FAIL_CAPTURE="go /get_block?height=0"; expect_end store_neutrality_genesis_capture_failed
 FAIL_CAPTURE="rust /get_block?height=0"; expect_end store_neutrality_genesis_capture_failed; FAIL_CAPTURE=""
-ARRAY_CAPTURE="rust /get_block?height=0"; expect_end store_neutrality_genesis_capture_failed; ARRAY_CAPTURE=""
+BAD_CAPTURE="rust /get_block?height=0"; expect_end store_neutrality_genesis_capture_failed; BAD_CAPTURE=""
 FAIL_GIT=rev-parse; expect_end store_neutrality_commit_unavailable
 FAIL_GIT=status; expect_end store_neutrality_commit_unavailable; FAIL_GIT=""
 TXGEN_BIN="${p}/missing"; expect_end store_neutrality_binary_hash_failed; TXGEN_BIN="${p}/ident.json"
@@ -1605,6 +1639,7 @@ def write_store_neutrality(mode_root: Path, scenario: str) -> None:
 for scenario, name in SCENARIO_ROOTS.items():
     shutil.copytree(artifact_root, root / name / "artifact-root", symlinks=True)
     write_store_neutrality(root / name / "artifact-root", scenario)
+SN_DELETE = object()
 SN_BASE_REPORTS = {"mesh": root / "mesh-report.json", "tx-accept": root / "tx-report.json", "restart": root / "restart-report.json", "partition": root / "partition-report.json"}
 def sn_variant(name: str, base: str, edit, report_edit=None) -> None:
     base_root = root / base / "artifact-root"
@@ -1614,7 +1649,7 @@ def sn_variant(name: str, base: str, edit, report_edit=None) -> None:
     if report_edit is not None:
         report_edit(report)
     sidecar = json.loads((var_root / SN_NAME).read_text(encoding="utf-8").replace(str(base_root), str(var_root)))
-    if edit(sidecar, var_root) is False:
+    if edit(sidecar, var_root) is SN_DELETE:
         (var_root / SN_NAME).unlink()
     else:
         dump(var_root / SN_NAME, sidecar)
@@ -1637,9 +1672,6 @@ def sn_drop_rust_create(report: dict) -> None:
     rust_node = next(node_obj for node_obj in report["nodes"] if node_obj["implementation"] == "rust")
     rust_node["command_argv"] = [arg for arg in rust_node["command_argv"] if arg != "--create-store"]
     rust_node["command"] = " ".join(rust_node["command_argv"])
-sn_variant("height-100", "tx-accept", lambda s, r: sn_set_height(s, r, 100))
-sn_variant("tip-hash-differs", "tx-accept", lambda s, r: (s["initial_convergence"].update(rust_tip_hash="ee" * 32), sn_edit_file(r, "initial-convergence-rust-tip.json", tip_hash="ee" * 32)))
-sn_variant("extra-key", "tx-accept", lambda s, r: s.update(node_rust_datadir_sha256="00" * 32))
 sn_variant("grammar-differs", "tx-accept", lambda s, r: s["header_bytes"].update(rust=148))
 sn_variant("grammar-outside", "tx-accept", lambda s, r: s["header_bytes"].update(go=120, rust=120))
 sn_variant("grammar-no-match", "tx-accept", lambda s, r: sn_edit_file(r, "genesis-rust-block.json", block_hex="00" + genesis_hex[2:]))
@@ -1652,18 +1684,16 @@ sn_variant("genesis-and-grammar", "tx-accept", lambda s, r: (s["chain_identity"]
 sn_variant("binary-and-genesis", "tx-accept", lambda s, r: (s["binaries"].update(go_node_sha256="00" * 32), s["chain_identity"].update(genesis_hash_hex="ee" * 32)))
 sn_variant("grammar-and-convergence", "tx-accept", lambda s, r: (s["header_bytes"].update(rust=148), s["initial_convergence"].update(rust_tip_hash="ee" * 32), sn_edit_file(r, "initial-convergence-rust-tip.json", tip_hash="ee" * 32)))
 sn_variant("genesis-and-block-file", "tx-accept", lambda s, r: (s["chain_identity"].update(genesis_hash_hex="ee" * 32), sn_edit_file(r, "genesis-go-block.json", implementation="rust")))
-sn_variant("binary-mismatch", "tx-accept", lambda s, r: s["binaries"].update(rust_node_sha256="00" * 32))
-sn_variant("tree-dirty", "tx-accept", lambda s, r: s.update(clients_tree_clean=False))
-sn_variant("rust-not-empty", "tx-accept", lambda s, r: s["datadirs"].update(rust_exact_empty_before_first_start=False))
-sn_variant("rust-datadir-alias", "tx-accept", lambda s, r: s["datadirs"].update(rust=str(r / "node-go")))
 sn_variant("tip-endpoint", "tx-accept", lambda s, r: sn_edit_file(r, "initial-convergence-rust-tip.json", rpc_endpoint=go_rpc))
-sn_variant("missing", "tx-accept", lambda s, r: False)
+sn_variant("missing", "tx-accept", lambda s, r: SN_DELETE)
 sn_variant("mesh-genesis", "mesh", lambda s, r: s.update(genesis={"go_hash": genesis_hash, "rust_hash": genesis_hash, "go_block_path": str(r / "node-go"), "rust_block_path": str(r / "node-rust")}))
 sn_variant("mesh-txgen", "mesh", lambda s, r: s["binaries"].update(txgen_sha256=hashlib.sha256((r / "rubin-txgen").read_bytes()).hexdigest()))
 sn_variant("mesh-tip-present", "mesh", lambda s, r: sn_edit_file(r, "initial-convergence-rust-tip.json", has_tip=True, height=0, tip_hash=conv_hash))
 sn_variant("restart-below", "restart", lambda s, r: sn_set_height(s, r, 108))
 sn_variant("restart-new-endpoint", "restart", lambda s, r: sn_edit_file(r, "initial-convergence-rust-tip.json", rpc_endpoint=rust_rpc))
-sn_variant("partition-not-above", "partition", lambda s, r: sn_set_height(s, r, 102))
+sn_variant("restart-at-pre-restart", "restart", lambda s, r: sn_set_height(s, r, 107))
+sn_variant("partition-not-above", "partition", lambda s, r: sn_set_height(s, r, common_height))
+sn_variant("partition-below-common", "partition", lambda s, r: sn_set_height(s, r, common_height - 1))
 import os
 def sn_drop_file_key(var_root: Path, file_name: str, key: str) -> None:
     data = json.loads((var_root / file_name).read_text(encoding="utf-8"))
@@ -1680,7 +1710,7 @@ SN_MODES = {"mesh": "public", "tx-accept": "tx", "restart": "rust-restart"}
 SN_ALL, SN_CHAIN = ("mesh", "tx-accept", "restart"), ("tx-accept", "restart")
 SN_I, SN_G, SN_H = "store_neutrality_sidecar_invalid", "store_neutrality_genesis_mismatch", "store_neutrality_header_grammar_mismatch"
 GO_TIP, GO_BLOCK, RUST_BLOCK = "initial-convergence-go-tip.json", "genesis-go-block.json", "genesis-rust-block.json"
-GO_TIP_BAD, GO_BLOCK_BAD = "initial_convergence.go_tip_path is not a", "genesis.go_block_path is not"
+GO_TIP_PATH, GO_BLOCK_PATH, GO_BLOCK_BAD = "initial_convergence.go_tip_path", "genesis.go_block_path", "genesis.go_block_path is not"
 SN_CASES = (
     (SN_ALL, "top-missing", SN_I, "sidecar keys mismatch", lambda s, r: s.pop("datadirs")),
     (SN_ALL, "top-extra", SN_I, "sidecar keys mismatch", lambda s, r: s.update(node_rust_datadir_sha256="00" * 32)),
@@ -1707,10 +1737,10 @@ SN_CASES = (
     (SN_ALL, "rust-not-empty", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(rust_exact_empty_before_first_start=False)),
     (SN_ALL, "conv-extra", SN_I, "initial_convergence keys mismatch", lambda s, r: s["initial_convergence"].update(extra=None)),
     (SN_ALL, "conv-missing", SN_I, "initial_convergence keys mismatch", lambda s, r: s["initial_convergence"].pop("go_tip_path")),
-    (SN_ALL, "tip-relative", SN_I, GO_TIP_BAD + " regular file inside artifact_root", lambda s, r: s["initial_convergence"].update(go_tip_path=os.path.relpath(r / GO_TIP))),
-    (SN_ALL, "tip-outside", SN_I, GO_TIP_BAD + " regular file inside artifact_root", lambda s, r: s["initial_convergence"].update(go_tip_path=sn_outside(r, GO_TIP))),
-    (SN_ALL, "tip-directory", SN_I, GO_TIP_BAD + " regular file inside artifact_root", lambda s, r: s["initial_convergence"].update(go_tip_path=str(r / "node-go"))),
-    (SN_ALL, "tip-array", SN_I, GO_TIP_BAD + " bounded JSON object", lambda s, r: dump(r / GO_TIP, [1])),
+    (SN_ALL, "tip-relative", SN_I, GO_TIP_PATH + " is not absolute", lambda s, r: s["initial_convergence"].update(go_tip_path=os.path.relpath(r / GO_TIP))),
+    (SN_ALL, "tip-outside", SN_I, GO_TIP_PATH + " is outside artifact_root", lambda s, r: s["initial_convergence"].update(go_tip_path=sn_outside(r, GO_TIP))),
+    (SN_ALL, "tip-directory", SN_I, GO_TIP_PATH + " file is missing", lambda s, r: s["initial_convergence"].update(go_tip_path=str(r / "node-go"))),
+    (SN_ALL, "tip-array", SN_I, GO_TIP_PATH + " root is not an object", lambda s, r: dump(r / GO_TIP, [1])),
     (SN_ALL, "tip-extra", SN_I, "initial_convergence.go_tip_path identity mismatch", lambda s, r: sn_edit_file(r, GO_TIP, extra=1)),
     (SN_ALL, "tip-missing", SN_I, "initial_convergence.go_tip_path identity mismatch", lambda s, r: sn_drop_file_key(r, GO_TIP, "in_ibd")),
     (SN_ALL, "tip-impl", SN_I, "initial_convergence.go_tip_path identity mismatch", lambda s, r: sn_edit_file(r, GO_TIP, implementation="rust")),
@@ -1743,10 +1773,10 @@ SN_CASES = (
     (SN_CHAIN, "genesis-go-upper", SN_I, "genesis malformed", lambda s, r: s["genesis"].update(go_hash=genesis_hash.upper())),
     (SN_CHAIN, "genesis-rust-upper", SN_I, "genesis malformed", lambda s, r: s["genesis"].update(rust_hash=genesis_hash.upper())),
     (SN_CHAIN, "genesis-rust-differs", SN_G, "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal", lambda s, r: (s["genesis"].update(rust_hash="ee" * 32), sn_edit_file(r, RUST_BLOCK, hash="ee" * 32))),
-    (SN_CHAIN, "block-relative", SN_I, GO_BLOCK_BAD + " a regular file inside artifact_root", lambda s, r: s["genesis"].update(go_block_path=os.path.relpath(r / GO_BLOCK))),
-    (SN_CHAIN, "block-outside", SN_I, GO_BLOCK_BAD + " a regular file inside artifact_root", lambda s, r: s["genesis"].update(go_block_path=sn_outside(r, GO_BLOCK))),
-    (SN_CHAIN, "block-directory", SN_I, GO_BLOCK_BAD + " a regular file inside artifact_root", lambda s, r: s["genesis"].update(go_block_path=str(r / "node-go"))),
-    (SN_CHAIN, "block-array", SN_I, GO_BLOCK_BAD + " a bounded JSON object", lambda s, r: dump(r / GO_BLOCK, [1])),
+    (SN_CHAIN, "block-relative", SN_I, GO_BLOCK_PATH + " is not absolute", lambda s, r: s["genesis"].update(go_block_path=os.path.relpath(r / GO_BLOCK))),
+    (SN_CHAIN, "block-outside", SN_I, GO_BLOCK_PATH + " is outside artifact_root", lambda s, r: s["genesis"].update(go_block_path=sn_outside(r, GO_BLOCK))),
+    (SN_CHAIN, "block-directory", SN_I, GO_BLOCK_PATH + " file is missing", lambda s, r: s["genesis"].update(go_block_path=str(r / "node-go"))),
+    (SN_CHAIN, "block-array", SN_I, GO_BLOCK_PATH + " root is not an object", lambda s, r: dump(r / GO_BLOCK, [1])),
     (SN_CHAIN, "block-extra", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_edit_file(r, GO_BLOCK, extra=1)),
     (SN_CHAIN, "block-missing", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_drop_file_key(r, GO_BLOCK, "canonical")),
     (SN_CHAIN, "block-impl", SN_I, "genesis.rust_block_path is not the rust genesis block capture", lambda s, r: sn_edit_file(r, RUST_BLOCK, implementation="go")),
@@ -2248,9 +2278,6 @@ sn_check() {
   esac
 }
 SN_INVALID=store_neutrality_sidecar_invalid; SN_GENESIS=store_neutrality_genesis_mismatch; SN_GRAMMAR=store_neutrality_header_grammar_mismatch
-sn_check "sidecar height below the chain minimum" "${SN_INVALID}" "initial_convergence does not prove equal tips" tx height-100
-sn_check "sidecar equal heights with different tip hashes" "${SN_INVALID}" "initial_convergence does not prove equal tips" tx tip-hash-differs
-sn_check "sidecar extra key" "${SN_INVALID}" "sidecar keys mismatch" tx extra-key
 sn_check "sidecar header lengths differ" "${SN_GRAMMAR}" "header_bytes.go differs from header_bytes.rust" tx grammar-differs
 sn_check "sidecar header length outside the two grammars" "${SN_GRAMMAR}" "header_bytes.go is not 116 or 148" tx grammar-outside
 sn_check "sidecar genesis block with no matching header length" "${SN_GRAMMAR}" "header_bytes.rust is not the unique header length" tx grammar-no-match
@@ -2264,24 +2291,22 @@ sn_check "genesis identity before header grammar" "${SN_GENESIS}" "go_hash, rust
 sn_check "binaries before genesis identity" "${SN_INVALID}" "binaries.go_node_sha256 does not match" tx binary-and-genesis
 sn_check "initial convergence before header grammar" "${SN_INVALID}" "initial_convergence does not prove equal tips" tx grammar-and-convergence
 sn_check "genesis block file before genesis identity" "${SN_INVALID}" "genesis.go_block_path is not the go genesis block capture" tx genesis-and-block-file
-sn_check "sidecar binary hash mismatch" "${SN_INVALID}" "binaries.rust_node_sha256 does not match" tx binary-mismatch
-sn_check "sidecar dirty clients tree" "${SN_INVALID}" "clients_tree_clean is not true" tx tree-dirty
-sn_check "sidecar rust datadir not empty before first start" "${SN_INVALID}" "datadirs mismatch" tx rust-not-empty
-sn_check "sidecar rust datadir aliases go datadir" "${SN_INVALID}" "datadirs mismatch" tx rust-datadir-alias
 sn_check "sidecar rust tip endpoint" "${SN_INVALID}" "initial_convergence.rust_tip_path identity mismatch" tx tip-endpoint
-sn_check "sidecar missing" "${SN_INVALID}" "store-neutrality sidecar is not a regular file" tx missing
+sn_check "sidecar missing" "${SN_INVALID}" "store-neutrality sidecar file is missing" tx missing
 sn_check "default sidecar with genesis" "${SN_INVALID}" "genesis and header_bytes are not null" public mesh-genesis
 sn_check "default sidecar with txgen hash" "${SN_INVALID}" "binaries.txgen_sha256 is not null" public mesh-txgen
 sn_check "default sidecar with a present tip" "${SN_INVALID}" "initial_convergence.rust_tip_path does not report an absent tip" public mesh-tip-present
 sn_check "restart pre-restart height below initial convergence" "${SN_INVALID}" "rust_restart.pre_restart_height is below initial_convergence.height" rust-restart restart-below
 sn_check "restart initial rust tip from the restarted endpoint" "${SN_INVALID}" "initial_convergence.rust_tip_path identity mismatch" rust-restart restart-new-endpoint
 sn_check "partition common block not above initial convergence" "${SN_INVALID}" "partition common block height is not above initial_convergence.height" partition-heal-reorg partition-not-above
+expect_pass_contains "restart initial convergence at the pre-restart height" "PASS: mixed_client_rust_restart report structurally accepted" check_report "${TMP_ROOT}/sn-restart-at-pre-restart-report.json" offline rust-restart
+expect_pass_contains "partition initial convergence one below the common block" "PASS: mixed_client_partition_heal_reorg report structurally accepted" check_report "${TMP_ROOT}/sn-partition-below-common-report.json" offline partition-heal-reorg
 sn_cases=0
 while IFS=$'\t' read -r sn_mode sn_name sn_token sn_needle; do
   sn_check "sidecar ${sn_name}" "${sn_token}" "${sn_needle}" "${sn_mode}" "${sn_name}"
   sn_cases=$((sn_cases + 1))
 done < "${TMP_ROOT}/sn-cases.tsv"
 (( sn_cases == 198 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 198" >&2; exit 1; }
-sn_output="$(check_report "${TMP_ROOT}/sn-extra-key-report.json" offline producer-tx 2>&1)" && { echo "FAIL: sidecar extra key report should fail" >&2; exit 1; }
+sn_output="$(check_report "${TMP_ROOT}/sn-tx-accept-top-extra-report.json" offline producer-tx 2>&1)" && { echo "FAIL: sidecar extra key report should fail" >&2; exit 1; }
 [[ "$(combined_report_reason_token <<<"${sn_output}")" == store_neutrality_sidecar_invalid ]] || { echo "FAIL: combined token for sidecar keys mismatch: $(combined_report_reason_token <<<"${sn_output}")" >&2; exit 1; }
 printf 'PASS: mixed-client mesh check-report public/internal boundaries are covered\n'
