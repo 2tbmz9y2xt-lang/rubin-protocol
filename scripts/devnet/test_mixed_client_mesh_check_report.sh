@@ -117,7 +117,7 @@ lines = src.read_text(encoding="utf-8").splitlines()
 start = next(i for i, line in enumerate(lines) if line.startswith("check_report()"))
 end = next(i for i, line in enumerate(lines[start:], start) if line.startswith('[[ "${MESH_TIMEOUT}"'))
 token_start = next(i for i, line in enumerate(lines) if line.startswith("check_report_reason_token()"))
-token_end = next(i for i, line in enumerate(lines[token_start:], token_start) if line.startswith("combined_report_reason_token()"))
+token_end = next(i for i, line in enumerate(lines[token_start:], token_start) if line.startswith("rpc_json()"))
 capture_start = next(i for i, line in enumerate(lines) if line.startswith("rpc_json()"))
 capture_end = next(i for i, line in enumerate(lines[capture_start:], capture_start) if line.startswith("pid_comm()"))
 tx_capture_start = next(i for i, line in enumerate(lines) if line.startswith("tx_capture_reason()"))
@@ -794,18 +794,18 @@ dump(root / "mesh-report.json", mesh_report)
 
 restart_marker = artifact_root / "restart-marker.json"
 restart = {
-    "catch_up_height": 8,
-    "pre_restart_height": 7,
+    "catch_up_height": 108,
+    "pre_restart_height": 107,
     "stopped_node": "node-rust",
 }
 restart_info = {
     "catch_up_has_tip": True,
-    "catch_up_height": 8,
+    "catch_up_height": 108,
     "catch_up_tip": "bb" * 32,
     "catch_up_tip_path": str(artifact_root / "rust-catch-up-tip.json"),
     "datadir": str(artifact_root / "node-rust"),
     "go_target_has_tip": True,
-    "go_target_height": 8,
+    "go_target_height": 108,
     "go_target_mine_next_path": str(artifact_root / "go-restart-mine-next.json"),
     "go_target_tip": "bb" * 32,
     "go_target_tip_path": str(artifact_root / "go-restart-target-tip.json"),
@@ -823,15 +823,15 @@ restart_info = {
     "old_started_at": "2026-05-12T09:59:58Z",
     "peer_reconnect_observed": True,
     "pre_restart_has_tip": True,
-    "pre_restart_height": 7,
+    "pre_restart_height": 107,
     "pre_restart_tip": "aa" * 32,
     "pre_restart_tip_path": str(artifact_root / "rust-pre-restart-tip.json"),
     "same_datadir": True,
 }
-dump(artifact_root / "rust-pre-restart-tip.json", {"best_known_height": 7, "has_tip": True, "height": 7, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": "127.0.0.1:51030", "tip_hash": "aa" * 32})
-dump(artifact_root / "go-restart-mine-next.json", {"block_hash": "bb" * 32, "height": 8, "implementation": "go", "mined": True, "nonce": 1777000001, "request_path": "/mine_next", "rpc_endpoint": go_rpc, "timestamp": 1777000000, "tx_count": 1, "commit_state": "committed"})
-dump(artifact_root / "go-restart-target-tip.json", {"best_known_height": 8, "has_tip": True, "height": 8, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": "bb" * 32})
-dump(artifact_root / "rust-catch-up-tip.json", {"best_known_height": 8, "has_tip": True, "height": 8, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "bb" * 32})
+dump(artifact_root / "rust-pre-restart-tip.json", {"best_known_height": 107, "has_tip": True, "height": 107, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": "127.0.0.1:51030", "tip_hash": "aa" * 32})
+dump(artifact_root / "go-restart-mine-next.json", {"block_hash": "bb" * 32, "height": 108, "implementation": "go", "mined": True, "nonce": 1777000001, "request_path": "/mine_next", "rpc_endpoint": go_rpc, "timestamp": 1777000000, "tx_count": 1, "commit_state": "committed"})
+dump(artifact_root / "go-restart-target-tip.json", {"best_known_height": 108, "has_tip": True, "height": 108, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": "bb" * 32})
+dump(artifact_root / "rust-catch-up-tip.json", {"best_known_height": 108, "has_tip": True, "height": 108, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "bb" * 32})
 dump(restart_marker, {
     "evidence_type": "mixed_client_process_soak",
     "failure_reason": "schema v1 PASS requires tx_path; restart PASS lives in sibling report",
@@ -908,7 +908,7 @@ for impl, endpoint, prefix in (("rust", rust_rpc, "rust-submit"), ("go", go_rpc,
         "rpc_endpoint": endpoint,
         "txid": txid,
     })
-height = 102
+height = 103
 tx_count = 2
 
 def merkle(ids: list[bytes], leaf_tag: int, node_tag: int) -> bytes:
@@ -1300,8 +1300,8 @@ bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["artifact_created_at_utc"] = ""
 dump(root / "restart-stale-artifact-created-at.json", bad_restart)
 bad_restart = json.loads(json.dumps(restart_report))
-bad_restart["restart"]["catch_up_height"] = 6
-bad_restart["rust_restart"]["catch_up_height"] = 6
+bad_restart["restart"]["catch_up_height"] = 106
+bad_restart["rust_restart"]["catch_up_height"] = 106
 below_pre_restart_marker = artifact_root / "restart-below-pre-restart-marker.json"
 dump(below_pre_restart_marker, {
     "evidence_type": "mixed_client_process_soak",
@@ -1318,8 +1318,8 @@ dump(below_pre_restart_marker, {
 bad_restart["legacy_schema_compatibility"]["marker_path"] = str(below_pre_restart_marker)
 dump(root / "restart-catch-up-below-pre-restart.json", bad_restart)
 bad_restart = json.loads(json.dumps(restart_report))
-bad_restart["restart"]["catch_up_height"] = 7
-bad_restart["rust_restart"]["catch_up_height"] = 7
+bad_restart["restart"]["catch_up_height"] = 107
+bad_restart["rust_restart"]["catch_up_height"] = 107
 stale_restart_marker = artifact_root / "restart-stale-marker.json"
 dump(stale_restart_marker, {
     "evidence_type": "mixed_client_process_soak",
@@ -1353,13 +1353,13 @@ bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["go_target_height"] = 7
 dump(root / "restart-go-target-not-advanced.json", bad_restart)
 bad_restart = json.loads(json.dumps(restart_report))
-bad_restart["rust_restart"]["pre_restart_height"] = "7"
+bad_restart["rust_restart"]["pre_restart_height"] = "107"
 dump(root / "restart-pre-restart-height-string.json", bad_restart)
 bad_restart = json.loads(json.dumps(restart_report))
-bad_restart["rust_restart"]["go_target_height"] = "8"
+bad_restart["rust_restart"]["go_target_height"] = "108"
 dump(root / "restart-go-target-height-string.json", bad_restart)
 bad_restart = json.loads(json.dumps(restart_report))
-bad_restart["rust_restart"]["catch_up_height"] = "8"
+bad_restart["rust_restart"]["catch_up_height"] = "108"
 dump(root / "restart-catch-up-height-string.json", bad_restart)
 bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["pre_restart_height"] = True
@@ -1377,37 +1377,37 @@ bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["legacy_schema_compatibility"]["purpose"] = "schema-valid legacy artifact only; not the mesh report verdict"
 bad_restart["legacy_schema_compatibility"]["reason"] = "existing mixed_client_evidence_v1 PASS requires tx_path; RUB-21 mesh-only PASS lives in this report"
 dump(root / "restart-stale-legacy-text.json", bad_restart)
-bad_sidecar = {"best_known_height": 7, "has_tip": True, "height": 7.0, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "aa" * 32}
+bad_sidecar = {"best_known_height": 107, "has_tip": True, "height": 107.0, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "aa" * 32}
 dump(artifact_root / "rust-pre-restart-tip-float-height.json", bad_sidecar)
 bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["pre_restart_tip_path"] = str(artifact_root / "rust-pre-restart-tip-float-height.json")
 dump(root / "restart-pre-tip-sidecar-float-height.json", bad_restart)
-bad_sidecar = {"best_known_height": 8, "has_tip": True, "height": 8.0, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "bb" * 32}
+bad_sidecar = {"best_known_height": 108, "has_tip": True, "height": 108.0, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "bb" * 32}
 dump(artifact_root / "rust-catch-up-tip-float-height.json", bad_sidecar)
 bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["catch_up_tip_path"] = str(artifact_root / "rust-catch-up-tip-float-height.json")
 dump(root / "restart-catch-up-tip-sidecar-float-height.json", bad_restart)
-bad_sidecar = {"best_known_height": 0, "has_tip": True, "height": 7, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "aa" * 32}
+bad_sidecar = {"best_known_height": 0, "has_tip": True, "height": 107, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "aa" * 32}
 dump(artifact_root / "rust-pre-restart-tip-low-best-known.json", bad_sidecar)
 bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["pre_restart_tip_path"] = str(artifact_root / "rust-pre-restart-tip-low-best-known.json")
 dump(root / "restart-pre-tip-sidecar-low-best-known.json", bad_restart)
-bad_sidecar = {"best_known_height": 0, "has_tip": True, "height": 8, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": "bb" * 32}
+bad_sidecar = {"best_known_height": 0, "has_tip": True, "height": 108, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": "bb" * 32}
 dump(artifact_root / "go-restart-target-tip-low-best-known.json", bad_sidecar)
 bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["go_target_tip_path"] = str(artifact_root / "go-restart-target-tip-low-best-known.json")
 dump(root / "restart-go-target-tip-sidecar-low-best-known.json", bad_restart)
-bad_sidecar = {"best_known_height": 0, "has_tip": True, "height": 8, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "bb" * 32}
+bad_sidecar = {"best_known_height": 0, "has_tip": True, "height": 108, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "bb" * 32}
 dump(artifact_root / "rust-catch-up-tip-low-best-known.json", bad_sidecar)
 bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["catch_up_tip_path"] = str(artifact_root / "rust-catch-up-tip-low-best-known.json")
 dump(root / "restart-catch-up-tip-sidecar-low-best-known.json", bad_restart)
-bad_sidecar = {"best_known_height": 8, "has_tip": True, "height": 8.0, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": "bb" * 32}
+bad_sidecar = {"best_known_height": 108, "has_tip": True, "height": 108.0, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": "bb" * 32}
 dump(artifact_root / "go-restart-target-tip-float-height.json", bad_sidecar)
 bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["go_target_tip_path"] = str(artifact_root / "go-restart-target-tip-float-height.json")
 dump(root / "restart-go-target-tip-float-height.json", bad_restart)
-bad_mine_next = {"block_hash": "bb" * 32, "height": 8, "implementation": "go", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": go_rpc, "timestamp": 1, "tx_count": True, "commit_state": "committed"}
+bad_mine_next = {"block_hash": "bb" * 32, "height": 108, "implementation": "go", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": go_rpc, "timestamp": 1, "tx_count": True, "commit_state": "committed"}
 dump(artifact_root / "go-restart-mine-next-bool-tx-count.json", bad_mine_next)
 bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["go_target_mine_next_path"] = str(artifact_root / "go-restart-mine-next-bool-tx-count.json")
@@ -1502,6 +1502,114 @@ for site, sidecar_name, base_report, field, variants in mine_next_cases:
             target = target[key]
         target[field[-1]] = str(sidecar_path)
         dump(artifact_root / f"mine-next-{site}-{variant}.json", bad)
+import shutil
+SN_NAME = "mixed-client-mesh-store-neutrality.json"
+SCENARIO_ROOTS = {"mixed_client_mesh": "mesh", "mixed_client_go_submit_rust_accept": "tx-accept", "mixed_client_go_submit_rust_mine_go_converge": "tx-converge", "mixed_client_rust_submit_go_mine_rust_converge": "rust-submit", "mixed_client_rust_restart": "restart", "mixed_client_partition_heal_reorg": "partition"}
+old_root = str(artifact_root)
+for report_path in sorted(root.rglob("*.json")):
+    try:
+        report_text = report_path.read_text(encoding="utf-8")
+        report_obj = json.loads(report_text)
+    except (UnicodeDecodeError, ValueError):
+        continue
+    if isinstance(report_obj, dict) and report_obj.get("artifact_root") == old_root and report_obj.get("scenario") in SCENARIO_ROOTS:
+        mode_root = root / SCENARIO_ROOTS[report_obj["scenario"]] / "artifact-root"
+        report_path.write_text(report_text.replace(old_root, str(mode_root)), encoding="utf-8")
+genesis_header = (1).to_bytes(4, "little") + bytes(64) + (1).to_bytes(8, "little") + b"\xff" * 32 + (0).to_bytes(8, "little")
+genesis_hex, genesis_hash = (genesis_header + bytes(40)).hex(), sha3(genesis_header).hex()
+long_header = genesis_header + b"\x07" * 32
+long_genesis_hex, long_genesis_hash = (long_header + bytes(8)).hex(), sha3(long_header).hex()
+conv_hash = "cc" * 32
+def sn_tip(impl: str, endpoint: str, chain: bool, tip_height: int = 101, tip_hash: str = conv_hash) -> dict:
+    if not chain:
+        return {"best_known_height": 0, "has_tip": False, "height": None, "implementation": impl, "in_ibd": True, "request_path": "/get_tip", "rpc_endpoint": endpoint, "tip_hash": None}
+    return tip_sidecar(impl, endpoint, tip_hash, tip_height)
+def write_store_neutrality(mode_root: Path, scenario: str) -> None:
+    chain = scenario != "mixed_client_mesh"
+    rust_endpoint = "127.0.0.1:51030" if scenario == "mixed_client_rust_restart" else rust_rpc
+    (mode_root / "rubin-txgen").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    dump(mode_root / "initial-convergence-go-tip.json", sn_tip("go", go_rpc, chain))
+    dump(mode_root / "initial-convergence-rust-tip.json", sn_tip("rust", rust_endpoint, chain))
+    genesis = heights = None
+    if chain:
+        dump(mode_root / "genesis-go-block.json", {**block_sidecar("go", go_rpc, genesis_hex, genesis_hash, 0)})
+        dump(mode_root / "genesis-rust-block.json", {**block_sidecar("rust", rust_endpoint, genesis_hex, genesis_hash, 0)})
+        genesis = {"go_hash": genesis_hash, "rust_hash": genesis_hash, "go_block_path": str(mode_root / "genesis-go-block.json"), "rust_block_path": str(mode_root / "genesis-rust-block.json")}
+        heights = {"go": 116, "rust": 116}
+    dump(mode_root / SN_NAME, {
+        "evidence_domain": "pre_switch_store_neutrality",
+        "protocol_commit": "ab" * 20,
+        "clients_tree_clean": True,
+        "binaries": {"go_node_sha256": hashlib.sha256((mode_root / "rubin-node-go").read_bytes()).hexdigest(), "rust_node_sha256": hashlib.sha256((mode_root / "rubin-node-rust").read_bytes()).hexdigest(), "txgen_sha256": hashlib.sha256((mode_root / "rubin-txgen").read_bytes()).hexdigest() if chain else None},
+        "chain_identity": {"network": "devnet", "chain_id_hex": "dd" * 32, "genesis_hash_hex": genesis_hash},
+        "genesis": genesis,
+        "header_bytes": heights,
+        "datadirs": {"go": str(mode_root / "node-go"), "rust": str(mode_root / "node-rust"), "rust_exact_empty_before_first_start": True},
+        "initial_convergence": {"go_has_tip": chain, "rust_has_tip": chain, "height": 101 if chain else None, "go_tip_hash": conv_hash if chain else None, "rust_tip_hash": conv_hash if chain else None, "go_tip_path": str(mode_root / "initial-convergence-go-tip.json"), "rust_tip_path": str(mode_root / "initial-convergence-rust-tip.json")},
+    })
+for scenario, name in SCENARIO_ROOTS.items():
+    shutil.copytree(artifact_root, root / name / "artifact-root", symlinks=True)
+    write_store_neutrality(root / name / "artifact-root", scenario)
+SN_BASE_REPORTS = {"mesh": root / "mesh-report.json", "tx-accept": root / "tx-report.json", "restart": root / "restart-report.json", "partition": root / "partition-report.json"}
+def sn_variant(name: str, base: str, edit, report_edit=None) -> None:
+    base_root = root / base / "artifact-root"
+    var_root = root / f"sn-{name}" / "artifact-root"
+    shutil.copytree(base_root, var_root, symlinks=True)
+    report = json.loads(SN_BASE_REPORTS[base].read_text(encoding="utf-8").replace(str(base_root), str(var_root)))
+    if report_edit is not None:
+        report_edit(report)
+    sidecar = json.loads((var_root / SN_NAME).read_text(encoding="utf-8").replace(str(base_root), str(var_root)))
+    if edit(sidecar, var_root) is False:
+        (var_root / SN_NAME).unlink()
+    else:
+        dump(var_root / SN_NAME, sidecar)
+    dump(root / f"sn-{name}-report.json", report)
+def sn_edit_file(var_root: Path, file_name: str, **changes) -> None:
+    data = json.loads((var_root / file_name).read_text(encoding="utf-8"))
+    data.update(changes)
+    dump(var_root / file_name, data)
+def sn_set_height(sidecar: dict, var_root: Path, value: int) -> None:
+    sidecar["initial_convergence"]["height"] = value
+    for file_name in ("initial-convergence-go-tip.json", "initial-convergence-rust-tip.json"):
+        sn_edit_file(var_root, file_name, height=value, best_known_height=value)
+def sn_long_genesis(sidecar: dict, var_root: Path) -> None:
+    for impl in ("go", "rust"):
+        sn_edit_file(var_root, f"genesis-{impl}-block.json", block_hex=long_genesis_hex, hash=long_genesis_hash)
+    sidecar["genesis"].update({"go_hash": long_genesis_hash, "rust_hash": long_genesis_hash})
+    sidecar["chain_identity"]["genesis_hash_hex"] = long_genesis_hash
+    sidecar["header_bytes"] = {"go": 148, "rust": 148}
+def sn_drop_rust_create(report: dict) -> None:
+    rust_node = next(node_obj for node_obj in report["nodes"] if node_obj["implementation"] == "rust")
+    rust_node["command_argv"] = [arg for arg in rust_node["command_argv"] if arg != "--create-store"]
+    rust_node["command"] = " ".join(rust_node["command_argv"])
+sn_variant("height-100", "tx-accept", lambda s, r: sn_set_height(s, r, 100))
+sn_variant("tip-hash-differs", "tx-accept", lambda s, r: (s["initial_convergence"].update(rust_tip_hash="ee" * 32), sn_edit_file(r, "initial-convergence-rust-tip.json", tip_hash="ee" * 32)))
+sn_variant("extra-key", "tx-accept", lambda s, r: s.update(node_rust_datadir_sha256="00" * 32))
+sn_variant("grammar-differs", "tx-accept", lambda s, r: s["header_bytes"].update(rust=148))
+sn_variant("grammar-outside", "tx-accept", lambda s, r: s["header_bytes"].update(go=120, rust=120))
+sn_variant("grammar-no-match", "tx-accept", lambda s, r: sn_edit_file(r, "genesis-rust-block.json", block_hex="00" + genesis_hex[2:]))
+sn_variant("grammar-derived-differs", "tx-accept", lambda s, r: (sn_long_genesis(s, r), s["header_bytes"].update(go=116, rust=116)))
+sn_variant("long-header", "tx-accept", sn_long_genesis)
+sn_variant("genesis-identity", "tx-accept", lambda s, r: s["chain_identity"].update(genesis_hash_hex="ee" * 32))
+sn_variant("genesis-block-hash", "tx-accept", lambda s, r: sn_edit_file(r, "genesis-go-block.json", hash="ee" * 32))
+sn_variant("argv-and-extra-key", "tx-accept", lambda s, r: s.update(node_rust_datadir_sha256="00" * 32), sn_drop_rust_create)
+sn_variant("genesis-and-grammar", "tx-accept", lambda s, r: (s["chain_identity"].update(genesis_hash_hex="ee" * 32), s["header_bytes"].update(rust=148)))
+sn_variant("binary-and-genesis", "tx-accept", lambda s, r: (s["binaries"].update(go_node_sha256="00" * 32), s["chain_identity"].update(genesis_hash_hex="ee" * 32)))
+sn_variant("grammar-and-convergence", "tx-accept", lambda s, r: (s["header_bytes"].update(rust=148), s["initial_convergence"].update(rust_tip_hash="ee" * 32), sn_edit_file(r, "initial-convergence-rust-tip.json", tip_hash="ee" * 32)))
+sn_variant("genesis-and-block-file", "tx-accept", lambda s, r: (s["chain_identity"].update(genesis_hash_hex="ee" * 32), sn_edit_file(r, "genesis-go-block.json", implementation="rust")))
+sn_variant("binary-mismatch", "tx-accept", lambda s, r: s["binaries"].update(rust_node_sha256="00" * 32))
+sn_variant("tree-dirty", "tx-accept", lambda s, r: s.update(clients_tree_clean=False))
+sn_variant("rust-not-empty", "tx-accept", lambda s, r: s["datadirs"].update(rust_exact_empty_before_first_start=False))
+sn_variant("rust-datadir-alias", "tx-accept", lambda s, r: s["datadirs"].update(rust=str(r / "node-go")))
+sn_variant("tip-endpoint", "tx-accept", lambda s, r: sn_edit_file(r, "initial-convergence-rust-tip.json", rpc_endpoint=go_rpc))
+sn_variant("missing", "tx-accept", lambda s, r: False)
+sn_variant("mesh-genesis", "mesh", lambda s, r: s.update(genesis={"go_hash": genesis_hash, "rust_hash": genesis_hash, "go_block_path": str(r / "node-go"), "rust_block_path": str(r / "node-rust")}))
+sn_variant("mesh-txgen", "mesh", lambda s, r: s["binaries"].update(txgen_sha256=hashlib.sha256((r / "rubin-txgen").read_bytes()).hexdigest()))
+sn_variant("mesh-tip-present", "mesh", lambda s, r: sn_edit_file(r, "initial-convergence-rust-tip.json", has_tip=True, height=0, tip_hash=conv_hash))
+sn_variant("restart-below", "restart", lambda s, r: sn_set_height(s, r, 108))
+sn_variant("restart-new-endpoint", "restart", lambda s, r: sn_edit_file(r, "initial-convergence-rust-tip.json", rpc_endpoint=rust_rpc))
+sn_variant("partition-not-above", "partition", lambda s, r: sn_set_height(s, r, 102))
+artifact_root = root / "partition" / "artifact-root"
 print(root / "mesh-report.json")
 print(root / "tx-report.json")
 print(root / "converge-report.json")
@@ -1864,19 +1972,19 @@ expect_pass_contains "producer tx internal check" "PASS: mixed_client_go_submit_
 expect_pass_contains "producer converge internal check" "PASS: mixed_client_go_submit_rust_mine_go_converge report structurally accepted" check_report "${CONVERGE_REPORT}" offline producer-tx
 expect_pass_contains "producer rust-submit converge internal check" "PASS: mixed_client_rust_submit_go_mine_rust_converge report structurally accepted" check_report "${RUST_SUBMIT_GO_MINE_REPORT}" offline producer-tx
 for variant in no-commit not-committed; do
-  expect_fail_contains "partition go mine_next ${variant}" "observations.pre_partition.common_go_mine keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/artifact-root/mine-next-partition-go-${variant}.json"
-  expect_generator_fail_contains "partition generator go mine_next ${variant}" "partition_reorg_source_binding_contradiction:mine_sidecar_invalid" --partition-heal-reorg-report "${TMP_ROOT}/artifact-root/mine-next-partition-go-${variant}.json"
-  expect_fail_contains "restart go target mine_next ${variant}" "rust_restart.go_target_mine_next_path keys mismatch" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/artifact-root/mine-next-restart-go-${variant}.json"
-  expect_generator_fail_contains "restart generator go target mine_next ${variant}" "restart_source_binding_contradiction:go_target_mine_next_invalid" --rust-restart-report "${TMP_ROOT}/artifact-root/mine-next-restart-go-${variant}.json"
-  expect_fail_contains "rust-submit go mine_next ${variant}" "go_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/artifact-root/mine-next-rust-conv-go-${variant}.json" offline producer-tx
-  expect_generator_fail_contains "rust-submit generator go mine_next ${variant}" "convergence_sidecar_invalid" --rust-submit-go-mine-rust-converge-report "${TMP_ROOT}/artifact-root/mine-next-rust-conv-go-${variant}.json"
+  expect_fail_contains "partition go mine_next ${variant}" "observations.pre_partition.common_go_mine keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-go-${variant}.json"
+  expect_generator_fail_contains "partition generator go mine_next ${variant}" "partition_reorg_source_binding_contradiction:mine_sidecar_invalid" --partition-heal-reorg-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-go-${variant}.json"
+  expect_fail_contains "restart go target mine_next ${variant}" "rust_restart.go_target_mine_next_path keys mismatch" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-${variant}.json"
+  expect_generator_fail_contains "restart generator go target mine_next ${variant}" "restart_source_binding_contradiction:go_target_mine_next_invalid" --rust-restart-report "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-${variant}.json"
+  expect_fail_contains "rust-submit go mine_next ${variant}" "go_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-${variant}.json" offline producer-tx
+  expect_generator_fail_contains "rust-submit generator go mine_next ${variant}" "convergence_sidecar_invalid" --rust-submit-go-mine-rust-converge-report "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-${variant}.json"
 done
-expect_fail_contains "partition rust mine_next with commit_state" "observations.fork.rust_mine_1 keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/artifact-root/mine-next-partition-rust-commit.json"
-expect_generator_fail_contains "partition generator rust mine_next with commit_state" "partition_reorg_source_binding_contradiction:mine_sidecar_invalid" --partition-heal-reorg-report "${TMP_ROOT}/artifact-root/mine-next-partition-rust-commit.json"
-expect_fail_contains "converge rust mine_next with commit_state" "rust_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/artifact-root/mine-next-converge-rust-commit.json" offline producer-tx
-expect_generator_fail_contains "converge generator rust mine_next with commit_state" "convergence_sidecar_invalid" --go-submit-rust-mine-go-converge-report "${TMP_ROOT}/artifact-root/mine-next-converge-rust-commit.json"
-expect_fail_contains "partition rust mine_next named go" "observations.fork.rust_mine_1 sidecar identity mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/artifact-root/mine-next-partition-rust-go-impl.json"
-expect_fail_contains "converge rust mine_next named go" "rust_mine mine_next sidecar identity mismatch" check_report "${TMP_ROOT}/artifact-root/mine-next-converge-rust-go-impl.json" offline producer-tx
+expect_fail_contains "partition rust mine_next with commit_state" "observations.fork.rust_mine_1 keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-rust-commit.json"
+expect_generator_fail_contains "partition generator rust mine_next with commit_state" "partition_reorg_source_binding_contradiction:mine_sidecar_invalid" --partition-heal-reorg-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-rust-commit.json"
+expect_fail_contains "converge rust mine_next with commit_state" "rust_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-commit.json" offline producer-tx
+expect_generator_fail_contains "converge generator rust mine_next with commit_state" "convergence_sidecar_invalid" --go-submit-rust-mine-go-converge-report "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-commit.json"
+expect_fail_contains "partition rust mine_next named go" "observations.fork.rust_mine_1 sidecar identity mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-rust-go-impl.json"
+expect_fail_contains "converge rust mine_next named go" "rust_mine mine_next sidecar identity mismatch" check_report "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-go-impl.json" offline producer-tx
 expect_fail_contains "producer rejects mesh report" "producer tx validation requires a mixed-client tx-path report" check_report "${MESH_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects missing propagation sample" "raw_samples.propagation requires one observed sample" check_report "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects non-finite propagation sample" "raw_samples.propagation.samples[0].elapsed is not finite" check_report "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
@@ -1963,4 +2071,44 @@ expect_fail_contains "mesh report Rust argv without --create-store" "node comman
 expect_fail_contains "restart old Rust argv without --create-store" "rust_restart old argv mismatch" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart-old-without-create-report.json"
 expect_fail_contains "restart new Rust argv with --create-store" "node command_argv does not match exact launched argv" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart-new-with-create-report.json"
 expect_fail_contains "partition Rust argv without --create-store" "node command_argv does not match exact launched argv" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition-rust-without-create-report.json"
+sn_check() {
+  local label="$1" token="$2" needle="$3" mode="$4" name="$5"
+  case "${mode}" in
+    tx) expect_fail_contains "${label}" "FAIL: ${token}: ${needle}" check_report "${TMP_ROOT}/sn-${name}-report.json" offline producer-tx
+        expect_fail_token "${label} token" "${token}" check_report "${TMP_ROOT}/sn-${name}-report.json" offline producer-tx ;;
+    *) expect_fail_contains "${label}" "FAIL: ${token}: ${needle}" check_report "${TMP_ROOT}/sn-${name}-report.json" offline "${mode}"
+       expect_fail_check_token "${label} token" "${token}" check_report "${TMP_ROOT}/sn-${name}-report.json" offline "${mode}" ;;
+  esac
+}
+SN_INVALID=store_neutrality_sidecar_invalid; SN_GENESIS=store_neutrality_genesis_mismatch; SN_GRAMMAR=store_neutrality_header_grammar_mismatch
+sn_check "sidecar height below the chain minimum" "${SN_INVALID}" "initial_convergence does not prove equal tips" tx height-100
+sn_check "sidecar equal heights with different tip hashes" "${SN_INVALID}" "initial_convergence does not prove equal tips" tx tip-hash-differs
+sn_check "sidecar extra key" "${SN_INVALID}" "sidecar keys mismatch" tx extra-key
+sn_check "sidecar header lengths differ" "${SN_GRAMMAR}" "header_bytes.go differs from header_bytes.rust" tx grammar-differs
+sn_check "sidecar header length outside the two grammars" "${SN_GRAMMAR}" "header_bytes.go is not 116 or 148" tx grammar-outside
+sn_check "sidecar genesis block with no matching header length" "${SN_GRAMMAR}" "header_bytes.rust is not the unique header length" tx grammar-no-match
+sn_check "sidecar recorded length differs from derived length" "${SN_GRAMMAR}" "header_bytes.go is not the unique header length" tx grammar-derived-differs
+expect_pass_contains "sidecar 148-byte header derivation" "PASS: mixed_client_go_submit_rust_accept report structurally accepted" check_report "${TMP_ROOT}/sn-long-header-report.json" offline producer-tx
+sn_check "sidecar genesis identity mismatch" "${SN_GENESIS}" "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal" tx genesis-identity
+sn_check "sidecar genesis block hash mismatch" "${SN_GENESIS}" "genesis.go_block_path hash differs" tx genesis-block-hash
+expect_fail_contains "argv defect before sidecar extra key" "node command_argv does not match exact launched argv" check_report "${TMP_ROOT}/sn-argv-and-extra-key-report.json" offline producer-tx
+expect_fail_check_token "argv defect before sidecar extra key token" argv_mismatch check_report "${TMP_ROOT}/sn-argv-and-extra-key-report.json" offline producer-tx
+sn_check "genesis identity before header grammar" "${SN_GENESIS}" "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal" tx genesis-and-grammar
+sn_check "binaries before genesis identity" "${SN_INVALID}" "binaries.go_node_sha256 does not match" tx binary-and-genesis
+sn_check "initial convergence before header grammar" "${SN_INVALID}" "initial_convergence does not prove equal tips" tx grammar-and-convergence
+sn_check "genesis block file before genesis identity" "${SN_INVALID}" "genesis.go_block_path is not the go genesis block capture" tx genesis-and-block-file
+sn_check "sidecar binary hash mismatch" "${SN_INVALID}" "binaries.rust_node_sha256 does not match" tx binary-mismatch
+sn_check "sidecar dirty clients tree" "${SN_INVALID}" "clients_tree_clean is not true" tx tree-dirty
+sn_check "sidecar rust datadir not empty before first start" "${SN_INVALID}" "datadirs mismatch" tx rust-not-empty
+sn_check "sidecar rust datadir aliases go datadir" "${SN_INVALID}" "datadirs mismatch" tx rust-datadir-alias
+sn_check "sidecar rust tip endpoint" "${SN_INVALID}" "initial_convergence.rust_tip_path identity mismatch" tx tip-endpoint
+sn_check "sidecar missing" "${SN_INVALID}" "store-neutrality sidecar is not a regular file" tx missing
+sn_check "default sidecar with genesis" "${SN_INVALID}" "genesis and header_bytes are not null" public mesh-genesis
+sn_check "default sidecar with txgen hash" "${SN_INVALID}" "binaries.txgen_sha256 is not null" public mesh-txgen
+sn_check "default sidecar with a present tip" "${SN_INVALID}" "initial_convergence.rust_tip_path does not report an absent tip" public mesh-tip-present
+sn_check "restart pre-restart height below initial convergence" "${SN_INVALID}" "rust_restart.pre_restart_height is below initial_convergence.height" rust-restart restart-below
+sn_check "restart initial rust tip from the restarted endpoint" "${SN_INVALID}" "initial_convergence.rust_tip_path identity mismatch" rust-restart restart-new-endpoint
+sn_check "partition common block not above initial convergence" "${SN_INVALID}" "partition common block height is not above initial_convergence.height" partition-heal-reorg partition-not-above
+sn_output="$(check_report "${TMP_ROOT}/sn-extra-key-report.json" offline producer-tx 2>&1)" && { echo "FAIL: sidecar extra key report should fail" >&2; exit 1; }
+[[ "$(combined_report_reason_token <<<"${sn_output}")" == store_neutrality_sidecar_invalid ]] || { echo "FAIL: combined token for sidecar keys mismatch: $(combined_report_reason_token <<<"${sn_output}")" >&2; exit 1; }
 printf 'PASS: mixed-client mesh check-report public/internal boundaries are covered\n'
