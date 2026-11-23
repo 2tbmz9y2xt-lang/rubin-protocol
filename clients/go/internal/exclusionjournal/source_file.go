@@ -1052,10 +1052,7 @@ func (o *SourceOwnerV1) prepared(r *sourceRoot, pin *os.File, m SourceManifestV1
 	if err != nil || !sameSourceFile(info, token.file) || o.currentRoot() != nil {
 		return nil, ErrIdentityV1
 	}
-	if _, err := o.qualify(pin, m, token.size, scratch, token, ErrIntegrityV1); err != nil {
-		return nil, err
-	}
-	if err := o.finalCaptureName(r, name, token); err != nil {
+	if err := o.finalCaptureName(r, pin, m, name, token, scratch); err != nil {
 		return nil, err
 	}
 	if o.observedStage == name {
@@ -1066,10 +1063,13 @@ func (o *SourceOwnerV1) prepared(r *sourceRoot, pin *os.File, m SourceManifestV1
 	return &PreparedSourceV1{manifest: m, name: name, incarnation: token}, nil
 }
 
-func (o *SourceOwnerV1) finalCaptureName(r *sourceRoot, name string, token *sourceIncarnation) error {
-	present, err := o.captureSlot(r, name)
-	if err != nil || !present {
-		return cmp.Or(err, ErrIdentityV1)
+func (o *SourceOwnerV1) finalCaptureName(r *sourceRoot, pin *os.File, m SourceManifestV1, name string, token *sourceIncarnation, scratch []byte) error {
+	present, slotErr := o.captureSlot(r, name)
+	if _, err := o.qualify(pin, m, token.size, scratch, token, ErrIntegrityV1); err != nil {
+		return err
+	}
+	if slotErr != nil || !present {
+		return cmp.Or(slotErr, ErrIdentityV1)
 	}
 	info, err := r.Lstat(name)
 	if err != nil || !sameSourceFile(info, token.file) {
