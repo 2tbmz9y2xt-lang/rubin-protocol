@@ -2061,9 +2061,9 @@ func testSourceCleanReopenOccupancy(t *testing.T) {
 	limits.Files, limits.Bytes = 1, size
 	s, _, paths, original := sourcePreparedScene(t, limits, m, parts)
 	fresh := sourceOpen(t, sourceReopenStore(t, s, paths.dir), sourceID(), limits, nil)
-	assertSourceReleaseCharge(t, fresh, m, 1, size)
 	sourceFailIf(t, fresh.stage.File != nil || len(sourceEntries(t, paths.dir)) != 1, "clean reopen retained a staging slot")
 	sourcePrepareRefusal(t, fresh, sourceForeign(m), parts, ErrCapacityV1)
+	assertSourceReleaseCharge(t, fresh, m, 1, size)
 	sourceReleaseResult(t, fresh, original, true, ErrIntegrityV1)
 	sourcePrepareAndRead(t, fresh, m, parts)
 }
@@ -2096,9 +2096,9 @@ func testSourceStageRestart(t *testing.T, mode string) {
 
 func testSourceReopenedPin(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte, old *PreparedSourceV1, public string, original os.FileInfo, charged uint64) {
 	t.Helper()
-	assertSourceReleaseCharge(t, o, m, 1, charged)
 	pin := checkSourcePinned(t, o.stage.File, original)
 	sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+	assertSourceReleaseCharge(t, o, m, 1, charged)
 	if old != nil {
 		sourceReleaseResult(t, o, old, true, ErrIntegrityV1)
 	}
@@ -3251,8 +3251,8 @@ func testSourceBoundChanges(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, 
 	sourceFailIf(t, calls != 0, "resealed file entered the producer")
 	before("resealed capture refusal")
 	sourceMust(t, os.Truncate(path, 1))
-	assertSourceReleaseCharge(t, o, m, 1, uint64(len(image)))
 	sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrCapacityV1)
+	assertSourceReleaseCharge(t, o, m, 1, uint64(len(image)))
 	sourceMust(t, os.WriteFile(path, image, 0o600))
 }
 
