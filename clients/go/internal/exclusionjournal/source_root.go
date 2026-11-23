@@ -1,6 +1,7 @@
 package exclusionjournal
 
 import (
+	"cmp"
 	"errors"
 	"io"
 	"os"
@@ -172,19 +173,73 @@ func (o *SourceOwnerV1) openSourceRoot() error {
 		if err != nil {
 			return err
 		}
-		if d := o.release; d != nil {
-			if !o.manifestFits(d.manifest, d.size) {
-				return ErrCapacityV1
-			}
-			if _, err := o.releaseBacking(r, d, make([]byte, scratchBytes)); err != nil {
-				return err
-			}
+		if err := o.recoverRelease(r, used); err != nil {
+			return err
 		}
 		if used.stage.held() {
 			return o.restoreHeldStage(r, used.stage)
 		}
 		return o.adoptStage(r, used)
 	})
+}
+
+// recoverRelease qualifies pending backing before restoring a service stage.
+func (o *SourceOwnerV1) recoverRelease(r *sourceRoot, used sourceUsage) error {
+	d := o.release
+	if d == nil {
+		return o.clearReleaseScratch(r)
+	}
+	if !o.manifestFits(d.manifest, d.size) {
+		return ErrCapacityV1
+	}
+	if err := o.qualifyRecoveredBacking(r, d, used); err != nil {
+		return err
+	}
+	if err := d.recoveredScratchAlias(r, used.stage); err != nil {
+		return err
+	}
+	return o.cleanRecoveredScratch(r, d, used.releaseLeaf)
+}
+
+// cleanRecoveredScratch syncs a qualified alias removal and reobserves release authority.
+func (o *SourceOwnerV1) cleanRecoveredScratch(r *sourceRoot, d *sourceRelease, location string) error {
+	removed, err := o.removeReleaseScratch(r, d)
+	if err != nil || !removed {
+		return cmp.Or(err, d.requireMarker(r))
+	}
+	if err := o.syncBoundRoot(r); err != nil {
+		return err
+	}
+	if leaf, err := d.releaseLocation(r); err != nil || leaf != location {
+		return cmp.Or(err, ErrIdentityV1)
+	}
+	return d.requireMarker(r)
+}
+
+// recoveredScratchAlias refuses scratch cleanup while a shared stage cannot be claimed.
+func (d *sourceRelease) recoveredScratchAlias(r *sourceRoot, stage sourceDebt) error {
+	present, err := d.checkReleaseScratch(r)
+	if err != nil || !present || stage.file != d.file {
+		return err
+	}
+	return d.admitSampledAlias(stage)
+}
+
+// qualifyRecoveredBacking validates the reached backing or reconstructs its admitted absence.
+func (o *SourceOwnerV1) qualifyRecoveredBacking(r *sourceRoot, d *sourceRelease, used sourceUsage) error {
+	if used.releaseLeaf == "" {
+		if used.stage.file == d.file {
+			return ErrIdentityV1
+		}
+		d.phase = releaseBackingGone
+		return nil
+	}
+	backing, err := openSourceFile(r, used.releaseLeaf, nil, d.file)
+	if err != nil {
+		return err
+	}
+	defer backing.Close()
+	return o.qualifyReleaseBacking(backing, d, make([]byte, scratchBytes))
 }
 
 // restoreHeldStage verifies the restored name before adopting it.

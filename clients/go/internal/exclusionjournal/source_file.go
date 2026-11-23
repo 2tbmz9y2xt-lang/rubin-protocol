@@ -53,6 +53,7 @@ type sourceUsage struct {
 	stageErr, visitErr                                   error
 	stageReached, overBytes, forRelease, completeCharge  bool
 	entries                                              []os.DirEntry
+	releaseLeaf                                          string
 }
 
 var realSourceFS = sourceFS{statfs: syscall.Fstatfs, write: (*os.File).Write, fileSync: (*os.File).Sync, close: (*os.File).Close, chmod: (*os.File).Chmod, namespace: runSourceNamespace, remove: (*os.Root).Remove, dirSync: (*os.File).Sync}
@@ -88,11 +89,14 @@ func (o *SourceOwnerV1) census(r *sourceRoot, forRelease bool) (sourceUsage, err
 		o.debt.leaf = used.stage.leaf
 		o.stage.Clear()
 	}
-	used.entries = entries
 	return used, err
 }
 
 func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, forRelease bool) (sourceUsage, error) {
+	location, err := o.releaseCensusLocation(r)
+	if err != nil {
+		return sourceUsage{}, err
+	}
 	if o.debt.unlinkTried {
 		_ = o.observeStageRemoval(r)
 	}
@@ -100,15 +104,41 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, forRel
 	if stopErr != nil && stage.held() {
 		return sourceUsage{}, stopErr
 	}
+	if err := o.observeCensusReleaseAlias(r, location, stage, stopErr == nil); err != nil {
+		return sourceUsage{}, err
+	}
 	stageErr := o.debt.qualifyStage(&stage)
 	used := o.stagingUsage(stage)
-	used.forRelease, used.stageErr = forRelease, stageErr
+	used.entries = entries
+	used.forRelease, used.stageErr, used.releaseLeaf = forRelease, stageErr, location
 	o.chargeBindings(&used)
-	used, err := o.censusCaptures(r, entries[:prefix], used, stopErr)
+	used, err = o.censusCaptures(r, entries[:prefix], used, stopErr)
 	if stopErr != nil && strings.HasPrefix(entries[prefix].Name(), heldStagePrefix) {
-		return sourceUsage{stage: stage, stageReached: used.stageReached}, stopErr
+		return sourceUsage{stage: stage, stageReached: used.stageReached, entries: entries}, stopErr
 	}
 	return used, err
+}
+
+// releaseCensusLocation admits the backing pair before inspecting ordinary entries.
+func (o *SourceOwnerV1) releaseCensusLocation(r *sourceRoot) (string, error) {
+	location, err := o.release.releaseLocation(r)
+	if err == nil && o.release != nil {
+		_, err = o.release.checkReleaseScratch(r)
+	}
+	return location, err
+}
+
+// observeCensusReleaseAlias keeps the current spelling for a positively observed alias.
+func (o *SourceOwnerV1) observeCensusReleaseAlias(r *sourceRoot, location string, stage sourceDebt, complete bool) error {
+	d := o.release
+	if d == nil || location == "" || d.phase != releaseBackingPending || !complete {
+		return nil
+	}
+	if err := d.observePriorAlias(r); err != nil {
+		return err
+	}
+	o.rebindReleaseAlias(r, d, stage)
+	return nil
 }
 
 func (o *SourceOwnerV1) stagingUsage(stage sourceDebt) sourceUsage {
@@ -157,7 +187,7 @@ func (o *SourceOwnerV1) censusCaptures(r *sourceRoot, entries []os.DirEntry, use
 		if stopErr != nil && used.visitErr != nil {
 			return used, used.visitErr
 		}
-		if absentRelease != nil && name == absentRelease.name {
+		if absentRelease != nil && name == used.releaseLeaf {
 			absentRelease = nil
 		}
 	}
@@ -170,27 +200,38 @@ func (o *SourceOwnerV1) censusCaptures(r *sourceRoot, entries []os.DirEntry, use
 func (o *SourceOwnerV1) censusEntry(r *sourceRoot, name string, used *sourceUsage) error {
 	switch name {
 	case used.stage.leaf:
-		if used.stageErr != nil {
-			return used.stageErr
-		}
-		if cmp.Or(o.observedStage, used.stage.name) != used.stage.name {
-			return ErrBusyV1
-		}
-		used.stageReached = used.visitErr == nil
-		size := used.stage.size - used.aliasBytes
-		if used.forRelease {
-			size = used.stage.observed
-			o.charge(used, size)
-		}
-		o.visitCensusBytes(used, size, 0, false)
+		return o.chargeCensusStage(used)
 	case releaseFile:
 		if o.release == nil {
 			return ErrIntegrityV1
 		}
 	case releaseScratch:
+	case releaseDetached:
+		if used.releaseLeaf != releaseDetached {
+			return ErrIntegrityV1
+		}
+		return o.censusCaptureAt(r, o.release.name, name, used)
 	default:
 		return o.censusCapture(r, name, used)
 	}
+	return nil
+}
+
+// chargeCensusStage accounts for the stage at its position in the listing.
+func (o *SourceOwnerV1) chargeCensusStage(used *sourceUsage) error {
+	if used.stageErr != nil {
+		return used.stageErr
+	}
+	if cmp.Or(o.observedStage, used.stage.name) != used.stage.name {
+		return ErrBusyV1
+	}
+	used.stageReached = used.visitErr == nil
+	size := used.stage.size - used.aliasBytes
+	if used.forRelease {
+		size = used.stage.observed
+		o.charge(used, size)
+	}
+	o.visitCensusBytes(used, size, 0, false)
 	return nil
 }
 
@@ -279,7 +320,12 @@ func (o *SourceOwnerV1) censusCapture(r *sourceRoot, name string, used *sourceUs
 	if !sourceHexKey(name) {
 		return ErrIntegrityV1
 	}
-	info, err := sourceEntryInfo(r, name, nil)
+	return o.censusCaptureAt(r, name, name, used)
+}
+
+// censusCaptureAt charges the capture key from the actual backing leaf.
+func (o *SourceOwnerV1) censusCaptureAt(r *sourceRoot, name, leaf string, used *sourceUsage) error {
+	info, err := sourceEntryInfo(r, leaf, nil)
 	if err != nil {
 		return ErrIntegrityV1
 	}
@@ -838,27 +884,31 @@ func (o *SourceOwnerV1) retainStageWitness(r *sourceRoot, stage sourceDebt) {
 
 // stageWitnessFits charges the full bounded listing without changing the admission error.
 func (o *SourceOwnerV1) stageWitnessFits(r *sourceRoot, stage sourceDebt, entries []os.DirEntry) bool {
+	location, err := o.release.releaseLocation(r)
+	if err != nil {
+		return false
+	}
 	stage.shared, stage.binding = false, nil
 	reserved := o.stagingUsage(stage)
-	reserved.completeCharge = true
+	reserved.completeCharge, reserved.releaseLeaf = true, location
 	o.chargeBindings(&reserved)
 	absentRelease := o.release
 	for _, entry := range entries {
 		name := entry.Name()
 		switch {
-		case sourceHexKey(name):
-			if o.censusCapture(r, name, &reserved) != nil {
+		case sourceHexKey(name), name == releaseDetached:
+			if o.censusEntry(r, name, &reserved) != nil {
 				return false
 			}
 		case name == stage.leaf:
 		case strings.HasPrefix(name, publicStagePrefix), strings.HasPrefix(name, heldStagePrefix):
 			return false
 		}
-		if absentRelease != nil && name == absentRelease.name {
+		if name == location {
 			absentRelease = nil
 		}
 	}
-	_, err := o.finishCensus(reserved, absentRelease)
+	_, err = o.finishCensus(reserved, absentRelease)
 	return err == nil
 }
 
@@ -1268,18 +1318,6 @@ func observeLink(r *sourceRoot, name string, id filelock.IdentityV1, err error) 
 		return disagrees, cmp.Or(err, ErrIdentityV1)
 	}
 	return sourceVisible, err
-}
-
-func (o *SourceOwnerV1) renameVisible(r *sourceRoot, from, to string) (bool, error) {
-	if _, err := r.Lstat(to); !errors.Is(err, os.ErrNotExist) {
-		return false, ErrIntegrityV1
-	}
-	err := o.ops.namespace((*sourceRoot).Rename, r, from, to)
-	if err == nil {
-		return true, nil
-	}
-	_, statErr := r.Lstat(to)
-	return !errors.Is(statErr, os.ErrNotExist), err
 }
 
 type compareSourceWriter struct {
