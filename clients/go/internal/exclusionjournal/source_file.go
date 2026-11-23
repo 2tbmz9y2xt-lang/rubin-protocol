@@ -327,6 +327,7 @@ func (o *SourceOwnerV1) chargeReservedCapture(used *sourceUsage, backing *source
 	matches := id == backing.file
 	extent, covered := excess, excess
 	if matches {
+		backing.uncertain = false
 		extent = size
 		covered += reserved
 		used.stage.observeAlias(id, backing)
