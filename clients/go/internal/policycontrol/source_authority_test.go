@@ -77,15 +77,89 @@ func TestSourceAuthorityCloseOnly(t *testing.T) {
 	checkSourceBorrowClose(t, s, before)
 }
 
+func TestSourceAuthorityStagingPin(t *testing.T) {
+	for _, mode := range []string{"failure", "panic", "success"} {
+		t.Run(mode, func(t *testing.T) { testSourceAuthorityStagingPin(t, mode) })
+	}
+}
+
+func testSourceAuthorityStagingPin(t *testing.T, mode string) {
+	t.Helper()
+	s := mustCreate(t, storeDir(t), testIdentity(1))
+	path := filepath.Join(s.dir, "stage")
+	must(t, os.WriteFile(path, []byte("staged source"), 0o600))
+	b, second := sourceBorrow(t, s), sourceBorrow(t, s)
+	pins := [2]*os.File{}
+	for i := range pins {
+		pin, err := os.Open(path)
+		must(t, err)
+		pins[i] = pin
+		t.Cleanup(func() { _ = pin.Close() })
+	}
+	cause := errors.New("source construction stopped")
+	use := func(stage *SourceStagePinV1) error {
+		stage.File, stage.Quota = pins[0], pins[1]
+		err := second.WithSourceOwnerClaimV1(func(*SourceStagePinV1) error {
+			t.Fatal("second construction ran")
+			return nil
+		})
+		sourceAuthorityFailIf(t, !sameDependentValue(err, ErrBusy), "second construction returned %v", err)
+		sourceAuthorityFailIf(t, !sameDependentValue(s.Close(), ErrBusy), "close during source construction")
+		assertSourcePinStatus(t, pins, nil)
+		switch mode {
+		case "panic":
+			panic(cause)
+		case "failure":
+			return cause
+		}
+		return nil
+	}
+	testSourceAuthorityPinResult(t, b, use, mode, cause)
+	if mode == "success" {
+		assertSourcePinStatus(t, pins, nil)
+		sourceAuthorityFailIf(t, !sameDependentValue(s.Close(), ErrBusy), "borrowed store closed")
+		assertSourcePinStatus(t, pins, nil)
+	} else {
+		assertSourcePinStatus(t, pins, os.ErrClosed)
+		must(t, second.WithSourceOwnerClaimV1(func(*SourceStagePinV1) error { return nil }))
+	}
+	b.ReleaseV1()
+	second.ReleaseV1()
+	must(t, s.Close())
+	assertSourcePinStatus(t, pins, os.ErrClosed)
+	sourceBorrowRefusal(t, s, ErrClosed, false)
+	must(t, s.Close())
+}
+
+func testSourceAuthorityPinResult(t *testing.T, b *SourceAuthorityBorrowV1, use func(*SourceStagePinV1) error, mode string, cause error) {
+	t.Helper()
+	if mode == "panic" {
+		defer func() {
+			sourceAuthorityFailIf(t, !sameDependentValue(recover(), cause), "source constructor did not preserve its panic")
+		}()
+	}
+	err := b.WithSourceOwnerClaimV1(use)
+	want := map[string]error{"failure": cause}[mode]
+	sourceAuthorityFailIf(t, !sameDependentValue(err, want), "source constructor returned %v, want %v", err, want)
+}
+
+func assertSourcePinStatus(t *testing.T, pins [2]*os.File, want error) {
+	t.Helper()
+	for _, pin := range pins {
+		_, err := pin.Stat()
+		sourceAuthorityFailIf(t, !errors.Is(err, want), "source descriptor status: %v, want %v", err, want)
+	}
+}
+
 func checkSourceOwnerClaims(t *testing.T, s *Store) {
 	t.Helper()
 	one, two := sourceBorrow(t, s), sourceBorrow(t, s)
-	claim := func(b *SourceAuthorityBorrowV1, use func() error, want error) {
+	claim := func(b *SourceAuthorityBorrowV1, use func(*SourceStagePinV1) error, want error) {
 		t.Helper()
 		err := b.WithSourceOwnerClaimV1(use)
 		sourceAuthorityFailIf(t, !sameDependentValue(err, want), "source owner claim: %v, want %v", err, want)
 	}
-	unreached := func() error {
+	unreached := func(*SourceStagePinV1) error {
 		t.Fatal("refused source owner claim entered callback")
 		return nil
 	}
@@ -103,7 +177,7 @@ func checkSourceOwnerClaims(t *testing.T, s *Store) {
 	wrapped := fmt.Errorf("construct source: %w", cause)
 	var typedNil *dependentCause
 	for _, want := range []error{cause, wrapped, typedNil} {
-		claim(one, func() error { releaseDuringClaim(); return want }, want)
+		claim(one, func(*SourceStagePinV1) error { releaseDuringClaim(); return want }, want)
 		one, two = sourceBorrow(t, s), sourceBorrow(t, s)
 	}
 	func() {
@@ -111,11 +185,11 @@ func checkSourceOwnerClaims(t *testing.T, s *Store) {
 			caught := recover()
 			sourceAuthorityFailIf(t, !sameDependentValue(caught, cause), "owner claim panic: %v", caught)
 		}()
-		claim(one, func() error { releaseDuringClaim(); panic(cause) }, nil)
+		claim(one, func(*SourceStagePinV1) error { releaseDuringClaim(); panic(cause) }, nil)
 	}()
 	one, two = sourceBorrow(t, s), sourceBorrow(t, s)
 	calls := 0
-	claim(one, func() error {
+	claim(one, func(*SourceStagePinV1) error {
 		calls++
 		copied := *two
 		claim(&copied, unreached, ErrBusy)
@@ -179,7 +253,7 @@ func checkSourceBorrowClose(t *testing.T, s *Store, before []byte) {
 func checkExpiredSourceBorrows(t *testing.T, one, two *SourceAuthorityBorrowV1) {
 	t.Helper()
 	for _, b := range []*SourceAuthorityBorrowV1{nil, {}, one, two} {
-		err := b.WithSourceOwnerClaimV1(func() error {
+		err := b.WithSourceOwnerClaimV1(func(*SourceStagePinV1) error {
 			t.Fatal("refused source owner claim entered callback")
 			return nil
 		})
