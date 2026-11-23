@@ -262,12 +262,20 @@ func (d *sourceRelease) observeBacking(r *sourceRoot, leaf string) (bool, error)
 		return false, nil
 	case err != nil:
 		return false, ErrIntegrityV1
-	case !sameSourceFile(info, d.file):
-		return false, ErrIdentityV1
-	case sourceFileSize(info) != d.size:
-		return false, ErrIntegrityV1
 	}
-	return true, nil
+	err = d.matchBacking(filelock.FileIdentityV1(info), sourceFileSize(info))
+	return err == nil, err
+}
+
+// matchBacking checks the identity before the extent of an observed regular file.
+func (d *sourceRelease) matchBacking(id filelock.IdentityV1, size uint64) error {
+	if id != d.file {
+		return ErrIdentityV1
+	}
+	if size != d.size {
+		return ErrIntegrityV1
+	}
+	return nil
 }
 
 // requireReleaseVacancy requires observed absence at the specified leaf.
@@ -564,7 +572,7 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 		return err
 	}
 	d.phase = releaseBackingDurable
-	o.discardReleaseAlias(d)
+	o.retireReleasedStageCharge(d)
 	return nil
 }
 
@@ -704,12 +712,10 @@ func (o *SourceOwnerV1) forgetReleaseStage(d *sourceRelease) {
 	}
 }
 
-// discardReleaseAlias returns shared stage custody after its directory sync.
-func (o *SourceOwnerV1) discardReleaseAlias(d *sourceRelease) {
-	o.forgetReleaseStage(d)
-	if o.pendingStage.file == d.file {
+// retireReleasedStageCharge retires continuously bound staging debt after directory sync.
+func (o *SourceOwnerV1) retireReleasedStageCharge(d *sourceRelease) {
+	if binding := o.pendingStage.binding; binding != nil && binding == o.live[d.name] {
 		o.pendingStage = sourceDebt{}
-		o.stage.ClearQuota()
 	}
 }
 
@@ -824,7 +830,7 @@ func (o *SourceOwnerV1) unlinkReleasedBacking(r *sourceRoot, d *sourceRelease, s
 	}
 	removeErr := o.ops.remove(r.Root, releaseDetached)
 	links, statErr := sourceLinks(f)
-	return cmp.Or(removeErr, d.afterReleaseUnlink(r, links, statErr))
+	return cmp.Or(removeErr, o.afterReleaseUnlink(r, d, links, statErr))
 }
 
 // restoreReleasedBacking restores only to a positively vacant canonical name.
@@ -934,9 +940,10 @@ func (o *SourceOwnerV1) protectReleaseAlias(r *sourceRoot, d *sourceRelease, sta
 }
 
 // afterReleaseUnlink records zero links or keeps retry authority pinned to the private entry.
-func (d *sourceRelease) afterReleaseUnlink(r *sourceRoot, links uint64, statErr error) error {
+func (o *SourceOwnerV1) afterReleaseUnlink(r *sourceRoot, d *sourceRelease, links uint64, statErr error) error {
 	if statErr == nil && links == 0 {
 		d.phase = releaseBackingGone
+		o.forgetReleaseStage(d)
 		return nil
 	}
 	refusal := cmp.Or(statErr, ErrIdentityV1)

@@ -331,6 +331,11 @@ func (o *SourceOwnerV1) censusCaptureAt(r *sourceRoot, name, leaf string, used *
 	}
 	id := filelock.FileIdentityV1(info)
 	size := sourceFileSize(info)
+	if leaf == used.releaseLeaf {
+		if err := o.release.matchBacking(id, size); err != nil {
+			return err
+		}
+	}
 	backing := o.live[name]
 	if backing != nil && backing.issued {
 		used.observeIssuedCapture(backing, id, size)

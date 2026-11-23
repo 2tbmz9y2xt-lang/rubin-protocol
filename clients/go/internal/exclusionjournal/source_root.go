@@ -219,7 +219,7 @@ func (o *SourceOwnerV1) cleanRecoveredScratch(r *sourceRoot, d *sourceRelease, l
 // recoveredScratchAlias refuses scratch cleanup while a shared stage cannot be claimed.
 func (d *sourceRelease) recoveredScratchAlias(r *sourceRoot, stage sourceDebt) error {
 	present, err := d.checkReleaseScratch(r)
-	if err != nil || !present || stage.file != d.file {
+	if err != nil || !present || d.phase == releaseBackingGone || stage.file != d.file {
 		return err
 	}
 	return d.admitSampledAlias(stage)
@@ -228,7 +228,7 @@ func (d *sourceRelease) recoveredScratchAlias(r *sourceRoot, stage sourceDebt) e
 // qualifyRecoveredBacking validates the reached backing or reconstructs its admitted absence.
 func (o *SourceOwnerV1) qualifyRecoveredBacking(r *sourceRoot, d *sourceRelease, used sourceUsage) error {
 	if used.releaseLeaf == "" {
-		if used.stage.file == d.file {
+		if used.stage.file == d.file && used.stage.observed == d.size {
 			return ErrIdentityV1
 		}
 		d.phase = releaseBackingGone
