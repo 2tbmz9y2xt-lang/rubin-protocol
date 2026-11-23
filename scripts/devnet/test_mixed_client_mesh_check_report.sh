@@ -1757,7 +1757,7 @@ rpc_json() {
   return 22
 }
 export RUST_RPC_ADDR="127.0.0.1:59999"
-RUST_MINE_JSON="${TMP_ROOT}/artifact-root/mine-next-sidecar.json"
+RUST_MINE_JSON="${TMP_ROOT}/mine-next-sidecar.json"
 TX_REASON=""
 if rust_mine_including_tx; then
   echo "FAIL: rust_mine_including_tx should fail on /mine_next HTTP error" >&2
