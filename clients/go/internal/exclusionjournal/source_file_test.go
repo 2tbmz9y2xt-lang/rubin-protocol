@@ -134,7 +134,7 @@ func sourceKeyOnlyRetry(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, part
 var sourceLookupFaults sync.Map
 
 func (r *sourceRoot) Lstat(leaf string) (os.FileInfo, error) {
-	if _, fail := sourceLookupFaults.LoadAndDelete([2]string{r.Root.Name(), leaf}); fail {
+	if _, fail := sourceLookupFaults.LoadAndDelete([2]string{r.Name(), leaf}); fail {
 		return nil, &os.PathError{Op: "lstat", Path: leaf, Err: syscall.EIO}
 	}
 	return r.Root.Lstat(leaf)
