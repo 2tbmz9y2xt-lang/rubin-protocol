@@ -279,7 +279,7 @@ def marker_participants_bound(marker: dict[str, Any], by_impl: dict[str, dict[st
         return False
     expected = sorted((node["name"], impl, node["rpc_endpoint"], node["started_at"]) for impl, node in by_impl.items())
     return sorted((p["name"], p["implementation"], p["endpoint"], p["started_at"]) for p in participants) == expected
-def source_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path) -> str | None:
+def source_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path, name: str) -> str | None:
     for impl, expected_name, expected_comm in (("go", "node-go", "rubin-node-go"), ("rust", "node-rust", "rubin-node-rust")):
         node = by_impl[impl]
         if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not jint(node.get("pid"), 1) or not utc_z(node.get("started_at")) or not command_bound_to_argv(node):
@@ -291,7 +291,7 @@ def source_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path) -
             binary.relative_to(root)
         except ValueError:
             return "process_identity_missing_or_invalid"
-        expected_argv = [str(binary), "--network", "devnet", "--datadir", str(root / f"node-{impl}"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + (["--peer", by_impl["go"]["p2p_endpoint"]] if impl == "rust" else [])
+        expected_argv = [str(binary), "--network", "devnet", "--datadir", str(root / f"node-{impl}"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + (["--peer", by_impl["go"]["p2p_endpoint"], "--create-store"] if impl == "rust" else ["--create-store"] if name == "mesh" else [])
         if not argv_eq(node.get("command_argv"), expected_argv, {0, 4}):
             return "process_identity_missing_or_invalid"
     return None
@@ -327,7 +327,7 @@ def source_report_contract_error(name: str, data: dict[str, Any], path: Path) ->
         return f"{name}_legacy_marker_invalid"
     if node_bad or by_impl is None:
         return node_bad
-    if bad := source_node_identity_error(by_impl, root):
+    if bad := source_node_identity_error(by_impl, root, name):
         return bad
     marker_keys = SOURCE_MESH_MARKER_KEYS if name == "mesh" else SOURCE_TX_MARKER_KEYS
     if set(marker) != marker_keys:
@@ -815,7 +815,7 @@ def restart_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
         return "restart_source_binding_contradiction:artifact_root_invalid"
     if bad := restart_identity_binding_error(data):
         return bad
-    expected_old_argv = [by_impl["rust"].get("binary"), "--network", "devnet", "--datadir", str(root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", by_impl["go"]["p2p_endpoint"]]
+    expected_old_argv = [by_impl["rust"].get("binary"), "--network", "devnet", "--datadir", str(root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", by_impl["go"]["p2p_endpoint"], "--create-store"]
     if not argv_eq(rr.get("old_command_argv"), expected_old_argv, {0, 4}) or not argv_eq(rr.get("new_command_argv"), by_impl["rust"].get("command_argv"), {0, 4}):
         return "restart_source_binding_contradiction:argv_mismatch"
     try:
@@ -912,7 +912,7 @@ def partition_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path
         return "partition_reorg_source_binding_contradiction:node_identity_invalid"
     if partition_proxy in {node.get(field) for node in by_impl.values() for field in ("rpc_endpoint", "p2p_endpoint")}:
         return "partition_reorg_source_binding_contradiction:node_identity_invalid"
-    for impl, expected_name, expected_comm, extra in (("go", "node-go", "rubin-node-go", []), ("rust", "node-rust", "rubin-node-rust", ["--peer", partition_proxy])):
+    for impl, expected_name, expected_comm, extra in (("go", "node-go", "rubin-node-go", []), ("rust", "node-rust", "rubin-node-rust", ["--peer", partition_proxy, "--create-store"])):
         node = by_impl[impl]
         if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not command_bound_to_argv(node):
             return "partition_reorg_source_binding_contradiction:node_identity_invalid"

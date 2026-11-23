@@ -543,8 +543,9 @@ if partition_mode:
     proof_for_argv = data.get("proof")
     req(isinstance(proof_for_argv, dict) and ep(proof_for_argv.get("partition_proxy_endpoint")), "partition proxy endpoint is malformed")
     rust_expected_peer = proof_for_argv["partition_proxy_endpoint"]
-create_flag = [] if (tx_mode or restart_mode or partition_mode) else ["--create-store"]
-req(report_node_argv_eq(nodes_by_impl["go"], "node-go", create_flag) and report_node_argv_eq(nodes_by_impl["rust"], "node-rust", ["--peer", rust_expected_peer] + create_flag), "node command_argv does not match exact launched argv")
+go_create_flag = [] if (tx_mode or restart_mode or partition_mode) else ["--create-store"]
+rust_create_flag = [] if restart_mode else ["--create-store"]
+req(report_node_argv_eq(nodes_by_impl["go"], "node-go", go_create_flag) and report_node_argv_eq(nodes_by_impl["rust"], "node-rust", ["--peer", rust_expected_peer] + rust_create_flag), "node command_argv does not match exact launched argv")
 req(nodes_by_impl["go"]["pid"] != nodes_by_impl["rust"]["pid"], "go/rust process evidence uses the same pid")
 req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"] and nodes_by_impl["go"].get("command_argv") != nodes_by_impl["rust"].get("command_argv"), "go/rust process evidence is not implementation-distinct")
 req(len({nodes_by_impl[i][f] for i in ("go", "rust") for f in ("rpc_endpoint", "p2p_endpoint")}) == 4, "node rpc/p2p endpoints are not pairwise distinct")
@@ -622,7 +623,7 @@ if restart_mode:
     json_int(mine_next.get("timestamp"), "rust_restart.go_target_mine_next_path.timestamp", 0)
     req(mine_next.get("implementation") == "go" and mine_next.get("rpc_endpoint") == nodes_by_impl["go"]["rpc_endpoint"] and mine_next.get("request_path") == "/mine_next", "rust_restart go target mine_next sidecar identity mismatch")
     req(mine_next.get("mined") is True and mine_height == go_target_height and mine_hash == restart_info["go_target_tip"] and mine_tx_count == restart_info["go_target_tx_count"], "rust_restart go target mine_next sidecar does not match report")
-    expected_old_rust_argv = [nodes_by_impl["rust"]["binary"], "--network", "devnet", "--datadir", str(artifact_root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", nodes_by_impl["go"]["p2p_endpoint"]]
+    expected_old_rust_argv = [nodes_by_impl["rust"]["binary"], "--network", "devnet", "--datadir", str(artifact_root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", nodes_by_impl["go"]["p2p_endpoint"], "--create-store"]
     old_argv = restart_info.get("old_command_argv")
     new_argv = restart_info.get("new_command_argv")
     req(isinstance(old_argv, list) and all(isinstance(arg, str) for arg in old_argv) and argv_eq(old_argv, expected_old_rust_argv, "rust_restart.old_command_argv", "expected old rust argv"), "rust_restart old argv mismatch")
@@ -795,9 +796,8 @@ source "${HELPER}"
 rubin_process_init mixed-client-mesh
 GO_NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"; RUST_NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-rust"
 GO_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-go"; RUST_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-rust"
-# A datadir is initialized once, by whoever constructs it first: the prepare_*
-# mine, or the first node start in plain mode. Every later start/restart, and
-# the Rust datadir once it is a byte-copy of the Go one, is a reopen.
+# A datadir is initialized once, by its own client: the prepare_* mine for Go,
+# or the first node start. Every later start/restart is a reopen.
 GO_STORE_READY=0; RUST_STORE_READY=0
 GO_LOG="node-go.log"; RUST_LOG="node-rust.log"; RUST_RESTART_LOG="node-rust-restart.log"; PARTITION_PROXY_LOG="partition-proxy.log"; REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-report.json"; LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-legacy-schema-marker.json"
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
@@ -811,6 +811,7 @@ PARTITION_PROXY_SCRIPT="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-proxy.py"; PART
 PARTITION_PRE_GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-pre-go-peers.json"; PARTITION_PRE_RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-pre-rust-peers.json"; PARTITION_COMMON_GO_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-common-go-mine.json"; PARTITION_COMMON_GO_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-common-go-block.json"; PARTITION_COMMON_RUST_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-common-rust-tip.json"; PARTITION_COMMON_RUST_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-common-rust-block.json"
 PARTITION_DROP_GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-drop-go-peers.json"; PARTITION_DROP_RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-drop-rust-peers.json"; PARTITION_FORK_GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-fork-go-peers.json"; PARTITION_FORK_RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-fork-rust-peers.json"; PARTITION_GO_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-mine.json"; PARTITION_GO_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-tip.json"; PARTITION_GO_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-block.json"
 PARTITION_RUST_MINE1_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-mine-1.json"; PARTITION_RUST_MINE2_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-mine-2.json"; PARTITION_RUST_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-tip.json"; PARTITION_RUST_BLOCK1_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-block-1.json"; PARTITION_RUST_BLOCK2_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-block-2.json"; PARTITION_HEAL_GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-heal-go-peers.json"; PARTITION_HEAL_RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-heal-rust-peers.json"
+INITIAL_GO_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/initial-convergence-go-tip.json"; INITIAL_RUST_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/initial-convergence-rust-tip.json"
 PARTITION_FINAL_GO_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-go-tip.json"; PARTITION_FINAL_RUST_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-rust-tip.json"; PARTITION_GO_REORG_PARENT_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-reorg-parent-block.json"; PARTITION_FINAL_GO_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-go-block.json"; PARTITION_FINAL_RUST_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-rust-block.json"; PARTITION_GO_METRICS_PROM="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-metrics.prom"
 GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" TX_FROM_KEY_FILE="" TX_FROM_KEY_DIR="" TX_TO_KEY="" RUST_MINE_HEIGHT="" RUST_MINE_HASH="" RUST_MINE_TX_COUNT="" GO_MINE_HEIGHT="" GO_MINE_HASH="" GO_MINE_TX_COUNT="" PROPAGATION_SAMPLE_START_SECONDS="" PROPAGATION_SAMPLE_SECONDS="" CONVERGENCE_SAMPLE_SECONDS="" RUST_RESTART_REASON="" RUST_RESTART_TIP_TSV="" OLD_RUST_PID="" OLD_RUST_RPC_ADDR="" OLD_RUST_P2P_ADDR="" OLD_RUST_STARTED_AT_UTC="" OLD_RUST_ARGV_JSON="" PRE_RESTART_RUST_HEIGHT="" PRE_RESTART_RUST_TIP="" PRE_RESTART_RUST_HAS_TIP="" GO_RESTART_TARGET_HEIGHT="" GO_RESTART_TARGET_TIP="" GO_RESTART_TARGET_HAS_TIP="" GO_RESTART_TARGET_TX_COUNT="" POST_RESTART_RUST_HEIGHT="" POST_RESTART_RUST_TIP="" POST_RESTART_RUST_HAS_TIP="" OLD_RUST_PID_STOPPED="" RUST_RESTART_SAME_DATADIR="" RUST_RESTART_PEER_RECONNECTED="" PARTITION_PROXY_PID="" PARTITION_PROXY_ADDR="" PARTITION_PRE_GO_PEER_ADDR="" PARTITION_HEAL_GO_PEER_ADDR="" PARTITION_COMMON_HEIGHT="" PARTITION_COMMON_HASH="" PARTITION_GO_FORK_HEIGHT="" PARTITION_GO_FORK_HASH="" PARTITION_RUST_WIN_HEIGHT="" PARTITION_RUST_WIN_HASH="" PARTITION_FINAL_GO_HEIGHT="" PARTITION_FINAL_GO_HASH="" PARTITION_FINAL_RUST_HEIGHT="" PARTITION_FINAL_RUST_HASH="" PARTITION_REORG_TOTAL="" PARTITION_REORG_DEPTH="" PARTITION_REASON=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
@@ -1287,8 +1288,6 @@ PY
   echo "Mining mature chainstate for mixed-client evidence" >&2
   bounded_mesh "${GO_NODE_BIN}" --network devnet --create-store --datadir "${GO_DIR}" --mine-address "${mine_address}" --mine-blocks 101 --mine-exit >"$(_rubin_process_resolve_log "${MINE_LOG}")" 2>&1 || { status=$?; cleanup_tx_from_key_file || true; [[ ${status} -eq 142 ]] && TX_REASON=go_submit_mine_timeout || TX_REASON=go_submit_mine_failed; return 1; }
   GO_STORE_READY=1
-  cp -R -- "${GO_DIR}/." "${RUST_DIR}/" || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_chainstate_copy_failed; return 1; }
-  RUST_STORE_READY=1
 }
 prepare_restart_chainstate() {
   TX_REASON=""
@@ -1301,7 +1300,6 @@ rust_restart_prepare_reason() {
     "") printf '%s\n' rust_restart_chainstate_prepare_failed ;;
     go_submit_keygen_*) printf 'rust_restart_keygen_%s\n' "${1#go_submit_keygen_}" ;;
     go_submit_mine_*) printf 'rust_restart_chainstate_mine_%s\n' "${1#go_submit_mine_}" ;;
-    go_submit_chainstate_copy_failed) printf '%s\n' rust_restart_chainstate_copy_failed ;;
     go_submit_*) printf 'rust_restart_chainstate_%s\n' "${1#go_submit_}" ;;
     *) printf 'rust_restart_%s\n' "${1}" ;;
   esac
@@ -1311,7 +1309,6 @@ partition_prepare_reason() {
     "") printf '%s\n' partition_chainstate_prepare_failed ;;
     go_submit_keygen_*) printf 'partition_keygen_%s\n' "${1#go_submit_keygen_}" ;;
     go_submit_mine_*) printf 'partition_chainstate_mine_%s\n' "${1#go_submit_mine_}" ;;
-    go_submit_chainstate_copy_failed) printf '%s\n' partition_chainstate_copy_failed ;;
     go_submit_*) printf 'partition_chainstate_%s\n' "${1#go_submit_}" ;;
     *) printf 'partition_%s\n' "${1}" ;;
   esac
@@ -1439,11 +1436,17 @@ if got.get("raw_hex") != txhex:
     fail(16, "get_tx_raw_hex_mismatch")
 PY
 }
+txgen_datadir_guard() {
+  local datadir="" resolved rust_resolved
+  while (( $# )); do [[ "$1" == --datadir && $# -ge 2 ]] && datadir="$2"; shift; done
+  [[ -n "${datadir}" ]] && resolved="$(CDPATH='' cd -- "${datadir}" 2>/dev/null && pwd -P)" && rust_resolved="$(CDPATH='' cd -- "${RUST_DIR}" 2>/dev/null && pwd -P)" && [[ "${resolved}" != "${rust_resolved}" ]] || { TX_REASON=cross_client_datadir_argv; return 1; }
+}
 submit_go_tx() {
   local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key-file "${TX_FROM_KEY_FILE}" --to-key "${TX_TO_KEY}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}" --submit-to "${GO_RPC_ADDR}")
   local status=0 cleanup_status=0 rc=0
   TX_REASON=""
   [[ -n "${TX_FROM_KEY_FILE}" && -f "${TX_FROM_KEY_FILE}" && -n "${TX_TO_KEY}" ]] || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_keygen_material_malformed; return 1; }
+  txgen_datadir_guard "${argv[@]}" || { cleanup_tx_from_key_file || true; return 1; }
   TX_HEX="$(bounded_mesh "${argv[@]}")" || status=$?
   PROPAGATION_SAMPLE_START_SECONDS="${SECONDS}"
   cleanup_tx_from_key_file || cleanup_status=$?
@@ -1456,10 +1459,11 @@ submit_go_tx() {
   verify_tx_sidecars go_submit go "${GO_RPC_ADDR}" "${TX_ID}" "${TX_HEX}" "/tx_status?txid=${TX_ID}" "/get_tx?txid=${TX_ID}" "${GO_SUBMIT_STATUS_JSON}" "${GO_SUBMIT_GET_TX_JSON}" || { rc=$?; TX_REASON="$(tx_sidecar_reason go_submit "${rc}")"; return 1; }
 }
 submit_rust_tx() {
-  local -a argv=("${TXGEN_BIN}" --datadir "${RUST_DIR}" --from-key-file "${TX_FROM_KEY_FILE}" --to-key "${TX_TO_KEY}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}" --submit-to "${RUST_RPC_ADDR}")
+  local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key-file "${TX_FROM_KEY_FILE}" --to-key "${TX_TO_KEY}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}" --submit-to "${RUST_RPC_ADDR}")
   local status=0 cleanup_status=0 rc=0
   TX_REASON=""
   [[ -n "${TX_FROM_KEY_FILE}" && -f "${TX_FROM_KEY_FILE}" && -n "${TX_TO_KEY}" ]] || { cleanup_tx_from_key_file || true; TX_REASON=rust_submit_keygen_material_malformed; return 1; }
+  txgen_datadir_guard "${argv[@]}" || { cleanup_tx_from_key_file || true; return 1; }
   TX_HEX="$(bounded_mesh "${argv[@]}")" || status=$?
   PROPAGATION_SAMPLE_START_SECONDS="${SECONDS}"
   cleanup_tx_from_key_file || cleanup_status=$?
@@ -2508,6 +2512,40 @@ wait_tip_to_match() {
   PARTITION_REASON="${label}_timeout"
   return 1
 }
+tips_absent() {
+  python3 - "$@" <<'PY'
+import json, sys
+def absent(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("has_tip") is False and "height" in data and data["height"] is None and "tip_hash" in data and data["tip_hash"] is None
+sys.exit(0 if all(absent(path) for path in sys.argv[1:]) else 1)
+PY
+}
+wait_initial_tips_absent() {
+  local deadline
+  deadline=$((SECONDS + MESH_TIMEOUT)); PARTITION_REASON=""
+  while (( SECONDS < deadline )); do
+    if capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /get_tip "${INITIAL_GO_TIP_JSON}" && capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" /get_tip "${INITIAL_RUST_TIP_JSON}" && tips_absent "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}"; then
+      return 0
+    fi
+    sleep 1
+  done
+  PARTITION_REASON=initial_convergence_timeout
+  return 1
+}
+wait_initial_convergence() {
+  local parsed rc=0 height tip_hash
+  (( TX_PATH_MODE || RUST_RESTART_MODE || PARTITION_HEAL_REORG_MODE )) || { wait_initial_tips_absent; return; }
+  PARTITION_REASON=""
+  partition_capture_tip initial_convergence_go_tip go "${GO_RPC_ADDR}" "${INITIAL_GO_TIP_JSON}" >/dev/null || return 1
+  parsed="$(parse_restart_tip_sidecar "${INITIAL_GO_TIP_JSON}")" || { rc=$?; PARTITION_REASON="$(restart_tip_reason initial_convergence_go_tip "${rc}")"; return 1; }
+  IFS='|' read -r height tip_hash _ <<<"${parsed}"
+  wait_tip_to_match initial_convergence rust "${RUST_RPC_ADDR}" "${height}" "${tip_hash}" "${INITIAL_RUST_TIP_JSON}"
+}
 capture_go_reorg_metrics() {
   local parsed
   PARTITION_GO_METRICS_PARSED=""
@@ -2594,12 +2632,16 @@ run_partition_heal_reorg_scenario() {
   FINAL_PROCESS_IDENTITY_RECHECKED=true
   FINAL_PEER_SNAPSHOTS_RECHECKED=true
 }
+require_rust_datadir_exact_empty() {
+  local entries
+  entries="$(ls -A -- "${RUST_DIR}")" && [[ -z "${entries}" ]] || { START_REASON=rust_datadir_not_exact_empty; return 1; }
+}
 start_rust_node_with_log() {
   local rust_log="$1"
   local peer_addr="${RUST_BOOTSTRAP_PEER_ADDR:-${GO_P2P_ADDR}}"
   local -a argv=("${RUST_NODE_BIN}" --network devnet --datadir "${RUST_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${peer_addr}")
-  (( RUST_STORE_READY )) || { argv+=(--create-store); RUST_STORE_READY=1; }
   START_REASON=""
+  (( RUST_STORE_READY )) || { require_rust_datadir_exact_empty || return 1; argv+=(--create-store); RUST_STORE_READY=1; }
   RUST_CMD="$(argv_cmd "${argv[@]}")"; RUST_ARGV_JSON="$(argv_json "${argv[@]}")"
   rubin_process_start "${rust_log}" "${argv[@]}" || { START_REASON=rust_launch_failed; return 1; }; RUST_PID="${RUBIN_PROCESS_LAST_PID}"
   rubin_process_wait_for_log "${rust_log}" "p2p: listening=" 60 "${RUST_PID}" || { START_REASON=rust_p2p_log_wait_failed; return 1; }
@@ -2696,6 +2738,7 @@ if (( PARTITION_HEAL_REORG_MODE == 1 )); then
 fi
 start_rust_node || finish_no_data "${START_REASON:-rust_process_not_ready}"
 verify_process_identity node-rust rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust rust_process_identity || finish_no_data "${PROCESS_IDENTITY_REASON:-rust_process_identity_unverified}"
+wait_initial_convergence || finish_no_data "${PARTITION_REASON:-initial_convergence_timeout}"
 if (( PARTITION_HEAL_REORG_MODE == 1 )); then
   run_partition_heal_reorg_scenario || finish_no_data "${PARTITION_REASON:-partition_heal_reorg_failed}"
 else

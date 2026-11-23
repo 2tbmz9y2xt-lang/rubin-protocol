@@ -147,6 +147,174 @@ Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
 PY
 }
 
+extract_slices() {
+  python3 - "${HARNESS}" "$@" <<'PY'
+from pathlib import Path
+import sys
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+dst, out = Path(sys.argv[2]), []
+for first, stop in zip(sys.argv[3::2], sys.argv[4::2]):
+    start = next(i for i, line in enumerate(lines) if line.startswith(first))
+    end = next(i for i, line in enumerate(lines[start:], start) if line.startswith(stop))
+    out += lines[start:end] + [""]
+dst.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+}
+
+check_prepare_tx_chainstate_leaves_rust_empty() {
+  local probe="${TMP_ROOT}/prepare-tx-chainstate-empty.sh" probe_root="${TMP_ROOT}/prepare-tx-chainstate-empty"
+  mkdir -p -- "${probe_root}"
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+probe_root="$2"
+KEYGEN_JSON="${probe_root}/keygen.json"; KEYGEN_GO="${probe_root}/keygen.go"; GO_MODULE_ROOT="${probe_root}/go"; DEV_ENV="${probe_root}/dev-env.sh"
+GO_NODE_BIN="${probe_root}/rubin-node"; GO_DIR="${probe_root}/go-node"; RUST_DIR="${probe_root}/rust-node"; MINE_LOG="${probe_root}/mine-go.log"; TMPDIR="${probe_root}/tmp"
+TX_REASON=""; TX_FROM_KEY_DIR=""; TX_FROM_KEY_FILE=""; TX_TO_KEY=""; GO_STORE_READY=0; RUST_STORE_READY=0
+mkdir -p -- "${TMPDIR}" "${GO_MODULE_ROOT}" "${GO_DIR}" "${RUST_DIR}"
+build_go_txgen() { :; }
+write_keygen() { :; }
+disable_xtrace_for_secret() { return 1; }
+restore_xtrace_after_secret() { :; }
+make_tx_secret_dir() { mkdir -p -- "${probe_root}/secret"; printf '%s\n' "${probe_root}/secret"; }
+cleanup_tx_from_key_file() { :; }
+_rubin_process_resolve_log() { printf '%s\n' "$1"; }
+bounded_mesh() {
+  local arg
+  for arg; do [[ "${arg}" == --mine-blocks ]] && { printf 'store\n' >"${GO_DIR}/chainstate"; printf 'mined\n'; return 0; }; done
+  printf '{}\n'
+}
+parse_keygen_material() { printf '%s\n%s\n%s\n' "${probe_root}/secret/from-key.hex" "01$(printf 'b%.0s' {1..64})" "01$(printf 'a%.0s' {1..64})"; }
+prepare_tx_chainstate || { echo "FAIL: prepare_tx_chainstate failed: ${TX_REASON}" >&2; exit 1; }
+[[ "${GO_STORE_READY}" == 1 && "${RUST_STORE_READY}" == 0 ]] || { echo "FAIL: store flags go=${GO_STORE_READY} rust=${RUST_STORE_READY}" >&2; exit 1; }
+[[ -f "${GO_DIR}/chainstate" ]] || { echo "FAIL: Go store was not created by the mining run" >&2; exit 1; }
+[[ -z "$(ls -A -- "${RUST_DIR}")" ]] || { echo "FAIL: Rust datadir is not empty after prepare_tx_chainstate: $(ls -A -- "${RUST_DIR}")" >&2; exit 1; }
+SH
+  bash "${probe}" "${PREPARE_TX_CHAINSTATE_LIB}" "${probe_root}"
+}
+
+check_rust_datadir_guard() {
+  local probe="${TMP_ROOT}/rust-datadir-guard.sh" probe_root="${TMP_ROOT}/rust-datadir-guard" lib="${TMP_ROOT}/rust-datadir-guard-lib.sh"
+  mkdir -p -- "${probe_root}"
+  extract_slices "${lib}" "require_rust_datadir_exact_empty()" "start_rust_node()"
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+probe_root="$2"
+RUST_NODE_BIN="${probe_root}/rubin-node-rust"; GO_P2P_ADDR="127.0.0.1:51002"; SPAWNED="${probe_root}/spawned-argv"
+argv_cmd() { :; }
+argv_json() { :; }
+rubin_process_start() { shift; printf '%s\n' "$@" >"${SPAWNED}"; return 1; }
+expect_refused() {
+  RUST_DIR="$1"; RUST_STORE_READY=0; rm -f -- "${SPAWNED}"
+  if start_rust_node_with_log node-rust.log; then echo "FAIL: start accepted ${RUST_DIR}" >&2; exit 1; fi
+  [[ "${START_REASON}" == rust_datadir_not_exact_empty ]] || { echo "FAIL: start reason ${START_REASON} for ${RUST_DIR}" >&2; exit 1; }
+  [[ ! -e "${SPAWNED}" && "${RUST_STORE_READY}" == 0 ]] || { echo "FAIL: Rust process spawned on ${RUST_DIR}" >&2; exit 1; }
+}
+mkdir -p -- "${probe_root}/file" "${probe_root}/dot" "${probe_root}/empty"
+printf 'x\n' >"${probe_root}/file/CURRENT"; printf 'x\n' >"${probe_root}/dot/.lock"
+expect_refused "${probe_root}/file"
+expect_refused "${probe_root}/dot"
+expect_refused "${probe_root}/missing"
+RUST_DIR="${probe_root}/empty"; RUST_STORE_READY=0; rm -f -- "${SPAWNED}"
+if start_rust_node_with_log node-rust.log; then echo "FAIL: stub launch should fail" >&2; exit 1; fi
+[[ "${START_REASON}" == rust_launch_failed && "${RUST_STORE_READY}" == 1 ]] || { echo "FAIL: empty datadir start reason ${START_REASON}" >&2; exit 1; }
+[[ "$(tail -n 1 "${SPAWNED}")" == --create-store ]] || { echo "FAIL: first Rust start lacks --create-store" >&2; exit 1; }
+printf 'x\n' >"${probe_root}/empty/CURRENT"; rm -f -- "${SPAWNED}"
+if start_rust_node_with_log node-rust-restart.log; then echo "FAIL: stub relaunch should fail" >&2; exit 1; fi
+[[ "${START_REASON}" == rust_launch_failed ]] || { echo "FAIL: reopen start reason ${START_REASON}" >&2; exit 1; }
+! grep -Fxq -- --create-store "${SPAWNED}" || { echo "FAIL: Rust reopen carries --create-store" >&2; exit 1; }
+SH
+  bash "${probe}" "${lib}" "${probe_root}"
+}
+
+check_txgen_datadir_guard() {
+  local probe="${TMP_ROOT}/txgen-datadir-guard.sh" probe_root="${TMP_ROOT}/txgen-datadir-guard" lib="${TMP_ROOT}/txgen-datadir-guard-lib.sh"
+  mkdir -p -- "${probe_root}/go-node" "${probe_root}/rust-node"
+  ln -s -- "${probe_root}/rust-node" "${probe_root}/rust-alias"
+  extract_slices "${lib}" "txgen_datadir_guard()" "wait_rust_accept()"
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+probe_root="$2"
+GO_DIR="${probe_root}/go-node"; RUST_DIR="${probe_root}/rust-node"; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"
+TXGEN_BIN="${probe_root}/rubin-txgen"; SPAWNED="${probe_root}/txgen-argv"; DETERMINISTIC_TX_FEE=1; TX_TO_KEY=to
+TX_FROM_KEY_FILE="${probe_root}/from-key.hex"; printf 'k\n' >"${TX_FROM_KEY_FILE}"
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" >"%s"\nexit 1\n' "${SPAWNED}" >"${TXGEN_BIN}"; chmod +x "${TXGEN_BIN}"
+bounded_mesh() { "$@"; }
+cleanup_tx_from_key_file() { :; }
+TX_REASON=""
+if submit_rust_tx; then echo "FAIL: stub txgen should fail" >&2; exit 1; fi
+[[ "${TX_REASON}" == rust_submit_txgen_failed ]] || { echo "FAIL: submit_rust_tx reason ${TX_REASON}" >&2; exit 1; }
+python3 - "${SPAWNED}" "${GO_DIR}" "${RUST_RPC_ADDR}" <<'PY'
+import sys
+argv = open(sys.argv[1], encoding="utf-8").read().splitlines()
+if argv[argv.index("--datadir") + 1] != sys.argv[2] or argv[argv.index("--submit-to") + 1] != sys.argv[3]:
+    sys.exit(f"submit_rust_tx txgen argv {argv}")
+PY
+expect_guard_refused() {
+  TX_REASON=""
+  if txgen_datadir_guard "${TXGEN_BIN}" "$@" --submit-to "${GO_RPC_ADDR}"; then echo "FAIL: guard accepted $*" >&2; exit 1; fi
+  [[ "${TX_REASON}" == cross_client_datadir_argv ]] || { echo "FAIL: guard reason ${TX_REASON} for $*" >&2; exit 1; }
+}
+expect_guard_refused --datadir "${RUST_DIR}"
+expect_guard_refused --datadir "${probe_root}/rust-alias"
+expect_guard_refused --datadir "${probe_root}/missing"
+expect_guard_refused --datadir ""
+expect_guard_refused
+TX_REASON=""; txgen_datadir_guard "${TXGEN_BIN}" --datadir "${GO_DIR}" || { echo "FAIL: guard refused the Go datadir" >&2; exit 1; }
+GO_DIR="${probe_root}/rust-alias"; rm -f -- "${SPAWNED}"; TX_REASON=""
+if submit_go_tx; then echo "FAIL: submit_go_tx accepted the Rust datadir" >&2; exit 1; fi
+[[ "${TX_REASON}" == cross_client_datadir_argv && ! -e "${SPAWNED}" ]] || { echo "FAIL: submit_go_tx reason ${TX_REASON} or txgen spawned" >&2; exit 1; }
+SH
+  bash "${probe}" "${lib}" "${probe_root}"
+}
+
+check_initial_convergence_wait() {
+  local probe="${TMP_ROOT}/initial-convergence.sh" probe_root="${TMP_ROOT}/initial-convergence" lib="${TMP_ROOT}/initial-convergence-lib.sh"
+  mkdir -p -- "${probe_root}"
+  extract_slices "${lib}" "tx_capture_reason()" "tx_sidecar_reason()" "tip_matches()" "wait_go_converge_to_rust_mined_block()" "parse_restart_tip_sidecar()" "rust_restart_start_reason()" "partition_capture_tip()" "capture_go_reorg_metrics()"
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+probe_root="$2"
+MESH_TIMEOUT=1; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"; TX_PATH_MODE=0; RUST_RESTART_MODE=0; PARTITION_HEAL_REORG_MODE=0
+INITIAL_GO_TIP_JSON="${probe_root}/go-tip.json"; INITIAL_RUST_TIP_JSON="${probe_root}/rust-tip.json"
+capture_rpc_sidecar() { local src; [[ "$1" == go ]] && src="${GO_TIP_INPUT}" || src="${RUST_TIP_INPUT}"; cp -- "${src}" "$5"; }
+tip() { printf '{"best_known_height":%s,"has_tip":%s,"height":%s,"in_ibd":false,"tip_hash":%s}\n' "$2" "$3" "$2" "$4" >"${probe_root}/$1.json"; printf '%s\n' "${probe_root}/$1.json"; }
+aa="\"$(printf 'a%.0s' {1..64})\""; bb="\"$(printf 'b%.0s' {1..64})\""
+go101="$(tip go101 101 true "${aa}")"; rust101="$(tip rust101 101 true "${aa}")"; rust100="$(tip rust100 100 true "${bb}")"; rust101b="$(tip rust101b 101 true "${bb}")"
+absent="$(tip absent null false null)"; rust_zero="$(tip rustzero 0 true "${aa}")"
+printf '{"has_tip":false,"tip_hash":null}\n' >"${probe_root}/absent-no-height.json"
+expect_match() {
+  GO_TIP_INPUT="$1"; RUST_TIP_INPUT="$2"; rm -f -- "${INITIAL_RUST_TIP_JSON}"
+  wait_initial_convergence || { echo "FAIL: initial convergence rejected $1 $2: ${PARTITION_REASON}" >&2; exit 1; }
+  cmp -s -- "$2" "${INITIAL_RUST_TIP_JSON}" || { echo "FAIL: initial Rust tip capture is not the accepted answer" >&2; exit 1; }
+}
+expect_reason() {
+  GO_TIP_INPUT="$2"; RUST_TIP_INPUT="$3"
+  if wait_initial_convergence; then echo "FAIL: initial convergence accepted $2 $3" >&2; exit 1; fi
+  [[ "${PARTITION_REASON}" == "$1" ]] || { echo "FAIL: initial convergence reason ${PARTITION_REASON}, want $1" >&2; exit 1; }
+}
+TX_PATH_MODE=3
+expect_match "${go101}" "${rust101}"
+expect_reason initial_convergence_timeout "${go101}" "${rust100}"
+expect_reason initial_convergence_timeout "${go101}" "${rust101b}"
+expect_reason initial_convergence_go_tip_tip_absent "${absent}" "${absent}"
+TX_PATH_MODE=0
+expect_match "${absent}" "${absent}"
+expect_reason initial_convergence_timeout "${absent}" "${rust_zero}"
+expect_reason initial_convergence_timeout "${go101}" "${absent}"
+expect_reason initial_convergence_timeout "${absent}" "${probe_root}/absent-no-height.json"
+SH
+  bash "${probe}" "${lib}" "${probe_root}"
+}
+
 extract_proxy_go_local_addr() {
   python3 - "${HARNESS}" "${PROXY_GO_LOCAL_ADDR_LIB}" <<'PY'
 from pathlib import Path
@@ -497,7 +665,7 @@ rust_started = "2026-05-12T10:00:01Z"
 def dump(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-def node(impl: str, create_store: bool = False) -> dict:
+def node(impl: str, create_store: bool) -> dict:
     is_go = impl == "go"
     name = "node-go" if is_go else "node-rust"
     binary = go_bin if is_go else rust_bin
@@ -647,7 +815,7 @@ restart_info = {
     "new_pid": 41002,
     "new_rpc_endpoint": rust_rpc,
     "new_started_at": rust_started,
-    "old_command_argv": node("rust", False)["command_argv"],
+    "old_command_argv": node("rust", True)["command_argv"],
     "old_p2p_endpoint": "127.0.0.1:51031",
     "old_pid": 41020,
     "old_pid_stopped": True,
@@ -856,8 +1024,8 @@ dump(artifact_root / "rust-converge-tip.json", {"best_known_height": height, "ha
 dump(artifact_root / "rust-missing-tx-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": missing_tx_hash})
 partition_proxy = "127.0.0.1:53010"
 partition_go_peer = "127.0.0.1:53011"
-partition_nodes = [node("go", False), node("rust", False)]
-partition_nodes[1]["command_argv"][-1] = partition_proxy
+partition_nodes = [node("go", False), node("rust", True)]
+partition_nodes[1]["command_argv"][-2] = partition_proxy
 partition_nodes[1]["command"] = " ".join(partition_nodes[1]["command_argv"])
 partition_peer_connectivity = {"bidirectional_observed": False, "counterpart_links": {"go_peer_snapshot_expected_addr": None, "rust_outbound_local_addr": None, "rust_outbound_pid": None, "rust_outbound_remote_addr": None, "rust_peer_snapshot_expected_addr": None}, "go_peer_snapshot": {"count": 0, "peers": []}, "go_to_rust": False, "rust_peer_snapshot": {"count": 0, "peers": []}, "rust_to_go": False}
 partition_final = {"peer_snapshots_rechecked": True, "process_identity_rechecked": True, "producer_side": True, "rust_outbound_link_rechecked": False, "rust_outbound_local_addr": None, "rust_outbound_pid": None, "rust_outbound_remote_addr": None}
@@ -926,8 +1094,8 @@ bad_partition = json.loads(json.dumps(partition_report)); bad_partition["peer_co
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["peer_connectivity"]["go_peer_snapshot"]["count"] = False; dump(artifact_root / "partition-peer-connectivity-bool-count-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["final_verification"]["rust_outbound_link_rechecked"] = True; dump(root / "partition-final-verification-overclaim-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["nodes"][0]["rpc_endpoint_process_backed"] = False; dump(artifact_root / "partition-unbacked-node-report.json", bad_partition)
-bad_partition = json.loads(json.dumps(partition_report)); bad_partition["nodes"][1]["command_argv"][-1] = go_p2p; bad_partition["nodes"][1]["command"] = " ".join(bad_partition["nodes"][1]["command_argv"]); dump(artifact_root / "partition-rust-peer-argv-mismatch-report.json", bad_partition)
-bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["partition_proxy_endpoint"] = go_p2p; bad_partition["nodes"][1]["command_argv"][-1] = go_p2p; bad_partition["nodes"][1]["command"] = " ".join(bad_partition["nodes"][1]["command_argv"]); bad_partition["observations"]["pre_partition"]["rust_peer_snapshot"] = str(artifact_root / "partition-direct-pre-rust-peers.json"); bad_partition["observations"]["heal"]["rust_peer_snapshot"] = str(artifact_root / "partition-direct-heal-rust-peers.json"); dump(artifact_root / "partition-direct-proxy-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["nodes"][1]["command_argv"][-2] = go_p2p; bad_partition["nodes"][1]["command"] = " ".join(bad_partition["nodes"][1]["command_argv"]); dump(artifact_root / "partition-rust-peer-argv-mismatch-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["partition_proxy_endpoint"] = go_p2p; bad_partition["nodes"][1]["command_argv"][-2] = go_p2p; bad_partition["nodes"][1]["command"] = " ".join(bad_partition["nodes"][1]["command_argv"]); bad_partition["observations"]["pre_partition"]["rust_peer_snapshot"] = str(artifact_root / "partition-direct-pre-rust-peers.json"); bad_partition["observations"]["heal"]["rust_peer_snapshot"] = str(artifact_root / "partition-direct-heal-rust-peers.json"); dump(artifact_root / "partition-direct-proxy-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["go_partition_tip"] = {"height": height, "hash": disconnected_go_hash}; bad_partition["observations"]["fork"]["go_mine"] = str(artifact_root / "partition-go-disconnected-mine.json"); bad_partition["observations"]["fork"]["go_tip"] = str(artifact_root / "partition-go-disconnected-tip.json"); bad_partition["observations"]["fork"]["go_block"] = str(artifact_root / "partition-go-disconnected-block.json"); dump(root / "partition-disconnected-go-fork-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["fork"]["rust_mine_1"] = str(artifact_root / "partition-rust-same-fork-mine.json"); bad_partition["observations"]["fork"]["rust_block_1"] = str(artifact_root / "partition-rust-same-fork-block.json"); dump(root / "partition-same-first-rust-fork-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["rust_winning_tip"] = {"height": rust_skip_height, "hash": rust_skip_hash}; bad_partition["proof"]["final_go_tip"] = {"height": rust_skip_height, "hash": rust_skip_hash}; bad_partition["proof"]["final_rust_tip"] = {"height": rust_skip_height, "hash": rust_skip_hash}; bad_partition["observations"]["fork"]["rust_mine_2"] = str(artifact_root / "partition-rust-skip-mine.json"); bad_partition["observations"]["fork"]["rust_tip"] = str(artifact_root / "partition-rust-skip-tip.json"); bad_partition["observations"]["fork"]["rust_block_2"] = str(artifact_root / "partition-rust-skip-block.json"); bad_partition["observations"]["reorg"]["go_tip"] = str(artifact_root / "partition-final-go-skip-tip.json"); bad_partition["observations"]["reorg"]["rust_tip"] = str(artifact_root / "partition-final-rust-skip-tip.json"); bad_partition["observations"]["reorg"]["go_tip_block"] = str(artifact_root / "partition-final-go-skip-block.json"); bad_partition["observations"]["reorg"]["rust_tip_block"] = str(artifact_root / "partition-final-rust-skip-block.json"); dump(artifact_root / "partition-skip-height-rust-winner-report.json", bad_partition)
@@ -942,7 +1110,7 @@ bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observa
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["reorg"]["go_metrics"] = str(artifact_root / "partition-go-metrics.json"); dump(artifact_root / "partition-metrics-json-report.json", bad_partition)
 tx_report = {
     **mesh_report,
-    "nodes": [node("go"), node("rust")],
+    "nodes": [node("go", False), node("rust", True)],
     "go_submit": {
         "get_tx_path": str(artifact_root / "go-get-tx.json"),
         "rpc_endpoint": go_rpc,
@@ -963,6 +1131,12 @@ tx_report = {
     "tx_path": tx_path,
 }
 dump(root / "tx-report.json", tx_report)
+dump(root / "tx-rust-without-create-report.json", {**tx_report, "nodes": [node("go", False), node("rust", False)]})
+dump(root / "tx-go-with-create-report.json", {**tx_report, "nodes": [node("go", True), node("rust", True)]})
+dump(root / "mesh-rust-without-create-report.json", {**mesh_report, "nodes": [node("go", True), node("rust", False)]})
+dump(root / "restart-old-without-create-report.json", {**restart_report, "rust_restart": {**restart_info, "old_command_argv": node("rust", False)["command_argv"]}})
+dump(root / "restart-new-with-create-report.json", {**restart_report, "nodes": [node("go", False), node("rust", True)], "rust_restart": {**restart_info, "new_command_argv": node("rust", True)["command_argv"]}})
+bad_partition = json.loads(json.dumps(partition_report)); del bad_partition["nodes"][1]["command_argv"][-1]; bad_partition["nodes"][1]["command"] = " ".join(bad_partition["nodes"][1]["command_argv"]); dump(root / "partition-rust-without-create-report.json", bad_partition)
 converge_report = {
     **tx_report,
     "go_converge": {
@@ -1007,7 +1181,7 @@ dump(rust_tx_marker, {
 })
 rust_converge_report = {
     **mesh_report,
-    "nodes": [node("go"), node("rust")],
+    "nodes": [node("go", False), node("rust", True)],
     "go_accept": {
         "get_tx_path": str(artifact_root / "go-accept-get-tx.json"),
         "raw_hex": tx_hex,
@@ -1432,6 +1606,10 @@ extract_wait_peer_snapshot
 extract_capture_go_reorg_metrics
 extract_wait_peer_snapshot_state
 check_prepare_tx_chainstate_cleanup
+check_prepare_tx_chainstate_leaves_rust_empty
+check_rust_datadir_guard
+check_txgen_datadir_guard
+check_initial_convergence_wait
 check_proxy_go_local_addr_reason
 check_wait_peer_snapshot_normalizes
 check_capture_go_reorg_metrics_reason
@@ -1445,7 +1623,6 @@ source "${CHECK_REPORT_LIB}"
 [[ "$(tx_path_prepare_reason tx_chainstate_unrelated 3)" == "tx_chainstate_unrelated" ]] || { echo "FAIL: non-go-submit prep reason should remain unchanged" >&2; exit 1; }
 [[ "$(rust_restart_prepare_reason go_submit_keygen_failed)" == "rust_restart_keygen_failed" ]] || { echo "FAIL: rust restart keygen prep reason was not remapped" >&2; exit 1; }
 [[ "$(rust_restart_prepare_reason go_submit_mine_timeout)" == "rust_restart_chainstate_mine_timeout" ]] || { echo "FAIL: rust restart mine prep reason was not remapped" >&2; exit 1; }
-[[ "$(rust_restart_prepare_reason go_submit_chainstate_copy_failed)" == "rust_restart_chainstate_copy_failed" ]] || { echo "FAIL: rust restart copy prep reason was not remapped" >&2; exit 1; }
 [[ "$(rust_restart_prepare_reason "")" == "rust_restart_chainstate_prepare_failed" ]] || { echo "FAIL: rust restart empty prep reason fallback was not remapped" >&2; exit 1; }
 REPORT_LIST="${TMP_ROOT}/reports.txt"
 write_reports >"${REPORT_LIST}"
@@ -1780,4 +1957,10 @@ expect_fail_contains "empty report" "report is empty" "${HARNESS}" --check-repor
 expect_fail_contains "malformed report" "report malformed JSON" "${HARNESS}" --check-report "${TMP_ROOT}/malformed.json"
 expect_fail_contains "oversized report" "report is too large" "${HARNESS}" --check-report "${TMP_ROOT}/oversized.json"
 
+expect_fail_contains "tx report Rust argv without --create-store" "node command_argv does not match exact launched argv" check_report "${TMP_ROOT}/tx-rust-without-create-report.json" offline producer-tx
+expect_fail_contains "tx report Go argv with --create-store" "node command_argv does not match exact launched argv" check_report "${TMP_ROOT}/tx-go-with-create-report.json" offline producer-tx
+expect_fail_contains "mesh report Rust argv without --create-store" "node command_argv does not match exact launched argv" "${HARNESS}" --check-report "${TMP_ROOT}/mesh-rust-without-create-report.json"
+expect_fail_contains "restart old Rust argv without --create-store" "rust_restart old argv mismatch" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart-old-without-create-report.json"
+expect_fail_contains "restart new Rust argv with --create-store" "node command_argv does not match exact launched argv" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart-new-with-create-report.json"
+expect_fail_contains "partition Rust argv without --create-store" "node command_argv does not match exact launched argv" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition-rust-without-create-report.json"
 printf 'PASS: mixed-client mesh check-report public/internal boundaries are covered\n'
