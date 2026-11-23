@@ -87,7 +87,7 @@ type Store struct {
 	closed                       bool
 	dependentView                bool // one synchronous consumer of committed P
 	sourceBorrows                uint64
-	sourceClaimed                bool
+	sourceStage                  *SourceStagePinV1
 	directory                    filelock.IdentityV1
 	self                         *Store
 	latchRequested, latchRenewed bool // the one coalesced RAM latch request; one recorded since the latest latch decision
@@ -411,8 +411,12 @@ func (s *Store) Close() error {
 	return s.closeLocked()
 }
 
-// closeLocked disposes the transaction, pending file and latch request before releasing the lock.
 func (s *Store) closeLocked() error {
+	if s.sourceStage != nil {
+		s.sourceStage.Clear()
+		s.sourceStage.ClearQuota()
+		s.sourceStage = nil
+	}
 	if s.tx != nil {
 		s.tx.done, s.tx = true, nil
 	}
