@@ -156,8 +156,8 @@ func (o *SourceOwnerV1) releaseRecord(d *sourceRelease) []byte {
 }
 
 // readRelease binds bounded record bytes to the named inode.
-func readRelease(r *sourceRoot, leaf string) ([]byte, filelock.IdentityV1, error) {
-	f, err := openSourceFile(r, leaf, nil)
+func readRelease(r *sourceRoot) ([]byte, filelock.IdentityV1, error) {
+	f, err := openSourceFile(r, releaseFile, nil)
 	if err != nil {
 		return nil, filelock.IdentityV1{}, err
 	}
@@ -294,7 +294,7 @@ func (o *SourceOwnerV1) qualifyReleaseBacking(f *os.File, d *sourceRelease, scra
 
 // openRelease binds the actual marker inode and its bounded record.
 func (o *SourceOwnerV1) openRelease(r *sourceRoot) error {
-	record, marker, err := readRelease(r, releaseFile)
+	record, marker, err := readRelease(r)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -469,7 +469,7 @@ func (d *sourceRelease) checkMarker(record []byte, id filelock.IdentityV1, err e
 
 // requireMarker confirms that the named marker is the expected record.
 func (d *sourceRelease) requireMarker(r *sourceRoot) error {
-	present, err := d.checkMarker(readRelease(r, releaseFile))
+	present, err := d.checkMarker(readRelease(r))
 	if err != nil || !present {
 		return ErrIntegrityV1
 	}
@@ -486,7 +486,7 @@ func (d *sourceRelease) checkReleaseScratch(r *sourceRoot) (bool, error) {
 		return false, ErrIntegrityV1
 	}
 	if d.pending {
-		present, err := d.checkMarker(readRelease(r, releaseFile))
+		present, err := d.checkMarker(readRelease(r))
 		if !present {
 			return false, err
 		}
@@ -752,7 +752,7 @@ func (o *SourceOwnerV1) releaseBoundary(r *sourceRoot, d *sourceRelease) (bool, 
 	if err != nil {
 		return false, err
 	}
-	present, err := d.checkMarker(readRelease(r, releaseFile))
+	present, err := d.checkMarker(readRelease(r))
 	if err != nil || present != listed || !d.acceptMarkerPresence(present) {
 		return false, ErrIntegrityV1
 	}
