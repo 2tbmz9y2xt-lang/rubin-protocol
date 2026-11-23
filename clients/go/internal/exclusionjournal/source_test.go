@@ -36,7 +36,11 @@ func (f *sourceCountedFile) ReadAt(dst []byte, off int64) (int, error) {
 // TestSourceVerifiedReadWindows changes backing after qualification and before a partial read.
 func TestSourceVerifiedReadWindows(t *testing.T) {
 	t.Run("refused-file-allocates-less-than-one-window", func(t *testing.T) {
-		_, o, _, m, _, _ := sourcePreparedBundle(t)
+		_, o, dir, m, parts, _ := sourcePreparedBundle(t)
+		unissued := sourceForeign(m)
+		unissued.Parts = slices.Clone(m.Parts)
+		paths := sourcePaths(dir, unissued.name(o.id))
+		sourceLeaveUnissued(t, o, unissued, parts, paths.stage, nil)
 		m.Parts[0].Length++
 		sourceAccount(t, func(a *mdbx.OperationAccount) {
 			visit := func(SourcePartV1) error { t.Fatal("refused file was visited"); return nil }
@@ -55,6 +59,12 @@ func TestSourceVerifiedReadWindows(t *testing.T) {
 			check("size mismatch")
 			m.Parts[1].Length--
 			check("header mismatch at matching size")
+			m = unissued
+			m.Parts[1].Length++
+			image := sourceReadFile(t, paths.capture)
+			copy(image, m.header(o.id))
+			sourceMust(t, os.WriteFile(paths.capture, append(image, 0), 0o600))
+			check("changed on-disk size and matching header of an unissued capture")
 		})
 	})
 	t.Run("conditional-length-crosses-window", func(t *testing.T) {
@@ -347,7 +357,7 @@ func sourceID() policycontrol.Identity {
 }
 
 func sourceLimits() SourceLimitsV1 {
-	return SourceLimitsV1{Bytes: 8 << 20, Files: 8, Scans: 64, RAM: 1 << 20, Headers: 256, Descriptors: 4, Overhead: 4096}
+	return SourceLimitsV1{Bytes: 8 << 20, Files: 8, Scans: 64, RAM: 1 << 20, Headers: 256, Descriptors: 5, Overhead: 4096}
 }
 
 func sourceMust(t *testing.T, err error) {

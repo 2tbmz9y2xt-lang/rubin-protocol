@@ -14,6 +14,18 @@ type sourceRoot struct {
 	pin *os.File
 }
 
+func (r *sourceRoot) renameExclusive(from, to string) error {
+	return renameSourceAt(int(r.pin.Fd()), from, to)
+}
+
+func (r *sourceRoot) pinFile(name string, id filelock.IdentityV1) (*os.File, error) {
+	f, err := openSourceFile(r, name, ErrIdentityV1, id)
+	if err != nil {
+		return nil, ErrIdentityV1
+	}
+	return f, nil
+}
+
 const sourceInitDirectory = "." + sourceDirectory + ".init"
 
 func (o *SourceOwnerV1) withRoot(open func(*os.Root) (*os.Root, error), use func(*sourceRoot) error) error {
@@ -111,7 +123,7 @@ func publishSourceRoot(parent int) (*os.File, os.FileInfo, error) {
 	if err := pin.Sync(); err != nil {
 		return pin, nil, err
 	}
-	return pin, info, renameSourceInit(parent)
+	return pin, info, renameSourceAt(parent, sourceInitDirectory, sourceDirectory)
 }
 
 // openSourceInit replaces only an empty directory at the reserved name and pins the replacement.
@@ -156,15 +168,45 @@ func (o *SourceOwnerV1) openSourceRoot() error {
 		if err := o.openRelease(r); err != nil {
 			return err
 		}
-		if _, err := o.census(r); err != nil || o.release == nil {
+		used, err := o.census(r, false)
+		if err != nil {
 			return err
 		}
-		if !o.manifestFits(o.release.manifest, o.release.size) {
-			return ErrCapacityV1
+		if d := o.release; d != nil {
+			if !o.manifestFits(d.manifest, d.size) {
+				return ErrCapacityV1
+			}
+			if _, err := o.releaseBacking(r, d, make([]byte, scratchBytes)); err != nil {
+				return err
+			}
 		}
-		_, err := o.releaseBacking(r, o.release, make([]byte, scratchBytes))
-		return err
+		if used.stage.held() {
+			return o.restoreHeldStage(r, used.stage)
+		}
+		return o.adoptStage(r, used)
 	})
+}
+
+// restoreHeldStage verifies the restored name before adopting it.
+func (o *SourceOwnerV1) restoreHeldStage(r *sourceRoot, stage sourceDebt) error {
+	if err := o.retainStage(r, stage); err != nil {
+		return err
+	}
+	public := publicStagePrefix + stage.name
+	if err := o.ops.namespace((*sourceRoot).renameExclusive, r, stage.leaf, public); err != nil {
+		return err
+	}
+	if err := o.syncBoundRoot(r); err != nil {
+		return err
+	}
+	used, err := o.census(r, false)
+	if err != nil {
+		return err
+	}
+	if used.stage.leaf != public || used.stage.file != stage.file {
+		return ErrIdentityV1
+	}
+	return o.adoptStage(r, used)
 }
 
 // syncBoundRoot makes namespace changes durable and verifies current root reachability.

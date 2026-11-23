@@ -18,6 +18,23 @@ type sourceAuthorityStateV1 struct {
 	live  bool
 }
 
+// SourceStagePinV1 holds the staging file and the file still charged until directory sync.
+type SourceStagePinV1 struct {
+	File, Quota *os.File
+}
+
+// Clear closes the staging file.
+func (p *SourceStagePinV1) Clear() {
+	_ = p.File.Close()
+	p.File = nil
+}
+
+// ClearQuota closes the file held for quota accounting.
+func (p *SourceStagePinV1) ClearQuota() {
+	_ = p.Quota.Close()
+	p.Quota = nil
+}
+
 // BorrowSourceAuthorityV1 admits a source lifetime without holding a transaction or mutex.
 func (s *Store) BorrowSourceAuthorityV1() (*SourceAuthorityBorrowV1, error) {
 	if s == nil || s.self != s {
@@ -63,7 +80,7 @@ func (b *SourceAuthorityBorrowV1) BindingV1() (string, Identity, filelock.Identi
 }
 
 // WithSourceOwnerClaimV1 reserves the Store's sole source construction until success or unwinding.
-func (b *SourceAuthorityBorrowV1) WithSourceOwnerClaimV1(use func() error) (err error) {
+func (b *SourceAuthorityBorrowV1) WithSourceOwnerClaimV1(use func(*SourceStagePinV1) error) (err error) {
 	if b == nil || b.state == nil || use == nil {
 		return ErrClosed
 	}
@@ -73,21 +90,26 @@ func (b *SourceAuthorityBorrowV1) WithSourceOwnerClaimV1(use func() error) (err 
 	case !b.state.live:
 		s.mu.Unlock()
 		return ErrClosed
-	case s.sourceClaimed, s.sourceBorrows == math.MaxUint64:
+	case s.sourceStage != nil, s.sourceBorrows == math.MaxUint64:
 		s.mu.Unlock()
 		return ErrBusy
 	}
-	s.sourceClaimed = true
+	stage := new(SourceStagePinV1)
+	s.sourceStage = stage
 	s.sourceBorrows++
 	s.mu.Unlock()
 	success := false
 	defer func() {
 		s.mu.Lock()
-		s.sourceClaimed = success
+		if !success {
+			stage.Clear()
+			stage.ClearQuota()
+			s.sourceStage = nil
+		}
 		s.sourceBorrows--
 		s.mu.Unlock()
 	}()
-	err = use()
+	err = use(stage)
 	success = err == nil
 	return err
 }

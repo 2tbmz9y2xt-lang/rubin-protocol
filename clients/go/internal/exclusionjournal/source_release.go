@@ -35,12 +35,15 @@ type sourceRelease struct {
 func (o *SourceOwnerV1) ReleaseUnpublishedSourceV1(account *mdbx.OperationAccount, p *PreparedSourceV1, neverReferenced bool) error {
 	return o.operation(account, func() error {
 		if err := o.releaseAdmission(p, neverReferenced); err != nil {
+			if any(err) == any(ErrBusyV1) && o.debt.name == "" && o.stage.File != nil {
+				_ = o.withRoot(o.bindRoot, o.retireStageWitness)
+			}
 			return err
 		}
 		return o.withRoot(o.bindRoot, func(r *sourceRoot) error {
 			scratch := make([]byte, scratchBytes)
 			if o.release == nil {
-				if _, err := o.census(r); err != nil {
+				if err := o.releaseCensus(r); err != nil {
 					return err
 				}
 				d := &sourceRelease{name: p.name, sourceIncarnation: *p.incarnation, manifest: p.manifest}
@@ -58,7 +61,7 @@ func (o *SourceOwnerV1) releaseAdmission(p *PreparedSourceV1, proof bool) error 
 	if !proof || !o.hasReleaseAuthority(p) {
 		return ErrIntegrityV1
 	}
-	if p != nil && (o.debt.name != "" || o.release != nil && o.release.name != p.name) {
+	if p != nil && (cmp.Or(o.debt.name, o.pendingStage.name, o.observedStage) != "" || o.release != nil && o.release.name != p.name) {
 		return ErrBusyV1
 	}
 	return nil
@@ -68,7 +71,21 @@ func (o *SourceOwnerV1) hasReleaseAuthority(p *PreparedSourceV1) bool {
 	if p == nil {
 		return o.release != nil && o.release.reopened
 	}
-	return p.incarnation != nil && o.live[p.name] == p.incarnation
+	return p.incarnation != nil && p.incarnation.issued && o.live[p.name] == p.incarnation
+}
+
+func (o *SourceOwnerV1) releaseCensus(r *sourceRoot) error {
+	used, err := o.census(r, true)
+	err = used.admissionError(err)
+	if err == nil && used.stage.held() {
+		return ErrIntegrityV1
+	}
+	if err != nil || o.limits.Descriptors < 5 {
+		o.rememberPublicStage(r, used, false)
+	} else if o.adoptStage(r, used) != nil {
+		o.observedStage = used.stage.name
+	}
+	return err
 }
 
 func (o *SourceOwnerV1) releaseRecord(d *sourceRelease) []byte {
@@ -191,7 +208,7 @@ func (o *SourceOwnerV1) persistRelease(r *sourceRoot, d *sourceRelease, scratch 
 	if err := o.clearReleaseScratch(r); err != nil {
 		return err
 	}
-	if err := o.space(r, uint64(len(d.record))); err != nil {
+	if _, err := o.space(r, uint64(len(d.record)), sourceDebt{}); err != nil {
 		return err
 	}
 	if err := o.writeRelease(r, d.record); err != nil {
