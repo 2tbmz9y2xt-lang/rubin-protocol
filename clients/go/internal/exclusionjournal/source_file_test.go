@@ -52,7 +52,7 @@ func sourceRetryAfterFault(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, p
 
 func sourceRetryAndRead(t *testing.T, o *SourceOwnerV1, m SourceManifestV1, parts [][]byte, binding *sourceIncarnation) {
 	t.Helper()
-	sourceFailIf(t, sourcePrepare(t, o, m, parts).incarnation != binding, "retry changed the qualified capture")
+	sourceFailIf(t, binding == nil || sourcePrepare(t, o, m, parts).incarnation != binding, "retry changed the qualified capture")
 	sourceRead(t, o, m, parts)
 }
 
@@ -371,7 +371,7 @@ func TestSourcePartialCleanupRetry(t *testing.T) {
 	sourceModes(t, []string{"sparse", "linked", "replaced", "clamped", "allocation-growth"}, testSourcePhysicalCreditBounds)
 	sourceModes(t, []string{"pending-sync", "pending-late-unlink"}, testSourcePendingStageProgress)
 	sourceModes(t, []string{"bound-sync", "bound-late-unlink", "bound-disjoint", "bound-issued"}, testSourcePendingAliasCharge)
-	sourceModes(t, []string{"bound-reopen-alias-first", "bound-reopen-alias-last", "quota-sync", "quota-late-unlink", "quota-refused-unlink", "quota-reuse", "quota-overlap", "quota-replaced-observation", "quota-partial", "quota-unfunded", "quota-stage-alias"}, testSourceReopenedAliasCharge)
+	sourceModes(t, []string{"bound-reopen-alias-first", "bound-reopen-alias-last", "quota-sync", "quota-late-unlink", "quota-refused-unlink", "quota-refused-unlink-walk", "quota-reuse", "quota-overlap", "quota-replaced-observation", "quota-partial", "quota-unfunded", "quota-stage-alias"}, testSourceReopenedAliasCharge)
 	t.Run("pending-independent-alias-key", testSourcePendingIndependentCharge)
 	t.Run("allocation-domain", testSourceAllocationDomain)
 	t.Run("write-no-space", testSourceWriteNoSpace)
@@ -533,26 +533,25 @@ type sourceSpaceFixture struct {
 
 func sourceSpaceScene(t *testing.T, mode string) sourceSpaceFixture {
 	t.Helper()
-	m, parts := sourceBundle(1, false)
+	m, parts, limits := sourceBundleLimits()
 	parts[0] = bytes.Repeat([]byte{41}, 90_000)
 	m.Parts[0].Length = uint64(len(parts[0]))
 	size := sourceSize(t, m)
-	limits := sourceLimits()
 	s, o, dir := sourceScene(t, limits)
 	stage := filepath.Join(dir, sourceDirectory, ".staging-"+m.name(o.id))
 	length := uint64(16384)
-	if mode == "clamped" {
+	var data []byte
+	switch mode {
+	case "clamped":
 		length = size * 2
-	}
-	data := bytes.Repeat([]byte{19}, int(length))
-	if mode == "clamped" {
+		data = make([]byte, length)
 		for i := 0; i < len(data); i += sha256.Size {
 			block := sha256.Sum256([]byte(strconv.Itoa(i)))
 			copy(data[i:], block[:])
 		}
-	}
-	if mode == "sparse" || mode == "allocation-growth" {
-		data = nil
+	case "sparse", "allocation-growth":
+	default:
+		data = bytes.Repeat([]byte{19}, int(length))
 	}
 	sourceMust(t, os.WriteFile(stage, data, 0o600))
 	if data == nil {
@@ -845,10 +844,8 @@ func checkSourceIncomingPendingStage(t *testing.T, o *SourceOwnerV1, first, next
 func testSourcePendingAliasCharge(t *testing.T, mode string) {
 	m, parts, size, limits := sourceSizedBundle(t)
 	other := sourceForeign(m)
-	limits.Files, limits.Bytes = 1, size
-	if mode == "bound-disjoint" {
-		limits.Files, limits.Bytes = 2, 2*size
-	}
+	limits.Files = map[bool]uint64{false: 1, true: 2}[mode == "bound-disjoint"]
+	limits.Bytes = limits.Files * size
 	_, o, dir := sourceScene(t, limits)
 	paths := sourcePaths(dir, m.name(o.id))
 	saved := filepath.Join(dir, "retained-capture")
@@ -885,7 +882,7 @@ func testSourcePendingAliasCharge(t *testing.T, mode string) {
 }
 
 func testSourceReopenedAliasCharge(t *testing.T, mode string) {
-	capture, parts := sourceBundle(1, false)
+	capture, parts, limits := sourceBundleLimits()
 	anchor, anchorParts := capture, parts
 	quotaCase := strings.HasPrefix(mode, "quota-")
 	if quotaCase {
@@ -894,7 +891,6 @@ func testSourceReopenedAliasCharge(t *testing.T, mode string) {
 		anchorParts[0] = append(slices.Clone(parts[0]), 1)
 		anchor.Parts[0].Length++
 	}
-	limits := sourceLimits()
 	limits.Files, limits.Bytes = 2, sourceSize(t, anchor)+sourceSize(t, capture)
 	s, o, paths, _ := sourcePreparedScene(t, limits, anchor, anchorParts)
 	if mode == "quota-reuse" {
@@ -904,26 +900,26 @@ func testSourceReopenedAliasCharge(t *testing.T, mode string) {
 	path, stage := paths.capture, filepath.Join(paths.root, publicStagePrefix+key)
 	original, image := sourceLstat(t, path), sourceReadFile(t, path)
 	alias := filepath.Join(paths.root, strings.Repeat("f", 64))
-	if mode == "bound-reopen-alias-first" {
-		alias = filepath.Join(paths.root, strings.Repeat("0", 64))
-		moved := filepath.Join(paths.dir, "capture-inode")
-		sourceMust(t, os.Rename(path, moved))
-		sourceMust(t, os.Link(moved, alias))
-		sourceMust(t, os.Rename(moved, path))
-	} else if !quotaCase {
-		sourceMust(t, os.Link(path, alias))
-	}
-	sourceMust(t, os.Link(path, stage))
 	if !quotaCase {
+		if mode == "bound-reopen-alias-first" {
+			alias = filepath.Join(paths.root, strings.Repeat("0", 64))
+			moved := filepath.Join(paths.dir, "capture-inode")
+			sourceMust(t, os.Rename(path, moved))
+			sourceMust(t, os.Link(moved, alias))
+			sourceMust(t, os.Rename(moved, path))
+		} else {
+			sourceMust(t, os.Link(path, alias))
+		}
 		sourceUnchangedEntry(t, alias, original)
 	}
+	sourceMust(t, os.Link(path, stage))
 	s = sourceReopenStore(t, s, paths.dir)
 	o = sourceOpen(t, s, sourceID(), limits, nil)
 	public := o.stage.File
 	cause := sourceRetirementFault(t, o, heldStagePrefix+key, mode == "quota-late-unlink", mode == "quota-partial", func() {
 		sourceAbsent(t, paths.root, filepath.Base(stage), heldStagePrefix+key)
 	})
-	if mode == "quota-refused-unlink" {
+	if strings.HasPrefix(mode, "quota-refused-unlink") {
 		o.ops = realSourceFS
 		o.ops.remove = func(r *os.Root, _ string) error { sourceMust(t, r.Close()); return cause }
 	}
@@ -932,8 +928,7 @@ func testSourceReopenedAliasCharge(t *testing.T, mode string) {
 		binding := o.live[key]
 		o.ops = realSourceFS
 		sourceReadRefusal(t, o, capture, ErrBusyV1, "shared stage unlink still owes sync")
-		sourceFailIf(t, binding == nil || sourcePrepare(t, o, capture, parts).incarnation != binding, "reopened alias changed the qualified binding")
-		sourceRead(t, o, capture, parts)
+		sourceRetryAndRead(t, o, capture, parts, binding)
 		sourceUnchangedEntry(t, path, original)
 		sourceUnchangedEntry(t, alias, original, image)
 		assertSourceReleaseCharge(t, o, capture, 2, limits.Bytes)
@@ -946,36 +941,41 @@ func testSourceReopenedAliasCharge(t *testing.T, mode string) {
 		sourceFault(o, effect, cause, func() { t.Fatal("quota read reached a namespace effect") })
 	}
 	switch mode {
-	case "quota-refused-unlink":
-		sourceRead(t, o, anchor, anchorParts)
+	case "quota-refused-unlink", "quota-refused-unlink-walk":
+		if mode == "quota-refused-unlink" {
+			sourceRead(t, o, anchor, anchorParts)
+		} else {
+			withSourceEntries(t, o, func(r *sourceRoot, entries []os.DirEntry) {
+				_, _, err := o.censusStage(r, entries)
+				sourceMust(t, err)
+			})
+		}
 		checkSourcePinClosed(t, quota, o.stage.Quota)
 		sourceFailIf(t, o.debt.unlinkTried, "observed staging inode still has an unresolved unlink")
 		sourceUnchangedEntry(t, filepath.Join(paths.root, heldStagePrefix+key), original, image)
 		sourceRetryAfterFault(t, o, capture, parts)
-		return
 	case "quota-overlap", "quota-replaced-observation", "quota-partial", "quota-unfunded":
 		checkSourceQuotaOverlap(t, s, o, mode, capture, anchor, parts, anchorParts, path, original, quota, cause)
-		return
 	case "quota-stage-alias":
 		checkSourceQuotaStageAlias(t, o, capture, parts, path, quota)
-		return
+	default:
+		sourceRead(t, o, anchor, anchorParts)
+		o.ops = realSourceFS
+		sourceMust(t, os.Link(path, alias))
+		sourceReadRefusal(t, o, anchor, ErrCapacityV1, "another canonical name")
+		sourceMust(t, os.Remove(alias))
+		if mode == "quota-sync" {
+			saved := filepath.Join(o.dir, "original-anchor")
+			sourceMust(t, os.Rename(path, saved))
+			assertSourceReleaseCharge(t, o, anchor, 1, uint64(len(image)))
+			sourceMust(t, os.WriteFile(path, image, 0o600))
+			sourceReadRefusal(t, o, anchor, ErrCapacityV1, "independent capture occupant")
+			sourceMust(t, os.Remove(path))
+			sourceMust(t, os.Rename(saved, path))
+		}
+		sourcePrepareAndRead(t, o, capture, parts)
+		checkSourcePinClosed(t, quota, o.stage.Quota)
 	}
-	sourceRead(t, o, anchor, anchorParts)
-	o.ops = realSourceFS
-	sourceMust(t, os.Link(path, alias))
-	sourceReadRefusal(t, o, anchor, ErrCapacityV1, "another canonical name")
-	sourceMust(t, os.Remove(alias))
-	if mode == "quota-sync" {
-		saved := filepath.Join(o.dir, "original-anchor")
-		sourceMust(t, os.Rename(path, saved))
-		assertSourceReleaseCharge(t, o, anchor, 1, uint64(len(image)))
-		sourceMust(t, os.WriteFile(path, image, 0o600))
-		sourceReadRefusal(t, o, anchor, ErrCapacityV1, "independent capture occupant")
-		sourceMust(t, os.Remove(path))
-		sourceMust(t, os.Rename(saved, path))
-	}
-	sourcePrepareAndRead(t, o, capture, parts)
-	checkSourcePinClosed(t, quota, o.stage.Quota)
 }
 
 func checkSourceQuotaOverlap(t *testing.T, s *policycontrol.Store, o *SourceOwnerV1, mode string, capture, anchor SourceManifestV1, parts, anchorParts [][]byte, path string, original os.FileInfo, quota *os.File, cause error) {
@@ -1053,9 +1053,8 @@ func checkSourceQuotaStageAlias(t *testing.T, o *SourceOwnerV1, capture SourceMa
 	next := sourceForeign(sourceForeign(capture))
 	other := sourceForeign(next)
 	root := filepath.Dir(path)
-	_, donor, dir := sourceScene(t, sourceLimits())
-	name := sourcePrepare(t, donor, other, parts).name
-	sourceMust(t, os.WriteFile(filepath.Join(root, name), sourceReadFile(t, filepath.Join(dir, sourceDirectory, name)), 0o600))
+	_, _, donor, _ := sourcePreparedScene(t, sourceLimits(), other, parts)
+	sourceMust(t, os.WriteFile(filepath.Join(root, donor.key), sourceReadFile(t, donor.capture), 0o600))
 	stage := filepath.Join(root, publicStagePrefix+next.name(o.id))
 	sourceMust(t, os.Rename(path, stage))
 	sourceRead(t, o, other, parts)

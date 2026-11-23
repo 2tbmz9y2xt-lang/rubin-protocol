@@ -96,7 +96,7 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, forRel
 	if o.debt.unlinkTried {
 		_ = o.observeStageRemoval(r)
 	}
-	stage, prefix, stopErr := censusStage(r, entries)
+	stage, prefix, stopErr := o.censusStage(r, entries)
 	if stopErr != nil && stage.held() {
 		return sourceUsage{}, stopErr
 	}
@@ -447,28 +447,27 @@ func sourceHexKey(name string) bool {
 func (d sourceDebt) held() bool { return strings.HasPrefix(d.leaf, heldStagePrefix) }
 
 // censusStage returns the valid prefix and the first staging error.
-func censusStage(r *sourceRoot, entries []os.DirEntry) (sourceDebt, int, error) {
+func (o *SourceOwnerV1) censusStage(r *sourceRoot, entries []os.DirEntry) (sourceDebt, int, error) {
 	var stage sourceDebt
 	for i, entry := range entries {
-		next, err := readStageEntry(r, entry.Name())
+		next, err := o.readStageEntry(r, entry.Name())
 		if err != nil {
 			return stage, i, err
 		}
-		if next.name == "" {
-			continue
-		}
-		if stage.name != "" {
-			if stage.name == next.name && stage.held() != next.held() {
-				return stage, i, syscall.EEXIST
-			}
+		switch {
+		case next.name == "":
+		case stage.name == "":
+			stage = next
+		case stage.name == next.name && stage.held() != next.held():
+			return stage, i, syscall.EEXIST
+		default:
 			return stage, i, ErrBusyV1
 		}
-		stage = next
 	}
 	return stage, len(entries), nil
 }
 
-func readStageEntry(r *sourceRoot, leaf string) (sourceDebt, error) {
+func (o *SourceOwnerV1) readStageEntry(r *sourceRoot, leaf string) (sourceDebt, error) {
 	name, public := strings.CutPrefix(leaf, publicStagePrefix)
 	if !public {
 		name, _ = strings.CutPrefix(leaf, heldStagePrefix)
@@ -485,7 +484,9 @@ func readStageEntry(r *sourceRoot, leaf string) (sourceDebt, error) {
 		return sourceDebt{}, err
 	}
 	size := sourceFileSize(info)
-	return sourceDebt{name: key, leaf: leaf, size: size, observed: size, file: filelock.FileIdentityV1(info)}, nil
+	id := filelock.FileIdentityV1(info)
+	o.observeRetainedStage(leaf, id)
+	return sourceDebt{name: key, leaf: leaf, size: size, observed: size, file: id}, nil
 }
 
 func (d sourceDebt) qualifyStage(next *sourceDebt) error {
@@ -495,9 +496,7 @@ func (d sourceDebt) qualifyStage(next *sourceDebt) error {
 		return ErrIdentityV1
 	case d.name != next.name:
 		return ErrBusyV1
-	case d.held() && !next.held():
-		return ErrIdentityV1
-	case d.file != (filelock.IdentityV1{}) && d.file != next.file:
+	case d.held() && !next.held(), d.file != (filelock.IdentityV1{}) && d.file != next.file:
 		return ErrIdentityV1
 	default:
 		next.binding, next.qualified, next.unlinkTried = d.binding, d.qualified, d.unlinkTried
@@ -971,10 +970,17 @@ func (o *SourceOwnerV1) observeStageRemoval(r *sourceRoot) error {
 		o.pendingStage, o.debt = *d, sourceDebt{}
 		return nil
 	case sameSourceFile(info, d.file):
-		d.unlinkTried = false
-		o.stage.ClearQuota()
+		o.observeRetainedStage(d.leaf, d.file)
 	}
 	return ErrIdentityV1
+}
+
+// observeRetainedStage clears the unlink attempt once its protected inode is seen.
+func (o *SourceOwnerV1) observeRetainedStage(leaf string, id filelock.IdentityV1) {
+	if o.debt.unlinkTried && leaf == o.debt.leaf && id == o.debt.file {
+		o.debt.unlinkTried = false
+		o.stage.ClearQuota()
+	}
 }
 
 // claimStage verifies the pinned inode after renaming it.
