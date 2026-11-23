@@ -1228,24 +1228,26 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 		sourceFailIf(t, sourceReleaseHasOpenFile(t, backing), "completed release retained the backing descriptor")
 	})
 	sourceModes(t, []string{"marker-after-final-sync", "marker-and-stage-after-final-sync"}, func(t *testing.T, mode string) {
-		_, o, dir, m, parts, p := sourcePreparedBundle(t)
+		_, o, dir, m, _, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		marker := filepath.Join(root, releaseFile)
-		markerData := []byte("independent marker")
-		var markerInfo os.FileInfo
+		var keepReached func(string)
 		o.ops.remove = func(r *os.Root, name string) error {
+			sourceFailIf(t, name == releaseFile && keepReached != nil, "release retried removal of an independent marker")
 			if err := r.Remove(name); err != nil {
 				return err
 			}
 			if name == releaseFile {
 				o.ops.dirSync = func(pin *os.File) error {
+					o.ops.dirSync = (*os.File).Sync
 					if err := pin.Sync(); err != nil {
 						return err
 					}
 					if mode == "marker-and-stage-after-final-sync" {
 						sourceMust(t, os.WriteFile(filepath.Join(root, publicStagePrefix+p.name), []byte{42}, 0o600))
 					}
-					markerInfo = writeSourceEntry(t, marker, markerData)
+					sourceMust(t, os.WriteFile(marker, []byte("independent marker"), 0o600))
+					keepReached = sourceHeld(t, o)
 					return nil
 				}
 			}
@@ -1253,9 +1255,10 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 		}
 		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
 		sourcePrepareResult(t, o, sourceForeign(m), refusedSourceProducer(t), ErrBusyV1)
-		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
+		sourceFailIf(t, keepReached == nil, "release did not reach the final directory sync")
+		keepReached("refused release and preparation")
 		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
-		sourceUnchangedEntry(t, marker, markerInfo, markerData)
+		keepReached("refused release retry")
 		size, err := m.SizeV1()
 		sourceMust(t, err)
 		if mode == "marker-and-stage-after-final-sync" {
@@ -1303,8 +1306,8 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 			return r.Remove(name)
 		}
 		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
-		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
 		sourcePrepareResult(t, o, sourceForeign(m), refusedSourceProducer(t), ErrBusyV1)
+		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
 		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
 		size, err := m.SizeV1()
 		sourceMust(t, err)
@@ -2768,7 +2771,8 @@ func testSourceRefilledCanonical(t *testing.T) {
 		sourceFailIf(t, !sourceLstat(t, filepath.Join(root, releaseDetached)).IsDir(), "release changed the detached directory")
 		sourcePresence(t, root, releaseFile, true)
 	})
-	sourceModes(t, []string{"detach", "stage-claim", "stage-unlink"}, func(t *testing.T, phase string) {
+	sourceModes(t, []string{"detach", "stage-claim", "stage-unlink", "live-detach", "live-stage-claim", "live-stage-unlink"}, func(t *testing.T, mode string) {
+		phase, live := strings.CutPrefix(mode, "live-")
 		s, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		canonical := filepath.Join(root, p.name)
@@ -2806,13 +2810,15 @@ func testSourceRefilledCanonical(t *testing.T) {
 		sourcePresence(t, root, publicStagePrefix+p.name, phase == "detach")
 		sourcePresence(t, root, heldStagePrefix+p.name, phase == "stage-claim")
 		sourceMust(t, os.Remove(canonical))
-		fresh := sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil)
-		sourcePrepareResult(t, fresh, foreign, refusedSourceProducer(t), ErrBusyV1)
-		size, err := m.SizeV1()
-		sourceMust(t, err)
-		assertSourceReleaseCharge(t, fresh, m, 1, size)
-		sourceReleaseResult(t, fresh, nil, true, nil)
-		sourcePrepareAndRead(t, fresh, foreign, parts)
+		o.ops = realSourceFS
+		if !live {
+			o, p = sourceOpen(t, sourceReopenStore(t, s, dir), sourceID(), sourceLimits(), nil), nil
+			sourcePrepareResult(t, o, foreign, refusedSourceProducer(t), ErrBusyV1)
+			assertSourceReleaseCharge(t, o, m, 1, sourceSize(t, m))
+		}
+		sourceReleaseResult(t, o, p, true, nil)
+		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
+		sourcePrepareAndRead(t, o, foreign, parts)
 	})
 }
 
@@ -2982,6 +2988,7 @@ func testSourceDetachedRelease(t *testing.T) {
 		}
 		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
 		sourcePrepareResult(t, o, sourceForeign(m), refusedSourceProducer(t), ErrBusyV1)
+		sourceFailIf(t, o.debt != (sourceDebt{}) || o.observedStage != "" || o.stage.File != nil, "pending preparation claimed stage custody")
 		detached := filepath.Join(root, releaseDetached)
 		sourceUnchangedEntry(t, detached, backing)
 		sourceFailIf(t, !bytes.Equal(data, sourceReadFile(t, detached)), "release changed detached contents")
@@ -3185,6 +3192,7 @@ func testSourceBackingLinks(t *testing.T) {
 		}
 		sourceReleaseResult(t, o, p, true, syscall.EIO)
 		sourcePrepareResult(t, o, sourceForeign(m), refusedSourceProducer(t), ErrBusyV1)
+		sourceFailIf(t, o.debt != (sourceDebt{}) || o.observedStage != "" || o.stage.File != nil, "pending preparation claimed stage custody")
 		sourcePresence(t, root, held, mode == "alias-remove-before")
 		sourcePresence(t, root, releaseDetached, true)
 		sourcePrepareRefusal(t, o, sourceForeign(m), parts, ErrBusyV1)
