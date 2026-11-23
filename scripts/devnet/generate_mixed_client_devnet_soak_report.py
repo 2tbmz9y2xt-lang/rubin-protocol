@@ -474,6 +474,11 @@ def block_inclusion_error(block: dict[str, Any], txhex: str, txid: str, height: 
             reason = line[len(BLOCK_REASON_PREFIX):]
             return reason if SAFE_REASON.fullmatch(reason) else "convergence_block_parser_malformed_output"
     return "convergence_block_parser_failed"
+MINE_NEXT_KEYS = {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}
+def mine_next_keys_ok(mine: dict[str, Any], impl: str) -> bool:
+    if impl == "go":
+        return set(mine) == MINE_NEXT_KEYS | {"commit_state"} and mine.get("commit_state") == "committed"
+    return set(mine) == MINE_NEXT_KEYS
 def tx_converge_sidecar_error(mine: dict[str, Any], seen: dict[str, Any], mine_impl: str, seen_impl: str, by_impl: dict[str, dict[str, Any]], root: Path, txid: str, txhex: str) -> tuple[list[Path], str | None]:
     reason = "convergence_sidecar_invalid"
     mine_next, mine_next_path, err = source_load_json_detailed(mine.get("mine_next_path"), root, "convergence_sidecar_path_invalid", "convergence_sidecar_nonobject")
@@ -489,7 +494,7 @@ def tx_converge_sidecar_error(mine: dict[str, Any], seen: dict[str, Any], mine_i
     height, block_hash, tx_count = mine.get("height"), mine.get("block_hash"), mine.get("tx_count")
     if not jint(height) or not is_hex32(block_hash) or not jint(tx_count, 2):
         return [], reason
-    if set(mine_next) != {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"} or mine_next.get("implementation") != mine_impl or mine_next.get("rpc_endpoint") != by_impl[mine_impl]["rpc_endpoint"] or mine_next.get("request_path") != "/mine_next" or mine_next.get("mined") is not True or not jint(mine_next.get("height")) or mine_next.get("height") != height or mine_next.get("block_hash") != block_hash or not jint(mine_next.get("tx_count"), 2) or mine_next.get("tx_count") != tx_count or not ju64(mine_next.get("nonce")) or not ju64(mine_next.get("timestamp")):
+    if not mine_next_keys_ok(mine_next, mine_impl) or mine_next.get("implementation") != mine_impl or mine_next.get("rpc_endpoint") != by_impl[mine_impl]["rpc_endpoint"] or mine_next.get("request_path") != "/mine_next" or mine_next.get("mined") is not True or not jint(mine_next.get("height")) or mine_next.get("height") != height or mine_next.get("block_hash") != block_hash or not jint(mine_next.get("tx_count"), 2) or mine_next.get("tx_count") != tx_count or not ju64(mine_next.get("nonce")) or not ju64(mine_next.get("timestamp")):
         return [], reason
     block_keys = {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}
     for block, impl, endpoint in ((mine_block, mine_impl, by_impl[mine_impl]["rpc_endpoint"]), (seen_block, seen_impl, by_impl[seen_impl]["rpc_endpoint"])):
@@ -854,8 +859,7 @@ def restart_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     mine, load_err = (None, err) if err else load(p)  # type: ignore[arg-type]
     if load_err or not isinstance(mine, dict):
         return "restart_source_binding_contradiction:go_target_mine_next_invalid"
-    keys = {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}
-    if set(mine) != keys or mine.get("implementation") != "go" or mine.get("rpc_endpoint") != by_impl["go"]["rpc_endpoint"] or mine.get("request_path") != "/mine_next":
+    if not mine_next_keys_ok(mine, "go") or mine.get("implementation") != "go" or mine.get("rpc_endpoint") != by_impl["go"]["rpc_endpoint"] or mine.get("request_path") != "/mine_next":
         return "restart_source_binding_contradiction:go_target_mine_next_invalid"
     mine_height = mine.get("height")
     mine_tx_count = mine.get("tx_count")
@@ -1037,8 +1041,7 @@ def partition_mine_sidecar(path: Path, impl: str, rpc: str, minimum: int = 1) ->
     data, err = partition_load_sidecar(path, "partition_reorg_source_binding_contradiction:mine_sidecar_invalid")
     if err or data is None:
         return None, err
-    keys = {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}
-    if set(data) != keys or data.get("implementation") != impl or data.get("rpc_endpoint") != rpc or data.get("request_path") != "/mine_next":
+    if not mine_next_keys_ok(data, impl) or data.get("implementation") != impl or data.get("rpc_endpoint") != rpc or data.get("request_path") != "/mine_next":
         return None, "partition_reorg_source_binding_contradiction:mine_sidecar_invalid"
     if data.get("mined") is not True or not jint(data.get("height"), minimum) or not is_hex32(data.get("block_hash")) or not jint(data.get("tx_count"), 1) or not ju64(data.get("nonce")) or not ju64(data.get("timestamp")):
         return None, "partition_reorg_source_binding_contradiction:mine_sidecar_invalid"

@@ -136,9 +136,14 @@ def block_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, bl
         detail = parsed.get("err")
         fail(f"{label} block payload check failed: {detail if isinstance(detail, str) else 'block_basic_check rejected block'}")
     req(parsed.get("block_hash") == block_hash, f"{label} parsed block hash mismatch")
+MINE_NEXT_KEYS = {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}
+def mine_next_keys_ok(mine: dict, impl: str) -> bool:
+    if impl == "go":
+        return set(mine) == MINE_NEXT_KEYS | {"commit_state"} and mine.get("commit_state") == "committed"
+    return set(mine) == MINE_NEXT_KEYS
 def mine_sidecar(label: str, p: Path, impl: str, endpoint: str, min_height: int = 1) -> dict:
     mine = load_json_file(label, p)
-    req(set(mine) == {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}, f"{label} keys mismatch: {sorted(mine)}")
+    req(mine_next_keys_ok(mine, impl), f"{label} keys mismatch: {sorted(mine)}")
     req(mine.get("implementation") == impl and mine.get("rpc_endpoint") == endpoint and mine.get("request_path") == "/mine_next", f"{label} sidecar identity mismatch")
     req(mine.get("mined") is True and is_json_int(mine.get("height"), min_height) and hex32(mine.get("block_hash")) and is_json_int(mine.get("tx_count"), 1) and is_json_u64(mine.get("nonce")) and is_json_u64(mine.get("timestamp")), f"{label} malformed mine result")
     return mine
@@ -609,7 +614,7 @@ if restart_mode:
     restart_tip_sidecar("catch_up_tip_path", "rust", nodes_by_impl["rust"]["rpc_endpoint"], catch_up_height, restart_info["catch_up_tip"])
     mine_next_path = artifact_file("rust_restart.go_target_mine_next_path", restart_info.get("go_target_mine_next_path"), artifact_root)
     mine_next = load_json_file("rust_restart.go_target_mine_next_path", mine_next_path)
-    req(set(mine_next) == {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}, f"rust_restart.go_target_mine_next_path keys mismatch: {sorted(mine_next)}")
+    req(mine_next_keys_ok(mine_next, "go"), f"rust_restart.go_target_mine_next_path keys mismatch: {sorted(mine_next)}")
     mine_height = json_int(mine_next.get("height"), "rust_restart.go_target_mine_next_path.height", 0)
     mine_hash = json_hex32(mine_next.get("block_hash"), "rust_restart.go_target_mine_next_path.block_hash")
     mine_tx_count = json_int(mine_next.get("tx_count"), "rust_restart.go_target_mine_next_path.tx_count", 1)
@@ -747,7 +752,7 @@ if tx_mode:
         converge_block_path = artifact_file(f"{converge_label}.block_path", converge.get("block_path"), artifact_root)
         req(len({mine_next_path, mine_block_path, converge_tip_path, converge_block_path}) == 4, "converge sidecar paths are not pairwise distinct")
         mine_next = load_json_file(f"{mine_label}.mine_next", mine_next_path)
-        req(set(mine_next) == {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}, f"{mine_label}.mine_next keys mismatch: {sorted(mine_next)}")
+        req(mine_next_keys_ok(mine_next, mine_impl), f"{mine_label}.mine_next keys mismatch: {sorted(mine_next)}")
         req(mine_next.get("implementation") == mine_impl and mine_next.get("rpc_endpoint") == nodes_by_impl[mine_impl]["rpc_endpoint"] and mine_next.get("request_path") == "/mine_next", f"{mine_label} mine_next sidecar identity mismatch")
         req(mine_next.get("mined") is True and mine_next.get("height") == height and mine_next.get("block_hash") == block_hash and mine_next.get("tx_count") == mine["tx_count"], f"{mine_label} mine_next sidecar does not match report")
         verify_block_inclusion_sidecar(f"{mine_label}.block_path", mine_block_path, txhex, txid, height, block_hash, mine["tx_count"], mine_impl, nodes_by_impl[mine_impl]["rpc_endpoint"], f"/get_block?height={height}")

@@ -661,7 +661,7 @@ restart_info = {
     "same_datadir": True,
 }
 dump(artifact_root / "rust-pre-restart-tip.json", {"best_known_height": 7, "has_tip": True, "height": 7, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": "127.0.0.1:51030", "tip_hash": "aa" * 32})
-dump(artifact_root / "go-restart-mine-next.json", {"block_hash": "bb" * 32, "height": 8, "implementation": "go", "mined": True, "nonce": 1777000001, "request_path": "/mine_next", "rpc_endpoint": go_rpc, "timestamp": 1777000000, "tx_count": 1})
+dump(artifact_root / "go-restart-mine-next.json", {"block_hash": "bb" * 32, "height": 8, "implementation": "go", "mined": True, "nonce": 1777000001, "request_path": "/mine_next", "rpc_endpoint": go_rpc, "timestamp": 1777000000, "tx_count": 1, "commit_state": "committed"})
 dump(artifact_root / "go-restart-target-tip.json", {"best_known_height": 8, "has_tip": True, "height": 8, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": "bb" * 32})
 dump(artifact_root / "rust-catch-up-tip.json", {"best_known_height": 8, "has_tip": True, "height": 8, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "bb" * 32})
 dump(restart_marker, {
@@ -810,7 +810,7 @@ def block_sidecar(impl: str, endpoint: str, block_hex_value: str, block_hash_val
 def tip_sidecar(impl: str, endpoint: str, block_hash_value: str, sidecar_height: int) -> dict:
     return {"best_known_height": sidecar_height, "has_tip": True, "height": sidecar_height, "implementation": impl, "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": endpoint, "tip_hash": block_hash_value}
 def mine_sidecar(impl: str, endpoint: str, block_hash_value: str, sidecar_height: int, count: int = tx_count) -> dict:
-    return {"block_hash": block_hash_value, "height": sidecar_height, "implementation": impl, "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": endpoint, "timestamp": 1, "tx_count": count}
+    return {"block_hash": block_hash_value, "height": sidecar_height, "implementation": impl, "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": endpoint, "timestamp": 1, "tx_count": count, **({"commit_state": "committed"} if impl == "go" else {})}
 def peer_snapshot(addr):
     peers = [] if addr is None else [{"addr": addr, "handshake_complete": True}]
     return {"count": len(peers), "peers": peers}
@@ -847,8 +847,8 @@ dump(artifact_root / "rust-mine-next.json", {"block_hash": block_hash, "height":
 dump(artifact_root / "rust-missing-tx-mine-next.json", {"block_hash": missing_tx_hash, "height": height, "implementation": "rust", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": rust_rpc, "timestamp": 1, "tx_count": tx_count})
 dump(artifact_root / "rust-corrupt-merkle-mine-next.json", {"block_hash": corrupt_block_hash, "height": height, "implementation": "rust", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": rust_rpc, "timestamp": 1, "tx_count": tx_count})
 dump(artifact_root / "rust-tx-count-mismatch-mine-next.json", {"block_hash": block_hash, "height": height, "implementation": "rust", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": rust_rpc, "timestamp": 1, "tx_count": 3})
-dump(artifact_root / "go-mine-next.json", {"block_hash": block_hash, "height": height, "implementation": "go", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": go_rpc, "timestamp": 1, "tx_count": tx_count})
-dump(artifact_root / "go-missing-tx-mine-next.json", {"block_hash": missing_tx_hash, "height": height, "implementation": "go", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": go_rpc, "timestamp": 1, "tx_count": tx_count})
+dump(artifact_root / "go-mine-next.json", {"block_hash": block_hash, "height": height, "implementation": "go", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": go_rpc, "timestamp": 1, "tx_count": tx_count, "commit_state": "committed"})
+dump(artifact_root / "go-missing-tx-mine-next.json", {"block_hash": missing_tx_hash, "height": height, "implementation": "go", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": go_rpc, "timestamp": 1, "tx_count": tx_count, "commit_state": "committed"})
 dump(artifact_root / "go-converge-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": block_hash})
 dump(artifact_root / "go-missing-tx-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": missing_tx_hash})
 dump(artifact_root / "go-corrupt-merkle-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": corrupt_block_hash})
@@ -1233,7 +1233,7 @@ dump(artifact_root / "go-restart-target-tip-float-height.json", bad_sidecar)
 bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["go_target_tip_path"] = str(artifact_root / "go-restart-target-tip-float-height.json")
 dump(root / "restart-go-target-tip-float-height.json", bad_restart)
-bad_mine_next = {"block_hash": "bb" * 32, "height": 8, "implementation": "go", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": go_rpc, "timestamp": 1, "tx_count": True}
+bad_mine_next = {"block_hash": "bb" * 32, "height": 8, "implementation": "go", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": go_rpc, "timestamp": 1, "tx_count": True, "commit_state": "committed"}
 dump(artifact_root / "go-restart-mine-next-bool-tx-count.json", bad_mine_next)
 bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["go_target_mine_next_path"] = str(artifact_root / "go-restart-mine-next-bool-tx-count.json")
@@ -1303,6 +1303,31 @@ dump(root / "converge-tx-count-mismatch.json", bad_converge)
 (root / "malformed.json").write_text("[", encoding="utf-8")
 with (root / "oversized.json").open("wb") as f:
     f.write(b" " * 1_000_001)
+mine_next_cases = (
+    ("partition-go", "partition-common-go-mine.json", partition_report, ("observations", "pre_partition", "common_go_mine"), ("no-commit", "not-committed")),
+    ("partition-rust", "partition-rust-mine-1.json", partition_report, ("observations", "fork", "rust_mine_1"), ("commit", "go-impl")),
+    ("restart-go", "go-restart-mine-next.json", restart_report, ("rust_restart", "go_target_mine_next_path"), ("no-commit", "not-committed")),
+    ("converge-rust", "rust-mine-next.json", converge_report, ("rust_mine", "mine_next_path"), ("commit", "go-impl")),
+    ("rust-conv-go", "go-mine-next.json", rust_converge_report, ("go_mine", "mine_next_path"), ("no-commit", "not-committed")),
+)
+mine_next_edits = {
+    "no-commit": lambda d: d.pop("commit_state"),
+    "not-committed": lambda d: d.__setitem__("commit_state", "not_committed"),
+    "commit": lambda d: d.__setitem__("commit_state", "committed"),
+    "go-impl": lambda d: d.__setitem__("implementation", "go"),
+}
+for site, sidecar_name, base_report, field, variants in mine_next_cases:
+    for variant in variants:
+        sidecar = json.loads((artifact_root / sidecar_name).read_text(encoding="utf-8"))
+        mine_next_edits[variant](sidecar)
+        sidecar_path = artifact_root / f"mine-next-{site}-{variant}-sidecar.json"
+        dump(sidecar_path, sidecar)
+        bad = json.loads(json.dumps(base_report))
+        target = bad
+        for key in field[:-1]:
+            target = target[key]
+        target[field[-1]] = str(sidecar_path)
+        dump(artifact_root / f"mine-next-{site}-{variant}.json", bad)
 print(root / "mesh-report.json")
 print(root / "tx-report.json")
 print(root / "converge-report.json")
@@ -1661,6 +1686,20 @@ expect_fail_contains "combined rust-submit tx-path flags reject" "tx-path modes 
 expect_pass_contains "producer tx internal check" "PASS: mixed_client_go_submit_rust_accept report structurally accepted" check_report "${TX_REPORT}" offline producer-tx
 expect_pass_contains "producer converge internal check" "PASS: mixed_client_go_submit_rust_mine_go_converge report structurally accepted" check_report "${CONVERGE_REPORT}" offline producer-tx
 expect_pass_contains "producer rust-submit converge internal check" "PASS: mixed_client_rust_submit_go_mine_rust_converge report structurally accepted" check_report "${RUST_SUBMIT_GO_MINE_REPORT}" offline producer-tx
+for variant in no-commit not-committed; do
+  expect_fail_contains "partition go mine_next ${variant}" "observations.pre_partition.common_go_mine keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/artifact-root/mine-next-partition-go-${variant}.json"
+  expect_generator_fail_contains "partition generator go mine_next ${variant}" "partition_reorg_source_binding_contradiction:mine_sidecar_invalid" --partition-heal-reorg-report "${TMP_ROOT}/artifact-root/mine-next-partition-go-${variant}.json"
+  expect_fail_contains "restart go target mine_next ${variant}" "rust_restart.go_target_mine_next_path keys mismatch" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/artifact-root/mine-next-restart-go-${variant}.json"
+  expect_generator_fail_contains "restart generator go target mine_next ${variant}" "restart_source_binding_contradiction:go_target_mine_next_invalid" --rust-restart-report "${TMP_ROOT}/artifact-root/mine-next-restart-go-${variant}.json"
+  expect_fail_contains "rust-submit go mine_next ${variant}" "go_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/artifact-root/mine-next-rust-conv-go-${variant}.json" offline producer-tx
+  expect_generator_fail_contains "rust-submit generator go mine_next ${variant}" "convergence_sidecar_invalid" --rust-submit-go-mine-rust-converge-report "${TMP_ROOT}/artifact-root/mine-next-rust-conv-go-${variant}.json"
+done
+expect_fail_contains "partition rust mine_next with commit_state" "observations.fork.rust_mine_1 keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/artifact-root/mine-next-partition-rust-commit.json"
+expect_generator_fail_contains "partition generator rust mine_next with commit_state" "partition_reorg_source_binding_contradiction:mine_sidecar_invalid" --partition-heal-reorg-report "${TMP_ROOT}/artifact-root/mine-next-partition-rust-commit.json"
+expect_fail_contains "converge rust mine_next with commit_state" "rust_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/artifact-root/mine-next-converge-rust-commit.json" offline producer-tx
+expect_generator_fail_contains "converge generator rust mine_next with commit_state" "convergence_sidecar_invalid" --go-submit-rust-mine-go-converge-report "${TMP_ROOT}/artifact-root/mine-next-converge-rust-commit.json"
+expect_fail_contains "partition rust mine_next named go" "observations.fork.rust_mine_1 sidecar identity mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/artifact-root/mine-next-partition-rust-go-impl.json"
+expect_fail_contains "converge rust mine_next named go" "rust_mine mine_next sidecar identity mismatch" check_report "${TMP_ROOT}/artifact-root/mine-next-converge-rust-go-impl.json" offline producer-tx
 expect_fail_contains "producer rejects mesh report" "producer tx validation requires a mixed-client tx-path report" check_report "${MESH_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects missing propagation sample" "raw_samples.propagation requires one observed sample" check_report "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects non-finite propagation sample" "raw_samples.propagation.samples[0].elapsed is not finite" check_report "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
@@ -1718,7 +1757,7 @@ rpc_json() {
   return 22
 }
 export RUST_RPC_ADDR="127.0.0.1:59999"
-RUST_MINE_JSON="${TMP_ROOT}/mine-next-sidecar.json"
+RUST_MINE_JSON="${TMP_ROOT}/artifact-root/mine-next-sidecar.json"
 TX_REASON=""
 if rust_mine_including_tx; then
   echo "FAIL: rust_mine_including_tx should fail on /mine_next HTTP error" >&2
