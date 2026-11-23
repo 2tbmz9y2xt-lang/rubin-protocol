@@ -482,7 +482,16 @@ func (d *sourceRelease) checkReleaseScratch(r *sourceRoot) (bool, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
-	if err != nil || !sameSourceFile(info, d.markerFile) {
+	if err != nil || d.pending && info.Size() > releaseMax {
+		return false, ErrIntegrityV1
+	}
+	if d.pending {
+		present, err := d.checkMarker(readRelease(r, releaseFile))
+		if !present {
+			return false, err
+		}
+	}
+	if !sameSourceFile(info, d.markerFile) {
 		return false, ErrIntegrityV1
 	}
 	return true, nil
@@ -536,6 +545,7 @@ func (o *SourceOwnerV1) releaseIntent(r *sourceRoot, d *sourceRelease, backing *
 		if _, err := o.sampleReleaseStage(r, d); err != nil {
 			return err
 		}
+		d.markerFile = filelock.IdentityV1{}
 	}
 	if unpublished || absentUnconfirmed {
 		if err := o.persistRelease(r, d, backing, scratch); err != nil {
@@ -576,7 +586,7 @@ func (o *SourceOwnerV1) syncReleasedBacking(r *sourceRoot, d *sourceRelease, scr
 	return nil
 }
 
-// releaseDescriptorsFit allows two root descriptors, the backing and a transient descriptor.
+// releaseDescriptorsFit counts the root pair, backing, transient descriptor and existing Store pins.
 func (o *SourceOwnerV1) releaseDescriptorsFit() bool {
 	needed := uint64(4)
 	if o.stage.File != nil {
@@ -702,12 +712,15 @@ func (o *SourceOwnerV1) rebindReleaseAlias(r *sourceRoot, d *sourceRelease, stag
 
 // forgetReleaseStage retires the stage that shares the released capture.
 func (o *SourceOwnerV1) forgetReleaseStage(d *sourceRelease) {
+	key := strings.TrimPrefix(strings.TrimPrefix(d.alias, publicStagePrefix), heldStagePrefix)
 	d.alias = ""
 	if o.debt.file == d.file {
 		o.debt = sourceDebt{}
 	}
 	if info, _ := o.stage.File.Stat(); sameSourceFile(info, d.file) {
 		o.stage.Clear()
+	}
+	if o.stage.File == nil && strings.EqualFold(o.observedStage, key) {
 		o.observedStage = ""
 	}
 }
@@ -878,7 +891,7 @@ func (o *SourceOwnerV1) unlinkReleaseAlias(r *sourceRoot, d *sourceRelease, f *o
 	if err := o.authorizeReleaseUnlink(r, d, f, 2); err != nil {
 		return err
 	}
-	if err := o.protectReleaseAlias(r, d, &stage); err != nil {
+	if err := o.protectReleaseAlias(r, d, &stage, f); err != nil {
 		return err
 	}
 	if err := o.authorizeReleaseUnlink(r, d, f, 2); err != nil {
@@ -922,14 +935,11 @@ func (d *sourceRelease) refuseUnsampledAlias(r *sourceRoot) error {
 }
 
 // protectReleaseAlias claims the sampled public alias before it can be unlinked.
-func (o *SourceOwnerV1) protectReleaseAlias(r *sourceRoot, d *sourceRelease, stage *sourceDebt) error {
+func (o *SourceOwnerV1) protectReleaseAlias(r *sourceRoot, d *sourceRelease, stage *sourceDebt, pin *os.File) error {
 	if stage.held() {
 		return nil
 	}
-	if err := o.retainStage(r, *stage); err != nil {
-		return err
-	}
-	if err := o.claimStage(r, stage); err != nil {
+	if err := o.claimStage(r, stage, pin); err != nil {
 		return err
 	}
 	d.alias = stage.leaf

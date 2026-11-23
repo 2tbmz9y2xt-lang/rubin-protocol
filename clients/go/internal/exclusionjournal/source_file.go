@@ -992,7 +992,7 @@ func (o *SourceOwnerV1) syncStageRemoval(r *sourceRoot, handoff bool) error {
 func (o *SourceOwnerV1) unlinkStage(r *sourceRoot) error {
 	d := &o.debt
 	if !d.held() {
-		if err := o.claimStage(r, d); err != nil {
+		if err := o.claimStage(r, d, o.stage.File); err != nil {
 			return err
 		}
 	}
@@ -1040,8 +1040,8 @@ func (o *SourceOwnerV1) observeRetainedStage(leaf string, id filelock.IdentityV1
 }
 
 // claimStage verifies the pinned inode after renaming it.
-func (o *SourceOwnerV1) claimStage(r *sourceRoot, d *sourceDebt) error {
-	if info, err := sourceEntryInfo(r, d.leaf, nil); err != nil || o.stage.File == nil || !sameSourceFile(info, d.file) {
+func (o *SourceOwnerV1) claimStage(r *sourceRoot, d *sourceDebt, pin *os.File) error {
+	if info, _ := sourceEntryInfo(r, d.leaf, nil); pin == nil || !sameSourceFile(info, d.file) {
 		return ErrIdentityV1
 	}
 	held := heldStagePrefix + d.name
@@ -1056,7 +1056,9 @@ func (o *SourceOwnerV1) claimStage(r *sourceRoot, d *sourceDebt) error {
 		return cmp.Or(err, ErrIdentityV1)
 	}
 	d.leaf = held
-	o.stage.Clear()
+	if pin == o.stage.File {
+		o.stage.Clear()
+	}
 	return nil
 }
 

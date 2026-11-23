@@ -1201,28 +1201,58 @@ func TestSourceReleaseOnlyRetry(t *testing.T) {
 	t.Run("recover-held-stage", testSourceRecoverHeldReleaseStage)
 	t.Run("expired-handle", testSourceExpiredReleaseHandle)
 	t.Run("last-link-retry", testSourceLastLinkRetryProof)
-	sourceModes(t, []string{"published-marker-pin", "retry-marker-pin"}, func(t *testing.T, mode string) {
-		_, o, dir, _, _, p := sourcePreparedBundle(t)
+	sourceModes(t, []string{"published-marker-pin", "retry-marker-pin", "descriptor-four-alias", "descriptor-four-late-alias"}, func(t *testing.T, mode string) {
+		m, parts, limits := sourceBundleLimits()
+		four := strings.HasPrefix(mode, "descriptor-four-")
+		if four {
+			limits.Descriptors = 4
+		}
+		_, o, paths, p := sourcePreparedScene(t, limits, m, parts)
 		if mode == "retry-marker-pin" {
 			sourceReleaseWithFault(t, o, p, "intent-sync", syscall.EIO)
+			sourceFault(o, "parent-sync", syscall.EIO, func() { t.Fatal("live release with nil handle reached sync") })
+			sourceReleaseResult(t, o, nil, true, ErrIntegrityV1)
 			o.ops = realSourceFS
 		}
-		path := filepath.Join(dir, sourceDirectory, releaseFile)
-		backing := sourceLstat(t, filepath.Join(dir, sourceDirectory, p.name))
-		var markerHeld, backingAtSync, backingAtDetach bool
+		path := filepath.Join(paths.root, releaseFile)
+		backing, root := sourceLstat(t, paths.capture), sourceLstat(t, paths.root)
+		if mode == "descriptor-four-alias" {
+			sourceMust(t, os.Link(paths.capture, paths.stage))
+		}
+		var markerHeld, backingAtSync, backingAtDetach, claimed bool
 		o.ops.dirSync = func(f *os.File) error {
 			o.ops.dirSync = (*os.File).Sync
-			markerHeld = sourceReleaseHasOpenFile(t, sourceLstat(t, path))
+			marker := sourceLstat(t, path)
+			markerHeld = sourceReleaseHasOpenFile(t, marker)
 			backingAtSync = sourceReleaseHasOpenFile(t, backing)
-			return f.Sync()
+			if four {
+				peak := len(sourceOpenFileModes(t, root)) + len(sourceOpenFileModes(t, backing)) + len(sourceOpenFileModes(t, marker))
+				sourceFailIf(t, peak != 4, "release held %d descriptors at marker sync, want 4", peak)
+			}
+			sourceMust(t, f.Sync())
+			if mode == "descriptor-four-late-alias" {
+				return os.Link(paths.capture, paths.stage)
+			}
+			return nil
 		}
 		o.ops.namespace = func(op sourceNamespace, r *sourceRoot, from, to string) error {
 			if to == releaseDetached {
 				backingAtDetach = sourceReleaseHasOpenFile(t, backing)
 			}
+			if four && to == filepath.Base(paths.held) {
+				sourceFailIf(t, !slices.Equal(sourceOpenFileModes(t, backing), []int{unix.O_RDONLY}) || o.stage.File != nil, "alias claim did not borrow the read-only backing")
+				claimed = true
+			}
 			return op(r, from, to)
 		}
 		sourceReleaseResult(t, o, p, true, nil)
+		if four {
+			sourceReadRefusal(t, o, m, ErrUnavailableV1, "readback of released capture")
+			sourceFailIf(t, !claimed, "release did not claim the alias")
+			sourceFailIf(t, len(sourceEntries(t, paths.dir)) != 0, "release retained source entries")
+			assertSourceReleaseCharge(t, o, m, 0, 0)
+			sourcePrepareAndRead(t, o, sourceForeign(m), parts)
+		}
 		sourceFailIf(t, !markerHeld, "release used the marker without holding it through directory sync")
 		sourceFailIf(t, !backingAtSync || !backingAtDetach, "release lost its backing before detachment (sync %v, detach %v)", backingAtSync, backingAtDetach)
 		sourceFailIf(t, sourceReleaseHasOpenFile(t, backing), "completed release retained the backing descriptor")
@@ -1724,6 +1754,7 @@ func testSourcePublishedMarkerBytes(t *testing.T) {
 }
 
 func testSourceUnpublishedLinkResult(t *testing.T) {
+	t.Run("absent-after-retry", testSourceUnconfirmedLinkRetry)
 	sourceModes(t, []string{"absent", "absent-raw", "distinct", "distinct-raw"}, func(t *testing.T, mode string) {
 		_, o, _, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(o.dir, sourceDirectory)
@@ -1777,6 +1808,47 @@ func testSourceUnpublishedLinkResult(t *testing.T) {
 			sourcePrepareAndRead(t, o, sourceForeign(m), parts)
 		}
 	})
+}
+
+func testSourceUnconfirmedLinkRetry(t *testing.T) {
+	_, o, _, m, parts, p := sourcePreparedBundle(t)
+	other := sourceForeign(m)
+	sourcePrepare(t, o, other, parts)
+	paths := sourcePaths(o.dir, p.name)
+	marker, scratch := filepath.Join(paths.root, releaseFile), filepath.Join(paths.root, releaseScratch)
+	old, newest := filepath.Join(paths.dir, "first-scratch"), filepath.Join(paths.dir, "next-scratch")
+	keepBacking := sourcePreservedEntry(t, paths.capture)
+	sourceReleaseWithFault(t, o, p, "pending-absent", syscall.EIO)
+	sourcePrepareResult(t, o, other, refusedSourceProducer(t), ErrBusyV1)
+	sourceMust(t, os.Link(scratch, old))
+	info, record := sourceLstat(t, old), sourceReadFile(t, old)
+	o.ops.namespace = func(_ sourceNamespace, _ *sourceRoot, from, to string) error {
+		sourceFailIf(t, from != releaseScratch || to != releaseFile, "unexpected retry namespace operation")
+		return syscall.EIO
+	}
+	sourceReleaseResult(t, o, p, true, syscall.EIO)
+	sourceRead(t, o, other, parts)
+	sourcePrepareResult(t, o, other, refusedSourceProducer(t), ErrBusyV1)
+	sourceAbsent(t, paths.root, releaseFile, releaseDetached)
+	replacement := sourceLstat(t, scratch)
+	sourceFailIf(t, os.SameFile(info, replacement), "retry reused the old scratch inode")
+	sourceUnchangedEntry(t, scratch, replacement, record)
+	keepBacking()
+	assertSourceReleaseCharge(t, o, m, 2, 2*sourceSize(t, m))
+	sourceMust(t, os.Rename(scratch, newest))
+	sourceMust(t, os.Link(old, marker))
+	sourceMust(t, os.Link(old, scratch))
+	sourceReadRefusal(t, o, other, ErrIntegrityV1, "readback with superseded marker pair")
+	sourcePrepareResult(t, o, other, refusedSourceProducer(t), ErrBusyV1)
+	sourceUnchangedEntry(t, marker, info, record)
+	sourceUnchangedEntry(t, scratch, info, record)
+	sourceMust(t, os.Remove(marker))
+	sourceMust(t, os.Rename(newest, scratch))
+	o.ops = realSourceFS
+	sourceReleaseResult(t, o, p, true, nil)
+	sourceRead(t, o, other, parts)
+	sourceAbsent(t, paths.root, p.name, releaseFile, releaseScratch, releaseDetached)
+	assertSourceReleaseCharge(t, o, m, 1, sourceSize(t, m))
 }
 
 func testSourceFinalObservations(t *testing.T) {
@@ -2495,6 +2567,7 @@ func testSourceFinalStage(t *testing.T) {
 
 func testSourceReleaseSpelling(t *testing.T) {
 	t.Run("withdrawn-alias-with-independent-stage", testSourceWithdrawnReleaseAlias)
+	t.Run("relinked-key-only-held", testSourceRelinkedReleaseAlias)
 	sourceModes(t, []string{"same-key-replaced-alias", "pending-same-key-replaced-alias"}, testSourceReplacedSameKeyAlias)
 	sourceModes(t, []string{"unqualified-cross-key", "unqualified-lowercase-cross-key"}, func(t *testing.T, mode string) {
 		_, o, dir, m, _, p := sourcePreparedBundle(t)
@@ -2785,6 +2858,35 @@ func checkSourceIndependentSpelling(t *testing.T, o *SourceOwnerV1, wrong Source
 	sourcePresence(t, filepath.Dir(stage), leaf, false)
 }
 
+func testSourceRelinkedReleaseAlias(t *testing.T) {
+	_, o, _, m, parts, p := sourcePreparedBundle(t)
+	backing := sourcePaths(o.dir, p.name)
+	other := sourceForeign(m)
+	alias := sourcePaths(o.dir, other.name(o.id))
+	sourceMust(t, os.Link(backing.capture, alias.stage))
+	sourceRead(t, o, m, parts)
+	checkSourceStageWitness(t, o, sourceLstat(t, alias.stage))
+	sourceMust(t, os.Remove(alias.stage))
+	sourceRead(t, o, m, parts)
+	sourceFailIf(t, o.stage.File != nil || o.observedStage != alias.key, "withdrawn alias did not leave its key")
+	sourceMust(t, os.Link(backing.capture, alias.stage))
+	o.ops.namespace = func(op sourceNamespace, r *sourceRoot, from, to string) error {
+		err := op(r, from, to)
+		if err == nil && to == filepath.Base(alias.held) {
+			sourceFailIf(t, o.observedStage != alias.key, "alias key retired at claim")
+			return syscall.EIO
+		}
+		return err
+	}
+	sourceReleaseResult(t, o, p, true, syscall.EIO)
+	sourcePrepareResult(t, o, other, refusedSourceProducer(t), ErrBusyV1)
+	o.ops = realSourceFS
+	sourceReleaseResult(t, o, p, true, nil)
+	sourcePrepareAndRead(t, o, sourceForeign(other), parts)
+	sourceAbsent(t, backing.root, p.name, filepath.Base(alias.stage), filepath.Base(alias.held), releaseFile, releaseScratch, releaseDetached)
+	assertSourceReleaseCharge(t, o, m, 1, sourceSize(t, m))
+}
+
 func testSourceWithdrawnReleaseAlias(t *testing.T) {
 	_, o, dir, m, parts, p := sourcePreparedBundle(t)
 	root := filepath.Join(dir, sourceDirectory)
@@ -2848,22 +2950,31 @@ func testSourceRefilledCanonical(t *testing.T) {
 		sourceFailIf(t, !sourceLstat(t, filepath.Join(root, releaseDetached)).IsDir(), "release changed the detached directory")
 		sourcePresence(t, root, releaseFile, true)
 	})
-	sourceModes(t, []string{"detach", "stage-claim", "stage-unlink", "live-detach", "live-stage-claim", "live-stage-unlink"}, func(t *testing.T, mode string) {
+	sourceModes(t, []string{"detach", "stage-claim", "stage-unlink", "live-detach", "live-stage-claim", "live-stage-unlink", "live-detach-missing-marker"}, func(t *testing.T, mode string) {
 		phase, live := strings.CutPrefix(mode, "live-")
+		detach, mixed := strings.HasPrefix(phase, "detach"), phase == "detach-missing-marker"
 		s, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		canonical := filepath.Join(root, p.name)
 		original := sourceLstat(t, canonical)
 		contents := sourceReadFile(t, canonical)
 		sourceMust(t, os.Link(canonical, filepath.Join(root, publicStagePrefix+p.name)))
+		marker, saved := filepath.Join(root, releaseFile), filepath.Join(dir, "saved-marker")
 		var keepMarker func()
+		var replacement os.FileInfo
 		refill := func() {
+			if mixed {
+				replacement = writeSourceEntry(t, canonical, []byte{1})
+				sourceMust(t, os.Rename(marker, saved))
+				keepMarker = sourcePreservedEntry(t, saved)
+				return
+			}
 			sourceMust(t, syscall.Mkfifo(canonical, 0o600))
-			keepMarker = sourcePreservedEntry(t, filepath.Join(root, releaseFile))
+			keepMarker = sourcePreservedEntry(t, marker)
 		}
 		o.ops.namespace = func(op sourceNamespace, r *sourceRoot, from, to string) error {
 			err := op(r, from, to)
-			if err == nil && (phase == "detach" && to == releaseDetached || phase == "stage-claim" && to == heldStagePrefix+p.name) {
+			if err == nil && (detach && to == releaseDetached || phase == "stage-claim" && to == heldStagePrefix+p.name) {
 				refill()
 			}
 			return err
@@ -2875,7 +2986,7 @@ func testSourceRefilledCanonical(t *testing.T) {
 			}
 			return err
 		}
-		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
+		sourceReleaseResult(t, o, p, true, map[bool]error{false: ErrIntegrityV1, true: ErrIdentityV1}[mixed])
 		foreign := sourceForeign(m)
 		sourcePrepareResult(t, o, foreign, refusedSourceProducer(t), ErrBusyV1)
 		sourceFailIf(t, keepMarker == nil, "release did not reach the selected namespace operation")
@@ -2883,8 +2994,14 @@ func testSourceRefilledCanonical(t *testing.T) {
 		backing := filepath.Join(root, releaseDetached)
 		sourceUnchangedEntry(t, backing, original)
 		sourceFailIf(t, !bytes.Equal(sourceReadFile(t, backing), contents), "release changed detached bytes")
-		sourceFailIf(t, sourceLstat(t, canonical).Mode()&os.ModeNamedPipe == 0, "release changed the refilled name")
-		sourcePresence(t, root, publicStagePrefix+p.name, phase == "detach")
+		if mixed {
+			sourceUnchangedEntry(t, canonical, replacement, []byte{1})
+			sourcePresence(t, root, releaseFile, false)
+			sourceMust(t, os.Rename(saved, marker))
+		} else {
+			sourceFailIf(t, sourceLstat(t, canonical).Mode()&os.ModeNamedPipe == 0, "release changed the refilled name")
+		}
+		sourcePresence(t, root, publicStagePrefix+p.name, detach)
 		sourcePresence(t, root, heldStagePrefix+p.name, phase == "stage-claim")
 		sourceMust(t, os.Remove(canonical))
 		o.ops = realSourceFS
@@ -3520,19 +3637,24 @@ func testSourceMarkerCollision(t *testing.T) {
 		sourceRead(t, fresh, m, parts)
 	})
 	t.Run("changed-scratch", func(t *testing.T) {
-		_, o, dir, _, _, p := sourcePreparedBundle(t)
+		_, o, dir, m, parts, p := sourcePreparedBundle(t)
 		root := filepath.Join(dir, sourceDirectory)
 		scratch := filepath.Join(root, releaseScratch)
 		replacement := filepath.Join(dir, "replacement")
-		sourceMust(t, os.WriteFile(replacement, []byte("independent record"), 0o600))
-		info := sourceLstat(t, replacement)
+		var info os.FileInfo
+		var record []byte
+		sourceFault(o, "rename", syscall.EIO, func() { t.Fatal("replacement scratch reached marker Link") })
 		o.ops.close = func(f *os.File) error {
+			record = sourceReadFile(t, scratch)
+			info = writeSourceEntry(t, replacement, record)
+			sourceFailIf(t, os.SameFile(info, sourceLstat(t, scratch)), "replacement shares scratch inode")
 			sourceMust(t, f.Close())
 			return os.Rename(replacement, scratch)
 		}
 		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
-		sourceUnchangedEntry(t, scratch, info)
-		sourcePresence(t, root, releaseFile, false)
+		sourceRead(t, o, m, parts)
+		sourceUnchangedEntry(t, scratch, info, record)
+		sourceAbsent(t, root, releaseFile, releaseDetached)
 		sourcePresence(t, root, p.name, true)
 	})
 	_, o, dir, _, _, p := sourcePreparedBundle(t)
@@ -3557,6 +3679,7 @@ func testSourceReleaseInconclusive(t *testing.T, stage string) {
 	_, o, dir, m, parts, p := sourcePreparedBundle(t)
 	root := filepath.Join(dir, sourceDirectory)
 	size := uint64(len(sourceReadFile(t, filepath.Join(root, p.name))))
+	keepBacking := sourcePreservedEntry(t, filepath.Join(root, p.name))
 	cause := errors.New("release observation unavailable")
 	markerPresent := stage == "pending-visible" || stage == "clear-present"
 	reclaimed := map[string]int{"scratch-sync": 1, "pending-absent": 2}[stage]
@@ -3581,13 +3704,20 @@ func testSourceReleaseInconclusive(t *testing.T, stage string) {
 	}
 	if markerPresent {
 		path := filepath.Join(root, releaseFile)
-		record := sourceReadFile(t, path)
+		info, record := sourceLstat(t, path), sourceReadFile(t, path)
 		sourceMust(t, os.WriteFile(path, []byte{1}, 0o600))
 		sourceReleaseResult(t, o, p, true, ErrIntegrityV1)
 		sourcePrepareResult(t, o, foreign, refusedSourceProducer(t), ErrBusyV1)
 		sourcePresence(t, root, p.name, backing)
-		assertSourceReleaseCharge(t, o, m, 1, size)
+		if stage == "pending-visible" {
+			sourceReadRefusal(t, o, m, ErrIntegrityV1, "readback with changed marker pair")
+			sourceUnchangedEntry(t, path, info, []byte{1})
+			sourceUnchangedEntry(t, filepath.Join(root, releaseScratch), info, []byte{1})
+			keepBacking()
+			sourceFailIf(t, o.release == nil || o.release.size != size || o.live[p.name] != p.incarnation, "changed marker pair lost the capture charge")
+		}
 		sourceMust(t, os.WriteFile(path, record, 0o600))
+		assertSourceReleaseCharge(t, o, m, 1, size)
 	}
 	renames, unlinks, syncs := 0, 0, 0
 	o.ops.namespace = func(op sourceNamespace, r *sourceRoot, from, to string) error {
