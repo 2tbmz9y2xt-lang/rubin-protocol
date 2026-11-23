@@ -38,7 +38,7 @@ validate_deterministic_tx_fee() {
 run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"; }
 check_report() { local report="${1:-}" mode="${2:-offline}" expected_mode="${3:-public}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
-  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" "${expected_mode}" "${DEV_ENV}" "${GO_MODULE_ROOT}" <<'PY'
+  { sidecar_derivations_py; cat <<'PY'; } | RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" "${expected_mode}" "${DEV_ENV}" "${GO_MODULE_ROOT}"
 import datetime as dt, hashlib, json, math, os, re, socket, struct, subprocess, sys, tempfile, time, urllib.error, urllib.request
 from pathlib import Path
 path = Path(sys.argv[1]); live = sys.argv[3] == "live"; expected_mode = sys.argv[4]; dev_env = sys.argv[5]; go_module_root = sys.argv[6]
@@ -802,14 +802,6 @@ def sn_file(label: str, value: object) -> dict:
     except (OSError, UnicodeDecodeError, RecursionError, ValueError): obj = None
     sn_req(isinstance(obj, dict), f"{label} is not a bounded JSON object")
     return obj
-def sn_sha256(p: Path) -> object:
-    try:
-        with p.open("rb") as f: return hashlib.sha256(f.read()).hexdigest()
-    except OSError: return None
-def sn_header_bytes(block_hex: str, block_hash: str) -> object:
-    raw = bytes.fromhex(block_hex)
-    found = [n for n in (116, 148) if len(raw) >= n and hashlib.sha3_256(raw[:n]).hexdigest() == block_hash]
-    return found[0] if len(found) == 1 else None
 def sn_tip(impl: str, endpoint: str, conv: dict, chain: bool) -> None:
     tip = sn_file(f"initial_convergence.{impl}_tip_path", conv[f"{impl}_tip_path"])
     sn_req(set(tip) == SN_TIP_KEYS and tip["implementation"] == impl and tip["request_path"] == "/get_tip" and tip["rpc_endpoint"] == endpoint, f"initial_convergence.{impl}_tip_path identity mismatch")
@@ -834,7 +826,7 @@ def store_neutrality_checks() -> None:
         if key == "txgen_sha256" and not chain:
             sn_req(binaries[key] is None, "binaries.txgen_sha256 is not null")
         else:
-            sn_req(hex32(binaries[key]) and binaries[key] == sn_sha256(artifact_root / name), f"binaries.{key} does not match artifact_root/{name}")
+            sn_req(hex32(binaries[key]) and binaries[key] == file_sha256(artifact_root / name), f"binaries.{key} does not match artifact_root/{name}")
     ident = sidecar["chain_identity"]
     sn_req(isinstance(ident, dict) and set(ident) == {"network", "chain_id_hex", "genesis_hash_hex"} and nonempty_str(ident["network"]) and hex32(ident["chain_id_hex"]) and hex32(ident["genesis_hash_hex"]), "chain_identity malformed")
     dirs = sidecar["datadirs"]
@@ -867,10 +859,26 @@ def store_neutrality_checks() -> None:
         sn_req(heights[impl] in (116, 148), f"header_bytes.{impl} is not 116 or 148", SN_GRAMMAR)
     sn_req(heights["go"] == heights["rust"], "header_bytes.go differs from header_bytes.rust", SN_GRAMMAR)
     for impl in ("go", "rust"):
-        derived = sn_header_bytes(blocks[impl]["block_hex"], blocks[impl]["hash"])
-        sn_req(derived is not None and derived == heights[impl], f"header_bytes.{impl} is not the unique header length hashing to the genesis hash", SN_GRAMMAR)
+        sn_req(header_length(blocks[impl]["block_hex"], blocks[impl]["hash"]) == heights[impl], f"header_bytes.{impl} is not the unique header length hashing to the genesis hash", SN_GRAMMAR)
 store_neutrality_checks()
 print(f"PASS: {scenario} report {'accepted' if live else 'structurally accepted'} {path}" + ("" if live else "; live proof not checked"))
+PY
+}
+# Prints the Python derivations shared by the sidecar writer and check_report:
+# file_sha256 is the sha256 hex of a file (None when unreadable); header_length is the
+# unique n in {116, 148} whose SHA3-256 over the first n block bytes equals
+# block_hash, else 0.
+sidecar_derivations_py() { cat <<'PY'
+import hashlib
+def file_sha256(path: object) -> object:
+    try:
+        with open(path, "rb") as f: return hashlib.sha256(f.read()).hexdigest()
+    except OSError: return None
+def header_length(block_hex: object, block_hash: object) -> int:
+    try: raw = bytes.fromhex(block_hex)
+    except (TypeError, ValueError): return 0
+    found = [n for n in (116, 148) if len(raw) >= n and hashlib.sha3_256(raw[:n]).hexdigest() == block_hash]
+    return found[0] if len(found) == 1 else 0
 PY
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
@@ -2649,8 +2657,8 @@ write_store_neutrality_sidecar() {
     { capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=0" "${GENESIS_GO_BLOCK_JSON}" && capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" "/get_block?height=0" "${GENESIS_RUST_BLOCK_JSON}"; } || { SIDECAR_REASON=store_neutrality_genesis_capture_failed; return 1; }
   fi
   commit="$(git -C "${REPO_ROOT}" rev-parse HEAD)" && tree="$(git -C "${REPO_ROOT}" status --porcelain -- clients)" || { SIDECAR_REASON=store_neutrality_commit_unavailable; return 1; }
-  python3 - "${STORE_NEUTRALITY_JSON}" "${chain}" "${commit}" "${tree:+dirty}" "${CHAIN_IDENTITY_JSON}" "${GENESIS_GO_BLOCK_JSON}" "${GENESIS_RUST_BLOCK_JSON}" "${GO_NODE_BIN}" "${RUST_NODE_BIN}" "${TXGEN_BIN}" "${GO_DIR}" "${RUST_DIR}" "${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}" <<'PY' || rc=$?
-import hashlib, json, os, sys
+  { sidecar_derivations_py; cat <<'PY'; } | python3 - "${STORE_NEUTRALITY_JSON}" "${chain}" "${commit}" "${tree:+dirty}" "${CHAIN_IDENTITY_JSON}" "${GENESIS_GO_BLOCK_JSON}" "${GENESIS_RUST_BLOCK_JSON}" "${GO_NODE_BIN}" "${RUST_NODE_BIN}" "${TXGEN_BIN}" "${GO_DIR}" "${RUST_DIR}" "${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}" || rc=$?
+import json, os, sys
 out, chain, commit, dirty, ident_path, go_block_path, rust_block_path, go_bin, rust_bin, txgen_bin, go_dir, rust_dir, rust_empty, go_tip_path, rust_tip_path = sys.argv[1:16]
 chain = chain == "1"
 def load(path, code):
@@ -2660,21 +2668,16 @@ def load(path, code):
     if not isinstance(data, dict): sys.exit(code)
     return data
 def sha256(path):
-    try:
-        with open(path, "rb") as f: return hashlib.sha256(f.read()).hexdigest()
-    except OSError: sys.exit(5)
-def header_bytes(block):
-    try: raw = bytes.fromhex(block.get("block_hex") or "")
-    except (TypeError, ValueError): return 0
-    found = [n for n in (116, 148) if len(raw) >= n and hashlib.sha3_256(raw[:n]).hexdigest() == block.get("hash")]
-    return found[0] if len(found) == 1 else 0
+    digest = file_sha256(path)
+    if digest is None: sys.exit(5)
+    return digest
 ident = load(ident_path, 2)
 chain_identity = {key: ident.get(key) for key in ("network", "chain_id_hex", "genesis_hash_hex")}
 genesis = heights = None
 if chain:
     go_block, rust_block = load(go_block_path, 3), load(rust_block_path, 3)
     genesis = {"go_hash": go_block.get("hash"), "rust_hash": rust_block.get("hash"), "go_block_path": go_block_path, "rust_block_path": rust_block_path}
-    heights = {"go": header_bytes(go_block), "rust": header_bytes(rust_block)}
+    heights = {impl: header_length(block.get("block_hex"), block.get("hash")) for impl, block in (("go", go_block), ("rust", rust_block))}
 go_tip, rust_tip = load(go_tip_path, 6), load(rust_tip_path, 6)
 sidecar = {
     "evidence_domain": "pre_switch_store_neutrality",

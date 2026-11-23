@@ -315,6 +315,61 @@ SH
   bash "${probe}" "${lib}" "${probe_root}"
 }
 
+check_store_neutrality_producer_reasons() {
+  local probe="${TMP_ROOT}/sn-producer.sh" probe_root="${TMP_ROOT}/sn-producer" lib="${TMP_ROOT}/sn-producer-lib.sh" main="${TMP_ROOT}/sn-producer-main.sh"
+  mkdir -p -- "${probe_root}/cap" "${probe_root}/out"
+  extract_slices "${lib}" "sidecar_derivations_py()" '[[ "${MESH_TIMEOUT}"' "write_store_neutrality_sidecar()" "capture_go_reorg_metrics()"
+  extract_slices "${main}" "write_store_neutrality_sidecar ||" "if (( PARTITION_HEAL_REORG_MODE == 1 )); then"
+  python3 - "${probe_root}" <<'PY'
+import hashlib, json, sys
+root = sys.argv[1]
+for name, size in (("116", 116), ("148", 148)):
+    header = bytes(range(size))
+    for impl in ("go", "rust"):
+        json.dump({"block_hex": (header + bytes(8)).hex(), "hash": hashlib.sha3_256(header).hexdigest()}, open(f"{root}/block-{name}-{impl}.json", "w"))
+json.dump({"network": "devnet", "chain_id_hex": "dd" * 32, "genesis_hash_hex": "ee" * 32}, open(f"{root}/ident.json", "w"))
+json.dump({"has_tip": True, "height": 101, "tip_hash": "cc" * 32}, open(f"{root}/tip.json", "w"))
+json.dump([], open(f"{root}/array.json", "w"))
+PY
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+main="$2"; p="$3"
+TX_PATH_MODE=3; RUST_RESTART_MODE=0; PARTITION_HEAL_REORG_MODE=0; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"; REPO_ROOT="${p}"
+GO_NODE_BIN="${p}/ident.json"; RUST_NODE_BIN="${p}/ident.json"; TXGEN_BIN="${p}/ident.json"; GO_DIR="${p}/node-go"; RUST_DIR="${p}/node-rust"; RUST_EXACT_EMPTY_BEFORE_FIRST_START=true
+CHAIN_IDENTITY_JSON="${p}/cap/ident.json"; GENESIS_GO_BLOCK_JSON="${p}/cap/go.json"; GENESIS_RUST_BLOCK_JSON="${p}/cap/rust.json"; INITIAL_GO_TIP_JSON="${p}/tip.json"; INITIAL_RUST_TIP_JSON="${p}/tip.json"
+STORE_NEUTRALITY_JSON="${p}/out/sidecar.json"; BLOCKS=116; FAIL_CAPTURE=""; ARRAY_CAPTURE=""; FAIL_GIT=""
+capture_rpc_sidecar() {
+  local src="${p}/block-${BLOCKS}-$1.json"
+  [[ "$1 $4" == "${FAIL_CAPTURE}" ]] && return 1
+  [[ "$4" == /chain_identity ]] && src="${p}/ident.json"
+  [[ "$1 $4" == "${ARRAY_CAPTURE}" ]] && src="${p}/array.json"
+  cp -- "${src}" "$5"
+}
+git() { [[ "$3" == "${FAIL_GIT}" ]] && return 128; [[ "$3" == rev-parse ]] && printf '%s\n' "$(printf 'a%.0s' {1..40})"; return 0; }
+finish_no_data() { printf '%s\n' "$1"; exit 0; }
+expect_end() {
+  local got
+  got="$(source "${main}"; printf 'completed\n')"
+  [[ "${got}" == "$1" ]] || { echo "FAIL: sidecar producer ended with ${got}, want $1" >&2; exit 1; }
+}
+expect_heights() { python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["header_bytes"] != {"go": int(sys.argv[2]), "rust": int(sys.argv[2])})' "${STORE_NEUTRALITY_JSON}" "$1" || { echo "FAIL: sidecar header_bytes is not $1" >&2; exit 1; }; }
+BLOCKS=148; expect_end completed; expect_heights 148
+BLOCKS=116; expect_end completed; expect_heights 116
+FAIL_CAPTURE="go /chain_identity"; expect_end store_neutrality_chain_identity_capture_failed; FAIL_CAPTURE=""
+ARRAY_CAPTURE="go /chain_identity"; expect_end store_neutrality_chain_identity_capture_failed; ARRAY_CAPTURE=""
+FAIL_CAPTURE="go /get_block?height=0"; expect_end store_neutrality_genesis_capture_failed
+FAIL_CAPTURE="rust /get_block?height=0"; expect_end store_neutrality_genesis_capture_failed; FAIL_CAPTURE=""
+ARRAY_CAPTURE="rust /get_block?height=0"; expect_end store_neutrality_genesis_capture_failed; ARRAY_CAPTURE=""
+FAIL_GIT=rev-parse; expect_end store_neutrality_commit_unavailable
+FAIL_GIT=status; expect_end store_neutrality_commit_unavailable; FAIL_GIT=""
+TXGEN_BIN="${p}/missing"; expect_end store_neutrality_binary_hash_failed; TXGEN_BIN="${p}/ident.json"
+STORE_NEUTRALITY_JSON="${p}/missing/sidecar.json"; expect_end store_neutrality_sidecar_write_failed
+SH
+  bash "${probe}" "${lib}" "${main}" "${probe_root}"
+}
+
 extract_proxy_go_local_addr() {
   python3 - "${HARNESS}" "${PROXY_GO_LOCAL_ADDR_LIB}" <<'PY'
 from pathlib import Path
@@ -1718,6 +1773,7 @@ check_prepare_tx_chainstate_leaves_rust_empty
 check_rust_datadir_guard
 check_txgen_datadir_guard
 check_initial_convergence_wait
+check_store_neutrality_producer_reasons
 check_proxy_go_local_addr_reason
 check_wait_peer_snapshot_normalizes
 check_capture_go_reorg_metrics_reason
