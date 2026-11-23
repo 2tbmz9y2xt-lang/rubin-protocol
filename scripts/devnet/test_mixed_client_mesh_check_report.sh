@@ -1664,6 +1664,117 @@ sn_variant("mesh-tip-present", "mesh", lambda s, r: sn_edit_file(r, "initial-con
 sn_variant("restart-below", "restart", lambda s, r: sn_set_height(s, r, 108))
 sn_variant("restart-new-endpoint", "restart", lambda s, r: sn_edit_file(r, "initial-convergence-rust-tip.json", rpc_endpoint=rust_rpc))
 sn_variant("partition-not-above", "partition", lambda s, r: sn_set_height(s, r, 102))
+import os
+def sn_drop_file_key(var_root: Path, file_name: str, key: str) -> None:
+    data = json.loads((var_root / file_name).read_text(encoding="utf-8"))
+    data.pop(key)
+    dump(var_root / file_name, data)
+def sn_outside(var_root: Path, file_name: str) -> str:
+    shutil.copy(var_root / file_name, var_root.parent / file_name)
+    return str(var_root.parent / file_name)
+def sn_conv_hash(sidecar: dict, var_root: Path, value: str) -> None:
+    sidecar["initial_convergence"].update(go_tip_hash=value, rust_tip_hash=value)
+    for file_name in ("initial-convergence-go-tip.json", "initial-convergence-rust-tip.json"):
+        sn_edit_file(var_root, file_name, tip_hash=value)
+SN_MODES = {"mesh": "public", "tx-accept": "tx", "restart": "rust-restart"}
+SN_ALL, SN_CHAIN = ("mesh", "tx-accept", "restart"), ("tx-accept", "restart")
+SN_I, SN_G, SN_H = "store_neutrality_sidecar_invalid", "store_neutrality_genesis_mismatch", "store_neutrality_header_grammar_mismatch"
+GO_TIP, GO_BLOCK, RUST_BLOCK = "initial-convergence-go-tip.json", "genesis-go-block.json", "genesis-rust-block.json"
+GO_TIP_BAD, GO_BLOCK_BAD = "initial_convergence.go_tip_path is not a", "genesis.go_block_path is not"
+SN_CASES = (
+    (SN_ALL, "top-missing", SN_I, "sidecar keys mismatch", lambda s, r: s.pop("datadirs")),
+    (SN_ALL, "top-extra", SN_I, "sidecar keys mismatch", lambda s, r: s.update(node_rust_datadir_sha256="00" * 32)),
+    (SN_ALL, "domain", SN_I, "evidence_domain mismatch", lambda s, r: s.update(evidence_domain="post_switch_store_neutrality")),
+    (SN_ALL, "commit-upper", SN_I, "protocol_commit is not 40 lowercase hex", lambda s, r: s.update(protocol_commit="AB" * 20)),
+    (SN_ALL, "commit-short", SN_I, "protocol_commit is not 40 lowercase hex", lambda s, r: s.update(protocol_commit="ab" * 19 + "a")),
+    (SN_ALL, "commit-long", SN_I, "protocol_commit is not 40 lowercase hex", lambda s, r: s.update(protocol_commit="ab" * 20 + "a")),
+    (SN_ALL, "tree-dirty", SN_I, "clients_tree_clean is not true", lambda s, r: s.update(clients_tree_clean=False)),
+    (SN_ALL, "tree-one", SN_I, "clients_tree_clean is not true", lambda s, r: s.update(clients_tree_clean=1)),
+    (SN_ALL, "binaries-extra", SN_I, "binaries keys mismatch", lambda s, r: s["binaries"].update(extra_sha256="00" * 32)),
+    (SN_ALL, "binaries-missing", SN_I, "binaries keys mismatch", lambda s, r: s["binaries"].pop("txgen_sha256")),
+    (SN_ALL, "go-node-hash", SN_I, "binaries.go_node_sha256 does not match", lambda s, r: s["binaries"].update(go_node_sha256="00" * 32)),
+    (SN_ALL, "rust-node-hash", SN_I, "binaries.rust_node_sha256 does not match", lambda s, r: s["binaries"].update(rust_node_sha256="00" * 32)),
+    (SN_ALL, "ident-extra", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(extra="x")),
+    (SN_ALL, "ident-missing", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].pop("network")),
+    (SN_ALL, "network-empty", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network="")),
+    (SN_ALL, "network-number", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network=5)),
+    (SN_ALL, "chain-id-upper", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(chain_id_hex="DD" * 32)),
+    (SN_ALL, "ident-genesis-short", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(genesis_hash_hex=genesis_hash[:62])),
+    (SN_ALL, "datadirs-extra", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(extra=str(r))),
+    (SN_ALL, "datadirs-missing", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].pop("rust_exact_empty_before_first_start")),
+    (SN_ALL, "go-datadir", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(go=str(r / "node-rust"))),
+    (SN_ALL, "rust-datadir", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(rust=str(r / "node-go"))),
+    (SN_ALL, "rust-not-empty", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(rust_exact_empty_before_first_start=False)),
+    (SN_ALL, "conv-extra", SN_I, "initial_convergence keys mismatch", lambda s, r: s["initial_convergence"].update(extra=None)),
+    (SN_ALL, "conv-missing", SN_I, "initial_convergence keys mismatch", lambda s, r: s["initial_convergence"].pop("go_tip_path")),
+    (SN_ALL, "tip-relative", SN_I, GO_TIP_BAD + " regular file inside artifact_root", lambda s, r: s["initial_convergence"].update(go_tip_path=os.path.relpath(r / GO_TIP))),
+    (SN_ALL, "tip-outside", SN_I, GO_TIP_BAD + " regular file inside artifact_root", lambda s, r: s["initial_convergence"].update(go_tip_path=sn_outside(r, GO_TIP))),
+    (SN_ALL, "tip-directory", SN_I, GO_TIP_BAD + " regular file inside artifact_root", lambda s, r: s["initial_convergence"].update(go_tip_path=str(r / "node-go"))),
+    (SN_ALL, "tip-array", SN_I, GO_TIP_BAD + " bounded JSON object", lambda s, r: dump(r / GO_TIP, [1])),
+    (SN_ALL, "tip-extra", SN_I, "initial_convergence.go_tip_path identity mismatch", lambda s, r: sn_edit_file(r, GO_TIP, extra=1)),
+    (SN_ALL, "tip-missing", SN_I, "initial_convergence.go_tip_path identity mismatch", lambda s, r: sn_drop_file_key(r, GO_TIP, "in_ibd")),
+    (SN_ALL, "tip-impl", SN_I, "initial_convergence.go_tip_path identity mismatch", lambda s, r: sn_edit_file(r, GO_TIP, implementation="rust")),
+    (SN_ALL, "tip-request", SN_I, "initial_convergence.go_tip_path identity mismatch", lambda s, r: sn_edit_file(r, GO_TIP, request_path="/get_block?height=0")),
+    (SN_ALL, "tip-endpoint", SN_I, "initial_convergence.go_tip_path identity mismatch", lambda s, r: sn_edit_file(r, GO_TIP, rpc_endpoint=rust_rpc)),
+    (("mesh",), "go-has-tip", SN_I, "initial_convergence does not prove two absent tips", lambda s, r: s["initial_convergence"].update(go_has_tip=True)),
+    (("mesh",), "rust-has-tip", SN_I, "initial_convergence does not prove two absent tips", lambda s, r: s["initial_convergence"].update(rust_has_tip=True)),
+    (("mesh",), "height-zero", SN_I, "initial_convergence does not prove two absent tips", lambda s, r: s["initial_convergence"].update(height=0)),
+    (("mesh",), "go-tip-hash", SN_I, "initial_convergence does not prove two absent tips", lambda s, r: s["initial_convergence"].update(go_tip_hash=conv_hash)),
+    (("mesh",), "rust-tip-hash", SN_I, "initial_convergence does not prove two absent tips", lambda s, r: s["initial_convergence"].update(rust_tip_hash=conv_hash)),
+    (("mesh",), "header-bytes", SN_I, "genesis and header_bytes are not null", lambda s, r: s.update(header_bytes={"go": 116, "rust": 116})),
+    (("mesh",), "tip-has-tip", SN_I, "initial_convergence.go_tip_path does not report an absent tip", lambda s, r: sn_edit_file(r, GO_TIP, has_tip=True)),
+    (("mesh",), "tip-height", SN_I, "initial_convergence.go_tip_path does not report an absent tip", lambda s, r: sn_edit_file(r, GO_TIP, height=0)),
+    (("mesh",), "tip-hash", SN_I, "initial_convergence.go_tip_path does not report an absent tip", lambda s, r: sn_edit_file(r, GO_TIP, tip_hash=conv_hash)),
+    (SN_CHAIN, "txgen-hash", SN_I, "binaries.txgen_sha256 does not match", lambda s, r: s["binaries"].update(txgen_sha256="00" * 32)),
+    (SN_CHAIN, "txgen-null", SN_I, "binaries.txgen_sha256 does not match", lambda s, r: s["binaries"].update(txgen_sha256=None)),
+    (SN_CHAIN, "txgen-unreadable", SN_I, "binaries.txgen_sha256 does not match", lambda s, r: ((r / "rubin-txgen").unlink(), s["binaries"].update(txgen_sha256=None))),
+    (SN_CHAIN, "go-has-tip-false", SN_I, "initial_convergence does not prove equal tips", lambda s, r: s["initial_convergence"].update(go_has_tip=False)),
+    (SN_CHAIN, "rust-has-tip-false", SN_I, "initial_convergence does not prove equal tips", lambda s, r: s["initial_convergence"].update(rust_has_tip=False)),
+    (SN_CHAIN, "height-100", SN_I, "initial_convergence does not prove equal tips", lambda s, r: sn_set_height(s, r, 100)),
+    (SN_CHAIN, "height-string", SN_I, "initial_convergence does not prove equal tips", lambda s, r: s["initial_convergence"].update(height="101")),
+    (SN_CHAIN, "conv-hash-upper", SN_I, "initial_convergence does not prove equal tips", lambda s, r: sn_conv_hash(s, r, "CC" * 32)),
+    (SN_CHAIN, "conv-hash-differs", SN_I, "initial_convergence does not prove equal tips", lambda s, r: (s["initial_convergence"].update(rust_tip_hash="ee" * 32), sn_edit_file(r, "initial-convergence-rust-tip.json", tip_hash="ee" * 32))),
+    (SN_CHAIN, "tip-has-tip-false", SN_I, "initial_convergence.go_tip_path does not match initial_convergence", lambda s, r: sn_edit_file(r, GO_TIP, has_tip=False)),
+    (SN_CHAIN, "tip-height", SN_I, "initial_convergence.go_tip_path does not match initial_convergence", lambda s, r: sn_edit_file(r, GO_TIP, height=102, best_known_height=102)),
+    (SN_CHAIN, "tip-hash", SN_I, "initial_convergence.go_tip_path does not match initial_convergence", lambda s, r: sn_edit_file(r, GO_TIP, tip_hash="ee" * 32)),
+    (SN_CHAIN, "genesis-list", SN_I, "genesis malformed", lambda s, r: s.update(genesis=[])),
+    (SN_CHAIN, "genesis-extra", SN_I, "genesis malformed", lambda s, r: s["genesis"].update(extra=None)),
+    (SN_CHAIN, "genesis-missing", SN_I, "genesis malformed", lambda s, r: s["genesis"].pop("rust_block_path")),
+    (SN_CHAIN, "genesis-go-upper", SN_I, "genesis malformed", lambda s, r: s["genesis"].update(go_hash=genesis_hash.upper())),
+    (SN_CHAIN, "genesis-rust-upper", SN_I, "genesis malformed", lambda s, r: s["genesis"].update(rust_hash=genesis_hash.upper())),
+    (SN_CHAIN, "genesis-rust-differs", SN_G, "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal", lambda s, r: (s["genesis"].update(rust_hash="ee" * 32), sn_edit_file(r, RUST_BLOCK, hash="ee" * 32))),
+    (SN_CHAIN, "block-relative", SN_I, GO_BLOCK_BAD + " a regular file inside artifact_root", lambda s, r: s["genesis"].update(go_block_path=os.path.relpath(r / GO_BLOCK))),
+    (SN_CHAIN, "block-outside", SN_I, GO_BLOCK_BAD + " a regular file inside artifact_root", lambda s, r: s["genesis"].update(go_block_path=sn_outside(r, GO_BLOCK))),
+    (SN_CHAIN, "block-directory", SN_I, GO_BLOCK_BAD + " a regular file inside artifact_root", lambda s, r: s["genesis"].update(go_block_path=str(r / "node-go"))),
+    (SN_CHAIN, "block-array", SN_I, GO_BLOCK_BAD + " a bounded JSON object", lambda s, r: dump(r / GO_BLOCK, [1])),
+    (SN_CHAIN, "block-extra", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_edit_file(r, GO_BLOCK, extra=1)),
+    (SN_CHAIN, "block-missing", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_drop_file_key(r, GO_BLOCK, "canonical")),
+    (SN_CHAIN, "block-impl", SN_I, "genesis.rust_block_path is not the rust genesis block capture", lambda s, r: sn_edit_file(r, RUST_BLOCK, implementation="go")),
+    (SN_CHAIN, "block-request", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_edit_file(r, GO_BLOCK, request_path="/get_block?height=1")),
+    (SN_CHAIN, "block-height-one", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_edit_file(r, GO_BLOCK, height=1)),
+    (SN_CHAIN, "block-height-false", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_edit_file(r, GO_BLOCK, height=False)),
+    (SN_CHAIN, "block-not-canonical", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_edit_file(r, GO_BLOCK, canonical=False)),
+    (SN_CHAIN, "block-canonical-one", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_edit_file(r, GO_BLOCK, canonical=1)),
+    (SN_CHAIN, "block-hex-empty", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_edit_file(r, GO_BLOCK, block_hex="")),
+    (SN_CHAIN, "block-hex-upper", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_edit_file(r, GO_BLOCK, block_hex=genesis_hex.upper())),
+    (SN_CHAIN, "block-hex-odd", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_edit_file(r, GO_BLOCK, block_hex=genesis_hex + "0")),
+    (SN_CHAIN, "block-hex-number", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_edit_file(r, GO_BLOCK, block_hex=5)),
+    (SN_CHAIN, "block-endpoint", SN_I, GO_BLOCK_BAD + " the go genesis block capture", lambda s, r: sn_edit_file(r, GO_BLOCK, rpc_endpoint=rust_rpc)),
+    (("restart",), "rust-block-new-endpoint", SN_I, "genesis.rust_block_path is not the rust genesis block capture", lambda s, r: sn_edit_file(r, RUST_BLOCK, rpc_endpoint=rust_rpc)),
+    (SN_CHAIN, "rust-block-hash", SN_G, "genesis.rust_block_path hash differs from genesis.rust_hash", lambda s, r: sn_edit_file(r, RUST_BLOCK, hash="ee" * 32)),
+    (SN_CHAIN, "header-list", SN_I, "header_bytes malformed", lambda s, r: s.update(header_bytes=[116, 116])),
+    (SN_CHAIN, "header-extra", SN_I, "header_bytes malformed", lambda s, r: s["header_bytes"].update(extra=116)),
+    (SN_CHAIN, "header-missing", SN_I, "header_bytes malformed", lambda s, r: s["header_bytes"].pop("rust")),
+    (SN_CHAIN, "header-string", SN_I, "header_bytes malformed", lambda s, r: s["header_bytes"].update(go="116")),
+    (SN_CHAIN, "header-bool", SN_I, "header_bytes malformed", lambda s, r: s["header_bytes"].update(go=True)),
+    (SN_CHAIN, "header-float", SN_I, "header_bytes malformed", lambda s, r: s["header_bytes"].update(go=116.0, rust=116.0)),
+    (SN_CHAIN, "header-rust-outside", SN_H, "header_bytes.rust is not 116 or 148", lambda s, r: s["header_bytes"].update(rust=120)),
+)
+with (root / "sn-cases.tsv").open("w", encoding="utf-8") as cases:
+    for columns, case_name, token, needle, edit in SN_CASES:
+        for column in columns:
+            sn_variant(f"{column}-{case_name}", column, edit)
+            cases.write(f"{SN_MODES[column]}\t{column}-{case_name}\t{token}\t{needle}\n")
 artifact_root = root / "partition" / "artifact-root"
 print(root / "mesh-report.json")
 print(root / "tx-report.json")
@@ -2165,6 +2276,12 @@ sn_check "default sidecar with a present tip" "${SN_INVALID}" "initial_convergen
 sn_check "restart pre-restart height below initial convergence" "${SN_INVALID}" "rust_restart.pre_restart_height is below initial_convergence.height" rust-restart restart-below
 sn_check "restart initial rust tip from the restarted endpoint" "${SN_INVALID}" "initial_convergence.rust_tip_path identity mismatch" rust-restart restart-new-endpoint
 sn_check "partition common block not above initial convergence" "${SN_INVALID}" "partition common block height is not above initial_convergence.height" partition-heal-reorg partition-not-above
+sn_cases=0
+while IFS=$'\t' read -r sn_mode sn_name sn_token sn_needle; do
+  sn_check "sidecar ${sn_name}" "${sn_token}" "${sn_needle}" "${sn_mode}" "${sn_name}"
+  sn_cases=$((sn_cases + 1))
+done < "${TMP_ROOT}/sn-cases.tsv"
+(( sn_cases == 198 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 198" >&2; exit 1; }
 sn_output="$(check_report "${TMP_ROOT}/sn-extra-key-report.json" offline producer-tx 2>&1)" && { echo "FAIL: sidecar extra key report should fail" >&2; exit 1; }
 [[ "$(combined_report_reason_token <<<"${sn_output}")" == store_neutrality_sidecar_invalid ]] || { echo "FAIL: combined token for sidecar keys mismatch: $(combined_report_reason_token <<<"${sn_output}")" >&2; exit 1; }
 printf 'PASS: mixed-client mesh check-report public/internal boundaries are covered\n'
