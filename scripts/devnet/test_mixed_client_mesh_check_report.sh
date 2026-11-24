@@ -209,10 +209,11 @@ argv_cmd() { :; }
 argv_json() { :; }
 rubin_process_start() { shift; printf '%s\n' "$@" >"${SPAWNED}"; return 1; }
 expect_refused() {
-  RUST_DIR="$1"; RUST_STORE_READY=0; rm -f -- "${SPAWNED}"
+  RUST_DIR="$1"; RUST_STORE_READY=0; RUST_EXACT_EMPTY_BEFORE_FIRST_START=false; rm -f -- "${SPAWNED}"
   if start_rust_node_with_log node-rust.log; then echo "FAIL: start accepted ${RUST_DIR}" >&2; exit 1; fi
   [[ "${START_REASON}" == rust_datadir_not_exact_empty ]] || { echo "FAIL: start reason ${START_REASON} for ${RUST_DIR}" >&2; exit 1; }
   [[ ! -e "${SPAWNED}" && "${RUST_STORE_READY}" == 0 ]] || { echo "FAIL: Rust process spawned on ${RUST_DIR}" >&2; exit 1; }
+  [[ "${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" == false ]] || { echo "FAIL: refused start set rust_exact_empty_before_first_start ${RUST_EXACT_EMPTY_BEFORE_FIRST_START} for ${RUST_DIR}" >&2; exit 1; }
 }
 mkdir -p -- "${probe_root}/file" "${probe_root}/dot" "${probe_root}/newline" "${probe_root}/empty"
 printf 'x\n' >"${probe_root}/file/CURRENT"; printf 'x\n' >"${probe_root}/dot/.lock"; printf 'x\n' >"${probe_root}/newline/"$'\n'
@@ -223,13 +224,14 @@ expect_refused "${probe_root}/newline"
 expect_refused "${probe_root}/link-to-file-dir"
 expect_refused "${probe_root}/regular"
 expect_refused "${probe_root}/missing"
-RUST_DIR="${probe_root}/empty"; RUST_STORE_READY=0; rm -f -- "${SPAWNED}"
+RUST_DIR="${probe_root}/empty"; RUST_STORE_READY=0; RUST_EXACT_EMPTY_BEFORE_FIRST_START=false; rm -f -- "${SPAWNED}"
 if start_rust_node_with_log node-rust.log; then echo "FAIL: stub launch should fail" >&2; exit 1; fi
 [[ "${START_REASON}" == rust_launch_failed && "${RUST_STORE_READY}" == 1 ]] || { echo "FAIL: empty datadir start reason ${START_REASON}" >&2; exit 1; }
+[[ "${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" == true ]] || { echo "FAIL: empty datadir start set rust_exact_empty_before_first_start ${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" >&2; exit 1; }
 [[ "$(tail -n 1 "${SPAWNED}")" == --create-store ]] || { echo "FAIL: first Rust start lacks --create-store" >&2; exit 1; }
 printf 'x\n' >"${probe_root}/empty/CURRENT"; rm -f -- "${SPAWNED}"
 if start_rust_node_with_log node-rust-restart.log; then echo "FAIL: stub relaunch should fail" >&2; exit 1; fi
-[[ "${START_REASON}" == rust_launch_failed ]] || { echo "FAIL: reopen start reason ${START_REASON}" >&2; exit 1; }
+[[ "${START_REASON}" == rust_launch_failed && "${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" == true ]] || { echo "FAIL: reopen start reason ${START_REASON}, rust_exact_empty_before_first_start ${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" >&2; exit 1; }
 ! grep -Fxq -- --create-store "${SPAWNED}" || { echo "FAIL: Rust reopen carries --create-store" >&2; exit 1; }
 SH
   bash "${probe}" "${lib}" "${probe_root}"
@@ -290,7 +292,7 @@ check_initial_convergence_wait() {
 set -euo pipefail
 source "$1"
 probe_root="$2"
-MESH_TIMEOUT=1; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"; TX_PATH_MODE=0; RUST_RESTART_MODE=0; PARTITION_HEAL_REORG_MODE=0
+MESH_TIMEOUT=2; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"; TX_PATH_MODE=0; RUST_RESTART_MODE=0; PARTITION_HEAL_REORG_MODE=0
 INITIAL_GO_TIP_JSON="${probe_root}/go-tip.json"; INITIAL_RUST_TIP_JSON="${probe_root}/rust-tip.json"
 RUST_CAPTURE_FAILS=0
 capture_rpc_sidecar() {
@@ -305,9 +307,9 @@ go101="$(tip go101 101 true "${aa}")"; rust101="$(tip rust101 101 true "${aa}")"
 absent="$(tip absent null false null)"; rust_zero="$(tip rustzero 0 true "${aa}")"
 printf '{"has_tip":false,"tip_hash":null}\n' >"${probe_root}/absent-no-height.json"
 expect_match() {
-  local MESH_TIMEOUT="${MESH_TIMEOUT}"; (( MESH_TIMEOUT >= 2 )) || MESH_TIMEOUT=2
-  GO_TIP_INPUT="$1"; RUST_TIP_INPUT="$2"; rm -f -- "${INITIAL_RUST_TIP_JSON}"
+  GO_TIP_INPUT="$1"; RUST_TIP_INPUT="$2"; rm -f -- "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}"
   wait_initial_convergence || { echo "FAIL: initial convergence rejected $1 $2: ${PARTITION_REASON}" >&2; exit 1; }
+  cmp -s -- "$1" "${INITIAL_GO_TIP_JSON}" || { echo "FAIL: initial Go tip capture is not the accepted answer" >&2; exit 1; }
   cmp -s -- "$2" "${INITIAL_RUST_TIP_JSON}" || { echo "FAIL: initial Rust tip capture is not the accepted answer" >&2; exit 1; }
 }
 expect_reason() {
@@ -317,13 +319,13 @@ expect_reason() {
 }
 TX_PATH_MODE=3
 expect_match "${go101}" "${rust101}"
-expect_reason initial_convergence_timeout "${go101}" "${rust100}"
+MESH_TIMEOUT=1 expect_reason initial_convergence_timeout "${go101}" "${rust100}"
 expect_reason initial_convergence_timeout "${go101}" "${rust101b}"
 expect_reason initial_convergence_go_tip_tip_absent "${absent}" "${absent}"
-rm -f -- "${probe_root}/captures-go" "${probe_root}/captures-rust"; MESH_TIMEOUT=3; RUST_CAPTURE_FAILS=1
-expect_match "${go101}" "${rust101}"
+rm -f -- "${probe_root}/captures-go" "${probe_root}/captures-rust"; RUST_CAPTURE_FAILS=1
+MESH_TIMEOUT=3 expect_match "${go101}" "${rust101}"
 [[ "$(wc -l <"${probe_root}/captures-go")" -eq 1 && "$(wc -l <"${probe_root}/captures-rust")" -eq 2 ]] || { echo "FAIL: Go tip captures $(wc -l <"${probe_root}/captures-go"), Rust tip captures $(wc -l <"${probe_root}/captures-rust"), want 1 and 2" >&2; exit 1; }
-MESH_TIMEOUT=1; RUST_CAPTURE_FAILS=1000
+RUST_CAPTURE_FAILS=1000
 expect_reason initial_convergence_timeout "${go101}" "${rust101}"
 RUST_CAPTURE_FAILS=0
 TX_PATH_MODE=0
@@ -338,7 +340,7 @@ SH
 check_store_neutrality_producer_reasons() {
   local probe="${TMP_ROOT}/sn-producer.sh" probe_root="${TMP_ROOT}/sn-producer" lib="${TMP_ROOT}/sn-producer-lib.sh" main="${TMP_ROOT}/sn-producer-main.sh"
   mkdir -p -- "${probe_root}/cap" "${probe_root}/out"
-  extract_slices "${lib}" "sidecar_derivations_py()" '[[ "${MESH_TIMEOUT}"' "write_store_neutrality_sidecar()" "capture_go_reorg_metrics()"
+  extract_slices "${lib}" "sidecar_derivations_py()" '[[ "${MESH_TIMEOUT}"' "chain_mode()" "capture_go_reorg_metrics()"
   extract_slices "${main}" "write_store_neutrality_sidecar ||" "if (( PARTITION_HEAL_REORG_MODE == 1 )); then"
   python3 - "${probe_root}" <<'PY'
 import hashlib, json, sys
@@ -361,6 +363,8 @@ for name, base in (("ident", ident), ("block", block)):
         json.dump({**base, key: 7}, open(f"{root}/bad-{name}-number-{key}.json", "w"))
 json.dump({"best_known_height": 101, "has_tip": True, "height": 101, "in_ibd": False, "tip_hash": "c1" * 32}, open(f"{root}/tip-go.json", "w"))
 json.dump({"best_known_height": 102, "has_tip": False, "height": 102, "in_ibd": True, "tip_hash": "c2" * 32}, open(f"{root}/tip-rust.json", "w"))
+for impl in ("go", "rust"):
+    json.dump({"best_known_height": 0, "has_tip": False, "height": None, "in_ibd": False, "tip_hash": None}, open(f"{root}/tip-absent-{impl}.json", "w"))
 for impl in ("go", "rust", "txgen"):
     open(f"{root}/bin-{impl}", "w").write(f"{impl} binary\n")
 json.dump([], open(f"{root}/array.json", "w"))
@@ -376,6 +380,7 @@ CHAIN_IDENTITY_JSON="${p}/cap/ident.json"; GENESIS_GO_BLOCK_JSON="${p}/cap/go.js
 STORE_NEUTRALITY_JSON="${p}/out/sidecar.json"; BLOCKS=116; FAIL_CAPTURE=""; BAD_CAPTURE=""; BAD_SRC=""; FAIL_GIT=""; GIT_HEAD=0123456789abcdef0123456789abcdef01234567; GIT_STATUS=""
 capture_rpc_sidecar() {
   local src="${p}/block-${BLOCKS}-$1.json"
+  printf '%s\n' "$1 $4" >>"${p}/captures.log"
   [[ "$1 $4" == "${FAIL_CAPTURE}" ]] && return 1
   [[ "$4" == /chain_identity ]] && src="${p}/ident.json"
   [[ "$1 $4" == "${BAD_CAPTURE}" ]] && src="${BAD_SRC}"
@@ -392,33 +397,36 @@ git() {
 finish_no_data() { printf '%s\n' "$1"; exit 0; }
 expect_end() {
   local got
+  rm -f -- "${p}/captures.log"
   got="$(source "${main}"; printf 'completed\n')"
   [[ "${got}" == "$1" ]] || { echo "FAIL: sidecar producer ended with ${got}, want $1" >&2; exit 1; }
 }
 expect_sidecar() {
-  python3 - "${STORE_NEUTRALITY_JSON}" "${p}" "${GIT_HEAD}" "$1" "$2" <<'PY' || { echo "FAIL: sidecar members differ from the producer inputs, clients_tree_clean $1, rust_exact_empty_before_first_start $2" >&2; exit 1; }
+  python3 - "${STORE_NEUTRALITY_JSON}" "${p}" "${GIT_HEAD}" "$1" "$2" "$3" "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}" <<'PY' || { echo "FAIL: sidecar members or capture requests differ from the producer inputs, clients_tree_clean $1, rust_exact_empty_before_first_start $2, mode $3" >&2; exit 1; }
 import hashlib, json, sys
-out, p, head, clean, empty = sys.argv[1:6]
-def load(name): return json.load(open(f"{p}/{name}", encoding="utf-8"))
+out, p, head, clean, empty, mode, go_tip_path, rust_tip_path = sys.argv[1:9]
+chain = mode == "chain"
+def load(path): return json.load(open(path, encoding="utf-8"))
 def sha(name): return hashlib.sha256(open(f"{p}/{name}", "rb").read()).hexdigest()
-ident, go_tip, rust_tip = load("ident.json"), load("tip-go.json"), load("tip-rust.json")
+ident, go_tip, rust_tip = load(f"{p}/ident.json"), load(go_tip_path), load(rust_tip_path)
 want = {
     "evidence_domain": "pre_switch_store_neutrality", "protocol_commit": head, "clients_tree_clean": clean == "true",
-    "binaries": {"go_node_sha256": sha("bin-go"), "rust_node_sha256": sha("bin-rust"), "txgen_sha256": sha("bin-txgen")},
+    "binaries": {"go_node_sha256": sha("bin-go"), "rust_node_sha256": sha("bin-rust"), "txgen_sha256": sha("bin-txgen") if chain else None},
     "chain_identity": {key: ident[key] for key in ("network", "chain_id_hex", "genesis_hash_hex")},
-    "genesis": {"go_hash": load("block-differ-go.json")["hash"], "rust_hash": load("block-differ-rust.json")["hash"], "go_block_path": f"{p}/cap/go.json", "rust_block_path": f"{p}/cap/rust.json"},
-    "header_bytes": {"go": 116, "rust": 148},
+    "genesis": {"go_hash": load(f"{p}/block-differ-go.json")["hash"], "rust_hash": load(f"{p}/block-differ-rust.json")["hash"], "go_block_path": f"{p}/cap/go.json", "rust_block_path": f"{p}/cap/rust.json"} if chain else None,
+    "header_bytes": {"go": 116, "rust": 148} if chain else None,
     "datadirs": {"go": f"{p}/node-go", "rust": f"{p}/node-rust", "rust_exact_empty_before_first_start": empty == "true"},
-    "initial_convergence": {"go_has_tip": go_tip["has_tip"], "rust_has_tip": rust_tip["has_tip"], "height": go_tip["height"], "go_tip_hash": go_tip["tip_hash"], "rust_tip_hash": rust_tip["tip_hash"], "go_tip_path": f"{p}/tip-go.json", "rust_tip_path": f"{p}/tip-rust.json"},
+    "initial_convergence": {"go_has_tip": go_tip["has_tip"], "rust_has_tip": rust_tip["has_tip"], "height": go_tip["height"], "go_tip_hash": go_tip["tip_hash"], "rust_tip_hash": rust_tip["tip_hash"], "go_tip_path": go_tip_path, "rust_tip_path": rust_tip_path},
 }
-sys.exit(json.load(open(out, encoding="utf-8")) != want)
+captures = ["go /chain_identity"] + (["go /get_block?height=0", "rust /get_block?height=0"] if chain else [])
+sys.exit(load(out) != want or open(f"{p}/captures.log", encoding="utf-8").read().splitlines() != captures)
 PY
 }
 expect_heights() { python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["header_bytes"] != {"go": int(sys.argv[2]), "rust": int(sys.argv[3])})' "${STORE_NEUTRALITY_JSON}" "$1" "$2" || { echo "FAIL: sidecar header_bytes is not go $1 rust $2" >&2; exit 1; }; }
 BLOCKS=148 expect_end completed; expect_heights 148 148
 BLOCKS=nomatch expect_end completed; expect_heights 116 0
-BLOCKS=differ expect_end completed; expect_sidecar true true
-BLOCKS=differ GIT_STATUS=" M clients/go/node/miner.go" RUST_EXACT_EMPTY_BEFORE_FIRST_START=false expect_end completed; expect_sidecar false false
+BLOCKS=differ expect_end completed; expect_sidecar true true chain
+BLOCKS=differ GIT_STATUS=" M clients/go/node/miner.go" RUST_EXACT_EMPTY_BEFORE_FIRST_START=false expect_end completed; expect_sidecar false false chain
 expect_end completed; expect_heights 116 116
 bad_captures=0
 for bad in "${p}"/bad-ident-*.json; do BAD_CAPTURE="go /chain_identity" BAD_SRC="${bad}" expect_end store_neutrality_chain_identity_capture_failed; bad_captures=$((bad_captures + 1)); done
@@ -435,6 +443,13 @@ FAIL_GIT=rev-parse expect_end store_neutrality_commit_unavailable
 FAIL_GIT=status expect_end store_neutrality_commit_unavailable
 TXGEN_BIN="${p}/missing" expect_end store_neutrality_binary_hash_failed
 STORE_NEUTRALITY_JSON="${p}/missing/sidecar.json" expect_end store_neutrality_sidecar_write_failed
+INITIAL_GO_TIP_JSON="${p}/array.json" expect_end store_neutrality_sidecar_write_failed
+INITIAL_RUST_TIP_JSON="${p}/missing-tip.json" expect_end store_neutrality_sidecar_write_failed
+rm -f -- "${GENESIS_GO_BLOCK_JSON}" "${GENESIS_RUST_BLOCK_JSON}"
+(
+  TX_PATH_MODE=0; TXGEN_BIN="${p}/missing"; INITIAL_GO_TIP_JSON="${p}/tip-absent-go.json"; INITIAL_RUST_TIP_JSON="${p}/tip-absent-rust.json"
+  expect_end completed; expect_sidecar true true default
+)
 SH
   bash "${probe}" "${lib}" "${main}" "${probe_root}"
 }

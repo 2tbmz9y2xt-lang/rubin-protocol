@@ -2626,9 +2626,11 @@ wait_initial_tips_absent() {
   PARTITION_REASON=initial_convergence_timeout
   return 1
 }
+# True in the modes that mine a chain before the first Rust start.
+chain_mode() { (( TX_PATH_MODE || RUST_RESTART_MODE || PARTITION_HEAL_REORG_MODE )); }
 wait_initial_convergence() {
   local parsed height tip_hash
-  (( TX_PATH_MODE || RUST_RESTART_MODE || PARTITION_HEAL_REORG_MODE )) || { wait_initial_tips_absent; return; }
+  chain_mode || { wait_initial_tips_absent; return; }
   PARTITION_REASON=""
   parsed="$(partition_capture_tip initial_convergence_go_tip go "${GO_RPC_ADDR}" "${INITIAL_GO_TIP_JSON}" || { printf '%s\n' "${PARTITION_REASON}"; exit 1; })" || { PARTITION_REASON="${parsed}"; return 1; }
   IFS='|' read -r height tip_hash _ <<<"${parsed}"
@@ -2640,7 +2642,7 @@ wait_initial_convergence() {
 # next to the code that writes it below.
 write_store_neutrality_sidecar() {
   local chain=0 commit tree rc=0
-  (( TX_PATH_MODE || RUST_RESTART_MODE || PARTITION_HEAL_REORG_MODE )) && chain=1
+  chain_mode && chain=1
   SIDECAR_REASON=""
   capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /chain_identity "${CHAIN_IDENTITY_JSON}" || { SIDECAR_REASON=store_neutrality_chain_identity_capture_failed; return 1; }
   if (( chain )); then
