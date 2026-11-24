@@ -373,8 +373,12 @@ func TestCapturedSourceReadSharedFaultV1(t *testing.T) {
 	t.Run("unissued-shared-old-inode", testCapturedReadOldAlias)
 	t.Run("deferred-before-shared-omission", testCapturedReadDeferredSharedOmission)
 	t.Run("unissued-multiple-inode-holders", testCapturedReadMultipleOldHolders)
+	t.Run("actual-shared-omission", func(t *testing.T) {
+		sourceModes(t, []string{"holder-before-target", "target-before-holder"}, testCapturedReadActualSharedOmission)
+	})
 	t.Run("stage-shared-old-inode", testCapturedReadStageAlias)
 	t.Run("stopped-stage-shared-old-inode", testCapturedReadStoppedStageAlias)
+	t.Run("stopped-stage-unknown-inode", testCapturedReadUnknownStoppedStage)
 	t.Run("active-release-conflict", testCapturedReadReleaseConflict)
 	t.Run("alternate-capture-spelling", testCapturedReadSpelledAlias)
 	t.Run("replacement-with-alternate-spelling", testCapturedReadSpelledReplacement)
@@ -806,6 +810,41 @@ func testCapturedReadMultipleOldHolders(t *testing.T) {
 	sourceRead(t, o, c.m, c.parts)
 }
 
+func testCapturedReadActualSharedOmission(t *testing.T, mode string) {
+	limits, size := sourceLimits(), capturedReadSize(t, 'B')
+	limits.Files, limits.Bytes = 4, 4*size
+	o, paths, ordered := capturedReadRetainedOrder(t, limits, 'B', 'C', 'E')
+	b, e, c := ordered[0], ordered[1], ordered[2]
+	if mode == "target-before-holder" {
+		e, c = c, e
+	}
+	sourcePrepare(t, o, b.m, b.parts)
+	sourcePrepare(t, o, e.m, e.parts)
+	bPath, ePath, cPath := filepath.Join(paths.root, b.leaf), filepath.Join(paths.root, e.leaf), filepath.Join(paths.root, c.leaf)
+	holder := sourceLstat(t, ePath)
+	sourceFailIf(t, os.SameFile(sourceLstat(t, bPath), holder) || uint64(holder.Size()) != size,
+		"issued holder shares the first capture or has a different extent")
+	cHeld := keepCaptureAndLink(t, cPath, ePath)
+	target := sourceReadFile(t, cHeld)
+	sourceFailIf(t, uint64(len(target)) != size, "retained target extent = %d, want %d", len(target), size)
+	sourceMust(t, os.WriteFile(cPath, target, 0o600))
+	sourceUnchangedEntry(t, cPath, holder, target)
+	sourceUnchangedEntry(t, ePath, holder, target)
+	checkCapturedReadOrder(t, paths.root, ordered)
+	sourceRead(t, o, c.m, c.parts)
+	outside := t.TempDir()
+	sourceMust(t, os.Rename(bPath, filepath.Join(outside, b.leaf)))
+	checkCapturedReadOrder(t, paths.root, ordered[1:])
+	sourceRead(t, o, c.m, c.parts)
+	sourceRead(t, o, c.m, c.parts)
+	eHeld := filepath.Join(outside, e.leaf)
+	sourceMust(t, os.Rename(ePath, eHeld))
+	sourceReadRefusal(t, o, c.m, ErrIntegrityV1, "target shares the omitted issued holder")
+	sourceMust(t, os.Rename(eHeld, ePath))
+	sourceRead(t, o, c.m, c.parts)
+	sourceReadRefusal(t, o, b.m, ErrIntegrityV1, "independent capture still omitted after holder restoration")
+}
+
 func testCapturedReadAbsentTarget(t *testing.T) {
 	o, paths, _, c := capturedReadUnissuedTarget(t)
 	target := filepath.Join(paths.root, c.leaf)
@@ -894,6 +933,36 @@ func testCapturedReadStoppedStageAlias(t *testing.T) {
 	sourceMust(t, os.Remove(stoppedPath))
 	sourceRead(t, o, c.m, c.parts)
 	sourceReadRefusal(t, o, b.m, ErrIdentityV1, "replacement after clearing the staging conflict")
+}
+
+func testCapturedReadUnknownStoppedStage(t *testing.T) {
+	o, paths, ordered := capturedReadRetainedOrder(t, sourceLimits(), 'B', 'C')
+	b, c := ordered[0], ordered[1]
+	sourcePrepare(t, o, b.m, b.parts)
+	bPath, cPath := filepath.Join(paths.root, b.leaf), filepath.Join(paths.root, c.leaf)
+	held := capturedReadReplace(t, bPath, t.TempDir(), sourceReadFile(t, bPath))
+	outside := t.TempDir()
+	for _, path := range []string{bPath, cPath} {
+		sourceMust(t, os.Rename(path, filepath.Join(outside, filepath.Base(path))))
+	}
+	for _, path := range []string{bPath, cPath} {
+		sourceMust(t, os.Rename(filepath.Join(outside, filepath.Base(path)), path))
+	}
+	stage := publicStagePrefix + capturedReadRecordFor('E').leaf
+	stagePath := filepath.Join(paths.root, stage)
+	sourceMust(t, os.Link(held, stagePath))
+	original := sourceLstat(t, held)
+	sourceUnchangedEntry(t, stagePath, original)
+	sourceFailIf(t, os.SameFile(sourceLstat(t, cPath), original), "target holds the staged inode")
+	actual := capturedReadNames(t, paths.root)
+	want := []string{b.leaf, c.leaf, stage}
+	sourceFailIf(t, !slices.Equal(actual, want), "stopped stage order = %v, want %v", actual, want)
+	sourceLookupOnce(t, [2]string{paths.root, stage}, struct{}{})
+	sourceReadRefusal(t, o, c.m, ErrIdentityV1, "capture replacement before a stage lookup failure")
+	sourceReadRefusal(t, o, c.m, ErrIdentityV1, "capture replacement with its original inode staged")
+	sourceMust(t, os.Remove(stagePath))
+	sourceRead(t, o, c.m, c.parts)
+	sourceReadRefusal(t, o, b.m, ErrIdentityV1, "capture replacement after removing the staging alias")
 }
 
 func testCapturedReadSpelledAlias(t *testing.T) {
