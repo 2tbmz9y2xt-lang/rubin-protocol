@@ -154,6 +154,14 @@ func (l SourceLimitsV1) WorkingBytesV1() uint64 {
 
 func (l SourceLimitsV1) retainedRAM() uint64 { return 1024 + l.Files*(136+sha256.Size) }
 
+// LimitsForStoreV1 returns a copy of the configured limits for the exact owning Store without borrowing it.
+func (o *SourceOwnerV1) LimitsForStoreV1(store *policycontrol.Store) (SourceLimitsV1, error) {
+	if o == nil || o.self != o || store == nil || store != o.store {
+		return SourceLimitsV1{}, ErrIdentityV1
+	}
+	return o.limits, nil
+}
+
 func (o *SourceOwnerV1) operation(account *mdbx.OperationAccount, use func() error) error {
 	if o == nil || o.self != o {
 		return ErrIdentityV1
