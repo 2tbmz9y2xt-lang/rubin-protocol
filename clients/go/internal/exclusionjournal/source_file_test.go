@@ -392,6 +392,7 @@ func TestCapturedSourceReadSharedFaultV1(t *testing.T) {
 	t.Run("stopped-stage-shared-old-inode", testCapturedReadStoppedStageAlias)
 	t.Run("stopped-stage-unknown-inode", testCapturedReadUnknownStoppedStage)
 	t.Run("malformed-stopped-stage-name", testCapturedReadMalformedStoppedStage)
+	t.Run("stopped-held-stage", testCapturedReadStoppedHeldStage)
 	t.Run("active-release-conflict", testCapturedReadReleaseConflict)
 	t.Run("alternate-capture-spelling", testCapturedReadSpelledAlias)
 	t.Run("replacement-with-alternate-spelling", testCapturedReadSpelledReplacement)
@@ -949,10 +950,12 @@ func testCapturedReadStoppedStageAlias(t *testing.T) {
 	sourceReadRefusal(t, o, b.m, ErrIdentityV1, "replacement after clearing the staging conflict")
 }
 
-func capturedReadFreshPair(t *testing.T) (*SourceOwnerV1, sourceTestPaths, capturedReadRecord, capturedReadRecord) {
+func capturedReadFreshPair(t *testing.T, first byte) (*policycontrol.Store, *SourceOwnerV1, sourceTestPaths, capturedReadRecord, capturedReadRecord) {
 	t.Helper()
 	limits := sourceLimits()
-	s, _, paths, b, c := capturedReadPair(t, limits)
+	b, c := capturedReadRecordFor(first), capturedReadRecordFor(first+1)
+	s, o, paths, _ := sourcePreparedScene(t, limits, b.m, b.parts)
+	sourcePrepare(t, o, c.m, c.parts)
 	s = sourceReopenStore(t, s, paths.dir)
 	prepared := filepath.Join(t.TempDir(), "captures")
 	sourceMust(t, os.Rename(paths.root, prepared))
@@ -964,25 +967,72 @@ func capturedReadFreshPair(t *testing.T) (*SourceOwnerV1, sourceTestPaths, captu
 	if capturedReadNames(t, paths.root)[0] == c.leaf {
 		b, c = c, b
 	}
-	o := sourceOpen(t, s, sourceID(), limits, nil)
+	o = sourceOpen(t, s, sourceID(), limits, nil)
 	sourcePrepare(t, o, b.m, b.parts)
-	return o, paths, b, c
+	return s, o, paths, b, c
+}
+
+type capturedReadStageFixture struct {
+	owner                 *SourceOwnerV1
+	b, c                  capturedReadRecord
+	root, original, stage string
+}
+
+func capturedReadStoppedStageFixture(t *testing.T, shape string) capturedReadStageFixture {
+	t.Helper()
+	for i := range 64 {
+		first := byte('B' + 3*i)
+		s, o, paths, b, c := capturedReadFreshPair(t, first)
+		bPath := filepath.Join(paths.root, b.leaf)
+		original := capturedReadReplace(t, bPath, t.TempDir(), sourceReadFile(t, bPath))
+		stage := capturedReadStoppedStageFile(t, paths.root, original, b, c, first+3, shape)
+		want := []string{b.leaf, c.leaf, stage}
+		if shape == "held" {
+			want[1], want[2] = want[2], want[1]
+		}
+		actual := capturedReadNames(t, paths.root)
+		if slices.Equal(actual, want) {
+			t.Logf("stopped stage order = %v", actual)
+			return capturedReadStageFixture{owner: o, b: b, c: c, root: paths.root, original: original, stage: stage}
+		}
+		sourceMust(t, s.Close())
+	}
+	t.Fatalf("no matching stopped %s stage order", shape)
+	return capturedReadStageFixture{}
+}
+
+func capturedReadStoppedStageFile(t *testing.T, root, original string, b, c capturedReadRecord, label byte, shape string) string {
+	t.Helper()
+	key := capturedReadRecordFor(label).leaf
+	switch shape {
+	case "public":
+		stage := publicStagePrefix + key
+		sourceMust(t, os.Link(original, filepath.Join(root, stage)))
+		return stage
+	case "malformed":
+		stage := publicStagePrefix + heldStagePrefix + b.leaf
+		writeSourceEntry(t, filepath.Join(root, stage), []byte{1})
+		return stage
+	case "held":
+		stage := heldStagePrefix + key
+		cPath, outside := filepath.Join(root, c.leaf), filepath.Join(t.TempDir(), c.leaf)
+		sourceMust(t, os.Rename(cPath, outside))
+		writeSourceEntry(t, filepath.Join(root, stage), []byte{1})
+		sourceMust(t, os.Rename(outside, cPath))
+		return stage
+	}
+	t.Fatalf("invalid stopped stage shape %q", shape)
+	return ""
 }
 
 func testCapturedReadUnknownStoppedStage(t *testing.T) {
-	o, paths, b, c := capturedReadFreshPair(t)
-	bPath, cPath := filepath.Join(paths.root, b.leaf), filepath.Join(paths.root, c.leaf)
-	held := capturedReadReplace(t, bPath, t.TempDir(), sourceReadFile(t, bPath))
-	stage := publicStagePrefix + capturedReadRecordFor('E').leaf
-	stagePath := filepath.Join(paths.root, stage)
-	sourceMust(t, os.Link(held, stagePath))
-	original := sourceLstat(t, held)
+	f := capturedReadStoppedStageFixture(t, "public")
+	o, b, c := f.owner, f.b, f.c
+	stagePath := filepath.Join(f.root, f.stage)
+	original := sourceLstat(t, f.original)
 	sourceUnchangedEntry(t, stagePath, original)
-	sourceFailIf(t, os.SameFile(sourceLstat(t, cPath), original), "target holds the staged inode")
-	actual := capturedReadNames(t, paths.root)
-	want := []string{b.leaf, c.leaf, stage}
-	sourceFailIf(t, !slices.Equal(actual, want), "stopped stage order = %v, want %v", actual, want)
-	sourceLookupOnce(t, [2]string{paths.root, stage}, struct{}{})
+	sourceFailIf(t, os.SameFile(sourceLstat(t, filepath.Join(f.root, c.leaf)), original), "target holds the staged inode")
+	sourceLookupOnce(t, [2]string{f.root, f.stage}, struct{}{})
 	sourceReadRefusal(t, o, c.m, ErrIdentityV1, "capture replacement before a stage lookup failure")
 	sourceReadRefusal(t, o, c.m, ErrIdentityV1, "capture replacement with its original inode staged")
 	sourceMust(t, os.Remove(stagePath))
@@ -991,22 +1041,27 @@ func testCapturedReadUnknownStoppedStage(t *testing.T) {
 }
 
 func testCapturedReadMalformedStoppedStage(t *testing.T) {
-	o, paths, b, c := capturedReadFreshPair(t)
-	bPath, cPath := filepath.Join(paths.root, b.leaf), filepath.Join(paths.root, c.leaf)
-	held := capturedReadReplace(t, bPath, t.TempDir(), sourceReadFile(t, bPath))
-	stage := publicStagePrefix + heldStagePrefix + b.leaf
-	stagePath := filepath.Join(paths.root, stage)
-	malformed := writeSourceEntry(t, stagePath, []byte{1})
-	for _, path := range []string{held, bPath, cPath} {
+	f := capturedReadStoppedStageFixture(t, "malformed")
+	o, b, c := f.owner, f.b, f.c
+	stagePath := filepath.Join(f.root, f.stage)
+	malformed := sourceLstat(t, stagePath)
+	for _, path := range []string{f.original, filepath.Join(f.root, b.leaf), filepath.Join(f.root, c.leaf)} {
 		sourceFailIf(t, os.SameFile(malformed, sourceLstat(t, path)), "malformed staging entry shares a capture inode")
 	}
-	actual := capturedReadNames(t, paths.root)
-	want := []string{b.leaf, c.leaf, stage}
-	sourceFailIf(t, !slices.Equal(actual, want), "malformed stage order = %v, want %v", actual, want)
 	sourceReadRefusal(t, o, c.m, ErrIntegrityV1, "malformed stage name after a distinct replacement")
 	sourceMust(t, os.Remove(stagePath))
 	sourceRead(t, o, c.m, c.parts)
 	sourceReadRefusal(t, o, b.m, ErrIdentityV1, "capture replacement after removing the malformed stage")
+}
+
+func testCapturedReadStoppedHeldStage(t *testing.T) {
+	f := capturedReadStoppedStageFixture(t, "held")
+	stagePath := filepath.Join(f.root, f.stage)
+	sourceLookupOnce(t, [2]string{f.root, f.stage}, struct{}{})
+	sourceReadRefusal(t, f.owner, f.c.m, ErrIntegrityV1, "held stage lookup before the target")
+	sourceMust(t, os.Remove(stagePath))
+	sourceRead(t, f.owner, f.c.m, f.c.parts)
+	sourceReadRefusal(t, f.owner, f.b.m, ErrIdentityV1, "capture replacement after removing the held stage")
 }
 
 func testCapturedReadSpelledAlias(t *testing.T) {

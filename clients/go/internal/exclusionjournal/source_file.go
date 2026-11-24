@@ -67,7 +67,6 @@ type sourceReadCensus struct {
 	nameIndex                                    []int
 	indexLimit, pendingLimit                     int
 	ordinal, refusalOrdinal                      int
-	selectedPending                              error
 	hasSpellings, stoppedStageUnknown, localized bool
 }
 
@@ -182,7 +181,7 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, forRel
 	o.chargeBindings(&used)
 	used, err = o.censusCaptures(r, listed, prefix, used, stopErr)
 	if stopErr != nil && strings.HasPrefix(listed.name(prefix), heldStagePrefix) {
-		return sourceUsage{stage: stage, stageReached: used.stageReached, entries: entries, read: used.read, visitErr: used.read.selectedPending}, stopErr
+		return sourceUsage{stage: stage, stageReached: used.stageReached, entries: entries, read: used.read}, stopErr
 	}
 	return used, err
 }
@@ -300,7 +299,7 @@ func (used *sourceUsage) applyPendingRefusal(pending sourceReadMismatch) {
 		refusal = ErrIdentityV1
 	}
 	used.visitErr, used.stageReached = refusal, pending.stageReached
-	read.selectedPending, read.refusalOrdinal = refusal, pending.ordinal
+	read.refusalOrdinal = pending.ordinal
 }
 
 // chargeBindings reserves space for bound captures, including missing files.
