@@ -1544,18 +1544,24 @@ dump(root / "converge-tx-count-mismatch.json", bad_converge)
 (root / "malformed.json").write_text("[", encoding="utf-8")
 with (root / "oversized.json").open("wb") as f:
     f.write(b" " * 1_000_001)
+GO_MINE_VARIANTS, RUST_MINE_VARIANTS = ("no-commit", "not-committed", "no-commit-rust-rpc", "not-committed-rust-rpc"), ("commit", "go-impl", "go-impl-commit")
 mine_next_cases = (
-    ("partition-go", "partition-common-go-mine.json", partition_report, ("observations", "pre_partition", "common_go_mine"), ("no-commit", "not-committed")),
-    ("partition-rust", "partition-rust-mine-1.json", partition_report, ("observations", "fork", "rust_mine_1"), ("commit", "go-impl")),
-    ("restart-go", "go-restart-mine-next.json", restart_report, ("rust_restart", "go_target_mine_next_path"), ("no-commit", "not-committed")),
-    ("converge-rust", "rust-mine-next.json", converge_report, ("rust_mine", "mine_next_path"), ("commit", "go-impl")),
-    ("rust-conv-go", "go-mine-next.json", rust_converge_report, ("go_mine", "mine_next_path"), ("no-commit", "not-committed")),
+    ("partition-go", "partition-common-go-mine.json", partition_report, ("observations", "pre_partition", "common_go_mine"), GO_MINE_VARIANTS),
+    ("partition-rust", "partition-rust-mine-1.json", partition_report, ("observations", "fork", "rust_mine_1"), RUST_MINE_VARIANTS),
+    ("restart-go", "go-restart-mine-next.json", restart_report, ("rust_restart", "go_target_mine_next_path"), GO_MINE_VARIANTS),
+    ("converge-rust", "rust-mine-next.json", converge_report, ("rust_mine", "mine_next_path"), RUST_MINE_VARIANTS),
+    ("rust-conv-go", "go-mine-next.json", rust_converge_report, ("go_mine", "mine_next_path"), GO_MINE_VARIANTS),
 )
+# The *-rust-rpc edits set rpc_endpoint to rust_rpc, the node-rust rpc_endpoint of the
+# edited report; in the restart report that is the restarted Rust node (new_rpc_endpoint).
 mine_next_edits = {
     "no-commit": lambda d: d.pop("commit_state"),
     "not-committed": lambda d: d.__setitem__("commit_state", "not_committed"),
+    "no-commit-rust-rpc": lambda d: (d.pop("commit_state"), d.__setitem__("rpc_endpoint", rust_rpc)),
+    "not-committed-rust-rpc": lambda d: d.update(commit_state="not_committed", rpc_endpoint=rust_rpc),
     "commit": lambda d: d.__setitem__("commit_state", "committed"),
     "go-impl": lambda d: d.__setitem__("implementation", "go"),
+    "go-impl-commit": lambda d: d.update(implementation="go", commit_state="committed"),
 }
 for site, sidecar_name, base_report, field, variants in mine_next_cases:
     for variant in variants:
@@ -1730,7 +1736,7 @@ SN_CASES = (
     (SN_ALL, "tip-relative", SN_I, GO_TIP_PATH + " is not absolute", lambda s, r: s["initial_convergence"].update(go_tip_path=os.path.relpath(r / GO_TIP))),
     (SN_ALL, "tip-outside", SN_I, GO_TIP_PATH + " is outside artifact_root", lambda s, r: s["initial_convergence"].update(go_tip_path=sn_outside(r, GO_TIP))),
     (SN_ALL, "tip-directory", SN_I, GO_TIP_PATH + " file is missing", lambda s, r: s["initial_convergence"].update(go_tip_path=str(r / "node-go"))),
-    (SN_ALL, "tip-symlink-loop", SN_I, GO_TIP_PATH, lambda s, r: ((r / "loop-a").symlink_to(r / "loop-b"), (r / "loop-b").symlink_to(r / "loop-a"), s["initial_convergence"].update(go_tip_path=str(r / "loop-a")))),
+    (SN_ALL, "tip-symlink-loop", SN_I, GO_TIP_PATH + " file is missing", lambda s, r: ((r / "loop-a").symlink_to(r / "loop-b"), (r / "loop-b").symlink_to(r / "loop-a"), s["initial_convergence"].update(go_tip_path=str(r / "loop-a")))),
     (SN_ALL, "tip-array", SN_I, GO_TIP_PATH + " root is not an object", lambda s, r: dump(r / GO_TIP, [1])),
     (SN_ALL, "tip-extra", SN_I, GO_TIP_KEYS, lambda s, r: sn_edit_file(r, GO_TIP, extra=1)),
     (SN_ALL, "tip-missing", SN_I, GO_TIP_KEYS, lambda s, r: sn_drop_file_key(r, GO_TIP, "in_ibd")),
@@ -1771,7 +1777,7 @@ SN_CASES = (
     (SN_CHAIN, "block-relative", SN_I, GO_BLOCK_PATH + " is not absolute", lambda s, r: s["genesis"].update(go_block_path=os.path.relpath(r / GO_BLOCK))),
     (SN_CHAIN, "block-outside", SN_I, GO_BLOCK_PATH + " is outside artifact_root", lambda s, r: s["genesis"].update(go_block_path=sn_outside(r, GO_BLOCK))),
     (SN_CHAIN, "block-directory", SN_I, GO_BLOCK_PATH + " file is missing", lambda s, r: s["genesis"].update(go_block_path=str(r / "node-go"))),
-    (SN_CHAIN, "block-symlink-loop", SN_I, GO_BLOCK_PATH, lambda s, r: ((r / "loop-a").symlink_to(r / "loop-b"), (r / "loop-b").symlink_to(r / "loop-a"), s["genesis"].update(go_block_path=str(r / "loop-a")))),
+    (SN_CHAIN, "block-symlink-loop", SN_I, GO_BLOCK_PATH + " file is missing", lambda s, r: ((r / "loop-a").symlink_to(r / "loop-b"), (r / "loop-b").symlink_to(r / "loop-a"), s["genesis"].update(go_block_path=str(r / "loop-a")))),
     (SN_CHAIN, "block-array", SN_I, GO_BLOCK_PATH + " root is not an object", lambda s, r: dump(r / GO_BLOCK, [1])),
     (SN_CHAIN, "block-extra", SN_I, GO_BLOCK_KEYS, lambda s, r: sn_edit_file(r, GO_BLOCK, extra=1)),
     (SN_CHAIN, "block-missing", SN_I, GO_BLOCK_KEYS, lambda s, r: sn_drop_file_key(r, GO_BLOCK, "canonical")),
@@ -2178,6 +2184,14 @@ expect_fail_contains "converge rust mine_next with commit_state" "rust_mine.mine
 expect_generator_fail_contains "converge generator rust mine_next with commit_state" "convergence_sidecar_invalid" --go-submit-rust-mine-go-converge-report "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-commit.json"
 expect_fail_contains "partition rust mine_next named go" "observations.fork.rust_mine_1 sidecar identity mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-rust-go-impl.json"
 expect_fail_contains "converge rust mine_next named go" "rust_mine mine_next sidecar identity mismatch" check_report "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-go-impl.json" offline producer-tx
+expect_fail_contains "partition rust mine_next named go with commit_state" "observations.fork.rust_mine_1 keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-rust-go-impl-commit.json"
+expect_fail_contains "converge rust mine_next named go with commit_state" "rust_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-go-impl-commit.json" offline producer-tx
+expect_fail_contains "partition go mine_next without commit_state at the Rust endpoint" "observations.pre_partition.common_go_mine sidecar identity mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-go-no-commit-rust-rpc.json"
+expect_fail_contains "restart go target mine_next without commit_state at the Rust endpoint" "rust_restart go target mine_next sidecar identity mismatch" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-no-commit-rust-rpc.json"
+expect_fail_contains "rust-submit go mine_next without commit_state at the Rust endpoint" "go_mine mine_next sidecar identity mismatch" check_report "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-no-commit-rust-rpc.json" offline producer-tx
+expect_fail_contains "partition go mine_next not committed at the Rust endpoint" "observations.pre_partition.common_go_mine keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-go-not-committed-rust-rpc.json"
+expect_fail_contains "restart go target mine_next not committed at the Rust endpoint" "rust_restart.go_target_mine_next_path keys mismatch" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-not-committed-rust-rpc.json"
+expect_fail_contains "rust-submit go mine_next not committed at the Rust endpoint" "go_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-not-committed-rust-rpc.json" offline producer-tx
 expect_fail_contains "producer rejects mesh report" "producer tx validation requires a mixed-client tx-path report" check_report "${MESH_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects missing propagation sample" "raw_samples.propagation requires one observed sample" check_report "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects non-finite propagation sample" "raw_samples.propagation.samples[0].elapsed is not finite" check_report "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
