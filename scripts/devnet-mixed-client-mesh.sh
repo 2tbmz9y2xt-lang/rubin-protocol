@@ -349,10 +349,14 @@ def pid_argv(pid: int) -> list[str]:
         if j < 0: break
         args.append(raw[i:j].decode("utf-8", "surrogateescape")); i = j + 1
     return args
-# True when both path strings resolve to one path and the actual string holds no ".."
-# component, through which realpath drops a missing directory.
+# True when the actual string equals the expected one, or the OS resolves the actual string
+# to the object of the expected path's realpath (same device and inode).
 def same_path(actual_label: str, actual: str, expected_label: str, expected: str) -> bool:
-    return checked_path(actual_label, actual) == checked_path(expected_label, expected) and ".." not in Path(actual).parts
+    checked_path(actual_label, actual); resolved = checked_path(expected_label, expected)
+    if actual == expected: return True
+    try: sa, se = os.stat(actual), os.stat(resolved)
+    except (OSError, ValueError): return False
+    return (sa.st_dev, sa.st_ino) == (se.st_dev, se.st_ino)
 def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live argv", expected_label: str = "report command_argv") -> bool:
     if len(actual) != len(expected) or not actual:
         return False

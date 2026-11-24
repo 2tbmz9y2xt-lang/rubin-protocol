@@ -2071,6 +2071,13 @@ def sn_argv_through_missing(argv: list, index: int, report: dict, name: str) -> 
 sn_variant("tx-accept-argv-datadir-through-missing", "tx-accept", lambda s, r: None, lambda report: sn_argv_through_missing(next(n["command_argv"] for n in report["nodes"] if n["implementation"] == "rust"), 4, report, "node-rust"))
 sn_variant("restart-old-argv-datadir-through-missing", "restart", lambda s, r: None, lambda report: sn_argv_through_missing(report["rust_restart"]["old_command_argv"], 4, report, "node-rust"))
 sn_variant("restart-old-argv-binary-through-missing", "restart", lambda s, r: None, lambda report: sn_argv_through_missing(report["rust_restart"]["old_command_argv"], 0, report, "rubin-node-rust"))
+def sn_argv_spelled(argv: list, index: int, report: dict, spelling: str) -> None:
+    assert argv[3] == "--datadir"
+    argv[index] = str(Path(report["artifact_root"])) + spelling
+for sn_suffix, sn_index, sn_spelling in (("binary-slash", 0, "/rubin-node-rust/"), ("binary-slash-dot", 0, "/rubin-node-rust/."), ("binary-through-dir", 0, "/node-go/../rubin-node-rust"), ("datadir-through-dir", 4, "/node-go/../node-rust")):
+    sn_variant(f"restart-old-argv-{sn_suffix}", "restart", lambda s, r: None, lambda report, i=sn_index, sp=sn_spelling: sn_argv_spelled(report["rust_restart"]["old_command_argv"], i, report, sp))
+sn_variant("tx-accept-argv-datadir-through-dir", "tx-accept", lambda s, r: None, lambda report: sn_argv_spelled(next(n["command_argv"] for n in report["nodes"] if n["implementation"] == "rust"), 4, report, "/node-go/../node-rust"))
+sn_variant("mesh-argv-binary-slash", "mesh", lambda s, r: None, lambda report: next(n for n in report["nodes"] if n["implementation"] == "go")["command_argv"].__setitem__(0, str(Path(report["artifact_root"]) / "rubin-node-go") + "/"))
 def sn_root_through_missing(report: dict) -> None:
     recorded = Path(report["artifact_root"])
     report["artifact_root"] = sn_through_missing(recorded.parent, recorded.name)
@@ -2659,6 +2666,12 @@ sidecar_value_check "restart datadir through a missing directory" "rust_restart 
 sidecar_value_check "rust argv datadir through a missing directory" "node command_argv does not match exact launched argv" argv_mismatch producer-tx "${TMP_ROOT}/sn-tx-accept-argv-datadir-through-missing-report.json" combined_report_reason_token
 sidecar_value_check "old rust argv datadir through a missing directory" "rust_restart old argv mismatch" rust_restart_old_argv_mismatch rust-restart "${TMP_ROOT}/sn-restart-old-argv-datadir-through-missing-report.json"
 sidecar_value_check "old rust argv binary through a missing directory" "rust_restart old argv mismatch" rust_restart_old_argv_mismatch rust-restart "${TMP_ROOT}/sn-restart-old-argv-binary-through-missing-report.json"
+sidecar_value_check "old rust argv binary with a trailing slash" "rust_restart old argv mismatch" rust_restart_old_argv_mismatch rust-restart "${TMP_ROOT}/sn-restart-old-argv-binary-slash-report.json"
+sidecar_value_check "old rust argv binary with a trailing slash dot" "rust_restart old argv mismatch" rust_restart_old_argv_mismatch rust-restart "${TMP_ROOT}/sn-restart-old-argv-binary-slash-dot-report.json"
+expect_fail_contains "go argv binary with a trailing slash" "FAIL: node-go command/binary is not bound to executable rubin-node-go" check_report "${TMP_ROOT}/sn-mesh-argv-binary-slash-report.json" offline public
+expect_pass_contains "old rust argv binary through an existing directory" "PASS: mixed_client_rust_restart report structurally accepted" check_report "${TMP_ROOT}/sn-restart-old-argv-binary-through-dir-report.json" offline rust-restart
+expect_pass_contains "old rust argv datadir through an existing directory" "PASS: mixed_client_rust_restart report structurally accepted" check_report "${TMP_ROOT}/sn-restart-old-argv-datadir-through-dir-report.json" offline rust-restart
+expect_pass_contains "rust argv datadir through an existing directory" "PASS: mixed_client_go_submit_rust_accept report structurally accepted" check_report "${TMP_ROOT}/sn-tx-accept-argv-datadir-through-dir-report.json" offline producer-tx
 sn_check "artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" public mesh-root-through-missing
 sn_check "tx artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" tx tx-accept-root-through-missing
 sidecar_value_check "restart artifact root through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-root-through-missing-report.json"
