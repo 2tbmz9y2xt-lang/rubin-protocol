@@ -162,9 +162,14 @@ func testRecoveryCoreParserV1(t *testing.T) {
 	})
 	header := func(tail ...byte) []byte { return append(bytes.Clone(genesis[:148]), tail...) }
 	t.Run("parser error identity", func(t *testing.T) {
+		txErrorType := reflect.TypeFor[*TxError]()
 		for _, raw := range [][]byte{genesis[:147], header(0x00), genesis[:len(genesis)-1]} {
 			_, err := ParseInitial148BlockBytes(raw)
-			if err == nil || recoveryCoreParseRefusalV1(err).ParserCause != err {
+			cause := recoveryCoreParseRefusalV1(err).ParserCause
+			original, _ := errors.AsType[*TxError](err)
+			mapped, _ := errors.AsType[*TxError](cause)
+			if original == nil || mapped != original ||
+				reflect.TypeOf(err) != txErrorType || reflect.TypeOf(cause) != txErrorType {
 				t.Fatalf("parser error identity changed for frame size %d", len(raw))
 			}
 		}
