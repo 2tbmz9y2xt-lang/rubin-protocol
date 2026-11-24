@@ -72,6 +72,8 @@ func TestJournalRecoveryCoreGatesV1(t *testing.T) {
 
 	genesis := initial148Hex(t, initial148GenesisBlockHex)
 	gHash := initial148Array(t, initial148GenesisHashHex)
+	wrongHash := gHash
+	wrongHash[31] ^= 1
 	limit := initial148Array(t, initial148MaxHex)
 	below := initial148Array(t, recoveryCoreBelowGenesisTargetHexV1)
 	zero, one, two := [32]byte{}, [32]byte{31: 1}, [32]byte{31: 2}
@@ -113,10 +115,12 @@ func TestJournalRecoveryCoreGatesV1(t *testing.T) {
 	}{
 		{"hash before target range", g0, gHash, 0, full(limit, limit, nil), "EXPECTED_HASH"},
 		{"hash before image", r, gHash, 0, image(genesis), "EXPECTED_HASH"},
+		{"expected hash differs at last byte", genesis, wrongHash, 0, full(limit, limit, nil), "EXPECTED_HASH"},
 		{"zero encoded target before work", g0, g0Hash, 0, full(limit, limit, nil), "TARGET_RANGE"},
 		{"work before expected target", g1, g1Hash, 0, full(limit, two, nil), "POW_HASH"},
 		{"expected target before parent and root", r, rHash, 1, full(limit, one, &pParent), "EXPECTED_TARGET"},
 		{"parent before root", r, rHash, 1, full(limit, limit, &pParent), "EXPECTED_PARENT"},
+		{"parent differs at last byte", genesis, gHash, 1, full(limit, limit, &one), "EXPECTED_PARENT"},
 		{"root after exact zero parent", r, rHash, 1, full(limit, limit, &zero), "TXID_MERKLE"},
 		{"image before root", r, rHash, 0, image(genesis), "IMAGE_HEADER"},
 		{"root after exact image", r, rHash, 0, image(r), "TXID_MERKLE"},
@@ -157,6 +161,14 @@ func testRecoveryCoreParserV1(t *testing.T) {
 		requireRecoveryCoreResultV1(t, genesis[:147], [32]byte{}, 1, context, want)
 	})
 	header := func(tail ...byte) []byte { return append(bytes.Clone(genesis[:148]), tail...) }
+	t.Run("parser error identity", func(t *testing.T) {
+		for _, raw := range [][]byte{genesis[:147], header(0x00), genesis[:len(genesis)-1]} {
+			_, err := ParseInitial148BlockBytes(raw)
+			if err == nil || recoveryCoreParseRefusalV1(err).ParserCause != err {
+				t.Fatalf("parser error identity changed for frame size %d", len(raw))
+			}
+		}
+	})
 	kind, payload := bytes.Clone(genesis), bytes.Clone(genesis)
 	kind[153] = 3
 	payload[len(payload)-1] = 1
@@ -248,7 +260,9 @@ func TestJournalRecoveryCoreDerivationV1(t *testing.T) {
 		{"wrong commitment with witness", [][]byte{recoveryCoreTxV1(0, true, anchor)}, "0217ab40a21df7b8da51c252654f1b5aa2522748082c909f7ce0376e4ca7c2b1", "a8a0230fc736de28266ec052750f793e8c471c953859523dec9c0238ac7efbbf", falseResult},
 		{"distinct anchors", [][]byte{recoveryCoreTxV1(0, false, anchor, distinct)}, "a1be69d52049f51f7e2a3c56c95fc6c21537da8afd80342744604ef92f51dec8", "d31832c96c19ec5107f0306a21b7c2eecf39836bd19601486047d1a97c54f16e", holds(0, 2, "ANCHOR_COUNT")},
 		{"identical anchors", [][]byte{recoveryCoreTxV1(0, false, anchor, anchor)}, "9dbd8edc2dd8291c94790c44be3fbd5d270fadce19778ded889e5d54154faa39", "26317a6e997aea0c73c9e6eee0bf347f9ee372f6f9363cdcd28f18b404a59a48", holds(0, 2, "ANCHOR_COUNT")},
+		{"three anchors after other output", [][]byte{recoveryCoreTxV1(0, false, other, anchor, distinct, anchor)}, "e3050cae1dbd83b101f6554189ed5ed97ba5551f11a10fd4e190741c0a0463ea", "8618b80b9841d59281a2d6530a1521135119bebbfb7a453eb1c1382817286985", holds(0, 3, "ANCHOR_COUNT")},
 		{"chunk with valued anchor", [][]byte{chunk}, chunkRoot, chunkHash, holds(2, 1, "POSITION_ZERO_CHUNK")},
+		{"chunk with last root byte mismatch", [][]byte{chunk}, "0fe742a7ab6d52da927acaf534cfd1c6124c075a668f536339297e1737a14a62", "576cea76298711c0fa9e10c1313c2d95b12b98737117aea017d88f7e2db2fdf3", RecoveryCoreResultV1{Gate: "TXID_MERKLE"}},
 		{"chunk with different payload bytes", [][]byte{chunkWithDifferentPayload}, chunkRoot, chunkHash, holds(2, 1, "POSITION_ZERO_CHUNK")},
 		{"anchor count before chunk", [][]byte{recoveryCoreTxV1(2, false, anchor, distinct)}, "41ec08ab7c9bb4afdcd9fdc117cf40402fc58fbd3406901b5050b543ffdd255c", "d541c5479fee42da76f3d5c194ebf8fca8b40ea8d4e334871ba0fa816a5d7c26", holds(2, 2, "ANCHOR_COUNT")},
 		{"manifest with anchor", [][]byte{recoveryCoreTxV1(1, false, anchor)}, "c02073ca1e57945d70fca046ac20cbf1cd8d02e6e0f1215d653de9a9a2a3a68e", "ac2434a719d12c9257582afada67ad37cc8f544a648e9066e4d999c42b7685fa", falseResult},
@@ -256,12 +270,19 @@ func TestJournalRecoveryCoreDerivationV1(t *testing.T) {
 		{"two transactions in committed order", [][]byte{chunk, empty}, "96f2973895931debc8782be29284f5ec73b940b71e1e0062900344af124ac7f6", "03ca24fb8186744a581eb03b073b3808a27ee48f07366155714156626e9d0e01", holds(2, 1, "POSITION_ZERO_CHUNK")},
 		{"two transactions in reverse order", [][]byte{empty, chunk}, "96f2973895931debc8782be29284f5ec73b940b71e1e0062900344af124ac7f6", "03ca24fb8186744a581eb03b073b3808a27ee48f07366155714156626e9d0e01", RecoveryCoreResultV1{Gate: "TXID_MERKLE"}},
 		{"second transaction anchor outside position zero", [][]byte{chunk, standard}, "a8ab7e2bc73e9e647e5f8d183a0f0fb5c4cedcbd9c2325025d79a6357672f1c4", "3603787f3222e8bc19f20b9730fee5e333e5efb2dbf7f31753323d3caca71fd9", holds(2, 1, "POSITION_ZERO_CHUNK")},
+		{"later chunk after anchored standard", [][]byte{standard, chunk}, "fbb64cbe25c00293400aa6393c6873dfd68f17d8c76aeaf034e9900de867b2d6", "4fc149fc01c75024fc7e0e163f994dc5190f09457bcff9b6879a436914a28765", falseResult},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := recoveryCoreBlockV1(t, genesis, tc.root, tc.txs...)
 			requireRecoveryCoreResultV1(t, raw, initial148Array(t, tc.hash), 0, input, tc.want)
 		})
 	}
+	t.Run("qualified image with position zero chunk", func(t *testing.T) {
+		raw := recoveryCoreBlockV1(t, genesis, chunkRoot, chunk)
+		image := [148]byte(raw)
+		input := RecoveryCoreHeaderInputV1{Mode: RecoveryCoreQualifiedImageV1, Image: &image}
+		requireRecoveryCoreResultV1(t, raw, initial148Array(t, chunkHash), 1, input, holds(2, 1, "POSITION_ZERO_CHUNK"))
+	})
 }
 
 func recoveryCoreOutputV1(value uint64, tag uint16, width int, data byte) []byte {
