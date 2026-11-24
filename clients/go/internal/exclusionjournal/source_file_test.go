@@ -949,19 +949,30 @@ func testCapturedReadStoppedStageAlias(t *testing.T) {
 	sourceReadRefusal(t, o, b.m, ErrIdentityV1, "replacement after clearing the staging conflict")
 }
 
-func testCapturedReadUnknownStoppedStage(t *testing.T) {
-	o, paths, ordered := capturedReadRetainedOrder(t, sourceLimits(), 'B', 'C')
-	b, c := ordered[0], ordered[1]
+func capturedReadFreshPair(t *testing.T) (*SourceOwnerV1, sourceTestPaths, capturedReadRecord, capturedReadRecord) {
+	t.Helper()
+	limits := sourceLimits()
+	s, _, paths, b, c := capturedReadPair(t, limits)
+	s = sourceReopenStore(t, s, paths.dir)
+	prepared := filepath.Join(t.TempDir(), "captures")
+	sourceMust(t, os.Rename(paths.root, prepared))
+	sourceMust(t, os.Mkdir(paths.root, 0o700))
+	// Populate the reopened directory without temporary publication names.
+	for _, record := range []capturedReadRecord{b, c} {
+		sourceMust(t, os.Rename(filepath.Join(prepared, record.leaf), filepath.Join(paths.root, record.leaf)))
+	}
+	if capturedReadNames(t, paths.root)[0] == c.leaf {
+		b, c = c, b
+	}
+	o := sourceOpen(t, s, sourceID(), limits, nil)
 	sourcePrepare(t, o, b.m, b.parts)
+	return o, paths, b, c
+}
+
+func testCapturedReadUnknownStoppedStage(t *testing.T) {
+	o, paths, b, c := capturedReadFreshPair(t)
 	bPath, cPath := filepath.Join(paths.root, b.leaf), filepath.Join(paths.root, c.leaf)
 	held := capturedReadReplace(t, bPath, t.TempDir(), sourceReadFile(t, bPath))
-	outside := t.TempDir()
-	for _, path := range []string{bPath, cPath} {
-		sourceMust(t, os.Rename(path, filepath.Join(outside, filepath.Base(path))))
-	}
-	for _, path := range []string{bPath, cPath} {
-		sourceMust(t, os.Rename(filepath.Join(outside, filepath.Base(path)), path))
-	}
 	stage := publicStagePrefix + capturedReadRecordFor('E').leaf
 	stagePath := filepath.Join(paths.root, stage)
 	sourceMust(t, os.Link(held, stagePath))
@@ -980,9 +991,7 @@ func testCapturedReadUnknownStoppedStage(t *testing.T) {
 }
 
 func testCapturedReadMalformedStoppedStage(t *testing.T) {
-	o, paths, ordered := capturedReadRetainedOrder(t, sourceLimits(), 'B', 'C')
-	b, c := ordered[0], ordered[1]
-	sourcePrepare(t, o, b.m, b.parts)
+	o, paths, b, c := capturedReadFreshPair(t)
 	bPath, cPath := filepath.Join(paths.root, b.leaf), filepath.Join(paths.root, c.leaf)
 	held := capturedReadReplace(t, bPath, t.TempDir(), sourceReadFile(t, bPath))
 	stage := publicStagePrefix + heldStagePrefix + b.leaf
