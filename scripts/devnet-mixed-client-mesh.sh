@@ -39,7 +39,7 @@ run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VAL
 check_report() { local report="${1:-}" mode="${2:-offline}" expected_mode="${3:-public}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
   { sidecar_derivations_py; cat <<'PY'; } | RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" "${expected_mode}" "${DEV_ENV}" "${GO_MODULE_ROOT}"
-import datetime as dt, hashlib, json, math, os, re, socket, struct, subprocess, sys, tempfile, time, urllib.error, urllib.request
+import datetime as dt, json, math, os, re, socket, struct, subprocess, sys, tempfile, time, urllib.error, urllib.request
 from pathlib import Path
 path = Path(sys.argv[1]); live = sys.argv[3] == "live"; expected_mode = sys.argv[4]; dev_env = sys.argv[5]; go_module_root = sys.argv[6]
 SCENARIO_MESH = "mixed_client_mesh"
@@ -64,7 +64,7 @@ def eventually(fn, message: str) -> None:
         time.sleep(1)
 def checked_path(label: str, value: object) -> Path:
     req(isinstance(value, str) and value.strip() == value and value and value[0] not in "'\"" and value[-1] not in "'\"" and "\0" not in value and all(ord(c) >= 32 for c in value), f"{label} is not a safe unquoted path string")
-    try: p = Path(value); req(p.is_absolute(), f"{label} is not absolute"); return p.resolve()
+    try: p = Path(value); req(p.is_absolute(), f"{label} is not absolute"); return Path(os.path.realpath(p))
     except (OSError, RuntimeError, ValueError) as exc: fail(f"{label} path is invalid: {exc}")
 def ep(value: object) -> bool:
     if not isinstance(value, str): return False
@@ -1552,7 +1552,7 @@ PY
 txgen_datadir_guard() {
   local datadir="" resolved rust_resolved
   while (( $# )); do [[ "$1" == --datadir && $# -ge 2 ]] && datadir="$2"; shift; done
-  [[ -n "${datadir}" ]] && resolved="$(CDPATH='' cd -- "${datadir}" 2>/dev/null && pwd -P)" && rust_resolved="$(CDPATH='' cd -- "${RUST_DIR}" 2>/dev/null && pwd -P)" && [[ "${resolved}" != "${rust_resolved}" ]] || { TX_REASON=cross_client_datadir_argv; return 1; }
+  [[ -n "${datadir}" ]] && resolved="$(_rubin_process_physical_dir "${datadir}" 2>/dev/null)" && rust_resolved="$(_rubin_process_physical_dir "${RUST_DIR}" 2>/dev/null)" && [[ "${resolved}" != "${rust_resolved}" ]] || { TX_REASON=cross_client_datadir_argv; return 1; }
 }
 submit_go_tx() {
   local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key-file "${TX_FROM_KEY_FILE}" --to-key "${TX_TO_KEY}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}" --submit-to "${GO_RPC_ADDR}")
@@ -2631,11 +2631,12 @@ PY
 wait_initial_tips_absent() {
   local deadline
   deadline=$((SECONDS + MESH_TIMEOUT)); PARTITION_REASON=""
-  while (( SECONDS < deadline )); do
+  while :; do
     if capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /get_tip "${INITIAL_GO_TIP_JSON}" && capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" /get_tip "${INITIAL_RUST_TIP_JSON}" && tips_absent "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}"; then
       return 0
     fi
     sleep 1
+    (( SECONDS < deadline )) || break
   done
   PARTITION_REASON=initial_convergence_timeout
   return 1

@@ -230,6 +230,7 @@ check_txgen_datadir_guard() {
   cat >"${probe}" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+source "$3"
 source "$1"
 probe_root="$2"
 GO_DIR="${probe_root}/go-node"; RUST_DIR="${probe_root}/rust-node"; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"
@@ -249,8 +250,9 @@ if argv[argv.index("--datadir") + 1] != sys.argv[2] or argv[argv.index("--submit
 PY
 expect_guard_refused() {
   TX_REASON=""
-  if txgen_datadir_guard "${TXGEN_BIN}" "$@" --submit-to "${GO_RPC_ADDR}"; then echo "FAIL: guard accepted $*" >&2; exit 1; fi
+  if txgen_datadir_guard "${TXGEN_BIN}" "$@" --submit-to "${GO_RPC_ADDR}" 2>"${probe_root}/guard.err"; then echo "FAIL: guard accepted $*" >&2; exit 1; fi
   [[ "${TX_REASON}" == cross_client_datadir_argv ]] || { echo "FAIL: guard reason ${TX_REASON} for $*" >&2; exit 1; }
+  [[ ! -s "${probe_root}/guard.err" ]] || { echo "FAIL: guard wrote to stderr for $*" >&2; exit 1; }
 }
 expect_guard_refused --datadir "${RUST_DIR}"
 expect_guard_refused --datadir "${probe_root}/rust-alias"
@@ -265,7 +267,7 @@ rm -f -- "${SPAWNED}"; TX_REASON=""
 if submit_rust_tx; then echo "FAIL: submit_rust_tx accepted the Rust datadir" >&2; exit 1; fi
 [[ "${TX_REASON}" == cross_client_datadir_argv && ! -e "${SPAWNED}" ]] || { echo "FAIL: submit_rust_tx reason ${TX_REASON} or txgen spawned" >&2; exit 1; }
 SH
-  bash "${probe}" "${lib}" "${probe_root}"
+  bash "${probe}" "${lib}" "${probe_root}" "${REPO_ROOT}/scripts/devnet-process-common.sh"
 }
 
 check_initial_convergence_wait() {
@@ -303,9 +305,14 @@ expect_reason() {
   [[ "${PARTITION_REASON}" == "$1" ]] || { echo "FAIL: initial convergence reason ${PARTITION_REASON}, want $1" >&2; exit 1; }
   [[ ! -s "${probe_root}/wait.err" ]] || { echo "FAIL: initial convergence wait wrote to stderr for $2 $3:" >&2; cat -- "${probe_root}/wait.err" >&2; exit 1; }
 }
+expect_polled_timeout() {
+  rm -f -- "${probe_root}/captures-go" "${probe_root}/captures-rust"
+  expect_reason initial_convergence_timeout "$1" "$2"
+  [[ -s "${probe_root}/captures-rust" ]] || { echo "FAIL: initial convergence timed out before a Rust tip capture for $1 $2" >&2; exit 1; }
+}
 TX_PATH_MODE=3
 expect_match "${go101}" "${rust101}"
-MESH_TIMEOUT=1 expect_reason initial_convergence_timeout "${go101}" "${rust100}"
+MESH_TIMEOUT=1 expect_polled_timeout "${go101}" "${rust100}"
 expect_reason initial_convergence_timeout "${go101}" "${rust101b}"
 expect_reason initial_convergence_go_tip_tip_absent "${absent}" "${absent}"
 rm -f -- "${probe_root}/captures-go" "${probe_root}/captures-rust"; RUST_CAPTURE_FAILS=1
@@ -319,9 +326,9 @@ expect_match "${absent}" "${absent}"
 expect_reason initial_convergence_timeout "${absent}" "${rust_zero}"
 expect_reason initial_convergence_timeout "${go101}" "${absent}"
 expect_reason initial_convergence_timeout "${absent}" "${probe_root}/absent-no-height.json"
-MESH_TIMEOUT=1 expect_reason initial_convergence_timeout "${absent}" "${present_null}"
-MESH_TIMEOUT=1 expect_reason initial_convergence_timeout "${absent}" "${probe_root}/array.json"
-MESH_TIMEOUT=1 expect_reason initial_convergence_timeout "${probe_root}/garbage.json" "${absent}"
+MESH_TIMEOUT=1 expect_polled_timeout "${absent}" "${present_null}"
+MESH_TIMEOUT=1 expect_polled_timeout "${absent}" "${probe_root}/array.json"
+MESH_TIMEOUT=1 expect_polled_timeout "${probe_root}/garbage.json" "${absent}"
 SH
   bash "${probe}" "${lib}" "${probe_root}"
 }
