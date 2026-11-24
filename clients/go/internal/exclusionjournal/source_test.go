@@ -28,6 +28,267 @@ type sourceCountedFile struct {
 	reads int
 }
 
+func TestCapturedSourceReadOwnerV1(t *testing.T) {
+	m, parts := capturedReadBundle('C')
+	limits := SourceLimitsV1{Bytes: 12000, Files: 3, Scans: 41, RAM: 190000, Headers: 88, Descriptors: 6, Overhead: 8192}
+	s, o, paths, _ := sourcePreparedScene(t, limits, m, parts)
+	foreign, _, foreignPaths, _ := sourcePreparedScene(t, limits, m, parts)
+	sourceFailIf(t, paths.dir == foreignPaths.dir, "stores share a directory")
+	copied := reflectSourceOwner(o)
+	for _, row := range []struct {
+		name  string
+		owner *SourceOwnerV1
+		store *policycontrol.Store
+	}{
+		{"foreign-store", o, foreign},
+		{"nil-store", o, nil},
+		{"nil-owner", nil, s},
+		{"zero-owner", &SourceOwnerV1{}, s},
+		{"copied-owner", copied, s},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			got, err := row.owner.LimitsForStoreV1(row.store)
+			sourceWantError(t, err, ErrIdentityV1, "limits authority")
+			sourceFailIf(t, got != (SourceLimitsV1{}), "refused limits = %+v", got)
+			sourceRead(t, o, m, parts)
+		})
+	}
+	alias := s
+	got := checkCapturedReadLimits(t, o, alias, limits)
+	got.Bytes, got.Files, got.Scans = 1, 1, 1
+	sourceFailIf(t, got == limits, "modified limits still equal the configured limits")
+	checkCapturedReadLimits(t, o, s, limits)
+	sourceRead(t, o, m, parts)
+	moved := filepath.Join(t.TempDir(), "store")
+	sourceMust(t, os.Rename(paths.dir, moved))
+	defer func() {
+		if _, err := os.Lstat(moved); err == nil {
+			sourceMust(t, os.Rename(moved, paths.dir))
+		}
+	}()
+	checkCapturedReadLimits(t, o, s, limits)
+	sourceReadRefusal(t, o, m, ErrIdentityV1, "missing store directory")
+	sourceMust(t, os.Rename(moved, paths.dir))
+	sourceRead(t, o, m, parts)
+}
+
+func checkCapturedReadLimits(t *testing.T, o *SourceOwnerV1, s *policycontrol.Store, want SourceLimitsV1) SourceLimitsV1 {
+	t.Helper()
+	got, err := o.LimitsForStoreV1(s)
+	sourceMust(t, err)
+	sourceFailIf(t, got != want, "configured limits = %+v, want %+v", got, want)
+	return got
+}
+
+func TestCapturedSourceReadVisitorV1(t *testing.T) {
+	plain := errors.New("visitor result")
+	for _, row := range []struct {
+		name   string
+		result error
+	}{
+		{"success", nil},
+		{"error", plain},
+		{"typed-nil", (*sourceTypedError)(nil)},
+		{"wrapped", fmt.Errorf("visitor: %w", plain)},
+	} {
+		t.Run(row.name, func(t *testing.T) { testCapturedReadVisitorResult(t, row.result) })
+	}
+	t.Run("nil-visitor", func(t *testing.T) {
+		o, _, c, _ := capturedReadMissingSibling(t)
+		sourceAccount(t, func(a *mdbx.OperationAccount) {
+			sourceWantError(t, o.WithCapturedSourceV1(a, c.m, nil), ErrIntegrityV1, "nil visitor")
+			sourceReadOn(t, a, o, c.m, c.parts)
+		})
+	})
+	t.Run("busy-and-expiry", testCapturedReadBusy)
+	t.Run("workspace", testCapturedReadWorkspace)
+	sourceModes(t, []string{"clean-panic", "clean-goexit"}, testCapturedReadTerminal)
+	sourceModes(t, []string{"ignored", "returned", "wrapped", "panic", "goexit"}, testCapturedReadWindow)
+}
+
+func testCapturedReadVisitorResult(t *testing.T, result error) {
+	o, _, c, _ := capturedReadMissingSibling(t)
+	sourceAccount(t, func(a *mdbx.OperationAccount) {
+		var escaped SourcePartV1
+		visits := 0
+		err := o.WithCapturedSourceV1(a, c.m, func(part SourcePartV1) error {
+			sourceCheckPart(t, part, visits, []byte{1, 2, 3, 4, 5, 6}, c.parts)
+			escaped = part
+			visits++
+			return result
+		})
+		sourceWantError(t, err, result, "visitor result")
+		want := len(c.parts)
+		if result != nil {
+			want = 1
+		}
+		sourceFailIf(t, visits != want, "visitor count = %d, want %d", visits, want)
+		checkCapturedReadExpired(t, escaped)
+		sourceReadOn(t, a, o, c.m, c.parts)
+	})
+}
+
+func testCapturedReadBusy(t *testing.T) {
+	o, b, c, _ := capturedReadMissingSibling(t)
+	sourceAccount(t, func(a *mdbx.OperationAccount) {
+		var escaped SourcePartV1
+		sourceAccount(t, func(contender *mdbx.OperationAccount) {
+			sourceMust(t, o.WithCapturedSourceV1(a, c.m, func(part SourcePartV1) error {
+				if escaped.ReadAt == nil {
+					checkCapturedReadBusy(t, o, contender, c.m)
+				}
+				escaped = part
+				return nil
+			}))
+		})
+		checkCapturedReadExpired(t, escaped)
+		sourceReadOn(t, a, o, c.m, c.parts)
+	})
+	sourceReadRefusal(t, o, b.m, ErrIntegrityV1, "missing sibling after read")
+}
+
+func checkCapturedReadBusy(t *testing.T, o *SourceOwnerV1, contender *mdbx.OperationAccount, m SourceManifestV1) {
+	t.Helper()
+	type result struct {
+		err    error
+		visits int
+	}
+	done := make(chan result, 1)
+	go func() {
+		out := result{}
+		out.err = o.WithCapturedSourceV1(contender, m, func(SourcePartV1) error {
+			out.visits++
+			return nil
+		})
+		done <- out
+	}()
+	select {
+	case out := <-done:
+		sourceWantError(t, out.err, ErrBusyV1, "concurrent read")
+		sourceFailIf(t, out.visits != 0, "busy visitor count = %d", out.visits)
+	case <-time.After(5 * time.Second):
+		t.Fatal("competing scope waited for the held read")
+	}
+}
+
+func checkCapturedReadExpired(t *testing.T, part SourcePartV1) {
+	t.Helper()
+	n, err := part.ReadAt(make([]byte, 1), 0)
+	sourceWantError(t, err, ErrUnavailableV1, "expired captured reader")
+	sourceFailIf(t, n != 0, "expired captured reader returned %d bytes", n)
+}
+
+func testCapturedReadWorkspace(t *testing.T) {
+	o, _, c, _ := capturedReadMissingSibling(t)
+	const exact = uint64(65536 + 4096 + 512*64 + 32*((8<<20)/65536+6))
+	sourceAccount(t, func(a *mdbx.OperationAccount) {
+		sourceMust(t, a.WithReservation(mdbx.TreeLaneMaxBytes-exact+1, func() error {
+			want := a.WithReservation(exact, func() error { t.Fatal("short workspace admitted a reservation"); return nil })
+			sourceWantError(t, o.WithCapturedSourceV1(a, c.m, func(SourcePartV1) error { t.Fatal("short workspace admitted a visitor"); return nil }), want, "one byte below read workspace")
+			return nil
+		}))
+		sourceMust(t, a.WithReservation(mdbx.TreeLaneMaxBytes-exact, func() error {
+			sourceReadOn(t, a, o, c.m, c.parts)
+			return a.WithReservation(exact, func() error { return nil })
+		}))
+	})
+}
+
+func testCapturedReadTerminal(t *testing.T, mode string) {
+	o, _, c, _ := capturedReadMissingSibling(t)
+	cause := errors.New("stop within captured visitor")
+	var escaped SourcePartV1
+	visits := 0
+	sourceAccount(t, func(a *mdbx.OperationAccount) {
+		call := func() error {
+			return o.WithCapturedSourceV1(a, c.m, func(part SourcePartV1) error {
+				escaped = part
+				sourceCheckPart(t, part, visits, []byte{1, 2, 3, 4, 5, 6}, c.parts)
+				visits++
+				if mode == "clean-goexit" {
+					runtime.Goexit()
+				}
+				panic(cause)
+			})
+		}
+		if mode == "clean-goexit" {
+			checkCapturedReadGoexit(t, call)
+		} else {
+			sourceFailIf(t, catchSourcePanic(func() { _ = call() }) != any(cause), "captured read changed the panic")
+		}
+		sourceFailIf(t, visits != 1, "terminated visitor entry count = %d", visits)
+		checkCapturedReadExpired(t, escaped)
+		sourceReadOn(t, a, o, c.m, c.parts)
+	})
+}
+
+func testCapturedReadWindow(t *testing.T, mode string) {
+	o, _, c, path := capturedReadMissingSibling(t)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	sourceMust(t, err)
+	defer f.Close()
+	cause := errors.New("visitor result after a failed read")
+	var escaped SourcePartV1
+	var visits int
+	visit := func(part SourcePartV1) error {
+		escaped = part
+		visits++
+		_, err := f.WriteAt([]byte{c.parts[0][0] ^ 1}, capturedReadHeader)
+		sourceMust(t, err)
+		n, readErr := part.ReadAt(make([]byte, 1), 0)
+		sourceWantError(t, readErr, ErrIntegrityV1, "changed captured window")
+		sourceFailIf(t, n != 0, "failed window returned %d bytes", n)
+		switch mode {
+		case "returned":
+			return readErr
+		case "wrapped":
+			return fmt.Errorf("%w: %w", cause, readErr)
+		case "panic":
+			panic(cause)
+		case "goexit":
+			runtime.Goexit()
+		}
+		return nil
+	}
+	sourceAccount(t, func(a *mdbx.OperationAccount) {
+		call := func() error { return o.WithCapturedSourceV1(a, c.m, visit) }
+		switch mode {
+		case "panic":
+			sourceFailIf(t, catchSourcePanic(func() { _ = call() }) != any(cause), "captured read changed the panic")
+		case "goexit":
+			checkCapturedReadGoexit(t, call)
+		default:
+			sourceWantError(t, call(), ErrIntegrityV1, "failed window precedes the visitor result")
+		}
+		sourceFailIf(t, visits != 1, "failed-window visitor count = %d", visits)
+		checkCapturedReadExpired(t, escaped)
+		_, err := f.WriteAt(c.parts[0][:1], capturedReadHeader)
+		sourceMust(t, err)
+		sourceReadOn(t, a, o, c.m, c.parts)
+	})
+}
+
+func checkCapturedReadGoexit(t *testing.T, call func() error) {
+	t.Helper()
+	done := make(chan struct{})
+	returned := false
+	var caught any
+	go func() {
+		defer func() {
+			caught = recover()
+			close(done)
+		}()
+		_ = call()
+		returned = true
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("captured read did not unwind after Goexit")
+	}
+	sourceFailIf(t, returned || caught != nil, "Goexit read returned=%t panic=%v", returned, caught)
+}
+
 func (f *sourceCountedFile) ReadAt(dst []byte, off int64) (int, error) {
 	f.reads++
 	return f.File.ReadAt(dst, off)
