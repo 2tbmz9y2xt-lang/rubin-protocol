@@ -453,17 +453,22 @@ func compactFallbackWriteStopped(ctx context.Context, deadline time.Time) (bool,
 // lockWriteUnless polls TryLock every millisecond, calling stop after a failed attempt and once
 // more with writeMu acquired, and returns true with a nil error holding writeMu when that last
 // call does not stop; when stop reports true, it returns false with stop's error without
-// holding writeMu.
-func (p *peer) lockWriteUnless(stop func() (bool, error)) (bool, error) {
+// holding writeMu. When that last call unwinds, writeMu is released once before the unwind
+// leaves lockWriteUnless; a stop call that unwinds before the acquisition releases nothing.
+func (p *peer) lockWriteUnless(stop func() (bool, error)) (acquired bool, err error) {
 	for !p.writeMu.TryLock() {
-		if stopped, err := stop(); stopped {
-			return false, err
+		if stopped, stopErr := stop(); stopped {
+			return false, stopErr
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if stopped, err := stop(); stopped {
-		p.writeMu.Unlock()
-		return false, err
+	defer func() {
+		if !acquired {
+			p.writeMu.Unlock()
+		}
+	}()
+	if stopped, stopErr := stop(); stopped {
+		return false, stopErr
 	}
 	return true, nil
 }
