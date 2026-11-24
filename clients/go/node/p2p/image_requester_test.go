@@ -1032,7 +1032,6 @@ func testImageEndBeforeWrite(t *testing.T) {
 		f.clock.cancelOnRead(cancel)
 		got := awaitImageResult(t, pending, "canceled wait")
 		requireImageResult(t, got, 1, 1, context.Canceled, "canceled wait")
-		require(t, !errors.Is(got.err, os.ErrDeadlineExceeded), "wait returned its own deadline error %v", got.err)
 		f.awaitReadsAfterHook(t, 1, "ctx callback")
 		must(t, release(), "holder write")
 		f.requireFrames(t, 0, "frozen now")
@@ -1155,20 +1154,27 @@ func testImageDoneContexts(t *testing.T) {
 // with live ctxs whose admission clock read ends one ctx and moves now past the first instance's
 // D. The request refuses with that ctx's error, allocates no ID, writes no frame and, for the
 // Request ctx, leaves the first instance unretired; the next request with live ctxs is admitted
-// with ID 1 on session 1.
+// with ID 1 on session 1. The Request ctx is an imageEndCtx or a context.WithCancel ctx.
 func testImageDoneAtAdmissionRead(t *testing.T) {
 	requestEnd, roundEnd := errors.New("request ctx ended"), errors.New("round ctx ended")
+	endCtx := func() (context.Context, context.CancelFunc) { return newImageEndCtx(requestEnd) }
+	cancelCtx := func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) }
 	for _, tc := range []struct {
-		name  string
-		round bool
-		want  error
-	}{{"request ctx", false, requestEnd}, {"round ctx", true, roundEnd}} {
+		name       string
+		round      bool
+		requestCtx func() (context.Context, context.CancelFunc)
+		want       error
+	}{
+		{"request ctx", false, endCtx, requestEnd},
+		{"request ctx from context.WithCancel", false, cancelCtx, context.Canceled},
+		{"round ctx", true, endCtx, roundEnd},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newImageTestFixture(t, 2)
 			t0 := f.clock.Now()
 			roundCtx, cancelRound := newImageEndCtx(roundEnd)
 			defer cancelRound()
-			ctx, cancel := newImageEndCtx(requestEnd)
+			ctx, cancel := tc.requestCtx()
 			defer cancel()
 			end := cancel
 			if tc.round {

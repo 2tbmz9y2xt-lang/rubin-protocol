@@ -172,10 +172,7 @@ type imageInstance struct {
 // endAt returns, without reading whether inst is retired, its ctx error, else its round ctx
 // error, else errImageExpired when now is after D, else nil.
 func (inst *imageInstance) endAt(now time.Time) error {
-	if err := inst.ctx.Err(); err != nil {
-		return err
-	}
-	if err := inst.round.ctx.Err(); err != nil {
+	if err := inst.round.doneErr(inst.ctx); err != nil {
 		return err
 	}
 	if now.After(inst.deadline) {
@@ -333,24 +330,28 @@ func (s *Service) resolveImageSources(ids []string) (map[string]*peer, error) {
 // increase across every round of the Service, with no reuse and no wrap. D = min(now +
 // AttemptLifetime, RD), with now the one clock read of admission, taken ahead of registration,
 // is fixed. A ctx or round ctx that ends after that read is an end of the admitted instance.
-// Until it retires, also after Request returns, a done ctx, a
-// done round ctx or now after D retires the instance, recording its ctx error, else the round
-// ctx error, else errImageExpired, when it is seen under the requester mutex by a ctx callback
-// or the deadline timer of the instance that obtained a Service lease, by the pass of a
-// Request that holds its lease, or by this Request's own pre-write decision. The last currency
-// decision is taken under the session's writeMu right before the write; when the instance
-// already ended, or is still current with now at RD (errImageRoundDeadline), no frame is
-// written, the instance retires and Request returns the admitted query with the end's error.
-// An end applied after that decision admits the write and before the post-write section takes
-// the requester mutex, as during the running write, leaves the result the admitted query and
-// nil. With no end applied by then, a failed write returns the admitted query and the
+// Until it retires, also after Request returns, the instance retires once, recording its ctx
+// error, else the round ctx error, else errImageExpired, when, under the requester mutex, a
+// done ctx, a done round ctx or now after D is seen by the pass of a Request that holds its
+// lease, by a currency decision this Request takes while waiting for writeMu or with writeMu
+// acquired or, with a Service lease, by the callback of a done ctx or round ctx; its deadline
+// timer, with a Service lease, retires it the same way only when the timer's one now read is
+// after D, and otherwise does nothing and is not re-armed. The last currency decision is
+// taken under the session's writeMu right before the write; when the instance has ended, or
+// is still current with now at RD (errImageRoundDeadline), no frame is written, the instance
+// is retired with that end recorded
+// unless an end was recorded already, and Request returns the admitted query with the recorded
+// end. An end applied after that decision admits the write and before the post-write section
+// takes the requester mutex, as during the running write, leaves the result the admitted query
+// and nil. With no end applied by then, a failed write returns the admitted query and the
 // original error and retires the instance. Retirement releases only the current assignment;
-// the pending request bytes are released once, at the pre-write refusal or in the post-write
-// section; the ID and the work stay consumed. After a failed write, once the instance outcome
-// is fixed, Request records the error as the session's last error and closes its connection
-// once. An unwind of Request after admission, a panic or runtime.Goexit, releases before it
-// leaves Request the session writeMu Request holds and the pending request bytes not yet
-// released, once each, retires nothing, records no end and closes nothing.
+// the pending request bytes are released once, at the pre-write refusal, in the post-write
+// section or on an unwind; the ID and the work stay consumed. After a failed write, once the
+// instance outcome is fixed, Request records the error as the session's last error and closes
+// its connection once. When Request unwinds after admission, a panic or runtime.Goexit, it
+// releases, before the unwind leaves Request, the session writeMu it holds at that moment and
+// the pending request bytes not yet released, once each; that release retires nothing,
+// records no end or last error and closes no connection, and the unwind propagates unchanged.
 //
 // Requests for different starts on different sessions, of one round or of several, do not wait
 // for one another's frame writes: a Request takes no writeMu but its own session's, and the
@@ -536,8 +537,8 @@ func (s *Service) applyImageEnd(inst *imageInstance, byTimer bool) {
 }
 
 // send runs writeRequest; when writeRequest unwinds, send releases the instance's pending
-// request bytes not yet released, once, after the writeMu holder released writeMu, and the
-// unwind propagates.
+// request bytes not yet released, once, after writeRequest has released the writeMu it held,
+// if it held writeMu, and the unwind propagates.
 func (r *ImageRound) send(inst *imageInstance, payload [imageRequestBytes]byte) error {
 	returned := false
 	defer func() {
