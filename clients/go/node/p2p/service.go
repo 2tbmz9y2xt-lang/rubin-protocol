@@ -122,6 +122,7 @@ type Service struct {
 	// current cleanup graph (issue #1307).
 	peerLifecycleExits atomic.Uint64
 	inboundBudget      *inboundBlockBudget
+	imageRequester     *imageRequester
 }
 
 type peerQuotaLock struct {
@@ -201,6 +202,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		orphans:        newOrphanPool(500),
 		daRelay:        expectedRelay,
 		inboundBudget:  inboundBudget,
+		imageRequester: newImageRequester(),
 	}
 	if err := cfg.PeerManager.Claim(); err != nil {
 		return nil, err
