@@ -2656,10 +2656,11 @@ wait_initial_convergence() {
   IFS='|' read -r height tip_hash _ <<<"${parsed}"
   wait_tip_to_match initial_convergence rust "${RUST_RPC_ADDR}" "${height}" "${tip_hash}" "${INITIAL_RUST_TIP_JSON}"
 }
-# Runs one store-neutrality producer step over its arguments and prints its JSON result:
-# identity and genesis read the members of the captured /chain_identity and
-# /get_block?height=0 answers (genesis also derives each header length), binaries hashes
-# the binary files, write writes the sidecar. A step exits non-zero when it fails.
+# Runs one store-neutrality producer step over its arguments. identity, genesis and
+# binaries print one JSON object: identity and genesis the members of the captured
+# /chain_identity and /get_block?height=0 answers (genesis also derives each header
+# length), binaries the hashes of the binary files. write prints nothing and writes
+# the sidecar file named by its first argument. A step exits non-zero when it fails.
 store_neutrality_step() { { sidecar_derivations_py; cat <<'PY'; } | python3 - "$@"; }
 import os, sys
 step, args = sys.argv[1], sys.argv[2:]

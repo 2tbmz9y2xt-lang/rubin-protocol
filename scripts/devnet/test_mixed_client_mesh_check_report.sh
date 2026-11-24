@@ -1709,16 +1709,20 @@ SN_CASES = (
     (SN_ALL, "commit-upper", SN_I, "protocol_commit is not 40 lowercase hex", lambda s, r: s.update(protocol_commit="AB" * 20)),
     (SN_ALL, "commit-short", SN_I, "protocol_commit is not 40 lowercase hex", lambda s, r: s.update(protocol_commit="ab" * 19 + "a")),
     (SN_ALL, "commit-long", SN_I, "protocol_commit is not 40 lowercase hex", lambda s, r: s.update(protocol_commit="ab" * 20 + "a")),
+    (SN_ALL, "commit-number", SN_I, "protocol_commit is not 40 lowercase hex", lambda s, r: s.update(protocol_commit=1234)),
     (SN_ALL, "tree-dirty", SN_I, "clients_tree_clean is not true", lambda s, r: s.update(clients_tree_clean=False)),
     (SN_ALL, "tree-one", SN_I, "clients_tree_clean is not true", lambda s, r: s.update(clients_tree_clean=1)),
     (SN_ALL, "binaries-extra", SN_I, "binaries keys mismatch", lambda s, r: s["binaries"].update(extra_sha256="00" * 32)),
     (SN_ALL, "binaries-missing", SN_I, "binaries keys mismatch", lambda s, r: s["binaries"].pop("txgen_sha256")),
+    (SN_ALL, "binaries-key-list", SN_I, "binaries keys mismatch", lambda s, r: s.update(binaries=sorted(s["binaries"]))),
     (SN_ALL, "go-node-hash", SN_I, "binaries.go_node_sha256 does not match", lambda s, r: s["binaries"].update(go_node_sha256="00" * 32)),
     (SN_ALL, "rust-node-hash", SN_I, "binaries.rust_node_sha256 does not match", lambda s, r: s["binaries"].update(rust_node_sha256="00" * 32)),
     (SN_ALL, "go-node-fifo", SN_I, "artifact_root/rubin-node-go is not a regular file", lambda s, r: ((r / "rubin-node-go").unlink(), os.mkfifo(r / "rubin-node-go")), sn_move_go_binary),
     (SN_ALL, "go-node-directory", SN_I, "artifact_root/rubin-node-go is not a regular file", lambda s, r: ((r / "rubin-node-go").unlink(), (r / "rubin-node-go").mkdir()), sn_move_go_binary),
+    (SN_ALL, "go-node-unreadable-null", SN_I, "binaries.go_node_sha256 does not match", lambda s, r: ((r / "rubin-node-go").chmod(0), s["binaries"].update(go_node_sha256=None)), sn_move_go_binary),
     (SN_ALL, "ident-extra", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(extra="x")),
     (SN_ALL, "ident-missing", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].pop("network")),
+    (SN_ALL, "ident-key-list", SN_I, "chain_identity malformed", lambda s, r: s.update(chain_identity=sorted(s["chain_identity"]))),
     (SN_ALL, "network-empty", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network="")),
     (SN_ALL, "network-number", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network=5)),
     (SN_ALL, "network-whitespace", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network=" \t\n ")),
@@ -1726,6 +1730,7 @@ SN_CASES = (
     (SN_ALL, "ident-genesis-short", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(genesis_hash_hex=genesis_hash[:62])),
     (SN_ALL, "datadirs-extra", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(extra=str(r))),
     (SN_ALL, "datadirs-missing", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].pop("rust_exact_empty_before_first_start")),
+    (SN_ALL, "datadirs-key-list", SN_I, "datadirs mismatch", lambda s, r: s.update(datadirs=sorted(s["datadirs"]))),
     (SN_ALL, "go-datadir", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(go=str(r / "node-rust"))),
     (SN_ALL, "rust-datadir", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(rust=str(r / "node-go"))),
     (SN_ALL, "datadir-symlink-loop", SN_I, "datadirs.go does not resolve to an existing directory", lambda s, r: ((r / "node-go").rmdir(), (r / "node-go").symlink_to(r / "node-go-loop"), (r / "node-go-loop").symlink_to(r / "node-go"))),
@@ -1733,6 +1738,7 @@ SN_CASES = (
     (SN_ALL, "rust-not-empty", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(rust_exact_empty_before_first_start=False)),
     (SN_ALL, "conv-extra", SN_I, "initial_convergence keys mismatch", lambda s, r: s["initial_convergence"].update(extra=None)),
     (SN_ALL, "conv-missing", SN_I, "initial_convergence keys mismatch", lambda s, r: s["initial_convergence"].pop("go_tip_path")),
+    (SN_ALL, "conv-key-list", SN_I, "initial_convergence keys mismatch", lambda s, r: s.update(initial_convergence=sorted(s["initial_convergence"]))),
     (SN_ALL, "tip-relative", SN_I, GO_TIP_PATH + " is not absolute", lambda s, r: s["initial_convergence"].update(go_tip_path=os.path.relpath(r / GO_TIP))),
     (SN_ALL, "tip-outside", SN_I, GO_TIP_PATH + " is outside artifact_root", lambda s, r: s["initial_convergence"].update(go_tip_path=sn_outside(r, GO_TIP))),
     (SN_ALL, "tip-directory", SN_I, GO_TIP_PATH + " file is missing", lambda s, r: s["initial_convergence"].update(go_tip_path=str(r / "node-go"))),
@@ -1773,11 +1779,13 @@ SN_CASES = (
     (SN_CHAIN, "tip-best-known-below", SN_I, GO_TIP_PATH + " does not match expected tip", lambda s, r: sn_edit_file(r, GO_TIP, best_known_height=s["initial_convergence"]["height"] - 1)),
     (SN_CHAIN, "tip-in-ibd-zero", SN_I, GO_TIP_PATH + " does not match expected tip", lambda s, r: sn_edit_file(r, GO_TIP, in_ibd=0)),
     (SN_CHAIN, "genesis-list", SN_I, "genesis malformed", lambda s, r: s.update(genesis=[])),
+    (SN_CHAIN, "genesis-key-list", SN_I, "genesis malformed", lambda s, r: s.update(genesis=sorted(s["genesis"]))),
     (SN_CHAIN, "genesis-extra", SN_I, "genesis malformed", lambda s, r: s["genesis"].update(extra=None)),
     (SN_CHAIN, "genesis-missing", SN_I, "genesis malformed", lambda s, r: s["genesis"].pop("rust_block_path")),
     (SN_CHAIN, "genesis-go-upper", SN_I, "genesis malformed", lambda s, r: s["genesis"].update(go_hash=genesis_hash.upper())),
     (SN_CHAIN, "genesis-rust-upper", SN_I, "genesis malformed", lambda s, r: s["genesis"].update(rust_hash=genesis_hash.upper())),
     (SN_CHAIN, "genesis-rust-differs", SN_G, "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal", lambda s, r: (s["genesis"].update(rust_hash="ee" * 32), sn_edit_file(r, RUST_BLOCK, hash="ee" * 32))),
+    (SN_CHAIN, "genesis-go-differs", SN_G, "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal", lambda s, r: (s["genesis"].update(go_hash="ee" * 32), sn_edit_file(r, GO_BLOCK, hash="ee" * 32))),
     (SN_CHAIN, "block-relative", SN_I, GO_BLOCK_PATH + " is not absolute", lambda s, r: s["genesis"].update(go_block_path=os.path.relpath(r / GO_BLOCK))),
     (SN_CHAIN, "block-outside", SN_I, GO_BLOCK_PATH + " is outside artifact_root", lambda s, r: s["genesis"].update(go_block_path=sn_outside(r, GO_BLOCK))),
     (SN_CHAIN, "block-directory", SN_I, GO_BLOCK_PATH + " file is missing", lambda s, r: s["genesis"].update(go_block_path=str(r / "node-go"))),
@@ -1799,6 +1807,7 @@ SN_CASES = (
     (("restart",), "rust-block-new-endpoint", SN_I, "genesis.rust_block_path sidecar identity mismatch", lambda s, r: sn_edit_file(r, RUST_BLOCK, rpc_endpoint=rust_rpc)),
     (SN_CHAIN, "rust-block-hash", SN_G, "genesis.rust_block_path hash differs from genesis.rust_hash", lambda s, r: sn_edit_file(r, RUST_BLOCK, hash="ee" * 32)),
     (SN_CHAIN, "header-list", SN_I, "header_bytes malformed", lambda s, r: s.update(header_bytes=[116, 116])),
+    (SN_CHAIN, "header-key-list", SN_I, "header_bytes malformed", lambda s, r: s.update(header_bytes=sorted(s["header_bytes"]))),
     (SN_CHAIN, "header-extra", SN_I, "header_bytes malformed", lambda s, r: s["header_bytes"].update(extra=116)),
     (SN_CHAIN, "header-missing", SN_I, "header_bytes malformed", lambda s, r: s["header_bytes"].pop("rust")),
     (SN_CHAIN, "header-string", SN_I, "header_bytes malformed", lambda s, r: s["header_bytes"].update(go="116")),
@@ -2321,7 +2330,7 @@ while IFS=$'\t' read -r sn_mode sn_name sn_token sn_needle; do
   sn_cases=$((sn_cases + 1))
 done < "${TMP_ROOT}/sn-cases.tsv"
 stop_fifo_watchdog
-(( sn_cases == 234 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 234" >&2; exit 1; }
+(( sn_cases == 258 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 258" >&2; exit 1; }
 sn_output="$(check_report "${TMP_ROOT}/sn-tx-accept-top-extra-report.json" offline producer-tx 2>&1)" && { echo "FAIL: sidecar extra key report should fail" >&2; exit 1; }
 [[ "$(combined_report_reason_token <<<"${sn_output}")" == store_neutrality_sidecar_invalid ]] || { echo "FAIL: combined token for sidecar keys mismatch: $(combined_report_reason_token <<<"${sn_output}")" >&2; exit 1; }
 printf 'PASS: mixed-client mesh check-report public/internal boundaries are covered\n'
