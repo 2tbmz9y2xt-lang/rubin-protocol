@@ -282,12 +282,16 @@ source "$1"
 probe_root="$2"
 MESH_TIMEOUT=2; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"; TX_PATH_MODE=0; RUST_RESTART_MODE=0; PARTITION_HEAL_REORG_MODE=0
 INITIAL_GO_TIP_JSON="${probe_root}/go-tip.json"; INITIAL_RUST_TIP_JSON="${probe_root}/rust-tip.json"
-RUST_CAPTURE_FAILS=0
+GO_CAPTURE_FAILS=0; RUST_CAPTURE_FAILS=0; GO_FIRST_TIP=""; RUST_FIRST_TIP=""
+# Capture N of a client fails while N is at most its CAPTURE_FAILS count, then answers
+# its FIRST_TIP once when that is set, then its TIP_INPUT.
 capture_rpc_sidecar() {
-  printf '%s\n' "$4" >>"${probe_root}/captures-$1"
-  [[ "$1" == go ]] && { cp -- "${GO_TIP_INPUT}" "$5"; return; }
-  (( $(wc -l <"${probe_root}/captures-rust") > RUST_CAPTURE_FAILS )) || return 1
-  cp -- "${RUST_TIP_INPUT}" "$5"
+  local fails="${RUST_CAPTURE_FAILS}" first="${RUST_FIRST_TIP}" input="${RUST_TIP_INPUT}" n
+  [[ "$1" != go ]] || { fails="${GO_CAPTURE_FAILS}"; first="${GO_FIRST_TIP}"; input="${GO_TIP_INPUT}"; }
+  printf '%s\n' "$4" >>"${probe_root}/captures-$1"; n="$(wc -l <"${probe_root}/captures-$1")"
+  (( n > fails )) || return 1
+  (( n > fails + 1 )) || [[ -z "${first}" ]] || input="${first}"
+  cp -- "${input}" "$5"
 }
 tip() { printf '{"best_known_height":%s,"has_tip":%s,"height":%s,"in_ibd":false,"tip_hash":%s}\n' "$2" "$3" "$2" "$4" >"${probe_root}/$1.json"; printf '%s\n' "${probe_root}/$1.json"; }
 aa="\"$(printf 'a%.0s' {1..64})\""; bb="\"$(printf 'b%.0s' {1..64})\""
@@ -311,19 +315,29 @@ expect_polled_timeout() {
   expect_reason initial_convergence_timeout "$1" "$2"
   [[ -s "${probe_root}/captures-rust" ]] || { echo "FAIL: initial convergence timed out before a Rust tip capture for $1 $2" >&2; exit 1; }
 }
+# Runs expect_match on fresh capture logs, then requires $1 Go tip captures and, unless
+# $2 is empty, $2 Rust tip captures.
+expect_match_after() {
+  rm -f -- "${probe_root}/captures-go" "${probe_root}/captures-rust"
+  MESH_TIMEOUT=10 expect_match "$3" "$4"
+  [[ "$(wc -l <"${probe_root}/captures-go")" -eq "$1" ]] && [[ -z "$2" || "$(wc -l <"${probe_root}/captures-rust")" -eq "$2" ]] || { echo "FAIL: Go tip captures $(wc -l <"${probe_root}/captures-go"), Rust tip captures $(wc -l <"${probe_root}/captures-rust"), want $1 and ${2:-unchecked}" >&2; exit 1; }
+}
 TX_PATH_MODE=3
 expect_match "${go101}" "${rust101}"
 MESH_TIMEOUT=1 expect_polled_timeout "${go101}" "${rust100}"
 expect_reason initial_convergence_timeout "${go101}" "${rust101b}"
 expect_reason initial_convergence_go_tip_tip_absent "${absent}" "${absent}"
-rm -f -- "${probe_root}/captures-go" "${probe_root}/captures-rust"; RUST_CAPTURE_FAILS=1
-MESH_TIMEOUT=10 expect_match "${go101}" "${rust101}"
-[[ "$(wc -l <"${probe_root}/captures-go")" -eq 1 && "$(wc -l <"${probe_root}/captures-rust")" -eq 2 ]] || { echo "FAIL: Go tip captures $(wc -l <"${probe_root}/captures-go"), Rust tip captures $(wc -l <"${probe_root}/captures-rust"), want 1 and 2" >&2; exit 1; }
+RUST_CAPTURE_FAILS=1 expect_match_after 1 2 "${go101}" "${rust101}"
+RUST_FIRST_TIP="${rust100}" expect_match_after 1 2 "${go101}" "${rust101}"
 RUST_CAPTURE_FAILS=1000
 expect_reason initial_convergence_timeout "${go101}" "${rust101}"
 RUST_CAPTURE_FAILS=0
 TX_PATH_MODE=0
 expect_match "${absent}" "${absent}"
+RUST_CAPTURE_FAILS=1 expect_match_after 2 2 "${absent}" "${absent}"
+RUST_FIRST_TIP="${rust_zero}" expect_match_after 2 2 "${absent}" "${absent}"
+GO_CAPTURE_FAILS=1 expect_match_after 2 "" "${absent}" "${absent}"
+GO_FIRST_TIP="${go101}" expect_match_after 2 "" "${absent}" "${absent}"
 expect_reason initial_convergence_timeout "${absent}" "${rust_zero}"
 expect_reason initial_convergence_timeout "${go101}" "${absent}"
 expect_reason initial_convergence_timeout "${absent}" "${probe_root}/absent-no-height.json"
@@ -2391,12 +2405,8 @@ expect_fail_contains "restart new Rust argv with --create-store" "node command_a
 expect_fail_contains "partition Rust argv without --create-store" "node command_argv does not match exact launched argv" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition-rust-without-create-report.json"
 sn_check() {
   local label="$1" token="$2" needle="$3" mode="$4" name="$5"
-  case "${mode}" in
-    tx) expect_fail_contains "${label}" "FAIL: ${token}: ${needle}" check_report "${TMP_ROOT}/sn-${name}-report.json" offline producer-tx
-        expect_fail_token "${label} token" "${token}" check_report "${TMP_ROOT}/sn-${name}-report.json" offline producer-tx ;;
-    *) expect_fail_contains "${label}" "FAIL: ${token}: ${needle}" check_report "${TMP_ROOT}/sn-${name}-report.json" offline "${mode}"
-       expect_fail_check_token "${label} token" "${token}" check_report "${TMP_ROOT}/sn-${name}-report.json" offline "${mode}" ;;
-  esac
+  [[ "${mode}" != tx ]] || mode=producer-tx
+  sidecar_value_check "${label}" "${token}: ${needle}" "${token}" "${mode}" "${TMP_ROOT}/sn-${name}-report.json"
 }
 SN_INVALID=store_neutrality_sidecar_invalid; SN_GENESIS=store_neutrality_genesis_mismatch; SN_GRAMMAR=store_neutrality_header_grammar_mismatch
 sn_check "sidecar header lengths differ" "${SN_GRAMMAR}" "header_bytes.go differs from header_bytes.rust" tx grammar-differs
