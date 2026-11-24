@@ -359,15 +359,17 @@ func testCapturedReadUnfundedWitness(t *testing.T) {
 }
 
 func testCapturedReadFundedWitnessAfterNamespaceRefusal(t *testing.T) {
-	c, d := capturedReadRecordFor('C'), capturedReadRecordFor('D')
+	c := capturedReadRecordFor('C')
 	limits := sourceLimits()
 	s, paths, prepared := capturedReadFreshDirectory(t, limits, c)
 	sourceMust(t, os.Rename(filepath.Join(prepared, c.leaf), filepath.Join(paths.root, c.leaf)))
 	o := sourceOpen(t, s, sourceID(), limits, nil)
 	sourcePrepare(t, o, c.m, c.parts)
-	stage := publicStagePrefix + d.leaf
-	stageBytes := make([]byte, capturedReadSize(t, 'D'))
 	for i := range 64 {
+		label := byte('D' + i)
+		d := capturedReadRecordFor(label)
+		stage := publicStagePrefix + d.leaf
+		stageBytes := make([]byte, capturedReadSize(t, label))
 		unexpected := fmt.Sprintf("unexpected-source-%02d", i)
 		names := [2]string{stage, unexpected}
 		if i%2 == 1 {
