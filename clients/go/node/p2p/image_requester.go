@@ -152,9 +152,10 @@ func newImageRequester() *imageRequester {
 	return &imageRequester{lastID: make(map[*peer]uint64), current: make(map[imageKey]*imageInstance)}
 }
 
-// imageInstance is one admitted assignment. retired, end, pendingHeld and the stop handles
-// are guarded by imageRequester.mu; end is the error of the end that retired it and
-// pendingHeld reports that its pending request bytes are still charged.
+// imageInstance is one admitted assignment. published, retired, end, pendingHeld and the stop
+// handles are guarded by imageRequester.mu; published reports that admission charged, allocated
+// and registered it, end is the error of the end that retired it and pendingHeld reports that
+// its pending request bytes are still charged.
 type imageInstance struct {
 	round       *ImageRound
 	session     *peer
@@ -167,6 +168,7 @@ type imageInstance struct {
 	stopRound   func() bool
 	timer       *time.Timer
 	pendingHeld bool
+	published   bool
 }
 
 // endAt returns, without reading whether inst is retired, its ctx error, else its round ctx
@@ -352,6 +354,9 @@ func (s *Service) resolveImageSources(ids []string) (map[string]*peer, error) {
 // releases, before the unwind leaves Request, the session writeMu it holds at that moment and
 // the pending request bytes not yet released, once each; that release retires nothing,
 // records no end or last error and closes no connection, and the unwind propagates unchanged.
+// Admission arms the instance's ctx callback, its round ctx callback and its deadline timer
+// before it charges, allocates the ID or registers the instance; an unwind while arming allocates
+// no ID and adds no registry entry, charge or attempted mark.
 //
 // Requests for different starts on different sessions, of one round or of several, do not wait
 // for one another's frame writes: a Request takes no writeMu but its own session's, and the
@@ -487,9 +492,16 @@ func (r *ImageRound) usageFor(session *peer) *imageUnitVector {
 	return &imageUnitVector{}
 }
 
-// commitLocked charges, allocates the ID, registers the instance and arms its two ctx
-// callbacks and its deadline timer in one linearization with the checks of prepareLocked.
+// commitLocked arms the instance's ctx callback, its round ctx callback and its deadline timer,
+// in that order, and only then charges, allocates the ID, registers the instance and marks the
+// start attempted and admitted, in one linearization with the checks of prepareLocked. When
+// arming unwinds, nothing is charged, allocated, registered or marked, and a callback already
+// armed finds the instance unpublished and changes nothing.
 func (r *ImageRound) commitLocked(inst *imageInstance, now time.Time) {
+	onCtx := func() { r.service.applyImageEnd(inst, false) }
+	inst.stopCtx = context.AfterFunc(inst.ctx, onCtx)
+	inst.stopRound = context.AfterFunc(r.ctx, onCtx)
+	inst.timer = time.AfterFunc(imageTimerDuration(inst.deadline.Sub(now)), func() { r.service.applyImageEnd(inst, true) })
 	req := r.service.imageRequester
 	start := inst.query.StartKey
 	perPeer, global := r.admissionDelta(start)
@@ -502,10 +514,7 @@ func (r *ImageRound) commitLocked(inst *imageInstance, now time.Time) {
 	r.attempted[imageAttemptKey{start, inst.session}] = struct{}{}
 	r.starts[start] = struct{}{}
 	inst.pendingHeld = true
-	onCtx := func() { r.service.applyImageEnd(inst, false) }
-	inst.stopCtx = context.AfterFunc(inst.ctx, onCtx)
-	inst.stopRound = context.AfterFunc(r.ctx, onCtx)
-	inst.timer = time.AfterFunc(imageTimerDuration(inst.deadline.Sub(now)), func() { r.service.applyImageEnd(inst, true) })
+	inst.published = true
 }
 
 // imageTimerDuration returns untilDeadline plus 1ns, saturating at the largest Duration.
@@ -518,9 +527,10 @@ func imageTimerDuration(untilDeadline time.Duration) time.Duration {
 
 // applyImageEnd is the body of the Request-ctx callback, the round-ctx callback (byTimer
 // false) and the deadline timer (byTimer true) of one instance. With a Service lease, under
-// the requester mutex and with one now read, it retires a not yet retired instance whose ctx
-// or round ctx is done or whose D is before now, once, recording endAt(now). The timer does
-// nothing when now is not after D. A refused lease changes nothing.
+// the requester mutex and with one now read, it retires a published, not yet retired instance
+// whose ctx or round ctx is done or whose D is before now, once, recording endAt(now). The timer
+// does nothing when now is not after D and is not re-armed. A refused lease or an unpublished
+// instance changes nothing and reads no clock.
 func (s *Service) applyImageEnd(inst *imageInstance, byTimer bool) {
 	if !s.acquireWork() {
 		return
@@ -529,6 +539,9 @@ func (s *Service) applyImageEnd(inst *imageInstance, byTimer bool) {
 	req := s.imageRequester
 	req.mu.Lock()
 	defer req.mu.Unlock()
+	if !inst.published {
+		return
+	}
 	now := s.cfg.Now()
 	if byTimer && !now.After(inst.deadline) {
 		return
@@ -610,21 +623,22 @@ func (r *ImageRound) endBeforeWrite(inst *imageInstance) error {
 	return end
 }
 
-// finishWrite is the post-write section: it releases the pending request bytes once and
-// returns nil when the instance is already retired as it takes the requester mutex, which an
-// end applied after the pre-write decision does; otherwise it retires the instance on a write
-// failure and returns writeErr.
+// finishWrite is the post-write section: it returns nil when the instance is already retired as
+// it takes the requester mutex, which an end applied after the pre-write decision does;
+// otherwise it retires the instance on a write failure and returns writeErr. It releases the
+// pending request bytes once, after that retirement.
 func (r *ImageRound) finishWrite(inst *imageInstance, writeErr error) error {
 	req := r.service.imageRequester
 	req.mu.Lock()
 	defer req.mu.Unlock()
-	inst.releasePendingLocked()
 	if inst.retired {
+		inst.releasePendingLocked()
 		return nil
 	}
 	if writeErr != nil {
 		req.retireLocked(inst, writeErr)
 	}
+	inst.releasePendingLocked()
 	return writeErr
 }
 
@@ -650,17 +664,18 @@ func (req *imageRequester) retireIfEndedLocked(inst *imageInstance, now time.Tim
 	}
 }
 
-// retireLocked retires exactly that instance once, records end, stops its ctx callbacks and
-// deadline timer and releases its current assignment in its own round; a later call has no
-// effect.
+// retireLocked retires exactly that instance once: it stops its ctx callback, its round ctx
+// callback and its deadline timer, then records end, deletes its registry entry and releases its
+// current assignment in its own round. When a stop call unwinds, the instance stays unretired,
+// registered and charged, with no end recorded; a later call has no effect once it is retired.
 func (req *imageRequester) retireLocked(inst *imageInstance, end error) {
 	if inst.retired {
 		return
 	}
-	inst.retired, inst.end = true, end
 	inst.stopCtx()
 	inst.stopRound()
 	inst.timer.Stop()
+	inst.retired, inst.end = true, end
 	delete(req.current, imageKey{inst.round.anchor, inst.query.StartKey})
 	inst.round.release(inst.session, unitCurrentAssignments, 1)
 }
