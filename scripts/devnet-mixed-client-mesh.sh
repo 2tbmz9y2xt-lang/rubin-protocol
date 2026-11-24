@@ -2693,12 +2693,19 @@ else:
     sidecar = {
         # Constant tag: store neutrality observed on the header grammar both binaries share.
         "evidence_domain": "pre_switch_store_neutrality",
-        # git rev-parse HEAD; true when git status --porcelain -- clients prints nothing.
+        # git rev-parse HEAD.
         "protocol_commit": commit,
+        # True when git status --porcelain -- clients prints nothing.
         "clients_tree_clean": dirty == "",
+        # go_node_sha256, rust_node_sha256 and txgen_sha256: sha256 of artifact_root/rubin-node-go,
+        # rubin-node-rust and rubin-txgen; txgen_sha256 is null in the default mode.
         "binaries": json.loads(binaries),
         # network, chain_id_hex and genesis_hash_hex copied from Go /chain_identity.
         "chain_identity": json.loads(ident),
+        # genesis: go_hash and rust_hash, the hash of each client's /get_block?height=0 answer,
+        # and go_block_path and rust_block_path of those captures. header_bytes: go and rust, the
+        # n in {116, 148} whose SHA3-256 over the first n genesis block bytes equals that hash,
+        # 0 when no unique n matches. Both are null in the default mode, which captures no genesis block.
         **(json.loads(genesis) if genesis else {"genesis": None, "header_bytes": None}),
         # Both datadir paths; true when the Rust datadir held no entry before its first start.
         "datadirs": {"go": go_dir, "rust": rust_dir, "rust_exact_empty_before_first_start": rust_empty == "true"},
