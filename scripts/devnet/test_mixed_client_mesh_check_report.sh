@@ -1552,25 +1552,49 @@ mine_next_cases = (
     ("restart-go", "go-restart-mine-next.json", restart_report, ("rust_restart", "go_target_mine_next_path"), GO_MINE_VARIANTS),
     ("converge-rust", "rust-mine-next.json", converge_report, ("rust_mine", "mine_next_path"), RUST_MINE_VARIANTS),
     ("rust-conv-go", "go-mine-next.json", rust_converge_report, ("go_mine", "mine_next_path"), GO_MINE_VARIANTS),
+    ("converge-rust", "rust-mine-next.json", converge_report, ("rust_mine", "mine_next_path"), ("nonce-string", "timestamp-string", "height-over-rust-mine", "tx-count-over-rust-mine")),
+    ("rust-conv-go", "go-mine-next.json", rust_converge_report, ("go_mine", "mine_next_path"), ("nonce-string", "timestamp-string", "height-over-go-mine", "tx-count-over-go-mine")),
+    ("restart-go", "go-restart-mine-next.json", restart_report, ("rust_restart", "go_target_mine_next_path"), ("nonce-over", "timestamp-over", "tx-count-over-restart")),
+    ("converge-go-tip", "go-converge-tip.json", converge_report, ("go_converge", "tip_path"), ("best-below", "best-string", "in-ibd-string")),
+    ("rust-conv-rust-tip", "rust-converge-tip.json", rust_converge_report, ("rust_converge", "tip_path"), ("best-below", "best-string", "in-ibd-string")),
+    ("restart-pre-tip", "rust-pre-restart-tip.json", restart_report, ("rust_restart", "pre_restart_tip_path"), ("best-over",)),
 )
+OVER = 1_000_000_001
+def set_over(d: dict, r: dict, key: str, *fields: tuple) -> None:
+    d[key] = OVER
+    for group, name in fields:
+        r[group][name] = OVER
 # The *-rust-rpc edits set rpc_endpoint to rust_rpc, the node-rust rpc_endpoint of the
 # edited report; in the restart report that is the restarted Rust node (new_rpc_endpoint).
 mine_next_edits = {
-    "no-commit": lambda d: d.pop("commit_state"),
-    "not-committed": lambda d: d.__setitem__("commit_state", "not_committed"),
-    "no-commit-rust-rpc": lambda d: (d.pop("commit_state"), d.__setitem__("rpc_endpoint", rust_rpc)),
-    "not-committed-rust-rpc": lambda d: d.update(commit_state="not_committed", rpc_endpoint=rust_rpc),
-    "commit": lambda d: d.__setitem__("commit_state", "committed"),
-    "go-impl": lambda d: d.__setitem__("implementation", "go"),
-    "go-impl-commit": lambda d: d.update(implementation="go", commit_state="committed"),
+    "no-commit": lambda d, r: d.pop("commit_state"),
+    "not-committed": lambda d, r: d.__setitem__("commit_state", "not_committed"),
+    "no-commit-rust-rpc": lambda d, r: (d.pop("commit_state"), d.__setitem__("rpc_endpoint", rust_rpc)),
+    "not-committed-rust-rpc": lambda d, r: d.update(commit_state="not_committed", rpc_endpoint=rust_rpc),
+    "commit": lambda d, r: d.__setitem__("commit_state", "committed"),
+    "go-impl": lambda d, r: d.__setitem__("implementation", "go"),
+    "go-impl-commit": lambda d, r: d.update(implementation="go", commit_state="committed"),
+    "nonce-string": lambda d, r: d.__setitem__("nonce", "0"),
+    "timestamp-string": lambda d, r: d.__setitem__("timestamp", "1"),
+    "nonce-over": lambda d, r: d.__setitem__("nonce", 2**64),
+    "timestamp-over": lambda d, r: d.__setitem__("timestamp", 2**64),
+    "height-over-rust-mine": lambda d, r: set_over(d, r, "height", ("rust_mine", "height"), ("go_converge", "height")),
+    "height-over-go-mine": lambda d, r: set_over(d, r, "height", ("go_mine", "height"), ("rust_converge", "height")),
+    "tx-count-over-rust-mine": lambda d, r: set_over(d, r, "tx_count", ("rust_mine", "tx_count")),
+    "tx-count-over-go-mine": lambda d, r: set_over(d, r, "tx_count", ("go_mine", "tx_count")),
+    "tx-count-over-restart": lambda d, r: set_over(d, r, "tx_count", ("rust_restart", "go_target_tx_count")),
+    "best-below": lambda d, r: d.__setitem__("best_known_height", d["height"] - 1),
+    "best-string": lambda d, r: d.__setitem__("best_known_height", str(d["height"])),
+    "in-ibd-string": lambda d, r: d.__setitem__("in_ibd", "false"),
+    "best-over": lambda d, r: d.__setitem__("best_known_height", OVER),
 }
 for site, sidecar_name, base_report, field, variants in mine_next_cases:
     for variant in variants:
         sidecar = json.loads((artifact_root / sidecar_name).read_text(encoding="utf-8"))
-        mine_next_edits[variant](sidecar)
+        bad = json.loads(json.dumps(base_report))
+        mine_next_edits[variant](sidecar, bad)
         sidecar_path = artifact_root / f"mine-next-{site}-{variant}-sidecar.json"
         dump(sidecar_path, sidecar)
-        bad = json.loads(json.dumps(base_report))
         target = bad
         for key in field[:-1]:
             target = target[key]
@@ -2218,6 +2242,26 @@ expect_fail_contains "rust-submit go mine_next without commit_state at the Rust 
 expect_fail_contains "partition go mine_next not committed at the Rust endpoint" "observations.pre_partition.common_go_mine keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-go-not-committed-rust-rpc.json"
 expect_fail_contains "restart go target mine_next not committed at the Rust endpoint" "rust_restart.go_target_mine_next_path keys mismatch" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-not-committed-rust-rpc.json"
 expect_fail_contains "rust-submit go mine_next not committed at the Rust endpoint" "go_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-not-committed-rust-rpc.json" offline producer-tx
+sidecar_value_check() {
+  local label="$1" needle="$2" token="$3" mode="$4" report="$5"
+  expect_fail_contains "${label}" "FAIL: ${needle}" check_report "${report}" offline "${mode}"
+  if [[ "${mode}" == producer-tx ]]; then expect_fail_token "${label} token" "${token}" check_report "${report}" offline "${mode}"
+  else expect_fail_check_token "${label} token" "${token}" check_report "${report}" offline "${mode}"; fi
+}
+for variant in nonce-string timestamp-string height-over-rust-mine tx-count-over-rust-mine; do
+  sidecar_value_check "converge rust mine_next ${variant}" "rust_mine mine_next sidecar does not match report" mine_sidecar_invalid producer-tx "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-${variant}.json"
+done
+for variant in nonce-string timestamp-string height-over-go-mine tx-count-over-go-mine; do
+  sidecar_value_check "rust-submit go mine_next ${variant}" "go_mine mine_next sidecar does not match report" mine_sidecar_invalid producer-tx "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-${variant}.json"
+done
+for variant in nonce-over timestamp-over tx-count-over-restart; do
+  sidecar_value_check "restart go target mine_next ${variant}" "rust_restart go target mine_next sidecar does not match report" rust_restart_go_target_mine_next_invalid rust-restart "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-${variant}.json"
+done
+for variant in best-below best-string in-ibd-string; do
+  sidecar_value_check "converge go tip ${variant}" "go_converge tip sidecar does not match rust_mine block" converge_tip_invalid producer-tx "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-go-tip-${variant}.json"
+  sidecar_value_check "rust-submit rust tip ${variant}" "rust_converge tip sidecar does not match go_mine block" converge_tip_invalid producer-tx "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-rust-tip-${variant}.json"
+done
+sidecar_value_check "restart pre-restart tip best-known height over the bound" "rust_restart.pre_restart_tip_path does not match report" rust_restart_pre_restart_tip_sidecar_invalid rust-restart "${TMP_ROOT}/restart/artifact-root/mine-next-restart-pre-tip-best-over.json"
 expect_fail_contains "producer rejects mesh report" "producer tx validation requires a mixed-client tx-path report" check_report "${MESH_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects missing propagation sample" "raw_samples.propagation requires one observed sample" check_report "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects non-finite propagation sample" "raw_samples.propagation.samples[0].elapsed is not finite" check_report "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" offline producer-tx

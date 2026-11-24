@@ -109,9 +109,10 @@ def tip_capture(label: str, p: Path, impl: str, endpoint: str) -> dict:
     req(set(tip) == TIP_SIDECAR_KEYS, f"{label} keys mismatch: {sorted(tip)}")
     req(tip.get("implementation") == impl and tip.get("rpc_endpoint") == endpoint and tip.get("request_path") == "/get_tip", f"{label} sidecar identity mismatch")
     return tip
+def tip_sidecar_ok(tip: dict, height: int, block_hash: str) -> bool:
+    return tip_at(tip, height, block_hash) and is_json_int(tip.get("height")) and is_json_int(tip.get("best_known_height")) and tip["best_known_height"] >= height and isinstance(tip.get("in_ibd"), bool)
 def tip_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str) -> None:
-    tip = tip_capture(label, p, impl, endpoint)
-    req(tip_at(tip, height, block_hash) and is_json_int(tip.get("height")) and is_json_int(tip.get("best_known_height")) and tip["best_known_height"] >= height and isinstance(tip.get("in_ibd"), bool), f"{label} does not match expected tip")
+    req(tip_sidecar_ok(tip_capture(label, p, impl, endpoint), height, block_hash), f"{label} does not match expected tip")
 def block_capture(label: str, p: Path, impl: str, endpoint: str, height: int) -> dict:
     block = load_json_file(label, p)
     req(set(block) == BLOCK_SIDECAR_KEYS, f"{label} keys mismatch: {sorted(block)}")
@@ -151,12 +152,14 @@ def mine_next_keys_ok(mine: dict, impl: str) -> bool:
     return set(mine) == MINE_NEXT_KEYS
 def mine_next_commit_state_ok(mine: dict, impl: str) -> bool:
     return impl != "go" or "commit_state" in mine
+def mine_result_ok(mine: dict, min_height: int = 1) -> bool:
+    return mine.get("mined") is True and is_json_int(mine.get("height"), min_height) and hex32(mine.get("block_hash")) and is_json_int(mine.get("tx_count"), 1) and is_json_u64(mine.get("nonce")) and is_json_u64(mine.get("timestamp"))
 def mine_sidecar(label: str, p: Path, impl: str, endpoint: str, min_height: int = 1) -> dict:
     mine = load_json_file(label, p)
     req(mine_next_keys_ok(mine, impl), f"{label} keys mismatch: {sorted(mine)}")
     req(mine.get("implementation") == impl and mine.get("rpc_endpoint") == endpoint and mine.get("request_path") == "/mine_next", f"{label} sidecar identity mismatch")
     req(mine_next_commit_state_ok(mine, impl), f"{label} keys mismatch: {sorted(mine)}")
-    req(mine.get("mined") is True and is_json_int(mine.get("height"), min_height) and hex32(mine.get("block_hash")) and is_json_int(mine.get("tx_count"), 1) and is_json_u64(mine.get("nonce")) and is_json_u64(mine.get("timestamp")), f"{label} malformed mine result")
+    req(mine_result_ok(mine, min_height), f"{label} malformed mine result")
     return mine
 def metrics_sidecar(label: str, p: Path) -> dict:
     try:
@@ -613,12 +616,12 @@ if restart_mode:
         req(set(sidecar) == TIP_SIDECAR_KEYS, f"rust_restart.{path_field} keys mismatch: {sorted(sidecar)}")
         sidecar_height = json_int(sidecar.get("height"), f"rust_restart.{path_field}.height", 0)
         sidecar_best_known_height = json_int(sidecar.get("best_known_height"), f"rust_restart.{path_field}.best_known_height", 0)
-        sidecar_has_tip = json_bool(sidecar.get("has_tip"), f"rust_restart.{path_field}.has_tip")
+        json_bool(sidecar.get("has_tip"), f"rust_restart.{path_field}.has_tip")
         json_bool(sidecar.get("in_ibd"), f"rust_restart.{path_field}.in_ibd")
-        sidecar_tip = json_hex32(sidecar.get("tip_hash"), f"rust_restart.{path_field}.tip_hash")
+        json_hex32(sidecar.get("tip_hash"), f"rust_restart.{path_field}.tip_hash")
         req(sidecar_best_known_height >= sidecar_height, f"rust_restart.{path_field}.best_known_height below height")
         req(sidecar.get("implementation") == impl and sidecar.get("rpc_endpoint") == endpoint and sidecar.get("request_path") == "/get_tip", f"rust_restart.{path_field} identity mismatch")
-        req(sidecar_has_tip is True and sidecar_height == height and sidecar_tip == tip, f"rust_restart.{path_field} does not match report")
+        req(tip_sidecar_ok(sidecar, height, tip), f"rust_restart.{path_field} does not match report")
     restart_tip_sidecar("pre_restart_tip_path", "rust", restart_info["old_rpc_endpoint"], pre_restart_height, restart_info["pre_restart_tip"])
     restart_tip_sidecar("go_target_tip_path", "go", nodes_by_impl["go"]["rpc_endpoint"], go_target_height, restart_info["go_target_tip"])
     restart_tip_sidecar("catch_up_tip_path", "rust", nodes_by_impl["rust"]["rpc_endpoint"], catch_up_height, restart_info["catch_up_tip"])
@@ -632,7 +635,7 @@ if restart_mode:
     json_int(mine_next.get("timestamp"), "rust_restart.go_target_mine_next_path.timestamp", 0)
     req(mine_next.get("implementation") == "go" and mine_next.get("rpc_endpoint") == nodes_by_impl["go"]["rpc_endpoint"] and mine_next.get("request_path") == "/mine_next", "rust_restart go target mine_next sidecar identity mismatch")
     req(mine_next_commit_state_ok(mine_next, "go"), f"rust_restart.go_target_mine_next_path keys mismatch: {sorted(mine_next)}")
-    req(mine_next.get("mined") is True and mine_height == go_target_height and mine_hash == restart_info["go_target_tip"] and mine_tx_count == restart_info["go_target_tx_count"], "rust_restart go target mine_next sidecar does not match report")
+    req(mine_result_ok(mine_next) and mine_height == go_target_height and mine_hash == restart_info["go_target_tip"] and mine_tx_count == restart_info["go_target_tx_count"], "rust_restart go target mine_next sidecar does not match report")
     expected_old_rust_argv = [nodes_by_impl["rust"]["binary"], "--network", "devnet", "--datadir", str(artifact_root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", nodes_by_impl["go"]["p2p_endpoint"], "--create-store"]
     old_argv = restart_info.get("old_command_argv")
     new_argv = restart_info.get("new_command_argv")
@@ -766,11 +769,11 @@ if tx_mode:
         req(mine_next_keys_ok(mine_next, mine_impl), f"{mine_label}.mine_next keys mismatch: {sorted(mine_next)}")
         req(mine_next.get("implementation") == mine_impl and mine_next.get("rpc_endpoint") == nodes_by_impl[mine_impl]["rpc_endpoint"] and mine_next.get("request_path") == "/mine_next", f"{mine_label} mine_next sidecar identity mismatch")
         req(mine_next_commit_state_ok(mine_next, mine_impl), f"{mine_label}.mine_next keys mismatch: {sorted(mine_next)}")
-        req(mine_next.get("mined") is True and mine_next.get("height") == height and mine_next.get("block_hash") == block_hash and mine_next.get("tx_count") == mine["tx_count"], f"{mine_label} mine_next sidecar does not match report")
+        req(mine_result_ok(mine_next) and mine_next.get("height") == height and mine_next.get("block_hash") == block_hash and mine_next.get("tx_count") == mine["tx_count"], f"{mine_label} mine_next sidecar does not match report")
         verify_block_inclusion_sidecar(f"{mine_label}.block_path", mine_block_path, txhex, txid, height, block_hash, mine["tx_count"], mine_impl, nodes_by_impl[mine_impl]["rpc_endpoint"])
         verify_block_inclusion_sidecar(f"{converge_label}.block_path", converge_block_path, txhex, txid, height, block_hash, mine["tx_count"], converge_impl, nodes_by_impl[converge_impl]["rpc_endpoint"])
         tip = tip_capture(f"{converge_label}.tip", converge_tip_path, converge_impl, nodes_by_impl[converge_impl]["rpc_endpoint"])
-        req(tip_at(tip, height, block_hash), f"{converge_label} tip sidecar does not match {mine_label} block")
+        req(tip_sidecar_ok(tip, height, block_hash), f"{converge_label} tip sidecar does not match {mine_label} block")
     validate_raw_samples(data, tx_mode, go_submit_mode, converge_mode, txid, block_hash if converge_mode else None, height if converge_mode else None)
 else:
     validate_raw_samples(data, tx_mode, go_submit_mode, converge_mode)
