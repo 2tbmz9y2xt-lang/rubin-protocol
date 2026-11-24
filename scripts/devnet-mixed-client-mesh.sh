@@ -104,15 +104,21 @@ def tip_obj(value: object, label: str) -> dict:
     req(isinstance(value, dict) and set(value) == {"height", "hash"}, f"{label} keys mismatch")
     req(is_json_int(value.get("height")) and hex32(value.get("hash")), f"{label} malformed")
     return value
-def tip_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str) -> None:
+def tip_capture(label: str, p: Path, impl: str, endpoint: str) -> dict:
     tip = load_json_file(label, p)
     req(set(tip) == TIP_SIDECAR_KEYS, f"{label} keys mismatch: {sorted(tip)}")
     req(tip.get("implementation") == impl and tip.get("rpc_endpoint") == endpoint and tip.get("request_path") == "/get_tip", f"{label} sidecar identity mismatch")
+    return tip
+def tip_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str) -> None:
+    tip = tip_capture(label, p, impl, endpoint)
     req(tip.get("has_tip") is True and is_json_int(tip.get("height")) and tip.get("height") == height and tip.get("tip_hash") == block_hash and is_json_int(tip.get("best_known_height")) and tip["best_known_height"] >= height and isinstance(tip.get("in_ibd"), bool), f"{label} does not match expected tip")
-def block_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str, expected_prev_hash=None) -> None:
+def block_capture(label: str, p: Path, impl: str, endpoint: str, height: int) -> dict:
     block = load_json_file(label, p)
     req(set(block) == BLOCK_SIDECAR_KEYS, f"{label} keys mismatch: {sorted(block)}")
     req(block.get("implementation") == impl and block.get("rpc_endpoint") == endpoint and block.get("request_path") == f"/get_block?height={height}", f"{label} sidecar identity mismatch")
+    return block
+def block_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str, expected_prev_hash=None) -> None:
+    block = block_capture(label, p, impl, endpoint, height)
     req(block.get("canonical") is True and block.get("height") == height and block.get("hash") == block_hash and isinstance(block.get("block_hex"), str) and re.fullmatch(r"[0-9a-f]+", block["block_hex"] or "") is not None, f"{label} does not match expected block")
     request_obj = {"op": "block_basic_check", "block_hex": block["block_hex"], "height": height}
     if expected_prev_hash is not None:
@@ -235,10 +241,8 @@ def parse_txid_from_hex(txhex: str) -> str:
     req(parsed.get("ok") is True and isinstance(txid, str) and re.fullmatch(r"[0-9a-f]{64}", txid), "tx parser did not produce txid")
     req(parsed.get("consumed") == len(txhex) // 2, "tx parser consumed mismatch")
     return txid
-def verify_block_inclusion_sidecar(label: str, p: Path, txhex: str, txid: str, height: int, block_hash: str, tx_count: int, impl: str, endpoint: str, request_path: str) -> None:
-    block = load_json_file(label, p)
-    req(set(block) == BLOCK_SIDECAR_KEYS, f"{label} keys mismatch: {sorted(block)}")
-    req(block.get("implementation") == impl and block.get("rpc_endpoint") == endpoint and block.get("request_path") == request_path, f"{label} sidecar identity mismatch")
+def verify_block_inclusion_sidecar(label: str, p: Path, txhex: str, txid: str, height: int, block_hash: str, tx_count: int, impl: str, endpoint: str) -> None:
+    block = block_capture(label, p, impl, endpoint, height)
     req(block.get("canonical") is True and block.get("height") == height and block.get("hash") == block_hash, f"{label} sidecar height/hash/canonical mismatch")
     req(isinstance(block.get("block_hex"), str) and block["block_hex"], f"{label} block_hex is missing")
     source = r'''
@@ -758,11 +762,9 @@ if tx_mode:
         req(mine_next_keys_ok(mine_next, mine_impl), f"{mine_label}.mine_next keys mismatch: {sorted(mine_next)}")
         req(mine_next.get("implementation") == mine_impl and mine_next.get("rpc_endpoint") == nodes_by_impl[mine_impl]["rpc_endpoint"] and mine_next.get("request_path") == "/mine_next", f"{mine_label} mine_next sidecar identity mismatch")
         req(mine_next.get("mined") is True and mine_next.get("height") == height and mine_next.get("block_hash") == block_hash and mine_next.get("tx_count") == mine["tx_count"], f"{mine_label} mine_next sidecar does not match report")
-        verify_block_inclusion_sidecar(f"{mine_label}.block_path", mine_block_path, txhex, txid, height, block_hash, mine["tx_count"], mine_impl, nodes_by_impl[mine_impl]["rpc_endpoint"], f"/get_block?height={height}")
-        verify_block_inclusion_sidecar(f"{converge_label}.block_path", converge_block_path, txhex, txid, height, block_hash, mine["tx_count"], converge_impl, nodes_by_impl[converge_impl]["rpc_endpoint"], f"/get_block?height={height}")
-        tip = load_json_file(f"{converge_label}.tip", converge_tip_path)
-        req(set(tip) == TIP_SIDECAR_KEYS, f"{converge_label}.tip keys mismatch: {sorted(tip)}")
-        req(tip.get("implementation") == converge_impl and tip.get("rpc_endpoint") == nodes_by_impl[converge_impl]["rpc_endpoint"] and tip.get("request_path") == "/get_tip", f"{converge_label} tip sidecar identity mismatch")
+        verify_block_inclusion_sidecar(f"{mine_label}.block_path", mine_block_path, txhex, txid, height, block_hash, mine["tx_count"], mine_impl, nodes_by_impl[mine_impl]["rpc_endpoint"])
+        verify_block_inclusion_sidecar(f"{converge_label}.block_path", converge_block_path, txhex, txid, height, block_hash, mine["tx_count"], converge_impl, nodes_by_impl[converge_impl]["rpc_endpoint"])
+        tip = tip_capture(f"{converge_label}.tip", converge_tip_path, converge_impl, nodes_by_impl[converge_impl]["rpc_endpoint"])
         req(tip.get("has_tip") is True and tip.get("height") == height and tip.get("tip_hash") == block_hash, f"{converge_label} tip sidecar does not match {mine_label} block")
     validate_raw_samples(data, tx_mode, go_submit_mode, converge_mode, txid, block_hash if converge_mode else None, height if converge_mode else None)
 else:
@@ -789,23 +791,24 @@ if not partition_mode:
 SN_INVALID, SN_GENESIS, SN_GRAMMAR = "store_neutrality_sidecar_invalid", "store_neutrality_genesis_mismatch", "store_neutrality_header_grammar_mismatch"
 def sn_req(ok: bool, detail: str, token: str = SN_INVALID) -> None:
     if not ok: fail(f"{token}: {detail}")
-def sn_file(label: str, value: object) -> dict:
+def sn_file(label: str, value: object) -> tuple:
     sn_label = f"{SN_INVALID}: {label}"
-    return load_json_file(sn_label, artifact_file(sn_label, value, artifact_root))
+    return sn_label, artifact_file(sn_label, value, artifact_root)
 def sn_tip(impl: str, endpoint: str, conv: dict, chain: bool) -> None:
-    tip = sn_file(f"initial_convergence.{impl}_tip_path", conv[f"{impl}_tip_path"])
-    sn_req(set(tip) == TIP_SIDECAR_KEYS and tip["implementation"] == impl and tip["request_path"] == "/get_tip" and tip["rpc_endpoint"] == endpoint, f"initial_convergence.{impl}_tip_path identity mismatch")
+    label, p = sn_file(f"initial_convergence.{impl}_tip_path", conv[f"{impl}_tip_path"])
     if chain:
-        sn_req(tip["has_tip"] is True and is_json_int(tip["height"]) and tip["height"] == conv["height"] and tip["tip_hash"] == conv[f"{impl}_tip_hash"] and is_json_int(tip["best_known_height"]) and tip["best_known_height"] >= tip["height"] and isinstance(tip["in_ibd"], bool), f"initial_convergence.{impl}_tip_path does not match initial_convergence")
-    else:
-        sn_req(tip["has_tip"] is False and tip["height"] is None and tip["tip_hash"] is None, f"initial_convergence.{impl}_tip_path does not report an absent tip")
+        tip_sidecar(label, p, impl, endpoint, conv["height"], conv[f"{impl}_tip_hash"])
+        return
+    tip = tip_capture(label, p, impl, endpoint)
+    req(tip["has_tip"] is False and tip["height"] is None and tip["tip_hash"] is None, f"{label} does not report an absent tip")
 def sn_block(impl: str, endpoint: str, genesis: dict) -> dict:
-    block = sn_file(f"genesis.{impl}_block_path", genesis[f"{impl}_block_path"])
-    sn_req(set(block) == BLOCK_SIDECAR_KEYS and block["implementation"] == impl and block["request_path"] == "/get_block?height=0" and is_json_int(block["height"]) and block["height"] == 0 and block["canonical"] is True and isinstance(block["block_hex"], str) and re.fullmatch(r"(?:[0-9a-f]{2})+", block["block_hex"]) is not None and block["rpc_endpoint"] == endpoint, f"genesis.{impl}_block_path is not the {impl} genesis block capture")
+    label, p = sn_file(f"genesis.{impl}_block_path", genesis[f"{impl}_block_path"])
+    block = block_capture(label, p, impl, endpoint, 0)
+    req(is_json_int(block["height"]) and block["height"] == 0 and block["canonical"] is True and isinstance(block["block_hex"], str) and re.fullmatch(r"(?:[0-9a-f]{2})+", block["block_hex"]) is not None, f"{label} is not the {impl} genesis block capture")
     return block
 def store_neutrality_checks() -> None:
     chain = scenario != SCENARIO_MESH
-    sidecar = sn_file("store-neutrality sidecar", str(artifact_root / "mixed-client-mesh-store-neutrality.json"))
+    sidecar = load_json_file(*sn_file("store-neutrality sidecar", str(artifact_root / "mixed-client-mesh-store-neutrality.json")))
     sn_req(set(sidecar) == {"evidence_domain", "protocol_commit", "clients_tree_clean", "binaries", "chain_identity", "genesis", "header_bytes", "datadirs", "initial_convergence"}, f"sidecar keys mismatch: {sorted(sidecar)}")
     sn_req(sidecar["evidence_domain"] == "pre_switch_store_neutrality", "evidence_domain mismatch")
     sn_req(isinstance(sidecar["protocol_commit"], str) and re.fullmatch(r"[0-9a-f]{40}", sidecar["protocol_commit"]) is not None, "protocol_commit is not 40 lowercase hex")
@@ -2788,8 +2791,7 @@ run_partition_heal_reorg_scenario() {
   FINAL_PEER_SNAPSHOTS_RECHECKED=true
 }
 require_rust_datadir_exact_empty() {
-  local entries
-  entries="$(ls -A -- "${RUST_DIR}")" && [[ -z "${entries}" ]] || { START_REASON=rust_datadir_not_exact_empty; return 1; }
+  [[ -d "${RUST_DIR}" ]] && find -H "${RUST_DIR}" -mindepth 1 -maxdepth 1 -exec false {} + || { START_REASON=rust_datadir_not_exact_empty; return 1; }
   RUST_EXACT_EMPTY_BEFORE_FIRST_START=true
 }
 start_rust_node_with_log() {
