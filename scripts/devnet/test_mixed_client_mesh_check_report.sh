@@ -20,6 +20,7 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; 
 TMP_PARENT="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)" || { echo "test TMPDIR parent is not usable: ${TMPDIR:-/tmp}" >&2; exit 1; }
 TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-mesh-check-report.XXXXXX")"
 cleanup() {
+  chmod -R u+rwx "${TMP_ROOT}"
   rm -rf -- "${TMP_ROOT}"
 }
 trap cleanup EXIT
@@ -1685,6 +1686,15 @@ def sn_drop_file_key(var_root: Path, file_name: str, key: str) -> None:
 def sn_outside(var_root: Path, file_name: str) -> str:
     shutil.copy(var_root / file_name, var_root.parent / file_name)
     return str(var_root.parent / file_name)
+def sn_locked(var_root: Path, name: str) -> str:
+    locked = var_root / "locked"
+    locked.mkdir()
+    if (var_root / name).is_dir():
+        (locked / name).mkdir()
+    else:
+        shutil.copy(var_root / name, locked / name)
+    locked.chmod(0)
+    return str(locked / name)
 def sn_move_go_binary(report: dict) -> None:
     go_node = next(node_obj for node_obj in report["nodes"] if node_obj["implementation"] == "go")
     moved = Path(report["artifact_root"]) / "bin" / "rubin-node-go"
@@ -1735,6 +1745,7 @@ SN_CASES = (
     (SN_ALL, "rust-datadir", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(rust=str(r / "node-go"))),
     (SN_ALL, "datadir-symlink-loop", SN_I, "datadirs.go does not resolve to an existing directory", lambda s, r: ((r / "node-go").rmdir(), (r / "node-go").symlink_to(r / "node-go-loop"), (r / "node-go-loop").symlink_to(r / "node-go"))),
     (SN_ALL, "datadir-missing", SN_I, "datadirs.rust does not resolve to an existing directory", lambda s, r: s["datadirs"].update(rust=str(r / "missing-dir"))),
+    (SN_ALL, "datadir-unsearchable-parent", SN_I, "datadirs.go does not resolve to an existing directory", lambda s, r: s["datadirs"].update(go=sn_locked(r, "node-go"))),
     (SN_ALL, "rust-not-empty", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(rust_exact_empty_before_first_start=False)),
     (SN_ALL, "conv-extra", SN_I, "initial_convergence keys mismatch", lambda s, r: s["initial_convergence"].update(extra=None)),
     (SN_ALL, "conv-missing", SN_I, "initial_convergence keys mismatch", lambda s, r: s["initial_convergence"].pop("go_tip_path")),
@@ -1742,6 +1753,7 @@ SN_CASES = (
     (SN_ALL, "tip-relative", SN_I, GO_TIP_PATH + " is not absolute", lambda s, r: s["initial_convergence"].update(go_tip_path=os.path.relpath(r / GO_TIP))),
     (SN_ALL, "tip-outside", SN_I, GO_TIP_PATH + " is outside artifact_root", lambda s, r: s["initial_convergence"].update(go_tip_path=sn_outside(r, GO_TIP))),
     (SN_ALL, "tip-directory", SN_I, GO_TIP_PATH + " file is missing", lambda s, r: s["initial_convergence"].update(go_tip_path=str(r / "node-go"))),
+    (SN_ALL, "tip-unsearchable-parent", SN_I, GO_TIP_PATH + " file is missing", lambda s, r: s["initial_convergence"].update(go_tip_path=sn_locked(r, GO_TIP))),
     (SN_ALL, "tip-symlink-loop", SN_I, GO_TIP_PATH + " file is missing", lambda s, r: ((r / "loop-a").symlink_to(r / "loop-b"), (r / "loop-b").symlink_to(r / "loop-a"), s["initial_convergence"].update(go_tip_path=str(r / "loop-a")))),
     (SN_ALL, "tip-array", SN_I, GO_TIP_PATH + " root is not an object", lambda s, r: dump(r / GO_TIP, [1])),
     (SN_ALL, "tip-extra", SN_I, GO_TIP_KEYS, lambda s, r: sn_edit_file(r, GO_TIP, extra=1)),
@@ -1789,6 +1801,7 @@ SN_CASES = (
     (SN_CHAIN, "block-relative", SN_I, GO_BLOCK_PATH + " is not absolute", lambda s, r: s["genesis"].update(go_block_path=os.path.relpath(r / GO_BLOCK))),
     (SN_CHAIN, "block-outside", SN_I, GO_BLOCK_PATH + " is outside artifact_root", lambda s, r: s["genesis"].update(go_block_path=sn_outside(r, GO_BLOCK))),
     (SN_CHAIN, "block-directory", SN_I, GO_BLOCK_PATH + " file is missing", lambda s, r: s["genesis"].update(go_block_path=str(r / "node-go"))),
+    (SN_CHAIN, "block-unsearchable-parent", SN_I, GO_BLOCK_PATH + " file is missing", lambda s, r: s["genesis"].update(go_block_path=sn_locked(r, GO_BLOCK))),
     (SN_CHAIN, "block-symlink-loop", SN_I, GO_BLOCK_PATH + " file is missing", lambda s, r: ((r / "loop-a").symlink_to(r / "loop-b"), (r / "loop-b").symlink_to(r / "loop-a"), s["genesis"].update(go_block_path=str(r / "loop-a")))),
     (SN_CHAIN, "block-array", SN_I, GO_BLOCK_PATH + " root is not an object", lambda s, r: dump(r / GO_BLOCK, [1])),
     (SN_CHAIN, "block-extra", SN_I, GO_BLOCK_KEYS, lambda s, r: sn_edit_file(r, GO_BLOCK, extra=1)),
@@ -2330,7 +2343,22 @@ while IFS=$'\t' read -r sn_mode sn_name sn_token sn_needle; do
   sn_cases=$((sn_cases + 1))
 done < "${TMP_ROOT}/sn-cases.tsv"
 stop_fifo_watchdog
-(( sn_cases == 258 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 258" >&2; exit 1; }
+(( sn_cases == 266 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 266" >&2; exit 1; }
+# Reruns the unsearchable-parent rows under the interpreters python3.9 to python3.13
+# found on PATH that import jsonschema, which the marker validator run by check_report
+# needs; their pathlib is_dir and is_file raise on such a path.
+printf '#!/usr/bin/env bash\n[[ "$1" == -- && "$2" == python3 ]] && shift 2 && exec "${SN_PYTHON}" "$@"\nexec %q "$@"\n' "${DEV_ENV}" >"${TMP_ROOT}/dev-env-python"
+chmod +x "${TMP_ROOT}/dev-env-python"
+sn_pythons=""
+for sn_python in python3.9 python3.10 python3.11 python3.12 python3.13; do
+  command -v "${sn_python}" >/dev/null 2>&1 && "${sn_python}" -c 'import jsonschema' >/dev/null 2>&1 || continue
+  while IFS=$'\t' read -r sn_mode sn_name sn_token sn_needle; do
+    [[ "${sn_name}" == *-unsearchable-parent ]] || continue
+    SN_PYTHON="$(command -v "${sn_python}")" DEV_ENV="${TMP_ROOT}/dev-env-python" sn_check "sidecar ${sn_name} with ${sn_python}" "${sn_token}" "${sn_needle}" "${sn_mode}" "${sn_name}"
+  done < "${TMP_ROOT}/sn-cases.tsv"
+  sn_pythons+=" ${sn_python}"
+done
+printf 'unsearchable-parent rows rerun under:%s\n' "${sn_pythons:- none}"
 sn_output="$(check_report "${TMP_ROOT}/sn-tx-accept-top-extra-report.json" offline producer-tx 2>&1)" && { echo "FAIL: sidecar extra key report should fail" >&2; exit 1; }
 [[ "$(combined_report_reason_token <<<"${sn_output}")" == store_neutrality_sidecar_invalid ]] || { echo "FAIL: combined token for sidecar keys mismatch: $(combined_report_reason_token <<<"${sn_output}")" >&2; exit 1; }
 printf 'PASS: mixed-client mesh check-report public/internal boundaries are covered\n'

@@ -798,10 +798,11 @@ def sn_req(ok: bool, detail: str, token: str = SN_INVALID) -> None:
     if not ok: fail(f"{token}: {detail}")
 def sn_file(label: str, value: object) -> tuple:
     sn_label = f"{SN_INVALID}: {label}"
-    return sn_label, artifact_file(sn_label, value, artifact_root)
+    try: return sn_label, artifact_file(sn_label, value, artifact_root)
+    except OSError: fail(f"{sn_label} file is missing")
 def sn_dir(label: str, value: object) -> Path:
     p = checked_path(f"{SN_INVALID}: {label}", value)
-    sn_req(p.is_dir(), f"{label} does not resolve to an existing directory")
+    sn_req(os.path.isdir(p), f"{label} does not resolve to an existing directory")
     return p
 def sn_tip(impl: str, endpoint: str, conv: dict, chain: bool) -> None:
     label, p = sn_file(f"initial_convergence.{impl}_tip_path", conv[f"{impl}_tip_path"])
