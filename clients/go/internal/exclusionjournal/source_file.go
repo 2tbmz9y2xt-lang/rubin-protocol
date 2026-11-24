@@ -1313,7 +1313,7 @@ func (o *SourceOwnerV1) chargeWitnessEntry(r *sourceRoot, name string, used *sou
 	case name == used.stage.leaf, name == releaseScratch, o.release != nil && name == releaseFile:
 		return true
 	default:
-		return used.read.name == "" && !strings.HasPrefix(name, publicStagePrefix) && !strings.HasPrefix(name, heldStagePrefix)
+		return !strings.HasPrefix(name, publicStagePrefix) && !strings.HasPrefix(name, heldStagePrefix)
 	}
 }
 

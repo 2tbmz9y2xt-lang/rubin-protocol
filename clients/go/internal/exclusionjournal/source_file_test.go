@@ -245,6 +245,7 @@ func TestCapturedSourceReadCapacityV1(t *testing.T) {
 	sourceModes(t, []string{"replacement-bytes", "replacement-files"}, testCapturedReadReplacementCharge)
 	t.Run("scan-ceiling", testCapturedReadScanCeiling)
 	t.Run("unfunded-stage-witness", testCapturedReadUnfundedWitness)
+	t.Run("funded-witness-after-namespace-refusal", testCapturedReadFundedWitnessAfterNamespaceRefusal)
 }
 
 func testCapturedReadRetainedBytes(t *testing.T, mode string) {
@@ -355,6 +356,45 @@ func testCapturedReadUnfundedWitness(t *testing.T) {
 	sourceFailIf(t, calls != 0, "unfunded witness reached the producer %d times", calls)
 	sourceRead(t, o, c.m, c.parts)
 	sourceUnchangedEntry(t, stage, stageInfo, make([]byte, size))
+}
+
+func testCapturedReadFundedWitnessAfterNamespaceRefusal(t *testing.T) {
+	c, d := capturedReadRecordFor('C'), capturedReadRecordFor('D')
+	limits := sourceLimits()
+	s, paths, prepared := capturedReadFreshDirectory(t, limits, c)
+	sourceMust(t, os.Rename(filepath.Join(prepared, c.leaf), filepath.Join(paths.root, c.leaf)))
+	o := sourceOpen(t, s, sourceID(), limits, nil)
+	sourcePrepare(t, o, c.m, c.parts)
+	stage := publicStagePrefix + d.leaf
+	stageBytes := make([]byte, capturedReadSize(t, 'D'))
+	for i := range 64 {
+		unexpected := fmt.Sprintf("unexpected-source-%02d", i)
+		names := [2]string{stage, unexpected}
+		if i%2 == 1 {
+			names[0], names[1] = names[1], names[0]
+		}
+		for _, name := range names {
+			var data []byte
+			if name == stage {
+				data = stageBytes
+			}
+			sourceMust(t, os.WriteFile(filepath.Join(paths.root, name), data, 0o600))
+		}
+		order := capturedReadNames(t, paths.root)
+		stageIndex := slices.Index(order, stage)
+		if len(order) == 3 && stageIndex >= 0 && stageIndex < slices.Index(order, unexpected) {
+			t.Logf("namespace refusal order = %v", order)
+			sourceReadRefusal(t, o, c.m, ErrIntegrityV1, "unexpected entry after funded stage")
+			sourceMust(t, os.Remove(filepath.Join(paths.root, unexpected)))
+			sourcePrepareAndRead(t, o, d.m, d.parts)
+			sourceRead(t, o, c.m, c.parts)
+			return
+		}
+		for _, name := range names {
+			sourceMust(t, os.Remove(filepath.Join(paths.root, name)))
+		}
+	}
+	t.Fatal("could not place a funded stage before the unexpected entry")
 }
 
 func capturedReadNames(t *testing.T, dir string) []string {
