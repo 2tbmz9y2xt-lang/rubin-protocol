@@ -2727,8 +2727,9 @@ PY
 # Writes mixed-client-mesh-store-neutrality.json from the public captures and the
 # local build, one step after another: /chain_identity, genesis blocks (chain modes
 # only), binary hashes, git state, sidecar write. SIDECAR_REASON names the failed step.
-# The default mode (no chain) captures no genesis block, so genesis, header_bytes and
-# binaries.txgen_sha256 are null there.
+# With chain 0 (the default mode) no genesis block is captured, so genesis and header_bytes
+# are null; binaries.txgen_sha256 is the sha256 of TXGEN_BIN when chain is 1 and null when
+# chain is 0.
 write_store_neutrality_sidecar() {
   local chain=0 ident genesis="" binaries commit tree
   chain_mode && chain=1

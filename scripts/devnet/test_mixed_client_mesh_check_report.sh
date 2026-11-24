@@ -20,7 +20,7 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; 
 TMP_PARENT="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)" || { echo "test TMPDIR parent is not usable: ${TMPDIR:-/tmp}" >&2; exit 1; }
 TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-mesh-check-report.XXXXXX")"
 cleanup() {
-  chmod -R u+rwx "${TMP_ROOT}"
+  chmod -R u+rwx "${TMP_ROOT}" || true
   rm -rf -- "${TMP_ROOT}"
 }
 trap cleanup EXIT
@@ -1903,6 +1903,24 @@ sn_variant("mesh-go-has-tip-zero", "mesh", lambda s, r: s["initial_convergence"]
 sn_variant("mesh-rust-has-tip-zero", "mesh", lambda s, r: s["initial_convergence"].update(rust_has_tip=0))
 sn_variant("mesh-tip-has-tip-zero", "mesh", lambda s, r: sn_edit_file(r, GO_TIP, has_tip=0))
 sn_variant("tx-accept-tip-has-tip-one", "tx-accept", lambda s, r: sn_edit_file(r, GO_TIP, has_tip=1))
+sn_variant("tx-accept-sidecar-outside", "tx-accept", lambda s, r: ((r / SN_NAME).unlink(), (r / SN_NAME).symlink_to(r.parent / SN_NAME)))
+sn_variant("tx-accept-tip-number", "tx-accept", lambda s, r: s["initial_convergence"].update(go_tip_path=5))
+sn_variant("tx-accept-rust-tip-number", "tx-accept", lambda s, r: s["initial_convergence"].update(rust_tip_path=5))
+sn_variant("tx-accept-rust-tip-relative", "tx-accept", lambda s, r: s["initial_convergence"].update(rust_tip_path="initial-convergence-rust-tip.json"))
+sn_variant("tx-accept-rust-tip-outside", "tx-accept", lambda s, r: s["initial_convergence"].update(rust_tip_path=sn_outside(r, "initial-convergence-rust-tip.json")))
+sn_variant("tx-accept-rust-tip-directory", "tx-accept", lambda s, r: s["initial_convergence"].update(rust_tip_path=str(r / "node-rust")))
+sn_variant("tx-accept-block-number", "tx-accept", lambda s, r: s["genesis"].update(go_block_path=5))
+sn_variant("tx-accept-rust-block-number", "tx-accept", lambda s, r: s["genesis"].update(rust_block_path=5))
+sn_variant("tx-accept-rust-block-relative", "tx-accept", lambda s, r: s["genesis"].update(rust_block_path=RUST_BLOCK))
+sn_variant("tx-accept-rust-block-outside", "tx-accept", lambda s, r: s["genesis"].update(rust_block_path=sn_outside(r, RUST_BLOCK)))
+sn_variant("tx-accept-rust-block-directory", "tx-accept", lambda s, r: s["genesis"].update(rust_block_path=str(r / "node-rust")))
+sn_variant("tx-accept-go-datadir-number", "tx-accept", lambda s, r: s["datadirs"].update(go=5))
+sn_variant("tx-accept-go-datadir-relative", "tx-accept", lambda s, r: s["datadirs"].update(go="node-go"))
+sn_variant("tx-accept-rust-datadir-number", "tx-accept", lambda s, r: s["datadirs"].update(rust=5))
+sn_variant("tx-accept-rust-datadir-relative", "tx-accept", lambda s, r: s["datadirs"].update(rust="node-rust"))
+sn_variant("tx-accept-node-go-moved", "tx-accept", lambda s, r: ((r / "node-go").rename(r / "node-go-moved"), s["datadirs"].update(go=str(r / "node-go-moved"))))
+sn_variant("tx-accept-node-rust-moved", "tx-accept", lambda s, r: ((r / "node-rust").rename(r / "node-rust-moved"), s["datadirs"].update(rust=str(r / "node-rust-moved"))))
+sn_variant("tx-accept-rust-node-directory", "tx-accept", lambda s, r: ((r / "rubin-node-rust").unlink(), (r / "rubin-node-rust").mkdir()), sn_move_binary("rust"))
 REPORT_LOCKED_CASES = (
     ("mesh", "public", "go-node", "unknown", "node-go command/binary is not bound to executable rubin-node-go", lambda report: sn_set_binary(report, "go", sn_locked(Path(report["artifact_root"]), "rubin-node-go"))),
     ("restart", "rust-restart", "pre-restart-tip", "rust_restart_pre_restart_tip_sidecar_invalid", "rust_restart.pre_restart_tip_path file is missing", sn_lock_report_path("rust_restart", "pre_restart_tip_path")),
@@ -2487,6 +2505,24 @@ sn_check "default sidecar go_has_tip 0" "${SN_INVALID}" "initial_convergence doe
 sn_check "default sidecar rust_has_tip 0" "${SN_INVALID}" "initial_convergence does not prove two absent tips" public mesh-rust-has-tip-zero
 sn_check "default sidecar go tip has_tip 0" "${SN_INVALID}" "initial_convergence.go_tip_path does not report an absent tip" public mesh-tip-has-tip-zero
 sn_check "sidecar go tip has_tip 1" "${SN_INVALID}" "initial_convergence.go_tip_path does not match expected tip" tx tx-accept-tip-has-tip-one
+sn_check "sidecar file resolving outside the artifact root" "${SN_INVALID}" "store-neutrality sidecar is outside artifact_root" tx tx-accept-sidecar-outside
+sn_check "sidecar go tip path a number" "${SN_INVALID}" "initial_convergence.go_tip_path is not a safe unquoted path string" tx tx-accept-tip-number
+sn_check "sidecar rust tip path a number" "${SN_INVALID}" "initial_convergence.rust_tip_path is not a safe unquoted path string" tx tx-accept-rust-tip-number
+sn_check "sidecar rust tip path relative" "${SN_INVALID}" "initial_convergence.rust_tip_path is not absolute" tx tx-accept-rust-tip-relative
+sn_check "sidecar rust tip path outside the artifact root" "${SN_INVALID}" "initial_convergence.rust_tip_path is outside artifact_root" tx tx-accept-rust-tip-outside
+sn_check "sidecar rust tip path a directory" "${SN_INVALID}" "initial_convergence.rust_tip_path file is missing" tx tx-accept-rust-tip-directory
+sn_check "sidecar go block path a number" "${SN_INVALID}" "genesis.go_block_path is not a safe unquoted path string" tx tx-accept-block-number
+sn_check "sidecar rust block path a number" "${SN_INVALID}" "genesis.rust_block_path is not a safe unquoted path string" tx tx-accept-rust-block-number
+sn_check "sidecar rust block path relative" "${SN_INVALID}" "genesis.rust_block_path is not absolute" tx tx-accept-rust-block-relative
+sn_check "sidecar rust block path outside the artifact root" "${SN_INVALID}" "genesis.rust_block_path is outside artifact_root" tx tx-accept-rust-block-outside
+sn_check "sidecar rust block path a directory" "${SN_INVALID}" "genesis.rust_block_path file is missing" tx tx-accept-rust-block-directory
+sn_check "sidecar go datadir a number" "${SN_INVALID}" "datadirs.go is not a safe unquoted path string" tx tx-accept-go-datadir-number
+sn_check "sidecar go datadir relative" "${SN_INVALID}" "datadirs.go is not absolute" tx tx-accept-go-datadir-relative
+sn_check "sidecar rust datadir a number" "${SN_INVALID}" "datadirs.rust is not a safe unquoted path string" tx tx-accept-rust-datadir-number
+sn_check "sidecar rust datadir relative" "${SN_INVALID}" "datadirs.rust is not absolute" tx tx-accept-rust-datadir-relative
+sn_check "artifact root go datadir moved away" "${SN_INVALID}" "artifact_root/node-go does not resolve to an existing directory" tx tx-accept-node-go-moved
+sn_check "artifact root rust datadir moved away" "${SN_INVALID}" "artifact_root/node-rust does not resolve to an existing directory" tx tx-accept-node-rust-moved
+sn_check "artifact root rust node binary a directory" "${SN_INVALID}" "artifact_root/rubin-node-rust is not a regular file" tx tx-accept-rust-node-directory
 report_locked_cases() {
   local label_suffix="$1" rp_mode rp_name rp_token rp_needle rp_cases=0
   while IFS=$'\t' read -r rp_mode rp_name rp_token rp_needle; do
