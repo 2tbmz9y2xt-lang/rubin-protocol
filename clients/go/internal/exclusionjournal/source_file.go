@@ -140,7 +140,11 @@ func (o *SourceOwnerV1) sourceReadNames(f *os.File, read *sourceReadCensus) erro
 	return nil
 }
 
-func (o *SourceOwnerV1) census(r *sourceRoot, forRelease bool, read ...sourceReadCensus) (sourceUsage, error) {
+func (o *SourceOwnerV1) census(r *sourceRoot, forRelease bool) (sourceUsage, error) {
+	return o.censusWithRead(r, forRelease)
+}
+
+func (o *SourceOwnerV1) censusWithRead(r *sourceRoot, forRelease bool, read ...sourceReadCensus) (sourceUsage, error) {
 	entries, err := o.sourceEntries(r, read...)
 	if err != nil {
 		return sourceUsage{}, err
@@ -613,14 +617,14 @@ func (o *SourceOwnerV1) observeReadCapture(used *sourceUsage, name string, b *so
 	refusal := b.censusMismatch(id, size)
 	if used.visitErr == nil && refusal != nil {
 		private := singleLink && o.privateReadBinding(used, name, b)
-		if !o.isolateReadMismatch(used, name, b, id, private, refusal) {
+		if !o.isolateReadMismatch(used, name, b, id, private) {
 			used.visitErr, used.read.refusalOrdinal = refusal, used.read.ordinal
 		}
 	}
 }
 
 // isolateReadMismatch retains a private fault's original position until target identity is known.
-func (o *SourceOwnerV1) isolateReadMismatch(used *sourceUsage, name string, b *sourceIncarnation, id filelock.IdentityV1, private bool, refusal error) bool {
+func (o *SourceOwnerV1) isolateReadMismatch(used *sourceUsage, name string, b *sourceIncarnation, id filelock.IdentityV1, private bool) bool {
 	read := &used.read
 	if !private || read.stoppedStageUnknown || read.target == id || read.target == b.file || o.readHolder(used, name, id, b) {
 		return false
@@ -629,14 +633,14 @@ func (o *SourceOwnerV1) isolateReadMismatch(used *sourceUsage, name string, b *s
 		return false
 	}
 	if read.target == (filelock.IdentityV1{}) {
-		return used.deferMismatch(b.file, id, refusal)
+		return used.deferMismatch(b.file, id)
 	}
 	read.localized = true
 	return true
 }
 
 // deferMismatch records a reached candidate in the space bounded by listed issued keys.
-func (used *sourceUsage) deferMismatch(original, observed filelock.IdentityV1, refusal error) bool {
+func (used *sourceUsage) deferMismatch(original, observed filelock.IdentityV1) bool {
 	read := &used.read
 	if len(read.pending) >= read.pendingLimit {
 		return false
@@ -646,7 +650,7 @@ func (used *sourceUsage) deferMismatch(original, observed filelock.IdentityV1, r
 	}
 	read.pending = append(read.pending, sourceReadMismatch{
 		original: original, observed: observed, ordinal: read.ordinal,
-		identityMismatch: refusal == ErrIdentityV1, stageReached: used.stageReached,
+		identityMismatch: original != observed, stageReached: used.stageReached,
 	})
 	return true
 }
@@ -1243,7 +1247,7 @@ func (o *SourceOwnerV1) withFiles(account *mdbx.OperationAccount, m SourceManife
 		if !preparing {
 			read = []sourceReadCensus{{name: m.name(o.id), witness: witness}}
 		}
-		used, err := o.census(r, false, read...)
+		used, err := o.censusWithRead(r, false, read...)
 		err = used.admissionError(err)
 		adopt := preparing || used.stage.name == used.read.name
 		if err == nil && adopt {
