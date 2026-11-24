@@ -622,26 +622,25 @@ func capturedReadSelectedStage(t *testing.T) (*SourceOwnerV1, sourceTestPaths, [
 		name := publicStagePrefix + stage.leaf
 		s, paths, prepared := capturedReadFreshDirectory(t, limits, captures...)
 		path := filepath.Join(paths.root, name)
-		for j, record := range captures {
-			if j == 1 {
-				writeSourceEntry(t, path, make([]byte, sourceSize(t, stage.m)))
-			}
+		for _, record := range captures {
 			sourceMust(t, os.Rename(filepath.Join(prepared, record.leaf), filepath.Join(paths.root, record.leaf)))
 		}
 		names := capturedReadNames(t, paths.root)
-		if len(names) != 4 || names[1] != name {
-			sourceMust(t, s.Close())
-			continue
-		}
+		sourceFailIf(t, len(names) != len(captures), "retained capture listing = %v", names)
 		slices.SortFunc(captures, func(a, b capturedReadRecord) int { return slices.Index(names, a.leaf) - slices.Index(names, b.leaf) })
-		held := filepath.Join(prepared, name)
-		sourceMust(t, os.Rename(path, held))
 		o := sourceOpen(t, s, sourceID(), limits, nil)
 		for _, record := range captures[:2] {
 			sourcePrepare(t, o, record.m, record.parts)
 		}
-		sourceMust(t, os.Rename(held, path))
-		if slices.Equal(capturedReadNames(t, paths.root), names) {
+		for _, record := range captures[1:] {
+			sourceMust(t, os.Rename(filepath.Join(paths.root, record.leaf), filepath.Join(prepared, record.leaf)))
+		}
+		writeSourceEntry(t, path, make([]byte, sourceSize(t, stage.m)))
+		for _, record := range captures[1:] {
+			sourceMust(t, os.Rename(filepath.Join(prepared, record.leaf), filepath.Join(paths.root, record.leaf)))
+		}
+		want := []string{captures[0].leaf, name, captures[1].leaf, captures[2].leaf}
+		if slices.Equal(capturedReadNames(t, paths.root), want) {
 			return o, paths, captures, stage, path
 		}
 		sourceMust(t, s.Close())
