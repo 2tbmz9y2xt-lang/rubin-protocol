@@ -2,14 +2,14 @@
 
 package mdbx
 
-// TreeImagePublicationV1 is the result of the UpdateImageV1 planner, run once with a Reader that expires when the planner exits. One ORIGINAL
-// OLD abort then takes the first primary of: the planner error joined before a failure the Reader recorded (the failure alone for a nil or
-// identical error); "invalid Update Batch" (InvalidInput/update/EINVAL, no Cause) if a field is not admitted or the account ceiling is not
-// LaneMaxBytes; a meta key 0x02 read error for update, of its get, of the exact-empty census if absent, or Integrity "invalid tree native
-// representation" caused by the DecodeTreeAuthorityV1 error if present; "invalid Update Batch". A clean abort returns the primary, or
-// consumes the Store with it if the Reader recorded a failure or the primary is the key 0x02 read error; a THREAD_MISMATCH abort error with
-// the primary as Cause is returned and poisons the Store as its terminal; another failed abort consumes the Store with the primary joined
-// before the abort error. A panic or Goexit resumes after the abort instead, with the recorded failure, if any, as primary.
+// TreeImagePublicationV1 is the result of the UpdateImageV1 planner, run once with a Reader that expires when it exits. One ORIGINAL OLD
+// abort takes the first primary of: the planner error joined before a failure the Reader recorded (the failure alone for a nil or identical
+// error); "invalid Update Batch" (InvalidInput/update/EINVAL, no Cause) if a field is not admitted or the account ceiling read before the
+// planner runs is not LaneMaxBytes; a meta key 0x02 read error for update, of its get, of the exact-empty census if absent, or Integrity
+// "invalid tree native representation" caused by the DecodeTreeAuthorityV1 error if present; "invalid Update Batch". A clean abort returns
+// the primary, or consumes the Store with it if the Reader recorded a failure or the primary is the key 0x02 read error; a THREAD_MISMATCH
+// abort error with the primary as Cause is returned and poisons the Store as its terminal; another failed abort consumes the Store with the
+// primary joined before the abort error. A panic or Goexit resumes after the abort, with any recorded failure as primary.
 type TreeImagePublicationV1 struct {
 	// Tag is admitted from 1 through 4.
 	Tag uint8
@@ -38,8 +38,9 @@ type TreeImageRecordV1 struct {
 // close, and returns its new terminal: the error joined before any close and lock-release errors, or as Cause of the busy close error.
 func (s *Store) UpdateImageV1(account *OperationAccount, planner func(*Reader) (TreeImagePublicationV1, error)) (CommitTruth, UpdateStage, int, error) {
 	return s.treeEntryGateV1(account, planner == nil, "nil UpdateImageV1 callback", func() (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
+		lane := account.shared.ceiling == LaneMaxBytes
 		return s.treeOriginalOldV1(func(e *treePublicEntryV1) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
-			return e.publicationV1(account, planner)
+			return e.publicationV1(lane, planner)
 		})
 	})
 }
@@ -49,20 +50,20 @@ func (s *Store) UpdateImageV1(account *OperationAccount, planner func(*Reader) (
 // planner Goexit, treeCallbackV1 aborts ORIGINAL OLD and the Goexit continues, so publicationV1 does not
 // return. Otherwise it aborts ORIGINAL OLD once through abortReadLocked with the publicationRefusalV1
 // error as the primary and its flag as infrastructure.
-func (e *treePublicEntryV1) publicationV1(account *OperationAccount, planner func(*Reader) (TreeImagePublicationV1, error)) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
+func (e *treePublicEntryV1) publicationV1(lane bool, planner func(*Reader) (TreeImagePublicationV1, error)) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
 	publication, unwind, err := treeCallbackV1(e, planner, func(TreeImagePublicationV1) bool { return false })
 	if err != nil || unwind.kind != 0 {
 		return CommitTruthOld, UpdateStagePrewrite, -1, unwind, err
 	}
-	infrastructure, refusal := e.publicationRefusalV1(account, publication)
+	infrastructure, refusal := e.publicationRefusalV1(lane, publication)
 	return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, e.store.abortReadLocked(e.old, refusal, infrastructure)
 }
 
 // publicationRefusalV1 returns false and "invalid Update Batch" when publicationDescriptorV1
 // refuses, true and the treeAuthorityRead error when that read of ORIGINAL OLD with
 // operationUpdate fails, and false and "invalid Update Batch" otherwise.
-func (e *treePublicEntryV1) publicationRefusalV1(account *OperationAccount, publication TreeImagePublicationV1) (bool, error) {
-	if !publicationDescriptorV1(account, publication) {
+func (e *treePublicEntryV1) publicationRefusalV1(lane bool, publication TreeImagePublicationV1) (bool, error) {
+	if !publicationDescriptorV1(lane, publication) {
 		return false, updateInvalidBatch()
 	}
 	s := e.store
@@ -73,10 +74,10 @@ func (e *treePublicEntryV1) publicationRefusalV1(account *OperationAccount, publ
 }
 
 // publicationDescriptorV1 reports whether Tag is 1 through 4, Replay is non-nil, RecordLimit is
-// positive, the account ceiling is LaneMaxBytes and DecodeTreeAuthorityV1 accepts Authority. It
-// reads no Store and charges no account.
-func publicationDescriptorV1(account *OperationAccount, publication TreeImagePublicationV1) bool {
-	if publication.Tag < 1 || publication.Tag > 4 || publication.Replay == nil || publication.RecordLimit == 0 || account.shared.ceiling != LaneMaxBytes {
+// positive, lane is true and DecodeTreeAuthorityV1 accepts Authority. It reads no Store and no
+// account.
+func publicationDescriptorV1(lane bool, publication TreeImagePublicationV1) bool {
+	if publication.Tag < 1 || publication.Tag > 4 || publication.Replay == nil || publication.RecordLimit == 0 || !lane {
 		return false
 	}
 	_, err := DecodeTreeAuthorityV1(publication.Authority)
