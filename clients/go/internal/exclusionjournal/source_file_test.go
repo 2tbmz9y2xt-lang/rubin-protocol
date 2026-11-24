@@ -980,7 +980,7 @@ type capturedReadStageFixture struct {
 
 func capturedReadStoppedStageFixture(t *testing.T, shape string) capturedReadStageFixture {
 	t.Helper()
-	for i := range 64 {
+	for i := range 63 {
 		first := byte('B' + 3*i)
 		s, o, paths, b, c := capturedReadFreshPair(t, first)
 		bPath := filepath.Join(paths.root, b.leaf)
