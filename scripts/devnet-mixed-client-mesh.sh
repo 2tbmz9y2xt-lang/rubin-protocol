@@ -794,6 +794,10 @@ def sn_req(ok: bool, detail: str, token: str = SN_INVALID) -> None:
 def sn_file(label: str, value: object) -> tuple:
     sn_label = f"{SN_INVALID}: {label}"
     return sn_label, artifact_file(sn_label, value, artifact_root)
+def sn_dir(label: str, value: object) -> Path:
+    p = checked_path(f"{SN_INVALID}: {label}", value)
+    sn_req(p.is_dir(), f"{label} does not resolve to an existing directory")
+    return p
 def sn_tip(impl: str, endpoint: str, conv: dict, chain: bool) -> None:
     label, p = sn_file(f"initial_convergence.{impl}_tip_path", conv[f"{impl}_tip_path"])
     if chain:
@@ -824,7 +828,7 @@ def store_neutrality_checks() -> None:
     sn_req(isinstance(ident, dict) and set(ident) == {"network", "chain_id_hex", "genesis_hash_hex"} and nonempty_str(ident["network"]) and hex32(ident["chain_id_hex"]) and hex32(ident["genesis_hash_hex"]), "chain_identity malformed")
     dirs = sidecar["datadirs"]
     sn_req(isinstance(dirs, dict) and set(dirs) == {"go", "rust", "rust_exact_empty_before_first_start"}, "datadirs mismatch")
-    sn_req(checked_path(f"{SN_INVALID}: datadirs.go", dirs["go"]) == checked_path(f"{SN_INVALID}: artifact_root/node-go", str(artifact_root / "node-go")) and checked_path(f"{SN_INVALID}: datadirs.rust", dirs["rust"]) == checked_path(f"{SN_INVALID}: artifact_root/node-rust", str(artifact_root / "node-rust")) and dirs["rust_exact_empty_before_first_start"] is True, "datadirs mismatch")
+    sn_req(sn_dir("datadirs.go", dirs["go"]) == sn_dir("artifact_root/node-go", str(artifact_root / "node-go")) and sn_dir("datadirs.rust", dirs["rust"]) == sn_dir("artifact_root/node-rust", str(artifact_root / "node-rust")) and dirs["rust_exact_empty_before_first_start"] is True, "datadirs mismatch")
     conv = sidecar["initial_convergence"]
     sn_req(isinstance(conv, dict) and set(conv) == {"go_has_tip", "rust_has_tip", "height", "go_tip_hash", "rust_tip_hash", "go_tip_path", "rust_tip_path"}, "initial_convergence keys mismatch")
     if chain:

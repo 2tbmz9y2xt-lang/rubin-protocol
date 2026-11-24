@@ -1672,6 +1672,13 @@ def sn_drop_file_key(var_root: Path, file_name: str, key: str) -> None:
 def sn_outside(var_root: Path, file_name: str) -> str:
     shutil.copy(var_root / file_name, var_root.parent / file_name)
     return str(var_root.parent / file_name)
+def sn_move_go_binary(report: dict) -> None:
+    go_node = next(node_obj for node_obj in report["nodes"] if node_obj["implementation"] == "go")
+    moved = Path(report["artifact_root"]) / "bin" / "rubin-node-go"
+    moved.parent.mkdir()
+    shutil.copy2(go_node["binary"], moved)
+    go_node["binary"] = go_node["command_argv"][0] = str(moved)
+    go_node["command"] = " ".join(go_node["command_argv"])
 def sn_conv_hash(sidecar: dict, var_root: Path, value: str) -> None:
     sidecar["initial_convergence"].update(go_tip_hash=value, rust_tip_hash=value)
     for file_name in ("initial-convergence-go-tip.json", "initial-convergence-rust-tip.json"):
@@ -1695,6 +1702,8 @@ SN_CASES = (
     (SN_ALL, "binaries-missing", SN_I, "binaries keys mismatch", lambda s, r: s["binaries"].pop("txgen_sha256")),
     (SN_ALL, "go-node-hash", SN_I, "binaries.go_node_sha256 does not match", lambda s, r: s["binaries"].update(go_node_sha256="00" * 32)),
     (SN_ALL, "rust-node-hash", SN_I, "binaries.rust_node_sha256 does not match", lambda s, r: s["binaries"].update(rust_node_sha256="00" * 32)),
+    (SN_ALL, "go-node-fifo", SN_I, "artifact_root/rubin-node-go is not a regular file", lambda s, r: ((r / "rubin-node-go").unlink(), os.mkfifo(r / "rubin-node-go")), sn_move_go_binary),
+    (SN_ALL, "go-node-directory", SN_I, "artifact_root/rubin-node-go is not a regular file", lambda s, r: ((r / "rubin-node-go").unlink(), (r / "rubin-node-go").mkdir()), sn_move_go_binary),
     (SN_ALL, "ident-extra", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(extra="x")),
     (SN_ALL, "ident-missing", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].pop("network")),
     (SN_ALL, "network-empty", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network="")),
@@ -1706,6 +1715,8 @@ SN_CASES = (
     (SN_ALL, "datadirs-missing", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].pop("rust_exact_empty_before_first_start")),
     (SN_ALL, "go-datadir", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(go=str(r / "node-rust"))),
     (SN_ALL, "rust-datadir", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(rust=str(r / "node-go"))),
+    (SN_ALL, "datadir-symlink-loop", SN_I, "datadirs.go does not resolve to an existing directory", lambda s, r: ((r / "node-go").rmdir(), (r / "node-go").symlink_to(r / "node-go-loop"), (r / "node-go-loop").symlink_to(r / "node-go"))),
+    (SN_ALL, "datadir-missing", SN_I, "datadirs.rust does not resolve to an existing directory", lambda s, r: s["datadirs"].update(rust=str(r / "missing-dir"))),
     (SN_ALL, "rust-not-empty", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(rust_exact_empty_before_first_start=False)),
     (SN_ALL, "conv-extra", SN_I, "initial_convergence keys mismatch", lambda s, r: s["initial_convergence"].update(extra=None)),
     (SN_ALL, "conv-missing", SN_I, "initial_convergence keys mismatch", lambda s, r: s["initial_convergence"].pop("go_tip_path")),
@@ -1779,9 +1790,9 @@ SN_CASES = (
     (SN_CHAIN, "header-rust-outside", SN_H, "header_bytes.rust is not 116 or 148", lambda s, r: s["header_bytes"].update(rust=120)),
 )
 with (root / "sn-cases.tsv").open("w", encoding="utf-8") as cases:
-    for columns, case_name, token, needle, edit in SN_CASES:
+    for columns, case_name, token, needle, edit, *report_edit in SN_CASES:
         for column in columns:
-            sn_variant(f"{column}-{case_name}", column, edit)
+            sn_variant(f"{column}-{case_name}", column, edit, *report_edit)
             cases.write(f"{SN_MODES[column]}\t{column}-{case_name}\t{token}\t{needle}\n")
 artifact_root = root / "partition" / "artifact-root"
 print(root / "mesh-report.json")
@@ -2279,13 +2290,13 @@ sn_check "restart initial rust tip from the restarted endpoint" "${SN_INVALID}" 
 sn_check "partition common block not above initial convergence" "${SN_INVALID}" "partition common block height is not above initial_convergence.height" partition-heal-reorg partition-not-above
 expect_pass_contains "restart initial convergence at the pre-restart height" "PASS: mixed_client_rust_restart report structurally accepted" check_report "${TMP_ROOT}/sn-restart-at-pre-restart-report.json" offline rust-restart
 sn_cases=0
-start_fifo_watchdog "${TMP_ROOT}/sn-tx-accept-txgen-fifo/artifact-root/rubin-txgen" "${TMP_ROOT}/sn-restart-txgen-fifo/artifact-root/rubin-txgen"
+start_fifo_watchdog "${TMP_ROOT}/sn-tx-accept-txgen-fifo/artifact-root/rubin-txgen" "${TMP_ROOT}/sn-restart-txgen-fifo/artifact-root/rubin-txgen" "${TMP_ROOT}"/sn-{mesh,tx-accept,restart}-go-node-fifo/artifact-root/rubin-node-go
 while IFS=$'\t' read -r sn_mode sn_name sn_token sn_needle; do
   sn_check "sidecar ${sn_name}" "${sn_token}" "${sn_needle}" "${sn_mode}" "${sn_name}"
   sn_cases=$((sn_cases + 1))
 done < "${TMP_ROOT}/sn-cases.tsv"
 stop_fifo_watchdog
-(( sn_cases == 214 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 214" >&2; exit 1; }
+(( sn_cases == 226 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 226" >&2; exit 1; }
 sn_output="$(check_report "${TMP_ROOT}/sn-tx-accept-top-extra-report.json" offline producer-tx 2>&1)" && { echo "FAIL: sidecar extra key report should fail" >&2; exit 1; }
 [[ "$(combined_report_reason_token <<<"${sn_output}")" == store_neutrality_sidecar_invalid ]] || { echo "FAIL: combined token for sidecar keys mismatch: $(combined_report_reason_token <<<"${sn_output}")" >&2; exit 1; }
 printf 'PASS: mixed-client mesh check-report public/internal boundaries are covered\n'
