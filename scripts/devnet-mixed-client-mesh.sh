@@ -349,14 +349,16 @@ def pid_argv(pid: int) -> list[str]:
         if j < 0: break
         args.append(raw[i:j].decode("utf-8", "surrogateescape")); i = j + 1
     return args
-# True when the actual string equals the expected one, or the OS resolves the actual string
-# to the object of the expected path's realpath (same device and inode).
-def same_path(actual_label: str, actual: str, expected_label: str, expected: str) -> bool:
-    checked_path(actual_label, actual); resolved = checked_path(expected_label, expected)
+# True when the actual string equals the expected one, or the OS resolves the actual string to an
+# existing object and both strings have the same realpath; a datadir must also keep that realpath
+# after lexical normalisation, the form the clients open.
+def same_path(actual_label: str, actual: str, expected_label: str, expected: str, datadir: bool = False) -> bool:
+    resolved, expected_resolved = checked_path(actual_label, actual), checked_path(expected_label, expected)
     if actual == expected: return True
-    try: sa, se = os.stat(actual), os.stat(resolved)
+    if resolved != expected_resolved: return False
+    try: os.stat(actual)
     except (OSError, ValueError): return False
-    return (sa.st_dev, sa.st_ino) == (se.st_dev, se.st_ino)
+    return not datadir or os.path.realpath(os.path.normpath(actual)) == os.path.realpath(os.path.normpath(expected))
 def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live argv", expected_label: str = "report command_argv") -> bool:
     if len(actual) != len(expected) or not actual:
         return False
@@ -368,7 +370,7 @@ def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live ar
         if expected[i] in path_flags:
             if i + 1 >= len(expected):
                 return False
-            if actual[i] != expected[i] or not same_path(f"{actual_label}[{i + 1}]", actual[i + 1], f"{expected_label}[{i + 1}]", expected[i + 1]):
+            if actual[i] != expected[i] or not same_path(f"{actual_label}[{i + 1}]", actual[i + 1], f"{expected_label}[{i + 1}]", expected[i + 1], datadir=True):
                 return False
             i += 2
             continue
@@ -532,7 +534,7 @@ if partition_mode:
 marker_path = checked_path("legacy_schema_compatibility.marker_path", legacy_schema.get("marker_path"))
 try: marker_path.relative_to(artifact_root)
 except ValueError: fail("legacy marker is outside artifact_root")
-req(regular_file(legacy_schema["marker_path"]) or not regular_file(marker_path), "legacy marker is not a regular file")
+req(regular_file(legacy_schema["marker_path"]), "legacy marker is not a regular file")
 marker = load_json_file("legacy marker", marker_path)
 req(isinstance(marker, dict) and marker.get("scenario") == "mixed_client_mesh_schema_marker" and marker.get("evidence_type") == "mixed_client_process_soak", "legacy marker has wrong schema marker shape")
 if tx_mode:
@@ -1600,9 +1602,12 @@ if got.get("raw_hex") != txhex:
 PY
 }
 txgen_datadir_guard() {
-  local datadir=""
+  local datadir="" cleaned
   while (( $# )); do [[ "$1" == --datadir && $# -ge 2 ]] && datadir="$2"; shift; done
-  [[ -d "${datadir}" && -d "${RUST_DIR}" && ! "${datadir}" -ef "${RUST_DIR}" ]] || { TX_REASON=cross_client_datadir_argv; return 1; }
+  # Refuses a datadir that names RUST_DIR as spelled or after lexical normalisation.
+  cleaned="$(python3 -c 'import os, sys; sys.stdout.buffer.write(os.path.normpath(os.fsencode(sys.argv[1])) + b"/")' "${datadir}")" || { TX_REASON=cross_client_datadir_argv; return 1; }
+  cleaned="${cleaned%/}"
+  [[ -d "${datadir}" && -d "${RUST_DIR}" && ! "${datadir}" -ef "${RUST_DIR}" && ! "${cleaned}" -ef "${RUST_DIR}" ]] || { TX_REASON=cross_client_datadir_argv; return 1; }
 }
 submit_go_tx() {
   local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key-file "${TX_FROM_KEY_FILE}" --to-key "${TX_TO_KEY}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}" --submit-to "${GO_RPC_ADDR}")

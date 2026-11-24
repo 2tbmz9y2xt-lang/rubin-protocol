@@ -228,8 +228,9 @@ SH
 
 check_txgen_datadir_guard() {
   local probe="${TMP_ROOT}/txgen-datadir-guard.sh" probe_root="${TMP_ROOT}/txgen-datadir-guard" lib="${TMP_ROOT}/txgen-datadir-guard-lib.sh"
-  mkdir -p -- "${probe_root}/go-node" "${probe_root}/rust-node"
+  mkdir -p -- "${probe_root}/go-node" "${probe_root}/rust-node" "${probe_root}/other/inner" "${probe_root}/other/rust-node"
   ln -s -- "${probe_root}/rust-node" "${probe_root}/rust-alias"
+  ln -s -- "${probe_root}/other/inner" "${probe_root}/hop"
   extract_slices "${lib}" "txgen_datadir_guard()" "wait_rust_accept()"
   cat >"${probe}" <<'SH'
 #!/usr/bin/env bash
@@ -259,6 +260,7 @@ expect_guard_refused() {
 }
 expect_guard_refused --datadir "${RUST_DIR}"
 expect_guard_refused --datadir "${probe_root}/rust-alias"
+expect_guard_refused --datadir "${probe_root}/hop/../rust-node"
 if [[ "$3" == 1 ]]; then expect_guard_refused --datadir "${probe_root}/RUST-NODE"; else printf 'SKIP: case-alias row %s\n' txgen-datadir-case-alias; fi
 expect_guard_refused --datadir "${probe_root}/missing"
 expect_guard_refused --datadir ""
@@ -269,6 +271,7 @@ RUST_DIR="${probe_root}/rust-node"
 reason="$(TX_REASON=""; txgen_datadir_guard "${TXGEN_BIN}" --datadir 2>"${probe_root}/guard.err" || printf '%s' "${TX_REASON}")" || :
 [[ "${reason}" == cross_client_datadir_argv && ! -s "${probe_root}/guard.err" ]] || { echo "FAIL: trailing --datadir reason '${reason}': $(cat "${probe_root}/guard.err")" >&2; exit 1; }
 TX_REASON=""; txgen_datadir_guard "${TXGEN_BIN}" --datadir "${GO_DIR}" || { echo "FAIL: guard refused the Go datadir" >&2; exit 1; }
+TX_REASON=""; txgen_datadir_guard "${TXGEN_BIN}" --datadir "${probe_root}/rust-node/../go-node" || { echo "FAIL: guard refused the Go datadir spelled through the Rust datadir" >&2; exit 1; }
 GO_DIR="${probe_root}/rust-alias"; rm -f -- "${SPAWNED}"; TX_REASON=""
 if submit_go_tx; then echo "FAIL: submit_go_tx accepted the Rust datadir" >&2; exit 1; fi
 [[ "${TX_REASON}" == cross_client_datadir_argv && ! -e "${SPAWNED}" ]] || { echo "FAIL: submit_go_tx reason ${TX_REASON} or txgen spawned" >&2; exit 1; }
@@ -573,14 +576,15 @@ SH
 # A repository whose git configuration hides the untracked clients/u from a plain
 # git status still has clients_tree_status print it.
 check_clients_tree_status() {
-  local lib="${TMP_ROOT}/clients-tree-status-lib.sh" repo="${TMP_ROOT}/clients-tree-status-repo" ignore="${TMP_ROOT}/clients-tree-status-ignore" clean_env key value got
+  local lib="${TMP_ROOT}/clients-tree-status-lib.sh" repo="${TMP_ROOT}/clients-tree-status-repo" ignore="${TMP_ROOT}/clients-tree-status-ignore" clean_env key value got ctl
   extract_slices "${lib}" "repo_git()" "# Writes mixed-client-mesh-store-neutrality.json"
   clean_env=(env -i "PATH=${PATH}" "HOME=${HOME}")
   printf 'u\n' >"${ignore}"
   while read -r key value; do
     rm -rf -- "${repo}"; "${clean_env[@]}" git -c init.defaultBranch=main init -q "${repo}"; mkdir -- "${repo}/clients"; printf 'u\n' >"${repo}/clients/u"
     "${clean_env[@]}" git -C "${repo}" config "${key}" "${value}"
-    [[ -z "$(git -C "${repo}" status --porcelain -- clients)" ]] || { echo "FAIL: ${key} ${value} does not hide clients/u from git status" >&2; exit 1; }
+    ctl="$("${clean_env[@]}" git -C "${repo}" status --porcelain -- clients)" || { echo "FAIL: control git status failed under ${key} ${value}" >&2; exit 1; }
+    [[ -z "${ctl}" ]] || { echo "FAIL: ${key} ${value} does not hide clients/u from git status" >&2; exit 1; }
     got="$(bash -c 'source "$1"; REPO_ROOT="$2"; clients_tree_status' _ "${lib}" "${repo}")" || { echo "FAIL: clients_tree_status failed under ${key} ${value}" >&2; exit 1; }
     [[ "${got}" == "?? clients/" ]] || { echo "FAIL: clients_tree_status under ${key} ${value} printed '${got}'" >&2; exit 1; }
   done <<EOF
@@ -2077,6 +2081,18 @@ def sn_argv_spelled(argv: list, index: int, report: dict, spelling: str) -> None
 for sn_suffix, sn_index, sn_spelling in (("binary-slash", 0, "/rubin-node-rust/"), ("binary-slash-dot", 0, "/rubin-node-rust/."), ("binary-through-dir", 0, "/node-go/../rubin-node-rust"), ("datadir-through-dir", 4, "/node-go/../node-rust")):
     sn_variant(f"restart-old-argv-{sn_suffix}", "restart", lambda s, r: None, lambda report, i=sn_index, sp=sn_spelling: sn_argv_spelled(report["rust_restart"]["old_command_argv"], i, report, sp))
 sn_variant("tx-accept-argv-datadir-through-dir", "tx-accept", lambda s, r: None, lambda report: sn_argv_spelled(next(n["command_argv"] for n in report["nodes"] if n["implementation"] == "rust"), 4, report, "/node-go/../node-rust"))
+def sn_old_datadir_lexical_other(report: dict) -> None:
+    var_root = Path(report["artifact_root"])
+    (var_root / "hop-parent").mkdir()
+    (var_root / "hop-parent" / "hop").symlink_to(var_root / "node-go")
+    sn_argv_spelled(report["rust_restart"]["old_command_argv"], 4, report, "/hop-parent/hop/../node-rust")
+sn_variant("restart-old-argv-datadir-lexical-other", "restart", lambda s, r: None, sn_old_datadir_lexical_other)
+def sn_old_binary_hard_link(report: dict) -> None:
+    var_root = Path(report["artifact_root"])
+    os.link(var_root / "rubin-node-rust", var_root / "rubin-node-rust-link")
+    report["rust_restart"]["old_command_argv"][0] = str(var_root / "rubin-node-rust-link")
+sn_variant("restart-old-argv-binary-hard-link", "restart", lambda s, r: None, sn_old_binary_hard_link)
+sn_variant("mesh-marker-unsearchable-parent", "mesh", lambda s, r: None, sn_lock_report_path("legacy_schema_compatibility", "marker_path"))
 sn_variant("mesh-argv-binary-slash", "mesh", lambda s, r: None, lambda report: next(n for n in report["nodes"] if n["implementation"] == "go")["command_argv"].__setitem__(0, str(Path(report["artifact_root"]) / "rubin-node-go") + "/"))
 def sn_root_through_missing(report: dict) -> None:
     recorded = Path(report["artifact_root"])
@@ -2672,6 +2688,8 @@ expect_fail_contains "go argv binary with a trailing slash" "FAIL: node-go comma
 expect_pass_contains "old rust argv binary through an existing directory" "PASS: mixed_client_rust_restart report structurally accepted" check_report "${TMP_ROOT}/sn-restart-old-argv-binary-through-dir-report.json" offline rust-restart
 expect_pass_contains "old rust argv datadir through an existing directory" "PASS: mixed_client_rust_restart report structurally accepted" check_report "${TMP_ROOT}/sn-restart-old-argv-datadir-through-dir-report.json" offline rust-restart
 expect_pass_contains "rust argv datadir through an existing directory" "PASS: mixed_client_go_submit_rust_accept report structurally accepted" check_report "${TMP_ROOT}/sn-tx-accept-argv-datadir-through-dir-report.json" offline producer-tx
+sidecar_value_check "old rust argv datadir whose lexical form names another directory" "rust_restart old argv mismatch" rust_restart_old_argv_mismatch rust-restart "${TMP_ROOT}/sn-restart-old-argv-datadir-lexical-other-report.json"
+sidecar_value_check "old rust argv binary as a hard link with another name" "rust_restart old argv mismatch" rust_restart_old_argv_mismatch rust-restart "${TMP_ROOT}/sn-restart-old-argv-binary-hard-link-report.json"
 sn_check "artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" public mesh-root-through-missing
 sn_check "tx artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" tx tx-accept-root-through-missing
 sidecar_value_check "restart artifact root through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-root-through-missing-report.json"
@@ -2764,8 +2782,9 @@ report_locked_cases() {
 }
 report_locked_cases ""
 if (( pd_denied )); then
-  # Reruns the sidecar and report unsearchable-parent rows under the interpreters python3.9 to python3.13
-  # found on PATH that import jsonschema, which the marker validator run by check_report
+  sidecar_value_check "legacy marker with an unsearchable parent" "legacy marker is not a regular file" legacy_marker_invalid public "${TMP_ROOT}/sn-mesh-marker-unsearchable-parent-report.json"
+  # Reruns the sidecar, report and legacy marker unsearchable-parent rows under the interpreters python3.9
+  # to python3.13 found on PATH that import jsonschema, which the marker validator run by check_report
   # needs; their pathlib is_dir and is_file raise on such a path.
   printf '#!/usr/bin/env bash\n[[ "$1" == -- && "$2" == python3 ]] && shift 2 && exec "${SN_PYTHON}" "$@"\nexec %q "$@"\n' "${DEV_ENV}" >"${TMP_ROOT}/dev-env-python"
   chmod +x "${TMP_ROOT}/dev-env-python"
@@ -2777,6 +2796,7 @@ if (( pd_denied )); then
       SN_PYTHON="$(command -v "${sn_python}")" DEV_ENV="${TMP_ROOT}/dev-env-python" sn_check "sidecar ${sn_name} with ${sn_python}" "${sn_token}" "${sn_needle}" "${sn_mode}" "${sn_name}"
     done < "${TMP_ROOT}/sn-cases.tsv"
     SN_PYTHON="$(command -v "${sn_python}")" DEV_ENV="${TMP_ROOT}/dev-env-python" report_locked_cases " with ${sn_python}"
+    SN_PYTHON="$(command -v "${sn_python}")" DEV_ENV="${TMP_ROOT}/dev-env-python" sidecar_value_check "legacy marker with an unsearchable parent with ${sn_python}" "legacy marker is not a regular file" legacy_marker_invalid public "${TMP_ROOT}/sn-mesh-marker-unsearchable-parent-report.json"
     sn_pythons+=" ${sn_python}"
   done
   printf 'unsearchable-parent rows rerun under:%s\n' "${sn_pythons:- none}"
