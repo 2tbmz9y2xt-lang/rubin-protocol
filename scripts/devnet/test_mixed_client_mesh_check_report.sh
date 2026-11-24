@@ -32,19 +32,29 @@ case_folds=0; [[ "${TMP_ROOT}/CASE-PROBE" -ef "${TMP_ROOT}/case-probe" ]] && cas
 
 # Opens and closes the write end of the FIFOs named by its arguments at 2-second
 # intervals, so a reader blocked on opening one sees end of file instead of hanging;
-# exits once none of those paths exists.
+# before closing, appends to FIFO_OPENED_LOG the path of a FIFO it found open for reading;
+# exits once none of those paths exists. stop_fifo_watchdog fails when that log is not empty.
+FIFO_OPENED_LOG="${TMP_ROOT}/fifo-opened.log"
 start_fifo_watchdog() {
+  rm -f -- "${FIFO_OPENED_LOG}"
   python3 -c '
-import os, sys, time
-while any(os.path.lexists(path) for path in sys.argv[1:]):
+import os, stat, sys, time
+log, paths = sys.argv[1], sys.argv[2:]
+while any(os.path.lexists(path) for path in paths):
     time.sleep(2)
-    for path in sys.argv[1:]:
-        try: os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
-        except OSError: pass
-' "$@" </dev/null >/dev/null 2>&1 &
+    for path in paths:
+        try: fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError: continue
+        if stat.S_ISFIFO(os.fstat(fd).st_mode):
+            with open(log, "a", encoding="utf-8") as f: f.write(path + "\n")
+        os.close(fd)
+' "${FIFO_OPENED_LOG}" "$@" </dev/null >/dev/null 2>&1 &
   FIFO_WATCHDOG_PID=$!
 }
-stop_fifo_watchdog() { kill "${FIFO_WATCHDOG_PID}" 2>/dev/null || true; wait "${FIFO_WATCHDOG_PID}" 2>/dev/null || true; }
+stop_fifo_watchdog() {
+  kill "${FIFO_WATCHDOG_PID}" 2>/dev/null || true; wait "${FIFO_WATCHDOG_PID}" 2>/dev/null || true
+  [[ ! -s "${FIFO_OPENED_LOG}" ]] || { echo "FAIL: a FIFO was opened for reading: $(cat -- "${FIFO_OPENED_LOG}")" >&2; exit 1; }
+}
 
 require_contains() {
   local output="$1" needle="$2" label="$3"
@@ -414,10 +424,9 @@ capture_rpc_sidecar() {
   cp -- "${src}" "$5"
 }
 git() {
-  [[ "$3" == "${FAIL_GIT}" ]] && return 128
   case "$*" in
-    "-C ${p} rev-parse HEAD") printf '%s\n' "${GIT_HEAD}" ;;
-    "-C ${p} status --porcelain -- clients") printf '%s' "${GIT_STATUS}" ;;
+    "-C ${p} rev-parse HEAD") [[ "${FAIL_GIT}" != rev-parse ]] || return 128; printf '%s\n' "${GIT_HEAD}" ;;
+    "-C ${p} -c core.excludesFile=/dev/null status --porcelain --untracked-files=normal --ignore-submodules=none -- clients") [[ "${FAIL_GIT}" != status ]] || return 128; printf '%s' "${GIT_STATUS}" ;;
     *) return 99 ;;
   esac
 }
@@ -522,6 +531,62 @@ expect_refused 0 0 1 partition-heal-reorg
 expect_refused 0 0 0
 SH
   bash "${probe}" "${CHECK_REPORT_LIB}" "${lib}" "${probe_root}"
+}
+
+check_main_flow_publishes() {
+  local probe="${TMP_ROOT}/main-flow-publish.sh" probe_root="${TMP_ROOT}/main-flow-publish" lib="${TMP_ROOT}/main-flow-publish-lib.sh" main="${TMP_ROOT}/main-flow-publish-main.sh"
+  mkdir -p -- "${probe_root}"
+  extract_slices "${lib}" "publish_pass_report()" "for tool in lsof perl ps sed sort"
+  extract_slices "${main}" 'PASS_REPORT_JSON="$(mktemp' "PASS_SCENARIO="
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+source "$2"
+main="$3"; p="$4"
+RUBIN_PROCESS_ARTIFACT_ROOT="${p}"; LEGACY_SCHEMA_MARKER_JSON="${p}/marker.json"
+mktemp() { printf '%s\n' "${p}/pass-report.json"; }
+write_outputs() { printf 'write_outputs %s %s\n' "$1" "${REPORT_JSON}" >>"${p}/calls"; printf '{"verdict":"PASS"}\n' >"${REPORT_JSON}"; }
+run_validator() { printf 'run_validator %s\n' "$1" >>"${p}/calls"; }
+check_report() { printf 'check_report %s\n' "$*" >>"${p}/calls"; echo "FAIL: store_neutrality_sidecar_invalid: clients_tree_clean is not true" >&2; return 1; }
+finish_no_data() { printf '%s\n' "$1"; exit 0; }
+# Sets the three mode variables from $1-$3; $4, when given, is the mode argument check_report
+# receives after the report path and live.
+expect_main_flow_refused() {
+  local got want
+  TX_PATH_MODE="$1"; RUST_RESTART_MODE="$2"; PARTITION_HEAL_REORG_MODE="$3"; shift 3
+  REPORT_JSON="${p}/report.json"; rm -f -- "${REPORT_JSON}" "${p}/pass-report.json" "${p}/calls"
+  got="$(source "${main}"; printf 'completed\n')"
+  want="$(printf '%s\n' "write_outputs PASS ${p}/pass-report.json" "run_validator ${LEGACY_SCHEMA_MARKER_JSON}" "check_report ${p}/pass-report.json live${1:+ $1}")"
+  [[ "${got}" == pass_report_live_validation_store_neutrality_sidecar_invalid ]] || { echo "FAIL: main flow in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE} ended with ${got}" >&2; exit 1; }
+  [[ "$(cat -- "${p}/calls")" == "${want}" ]] || { echo "FAIL: main flow calls in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE}: $(cat -- "${p}/calls")" >&2; exit 1; }
+  [[ ! -e "${REPORT_JSON}" && ! -e "${p}/pass-report.json" ]] || { echo "FAIL: main flow kept a refused PASS report in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE}" >&2; exit 1; }
+}
+expect_main_flow_refused 1 0 0 producer-tx
+expect_main_flow_refused 0 1 0 rust-restart
+expect_main_flow_refused 0 0 1 partition-heal-reorg
+expect_main_flow_refused 0 0 0
+SH
+  bash "${probe}" "${CHECK_REPORT_LIB}" "${lib}" "${main}" "${probe_root}"
+}
+
+# A repository whose git configuration hides the untracked clients/u from a plain
+# git status still has clients_tree_status print it.
+check_clients_tree_status() {
+  local lib="${TMP_ROOT}/clients-tree-status-lib.sh" repo="${TMP_ROOT}/clients-tree-status-repo" ignore="${TMP_ROOT}/clients-tree-status-ignore" clean_env key value got
+  extract_slices "${lib}" "repo_git()" "# Writes mixed-client-mesh-store-neutrality.json"
+  clean_env=(env -i "PATH=${PATH}" "HOME=${HOME}")
+  printf 'u\n' >"${ignore}"
+  while read -r key value; do
+    rm -rf -- "${repo}"; "${clean_env[@]}" git -c init.defaultBranch=main init -q "${repo}"; mkdir -- "${repo}/clients"; printf 'u\n' >"${repo}/clients/u"
+    "${clean_env[@]}" git -C "${repo}" config "${key}" "${value}"
+    [[ -z "$(git -C "${repo}" status --porcelain -- clients)" ]] || { echo "FAIL: ${key} ${value} does not hide clients/u from git status" >&2; exit 1; }
+    got="$(bash -c 'source "$1"; REPO_ROOT="$2"; clients_tree_status' _ "${lib}" "${repo}")" || { echo "FAIL: clients_tree_status failed under ${key} ${value}" >&2; exit 1; }
+    [[ "${got}" == "?? clients/" ]] || { echo "FAIL: clients_tree_status under ${key} ${value} printed '${got}'" >&2; exit 1; }
+  done <<EOF
+status.showUntrackedFiles no
+core.excludesFile ${ignore}
+EOF
 }
 
 check_proxy_go_local_addr_reason() {
@@ -713,7 +778,7 @@ artifact_root.mkdir()
 go_bin = artifact_root / "rubin-node-go"
 rust_bin = artifact_root / "rubin-node-rust"
 for path in (go_bin, rust_bin):
-    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.write_text(f"#!/bin/sh\n# {path.name}\nexit 0\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 def compact_size(n: int) -> bytes:
@@ -1695,7 +1760,7 @@ def sn_tip(impl: str, endpoint: str, chain: bool) -> dict:
 def write_store_neutrality(mode_root: Path, scenario: str) -> None:
     chain = scenario != "mixed_client_mesh"
     rust_endpoint = "127.0.0.1:51030" if scenario == "mixed_client_rust_restart" else rust_rpc
-    (mode_root / "rubin-txgen").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (mode_root / "rubin-txgen").write_text("#!/bin/sh\n# rubin-txgen\nexit 0\n", encoding="utf-8")
     dump(mode_root / "initial-convergence-go-tip.json", sn_tip("go", go_rpc, chain))
     dump(mode_root / "initial-convergence-rust-tip.json", sn_tip("rust", rust_endpoint, chain))
     genesis = heights = None
@@ -2000,6 +2065,12 @@ sn_variant("tx-accept-datadir-through-missing", "tx-accept", lambda s, r: s["dat
 sn_variant("mesh-binary-through-missing", "mesh", lambda s, r: None, lambda report: sn_set_binary(report, "go", sn_through_missing(Path(report["artifact_root"]), "rubin-node-go")))
 sn_variant("mesh-marker-through-missing", "mesh", lambda s, r: None, lambda report: report["legacy_schema_compatibility"].update(marker_path=sn_through_missing(Path(report["legacy_schema_compatibility"]["marker_path"]).parent, Path(report["legacy_schema_compatibility"]["marker_path"]).name)))
 sn_variant("restart-report-datadir-through-missing", "restart", lambda s, r: None, lambda report: report["rust_restart"].update(datadir=sn_through_missing(Path(report["artifact_root"]), "node-rust")))
+def sn_argv_through_missing(argv: list, index: int, report: dict, name: str) -> None:
+    assert argv[3] == "--datadir"
+    argv[index] = sn_through_missing(Path(report["artifact_root"]), name)
+sn_variant("tx-accept-argv-datadir-through-missing", "tx-accept", lambda s, r: None, lambda report: sn_argv_through_missing(next(n["command_argv"] for n in report["nodes"] if n["implementation"] == "rust"), 4, report, "node-rust"))
+sn_variant("restart-old-argv-datadir-through-missing", "restart", lambda s, r: None, lambda report: sn_argv_through_missing(report["rust_restart"]["old_command_argv"], 4, report, "node-rust"))
+sn_variant("restart-old-argv-binary-through-missing", "restart", lambda s, r: None, lambda report: sn_argv_through_missing(report["rust_restart"]["old_command_argv"], 0, report, "rubin-node-rust"))
 def sn_root_through_missing(report: dict) -> None:
     recorded = Path(report["artifact_root"])
     report["artifact_root"] = sn_through_missing(recorded.parent, recorded.name)
@@ -2145,6 +2216,8 @@ check_wait_peer_snapshot_normalizes
 check_capture_go_reorg_metrics_reason
 check_wait_peer_snapshot_state_reason
 check_publish_pass_report
+check_main_flow_publishes
+check_clients_tree_status
 # shellcheck source=/dev/null
 source "${CHECK_REPORT_LIB}"
 [[ "$(tx_path_prepare_reason go_submit_chainstate_prepare_failed 1)" == "go_submit_chainstate_prepare_failed" ]] || { echo "FAIL: go-submit prep reason should remain go_submit scoped" >&2; exit 1; }
@@ -2583,6 +2656,9 @@ sn_check "sidecar datadir through a missing directory" "${SN_INVALID}" "datadirs
 sidecar_value_check "node binary through a missing directory" "node-go command/binary is not bound to executable rubin-node-go" unknown public "${TMP_ROOT}/sn-mesh-binary-through-missing-report.json"
 sidecar_value_check "legacy marker through a missing directory" "legacy marker is not a regular file" legacy_marker_invalid public "${TMP_ROOT}/sn-mesh-marker-through-missing-report.json"
 sidecar_value_check "restart datadir through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-report-datadir-through-missing-report.json"
+sidecar_value_check "rust argv datadir through a missing directory" "node command_argv does not match exact launched argv" argv_mismatch producer-tx "${TMP_ROOT}/sn-tx-accept-argv-datadir-through-missing-report.json"
+sidecar_value_check "old rust argv datadir through a missing directory" "rust_restart old argv mismatch" rust_restart_old_argv_mismatch rust-restart "${TMP_ROOT}/sn-restart-old-argv-datadir-through-missing-report.json"
+sidecar_value_check "old rust argv binary through a missing directory" "rust_restart old argv mismatch" rust_restart_old_argv_mismatch rust-restart "${TMP_ROOT}/sn-restart-old-argv-binary-through-missing-report.json"
 sn_check "artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" public mesh-root-through-missing
 sn_check "tx artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" tx tx-accept-root-through-missing
 sidecar_value_check "restart artifact root through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-root-through-missing-report.json"

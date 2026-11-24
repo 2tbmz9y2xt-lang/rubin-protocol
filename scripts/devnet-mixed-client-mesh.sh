@@ -349,10 +349,14 @@ def pid_argv(pid: int) -> list[str]:
         if j < 0: break
         args.append(raw[i:j].decode("utf-8", "surrogateescape")); i = j + 1
     return args
+# True when both path strings name an existing object and resolve to one path; a string
+# through a missing directory names nothing, although its realpath may exist.
+def same_path(actual_label: str, actual: str, expected_label: str, expected: str) -> bool:
+    return checked_path(actual_label, actual) == checked_path(expected_label, expected) and os.path.exists(actual) and os.path.exists(expected)
 def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live argv", expected_label: str = "report command_argv") -> bool:
     if len(actual) != len(expected) or not actual:
         return False
-    if checked_path(f"{actual_label}[0]", actual[0]) != checked_path(f"{expected_label}[0]", expected[0]):
+    if not same_path(f"{actual_label}[0]", actual[0], f"{expected_label}[0]", expected[0]):
         return False
     path_flags = {"--datadir"}
     i = 1
@@ -360,7 +364,7 @@ def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live ar
         if expected[i] in path_flags:
             if i + 1 >= len(expected):
                 return False
-            if actual[i] != expected[i] or checked_path(f"{actual_label}[{i + 1}]", actual[i + 1]) != checked_path(f"{expected_label}[{i + 1}]", expected[i + 1]):
+            if actual[i] != expected[i] or not same_path(f"{actual_label}[{i + 1}]", actual[i + 1], f"{expected_label}[{i + 1}]", expected[i + 1]):
                 return False
             i += 2
             continue
@@ -2734,7 +2738,7 @@ else:
         "evidence_domain": "pre_switch_store_neutrality",
         # git rev-parse HEAD.
         "protocol_commit": commit,
-        # True when git status --porcelain -- clients prints nothing.
+        # True when clients_tree_status prints nothing.
         "clients_tree_clean": dirty == "",
         # go_node_sha256, rust_node_sha256 and txgen_sha256: sha256 of artifact_root/rubin-node-go,
         # rubin-node-rust and rubin-txgen; txgen_sha256 is null in the default mode.
@@ -2765,6 +2769,9 @@ repo_git() (
   while IFS= read -r name; do unset "${name}"; done <<<"${vars}"
   git -C "${REPO_ROOT}" "$@"
 )
+# Prints git status --porcelain -- clients with untracked files listed, no user excludes
+# file and submodules compared, whatever the git configuration sets for these.
+clients_tree_status() { repo_git -c core.excludesFile=/dev/null status --porcelain --untracked-files=normal --ignore-submodules=none -- clients; }
 # Writes mixed-client-mesh-store-neutrality.json from the public captures and the
 # local build, one step after another: /chain_identity, genesis blocks (chain modes
 # only), binary hashes, git state, sidecar write. SIDECAR_REASON names the failed step.
@@ -2786,7 +2793,7 @@ write_store_neutrality_sidecar() {
   SIDECAR_REASON=store_neutrality_binary_hash_failed
   binaries="$(store_neutrality_step binaries "${chain}" "${GO_NODE_BIN}" "${RUST_NODE_BIN}" "${TXGEN_BIN}")" || return 1
   SIDECAR_REASON=store_neutrality_commit_unavailable
-  commit="$(repo_git rev-parse HEAD)" && tree="$(repo_git status --porcelain -- clients)" || return 1
+  commit="$(repo_git rev-parse HEAD)" && tree="$(clients_tree_status)" || return 1
   SIDECAR_REASON=store_neutrality_sidecar_write_failed
   store_neutrality_step write "${STORE_NEUTRALITY_JSON}" "${ident}" "${genesis}" "${binaries}" "${commit}" "${tree:+dirty}" "${GO_DIR}" "${RUST_DIR}" "${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}" || return 1
   SIDECAR_REASON=""
