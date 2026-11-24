@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/bits"
 	"os"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -58,18 +59,16 @@ type sourceUsage struct {
 }
 
 type sourceReadCensus struct {
-	name, blockedStage                    string
-	names                                 []string
+	name, blockedStage, singleSpelling    string
+	names, spellings                      []string
 	witness                               sourceDebt
 	target, blockedStageFile              filelock.IdentityV1
 	pending                               []sourceReadMismatch
 	pendingLimit, ordinal, refusalOrdinal int
 	selectedPending                       error
-	omittable                             int
-	omissionKey                           [2 * sha256.Size]byte
-	sharedBinding, spelledBinding         *sourceIncarnation
-	multipleHolders, multipleSpellings    bool
-	spellingChecked, localized            bool
+	omittable, spellingCount              int
+	sharedBinding                         *sourceIncarnation
+	multipleHolders, localized            bool
 }
 
 type sourceReadMismatch struct {
@@ -239,8 +238,7 @@ func sourceStageSpelling(leaf string) string {
 func (o *SourceOwnerV1) privateReadBinding(used *sourceUsage, name string, b *sourceIncarnation) bool {
 	read := &used.read
 	return !b.uncertain && b.file != (filelock.IdentityV1{}) && name != read.name &&
-		b != read.spelledBinding &&
-		!o.readHolder(used, name, b.file, b)
+		!o.readHolder(used, name, b.file, b) && !o.hasReadSpelling(read, name)
 }
 
 // readHolder checks the stage, its pending quota, and the release custody.
@@ -268,19 +266,9 @@ func (o *SourceOwnerV1) countReadOmission(used *sourceUsage, name string, b *sou
 	if read.name == "" || used.completeCharge || !o.privateReadBinding(used, name, b) {
 		return
 	}
-	read.countOmission(name, 1)
+	read.omittable++
 	if read.target == b.file {
 		read.noteSharedBinding(b)
-	}
-}
-
-// countOmission tracks the remaining key when exactly one possible omission is left.
-func (read *sourceReadCensus) countOmission(name string, delta int) {
-	read.omittable += delta
-	if read.multipleSpellings {
-		for i := range read.omissionKey {
-			read.omissionKey[i] ^= name[i]
-		}
 	}
 }
 
@@ -288,9 +276,6 @@ func (read *sourceReadCensus) countOmission(name string, delta int) {
 func (used *sourceUsage) acceptReadOmissions() {
 	read := &used.read
 	if read.omittable == 0 || read.sharedBinding != nil {
-		return
-	}
-	if read.multipleSpellings && (read.omittable != 1 || !used.readSpellingIndependent(string(read.omissionKey[:]))) {
 		return
 	}
 	used.releaseMissing -= read.omittable
@@ -634,7 +619,7 @@ func (o *SourceOwnerV1) observeReadBinding(used *sourceUsage, name string, b *so
 	used.releaseMissing--
 	private := o.privateReadBinding(used, name, b)
 	if private {
-		used.read.countOmission(name, -1)
+		used.read.omittable--
 	}
 	if b == used.read.sharedBinding && !used.read.multipleHolders {
 		used.read.sharedBinding = nil
@@ -646,9 +631,6 @@ func (o *SourceOwnerV1) observeReadBinding(used *sourceUsage, name string, b *so
 func (o *SourceOwnerV1) isolateReadMismatch(used *sourceUsage, name string, b *sourceIncarnation, id filelock.IdentityV1, private bool, refusal error) bool {
 	read := &used.read
 	if !private || read.target == id || read.target == b.file || o.readHolder(used, name, id, b) {
-		return false
-	}
-	if !used.readSpellingIndependent(name) {
 		return false
 	}
 	if read.target == (filelock.IdentityV1{}) {
@@ -720,45 +702,66 @@ func (o *SourceOwnerV1) observeReadName(read *sourceReadCensus, name string, inP
 	o.observeReadSpelling(read, name)
 }
 
-// observeReadSpelling marks an alternate spelling of an issued capture key.
+// observeReadSpelling counts alternate spellings of issued capture keys.
 func (o *SourceOwnerV1) observeReadSpelling(read *sourceReadCensus, name string) {
-	if !strings.ContainsAny(name, "ABCDEF") || !sourceHexKey(name) {
+	if !o.issuedReadSpelling(name) {
 		return
+	}
+	if read.spellingCount == 0 {
+		read.singleSpelling = name
+	}
+	read.spellingCount++
+}
+
+// issuedReadSpelling matches a case variant to a canonical key of a live issued capture.
+func (o *SourceOwnerV1) issuedReadSpelling(name string) bool {
+	if len(name) != 2*sha256.Size || !strings.ContainsAny(name, "ABCDEF") {
+		return false
 	}
 	var key [2 * sha256.Size]byte
 	for i := range key {
-		key[i] = name[i] | ('a' - 'A')
+		c := name[i]
+		if c >= 'A' && c <= 'F' {
+			c += 'a' - 'A'
+		}
+		key[i] = c
 	}
 	b := o.live[string(key[:])]
-	if b == nil || !b.issued {
-		return
-	}
-	switch {
-	case read.spelledBinding == nil:
-		read.spelledBinding = b
-	case read.spelledBinding != b:
-		read.multipleSpellings = true
-	}
+	return b != nil && b.issued
 }
 
-// readSpellingIndependent checks one key against the sampled names when several have alternate spellings.
-func (used *sourceUsage) readSpellingIndependent(name string) bool {
-	read := &used.read
-	if !read.multipleSpellings {
-		return true
-	}
-	if read.spellingChecked {
+// hasReadSpelling checks the issued key against the listed alternate spellings.
+func (o *SourceOwnerV1) hasReadSpelling(read *sourceReadCensus, name string) bool {
+	switch read.spellingCount {
+	case 0:
 		return false
+	case 1:
+		return compareCaptureSpelling(read.singleSpelling, name) == 0
 	}
-	read.spellingChecked = true
-	listed := sourceEntryNames{names: read.names}
-	for i := range listed.len() {
-		leaf := listed.name(i)
-		if leaf != name && strings.EqualFold(leaf, name) {
-			return false
+	if read.spellings == nil {
+		read.spellings = make([]string, read.spellingCount)
+		i := 0
+		for _, leaf := range read.names {
+			if o.issuedReadSpelling(leaf) {
+				read.spellings[i] = leaf
+				i++
+			}
+		}
+		slices.SortFunc(read.spellings, compareCaptureSpelling)
+	}
+	_, found := slices.BinarySearchFunc(read.spellings, name, compareCaptureSpelling)
+	return found
+}
+
+// compareCaptureSpelling compares validated hex keys in ASCII-folded order.
+func compareCaptureSpelling(a, b string) int {
+	for i := range 2 * sha256.Size {
+		left, right := a[i]|('a'-'A'), b[i]|('a'-'A')
+		if left != right {
+			return int(left) - int(right)
 		}
 	}
-	return true
+	return 0
 }
 
 func (d *sourceDebt) observeAlias(id filelock.IdentityV1, backing *sourceIncarnation) {

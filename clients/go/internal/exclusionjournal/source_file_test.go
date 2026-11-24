@@ -381,6 +381,9 @@ func TestCapturedSourceReadSharedFaultV1(t *testing.T) {
 	t.Run("multiple-alternate-spellings", func(t *testing.T) {
 		sourceModes(t, []string{"missing", "replacement"}, testCapturedReadMultipleSpellings)
 	})
+	t.Run("exact-spelling-membership", func(t *testing.T) {
+		sourceModes(t, []string{"independent-extents", "independent-omissions", "matching-extent", "matching-omissions"}, testCapturedReadExactSpellings)
+	})
 	t.Run("absent-unissued-target", testCapturedReadAbsentTarget)
 }
 
@@ -553,7 +556,7 @@ func testCapturedReadMixedPending(t *testing.T, withStage bool) {
 	stage := capturedReadRecordFor('D')
 	var stagePath string
 	if withStage {
-		stagePath = placeCapturedReadStage(t, paths.root, stage, d.leaf, c.leaf)
+		stagePath = placeCapturedReadStage(t, paths.root, stage, b.leaf, d.leaf, c.leaf)
 	}
 	bOriginal, dOriginal := sourceLstat(t, bPath), sourceLstat(t, dPath)
 	bBytes, dBytes := sourceReadFile(t, bPath), sourceReadFile(t, dPath)
@@ -567,9 +570,11 @@ func testCapturedReadMixedPending(t *testing.T, withStage bool) {
 	sourceUnchangedEntry(t, cPath, dOriginal, cBytes)
 	sourceFailIf(t, os.SameFile(dOriginal, bOriginal) || os.SameFile(dOriginal, sourceLstat(t, cHeld)),
 		"shared inode also holds an independent capture")
-	var prepareErr error
 	if withStage {
-		prepareErr = capturedReadStageRefusal(t, paths.root, order, filepath.Base(stagePath))
+		actual := capturedReadNames(t, paths.root)
+		want := []string{b.leaf, filepath.Base(stagePath), d.leaf, c.leaf}
+		sourceFailIf(t, !slices.Equal(actual, want), "selected stage order = %v, want %v", actual, want)
+		t.Logf("selected stage order: %v", actual)
 	} else {
 		checkCapturedReadOrder(t, paths.root, order)
 	}
@@ -579,35 +584,24 @@ func testCapturedReadMixedPending(t *testing.T, withStage bool) {
 		sourceMust(t, os.WriteFile(bPath, bBytes, 0o600))
 		sourceMust(t, os.WriteFile(dHeld, dBytes, 0o600))
 		sourceMust(t, os.Rename(dHeld, dPath))
-		checkCapturedReadReplacedStage(t, o, stage, stagePath, prepareErr)
+		checkCapturedReadReplacedStage(t, o, stage, stagePath, ErrIdentityV1)
 	}
 	sourceRead(t, o, c.m, c.parts)
 }
 
-func placeCapturedReadStage(t *testing.T, root string, stage capturedReadRecord, later ...string) string {
+func placeCapturedReadStage(t *testing.T, root string, stage capturedReadRecord, captures ...string) string {
 	t.Helper()
 	outside := t.TempDir()
-	for _, name := range later {
+	for _, name := range captures {
 		sourceMust(t, os.Rename(filepath.Join(root, name), filepath.Join(outside, name)))
 	}
+	sourceMust(t, os.Rename(filepath.Join(outside, captures[0]), filepath.Join(root, captures[0])))
 	path := filepath.Join(root, publicStagePrefix+stage.leaf)
 	writeSourceEntry(t, path, make([]byte, sourceSize(t, stage.m)))
-	for _, name := range later {
+	for _, name := range captures[1:] {
 		sourceMust(t, os.Rename(filepath.Join(outside, name), filepath.Join(root, name)))
 	}
 	return path
-}
-
-func capturedReadStageRefusal(t *testing.T, root string, order []capturedReadRecord, stage string) error {
-	t.Helper()
-	actual := capturedReadNames(t, root)
-	b, d, c, s := slices.Index(actual, order[0].leaf), slices.Index(actual, order[1].leaf), slices.Index(actual, order[2].leaf), slices.Index(actual, stage)
-	sourceFailIf(t, len(actual) != 4 || b < 0 || d < 0 || c < 0 || s < 0, "source listing %v does not contain the captures and stage", actual)
-	t.Logf("mixed capture order: extent=%d stage=%d replacement=%d target=%d", b, s, d, c)
-	if s < d {
-		return ErrIdentityV1
-	}
-	return nil
 }
 
 func testCapturedReadDeferredStage(t *testing.T) {
@@ -950,6 +944,85 @@ func testCapturedReadMultipleSpellings(t *testing.T, mode string) {
 	sourceReadRefusal(t, o, c.m, want, "defective capture with the second listed alternate spelling")
 	restore()
 	sourceRead(t, o, c.m, c.parts)
+}
+
+func testCapturedReadExactSpellings(t *testing.T, mode string) {
+	limits, size := sourceLimits(), capturedReadSize(t, 'B')
+	limits.Files, limits.Bytes = 10, 10*size
+	o, paths, ordered := capturedReadRetainedOrder(t, limits, 'B', 'C', 'D', 'U', 'V')
+	u, v := capturedReadRecordFor('U'), capturedReadRecordFor('V')
+	var captures []capturedReadRecord
+	for _, record := range ordered {
+		info := sourceLstat(t, filepath.Join(paths.root, record.leaf))
+		sourceFailIf(t, uint64(info.Size()) != size, "retained capture extent = %d, want %d", info.Size(), size)
+		if record.leaf != u.leaf && record.leaf != v.leaf {
+			captures = append(captures, record)
+		}
+	}
+	sourceFailIf(t, len(captures) != 3, "retained capture count = %d, want 3", len(captures))
+	b, d, c := captures[0], captures[1], captures[2]
+	for _, record := range []capturedReadRecord{b, d, u, v} {
+		sourcePrepare(t, o, record.m, record.parts)
+	}
+	for _, leaf := range []string{u.leaf, v.leaf} {
+		path := filepath.Join(paths.root, leaf)
+		alternate := filepath.Join(paths.root, strings.ToUpper(leaf))
+		if !linkCapturedReadSpelling(t, path, alternate, path) {
+			t.Skip("filesystem does not expose separate capture spellings")
+		}
+	}
+	omitted, matched := strings.HasSuffix(mode, "omissions"), strings.HasPrefix(mode, "matching-")
+	bPath, dPath := filepath.Join(paths.root, b.leaf), filepath.Join(paths.root, d.leaf)
+	bOriginal, dOriginal := sourceLstat(t, bPath), sourceLstat(t, dPath)
+	sourceFailIf(t, os.SameFile(bOriginal, dOriginal), "issued captures share an original inode")
+	dAlternate := strings.ToUpper(d.leaf)
+	dSpelling := filepath.Join(paths.root, dAlternate)
+	if matched {
+		alternate := writeSourceEntry(t, dSpelling, sourceReadFile(t, dPath))
+		sourceFailIf(t, os.SameFile(dOriginal, alternate) || alternate.Size() != dOriginal.Size() || alternate.Sys().(*syscall.Stat_t).Nlink != 1,
+			"matching spelling does not hold a distinct single-link copy")
+	}
+	bErr := ErrIntegrityV1
+	if omitted {
+		outside := t.TempDir()
+		sourceMust(t, os.Rename(bPath, filepath.Join(outside, b.leaf)))
+		sourceMust(t, os.Rename(dPath, filepath.Join(outside, d.leaf)))
+	} else {
+		if matched {
+			capturedReadReplace(t, bPath, t.TempDir(), sourceReadFile(t, bPath))
+			bErr = ErrIdentityV1
+		} else {
+			shrinkCapturedReadBacking(t, bPath, bOriginal)
+		}
+		shrinkCapturedReadBacking(t, dPath, dOriginal)
+	}
+	listed := capturedReadNames(t, paths.root)
+	bIndex, dIndex, cIndex := slices.Index(listed, b.leaf), slices.Index(listed, d.leaf), slices.Index(listed, c.leaf)
+	uIndex, vIndex := slices.Index(listed, strings.ToUpper(u.leaf)), slices.Index(listed, strings.ToUpper(v.leaf))
+	sourceFailIf(t, cIndex < 0 || uIndex < 0 || vIndex < 0, "source listing %v lacks the target or unrelated spellings", listed)
+	if omitted {
+		sourceFailIf(t, bIndex >= 0 || dIndex >= 0, "omitted canonical names remain listed: %v", listed)
+	} else {
+		sourceFailIf(t, bIndex < 0 || bIndex >= dIndex || dIndex >= cIndex, "capture listing does not order both defects before the target: %v", listed)
+	}
+	if matched {
+		matchingIndex := slices.Index(listed, dAlternate)
+		sourceFailIf(t, matchingIndex < 0, "source listing %v lacks the matching spelling", listed)
+		t.Logf("alternate order: unrelated=%d,%d matching=%d", uIndex, vIndex, matchingIndex)
+		sourceReadRefusal(t, o, c.m, ErrIntegrityV1, "matching spelling of the later issued capture")
+		sourceMust(t, os.Remove(dSpelling))
+	}
+	sourceRead(t, o, c.m, c.parts)
+	sourceReadRefusal(t, o, b.m, bErr, "first defective capture after the independent read")
+	sourceReadRefusal(t, o, d.m, ErrIntegrityV1, "second defective capture after the independent read")
+}
+
+func shrinkCapturedReadBacking(t *testing.T, path string, original os.FileInfo) {
+	t.Helper()
+	sourceMust(t, os.Truncate(path, original.Size()-1))
+	shrunk := sourceLstat(t, path)
+	sourceFailIf(t, !os.SameFile(shrunk, original) || shrunk.Size() != original.Size()-1 || shrunk.Sys().(*syscall.Stat_t).Nlink != 1,
+		"capture extent change did not preserve the single-link inode")
 }
 
 func testCapturedReadSpelledReplacement(t *testing.T) {
