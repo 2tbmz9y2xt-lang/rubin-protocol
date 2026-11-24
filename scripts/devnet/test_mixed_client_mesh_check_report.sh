@@ -237,9 +237,10 @@ set -euo pipefail
 source "$1"
 probe_root="$2"
 GO_DIR="${probe_root}/go-node"; RUST_DIR="${probe_root}/rust-node"; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"
-TXGEN_BIN="${probe_root}/rubin-txgen"; SPAWNED="${probe_root}/txgen-argv"; DETERMINISTIC_TX_FEE=1; TX_TO_KEY=to
+TXGEN_BIN="${probe_root}/rubin-txgen"; export SPAWNED="${probe_root}/txgen-argv"; DETERMINISTIC_TX_FEE=1; TX_TO_KEY=to
 TX_FROM_KEY_FILE="${probe_root}/from-key.hex"; printf 'k\n' >"${TX_FROM_KEY_FILE}"
-printf '#!/bin/sh\nprintf "%%s\\n" "$@" >"%s"\nexit 1\n' "${SPAWNED}" >"${TXGEN_BIN}"; chmod +x "${TXGEN_BIN}"
+# The stub reads its output path from the environment, so the path is never part of its source.
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" >"${SPAWNED}"\nexit 1\n' >"${TXGEN_BIN}"; chmod +x "${TXGEN_BIN}"
 bounded_mesh() { "$@"; }
 cleanup_tx_from_key_file() { :; }
 TX_REASON=""
