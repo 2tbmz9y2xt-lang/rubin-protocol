@@ -224,14 +224,15 @@ type imageRoundUsage struct {
 }
 
 // BeginImageRound admits an acquisition round under one Service lease. It refuses, in this order, once Close has
-// published the non-OPEN state (errServiceClosed), a nil ctx (errImageNilContext), an anchor height above 0xffffffff
-// (errImageRequestDomain), a zero limit or nonpositive duration (errImagePolicy), an empty source list or a source
-// that has no Service.peers entry or resolves to an already listed connection (errImageSourceSet), then, right after
-// its one clock read and ahead of the RD decision, a Service that Close has moved out of OPEN since the lease was
-// taken (errServiceClosed), and an RD = now + RoundLifetime that is not exact (errImagePolicy). A refusal returns a
-// nil round and faults no peer. A done ctx is captured, not refused. Its Requests for different starts can hold
-// assignments on several of its sources at once, within its captured limits, with no source waiting behind another
-// (RUBIN_L1_P2P_AUX.md Section 7.5).
+// published the non-OPEN state (errServiceClosed), a nil ctx (errImageNilContext), an anchor height above
+// 0xffffffff (errImageRequestDomain), a zero limit or nonpositive duration (errImagePolicy), an empty source list,
+// more sources than Service.peers entries (decided before any table sized by the source list is allocated) or a
+// source that has no Service.peers entry or resolves to an already listed connection (errImageSourceSet), then,
+// right after its one clock read and ahead of the RD decision, a Service that Close has moved out of OPEN since the
+// lease was taken (errServiceClosed), and an RD = now + RoundLifetime that is not exact (errImagePolicy). A refusal
+// returns a nil round and faults no peer. A done ctx is captured, not refused. Its Requests for different starts
+// can hold assignments on several of its sources at once, within its captured limits, with no source waiting behind
+// another (RUBIN_L1_P2P_AUX.md Section 7.5).
 func (s *Service) BeginImageRound(ctx context.Context, config ImageRoundConfig) (*ImageRound, error) {
 	if !s.acquireWork() {
 		return nil, errServiceClosed
@@ -285,16 +286,19 @@ func positiveDurations(durations ...time.Duration) bool {
 	return true
 }
 
-// resolveImageSources resolves every source ID through Service.peers in one
-// read section; two IDs naming the same connection refuse.
+// resolveImageSources resolves every source ID through Service.peers in one read section; more IDs than
+// Service.peers entries refuse before any table is allocated, and two IDs naming the same connection refuse.
 func (s *Service) resolveImageSources(ids []string) (map[string]*peer, error) {
 	if len(ids) == 0 {
 		return nil, errImageSourceSet
 	}
-	sources := make(map[string]*peer, len(ids))
-	seen := make(map[*peer]struct{}, len(ids))
 	s.peersMu.RLock()
 	defer s.peersMu.RUnlock()
+	if len(ids) > len(s.peers) {
+		return nil, errImageSourceSet
+	}
+	sources := make(map[string]*peer, len(ids))
+	seen := make(map[*peer]struct{}, len(ids))
 	for _, id := range ids {
 		session := s.peers[id]
 		if session == nil {

@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -87,14 +88,6 @@ func (c *imageTestClock) followRealTime(from time.Time) {
 	c.mu.Unlock()
 }
 
-// cancelOnRead makes the next read call cancel before it returns, leaving the clock.
-func (c *imageTestClock) cancelOnRead(cancel func()) {
-	c.onNextRead(func(now time.Time) time.Time {
-		cancel()
-		return now
-	})
-}
-
 // awaitEndAppliers waits until no goroutine runs, or is about to run, the ctx callback or the
 // deadline timer of an instance, found by the name of the closures that admission arms.
 func awaitEndAppliers(t *testing.T) {
@@ -105,11 +98,14 @@ func awaitEndAppliers(t *testing.T) {
 	}, "end applier")
 }
 
-// jumpOnRead makes the next read move the clock to now and call cancel before it returns.
+// cancelOnRead makes the next read call cancel before it returns, leaving the clock.
+func (c *imageTestClock) cancelOnRead(cancel func()) { c.jumpOnRead(time.Time{}, cancel) }
+
+// jumpOnRead makes the next read move the clock to now, or leave it when now is zero, and call cancel before it returns.
 func (c *imageTestClock) jumpOnRead(now time.Time, cancel func()) {
-	c.onNextRead(func(time.Time) time.Time {
+	c.onNextRead(func(at time.Time) time.Time {
 		cancel()
-		return now
+		return cmp.Or(now, at)
 	})
 }
 
@@ -640,6 +636,7 @@ func TestImageRequesterRound(t *testing.T) {
 	t.Run("a failed write keeps the query, the id and the work and retires only that assignment", testImageFailedWrite)
 	t.Run("a stale handle leaves its replacement current", testImageStaleHandle)
 	t.Run("round refusals in order", testImageRoundRefusals)
+	t.Run("more source ids than service entries refuse with less allocation than the source list", testImageSourceBound)
 	t.Run("round construction at the domain bounds and with a done ctx", testImageRoundAdmits)
 	t.Run("request refusals in order", testImageRequestRefusals)
 	t.Run("deadline representability", testImageRepresentability)
@@ -765,10 +762,7 @@ func testImageCountLimits(t *testing.T) {
 			t.Run(fmt.Sprintf("%s global=%v", tc.name, global), func(t *testing.T) {
 				f := newImageTestFixture(t, 2)
 				limits := imageTestLimits()
-				scope := &limits.PerPeer
-				if global {
-					scope = &limits.Global
-				}
+				scope := map[bool]*ImageUnits{false: &limits.PerPeer, true: &limits.Global}[global]
 				*tc.field(scope) = 2
 				round := f.round(t, limits, 0, 1)
 				ctx, cancel := context.WithCancel(context.Background())
@@ -805,10 +799,7 @@ func testImagePendingBytes(t *testing.T) {
 		t.Run(fmt.Sprintf("global=%v limit %d", tc.global, tc.limit), func(t *testing.T) {
 			f := newImageTestFixture(t, 2)
 			limits := imageTestLimits()
-			scope := &limits.PerPeer
-			if tc.global {
-				scope = &limits.Global
-			}
+			scope := map[bool]*ImageUnits{false: &limits.PerPeer, true: &limits.Global}[tc.global]
 			scope.PendingNetworkBytes = tc.limit
 			round := f.round(t, limits, 0, 1)
 			stall := f.wires[0].armStall()
@@ -910,8 +901,7 @@ func testImagePerRoundUsage(t *testing.T) {
 
 func testImageDeadlines(t *testing.T) {
 	f := newImageTestFixture(t, 5)
-	t0 := f.clock.Now()
-	limits := imageTestLimits()
+	t0, limits := f.clock.Now(), imageTestLimits()
 	limits.RoundLifetime = 60 * time.Second
 	round := f.round(t, limits, 0, 1, 2, 3, 4)
 	f.admitted(t, round, context.Background(), 0, 1, 1)
@@ -1022,8 +1012,7 @@ func testImageEndBeforeWrite(t *testing.T) {
 	for _, tc := range imageEndCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newImageTestFixture(t, 2)
-			t0 := f.clock.Now()
-			limits := imageTestLimits()
+			t0, limits := f.clock.Now(), imageTestLimits()
 			if tc.lifetime != 0 {
 				limits.AttemptLifetime = tc.lifetime
 			}
@@ -1373,8 +1362,7 @@ func testImagePassEndOrder(t *testing.T) {
 // and checks that the listed refusals ahead of the pass leave it unretired until a later pass.
 func testImageEarlyRefusalRetiresNothing(t *testing.T) {
 	f := newImageTestFixture(t, 2)
-	t0 := f.clock.Now()
-	limits := imageTestLimits()
+	t0, limits := f.clock.Now(), imageTestLimits()
 	limits.AttemptLifetime, limits.RoundLifetime = 24*time.Hour, 48*time.Hour
 	round := f.round(t, limits, 0)
 	doneRoundCtx, cancelDoneRound := context.WithCancel(context.Background())
@@ -1471,8 +1459,7 @@ func testImageRefusalKeepsPass(t *testing.T) {
 	for _, tc := range imagePassRefusals() {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newImageTestFixtureAt(t, 2, time.Now())
-			t0 := f.clock.Now()
-			limits := imageTestLimits()
+			t0, limits := f.clock.Now(), imageTestLimits()
 			limits.AttemptLifetime = 50 * time.Millisecond
 			limits.PerPeer.SourceAttempts = 1
 			ended := f.round(t, limits, 0, 1)
@@ -1503,8 +1490,7 @@ func testImageEndDuringWrite(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newImageTestFixture(t, 2)
-			t0 := f.clock.Now()
-			limits := imageTestLimits()
+			t0, limits := f.clock.Now(), imageTestLimits()
 			limits.PerPeer.PendingNetworkBytes = 120
 			round := f.round(t, limits, 0, 1)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -1685,7 +1671,6 @@ type imageHookCtx struct {
 	done                chan struct{}
 	err                 error
 	funcs               map[*func()]struct{}
-	calls, stops        int
 	onAfterFunc, onStop func()
 }
 
@@ -1714,11 +1699,8 @@ func (c *imageHookCtx) end(err error) {
 
 func (c *imageHookCtx) AfterFunc(f func()) func() bool {
 	c.mu.Lock()
-	c.calls++
 	hook := c.onAfterFunc
-	if c.calls > 1 {
-		hook = nil
-	}
+	c.onAfterFunc = nil
 	if hook == nil {
 		c.funcs[&f] = struct{}{}
 	}
@@ -1731,11 +1713,8 @@ func (c *imageHookCtx) AfterFunc(f func()) func() bool {
 
 func (c *imageHookCtx) stop(key *func()) bool {
 	c.mu.Lock()
-	c.stops++
 	hook := c.onStop
-	if c.stops > 1 {
-		hook = nil
-	}
+	c.onStop = nil
 	_, kept := c.funcs[key]
 	if hook == nil {
 		delete(c.funcs, key)
@@ -1791,8 +1770,7 @@ type imageBubble struct {
 func runImageBubble(t *testing.T, follow bool, body func(t *testing.T, b imageBubble)) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newImageTestFixture(t, 1)
-		t0 := f.clock.Now()
-		limits := imageTestLimits()
+		t0, limits := f.clock.Now(), imageTestLimits()
 		limits.AttemptLifetime = 100 * time.Millisecond
 		roundCtx, cancelRound := context.WithCancel(context.Background())
 		defer cancelRound()
@@ -1911,8 +1889,7 @@ func (b imageBubble) endRound() {
 func testImageSaturatedTimer(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newImageTestFixture(t, 1)
-		t0 := f.clock.Now()
-		limits := imageTestLimits()
+		t0, limits := f.clock.Now(), imageTestLimits()
 		limits.AttemptLifetime, limits.RoundLifetime = math.MaxInt64, math.MaxInt64
 		f.admitted(t, f.round(t, limits, 0), context.Background(), 0, 1, 1)
 		inst := f.instance(1)
@@ -2133,6 +2110,24 @@ func testImageRoundRefusals(t *testing.T) {
 	}
 }
 
+// testImageSourceBound compares the bytes BeginImageRound allocates for 1048576 unregistered source ids with the
+// backing array of that list, which one table sized by the list exceeds.
+func testImageSourceBound(t *testing.T) {
+	f := newImageTestFixture(t, 2)
+	config := f.config(imageTestLimits())
+	config.SourceIDs = make([]string, 1<<20)
+	for i := range config.SourceIDs {
+		config.SourceIDs[i] = fmt.Sprintf("absent-%d:1", i)
+	}
+	backing := uint64(cap(config.SourceIDs)) * uint64(reflect.TypeFor[string]().Size())
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	round, err := f.s.BeginImageRound(context.Background(), config)
+	runtime.ReadMemStats(&after)
+	grown := after.TotalAlloc - before.TotalAlloc
+	require(t, round == nil && errors.Is(err, errImageSourceSet) && grown < backing, "round=%v err=%v allocated %d bytes, source list backing array %d bytes", round != nil, err, grown, backing)
+}
+
 func testImageRoundAdmits(t *testing.T) {
 	f := newImageTestFixture(t, 1)
 	passing := f.config(ImageLimits{PerPeer: imageTestUnits(math.MaxUint64), Global: imageTestUnits(math.MaxUint64), AttemptLifetime: time.Second, RoundLifetime: time.Hour, Backoff: time.Second}, 0)
@@ -2174,8 +2169,7 @@ func testImageRequestRefusals(t *testing.T) {
 	})
 	t.Run("byte limit, round deadline, assignment, attempt, limit and id checks in order", func(t *testing.T) {
 		f := newImageTestFixture(t, 2)
-		t0 := f.clock.Now()
-		limits := imageTestLimits()
+		t0, limits := f.clock.Now(), imageTestLimits()
 		limits.PerPeer.AdmittedRequests, limits.AttemptLifetime = 2, 50*time.Millisecond
 		round := f.round(t, limits, 0, 1)
 		f.admitTimerSpent(t, round, context.Background(), 0, 1, 1)
@@ -2313,9 +2307,12 @@ func testImageServiceClose(t *testing.T) {
 		closed := lifecycleClose(f.s)
 		requireChannelClosed(t, f.conns[0].closed, "connection close")
 		requireStillBlocked(t, closed, "Close with the parked request's end decision pending")
+		var nilCtx context.Context
+		drainedNil := requestWithin(lifecycleWatchdog, round, nilCtx, f.ids[0], 3, imageTestByteLimit)
 		drained := requestWithin(lifecycleWatchdog, round, context.Background(), f.ids[0], 2, imageTestByteLimit)
 		drainedRound, err := f.begin(context.Background(), f.config(imageTestLimits(), 0))
 		req.mu.Unlock()
+		requireQueryResult(t, drainedNil, consensus.UTXOImageQuery{}, errServiceClosed, "request with a nil ctx while Close drains")
 		requireQueryResult(t, drained, consensus.UTXOImageQuery{}, errServiceClosed, "request while Close drains")
 		require(t, drainedRound == nil && err == errServiceClosed, "round while Close drains: round=%v err=%v, want %v", drainedRound != nil, err, errServiceClosed) //nolint:errorlint // The refusal is errServiceClosed itself.
 		requireReturned(t, closed, "Close")
@@ -2383,8 +2380,7 @@ func (f *imageTestFixture) closeWhileReadHeld(t *testing.T, entered <-chan struc
 // errServiceClosed, ahead of its ctx check and its pass, and the instance stays current.
 func testImageDrainAdmission(t *testing.T, canceled bool) {
 	f := newImageTestFixture(t, 2)
-	t0 := f.clock.Now()
-	limits := imageTestLimits()
+	t0, limits := f.clock.Now(), imageTestLimits()
 	limits.AttemptLifetime, limits.RoundLifetime = 24*time.Hour, 48*time.Hour
 	round := f.round(t, limits, 0, 1)
 	f.admitted(t, round, context.Background(), 0, 1, 1)
