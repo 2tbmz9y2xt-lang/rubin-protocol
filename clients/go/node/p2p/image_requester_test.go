@@ -708,25 +708,31 @@ func testImageIDMaximum(t *testing.T) {
 
 func testImageOneCurrent(t *testing.T) {
 	f := newImageTestFixture(t, 3)
-	first := f.round(t, imageTestLimits(), 0, 1, 2)
-	second := f.round(t, imageTestLimits(), 0, 1, 2)
+	limits := imageTestLimits()
+	limits.AttemptLifetime = 50 * time.Millisecond
+	first := f.round(t, limits, 0, 1, 2)
+	second := f.round(t, limits, 0, 1, 2)
 	stall := f.wires[0].armStall()
+	reads := f.clock.readCount()
 	pending := f.goRequest(first, context.Background(), 0, 1)
 	requireChannelClosed(t, stall.entered, "first request write")
+	f.requireTimerSpent(t, imageTestAnchor, 1, reads+3)
 	f.refused(t, second, context.Background(), 1, 1, errImageAssignmentCurrent)
-	f.admitted(t, second, context.Background(), 1, 2, 1)
+	f.admitTimerSpent(t, second, context.Background(), 1, 2, 1)
 	stall.release <- nil
 	requireImageResult(t, awaitImageResult(t, pending, "stalled request"), 1, 1, nil, "stalled request")
 	f.requireFrames(t, 1, "parallel start", expectedImageQuery(1, 2))
 	other := imageTestAnchor
 	other.Height = 8
-	otherRound, err := f.begin(context.Background(), ImageRoundConfig{Anchor: other, SourceIDs: []string{f.ids[2]}, Limits: imageTestLimits()})
+	otherRound, err := f.begin(context.Background(), ImageRoundConfig{Anchor: other, SourceIDs: []string{f.ids[2]}, Limits: limits})
 	must(t, err, "BeginImageRound other anchor")
 	wantOther := expectedImageQuery(1, 1)
 	wantOther.Height = 8
+	reads = f.clock.readCount()
 	requireQueryResult(t, f.request(otherRound, context.Background(), 2, 1), wantOther, nil, "other anchor same start")
+	f.requireTimerSpent(t, other, 1, reads+3)
 	f.requireFrames(t, 2, "other anchor same start", wantOther)
-	f.clock.add(10*time.Second + time.Nanosecond)
+	f.clock.add(50*time.Millisecond + time.Nanosecond)
 	f.refusedAfterPass(t, first, 0, 1, errImageAttempted, imageDrop{1, 1, 3})
 	f.admitted(t, first, context.Background(), 1, 1, 2)
 }
@@ -806,13 +812,13 @@ func testImagePendingBytes(t *testing.T) {
 func testImageDistinctStarts(t *testing.T) {
 	f := newImageTestFixture(t, 2)
 	limits := imageTestLimits()
-	limits.Global.DistinctStarts = 1
+	limits.Global.DistinctStarts, limits.AttemptLifetime = 1, 50*time.Millisecond
 	round := f.round(t, limits, 0, 1)
-	f.admitted(t, round, context.Background(), 0, 1, 1)
-	f.clock.add(10*time.Second + time.Nanosecond)
-	f.admitted(t, round, context.Background(), 1, 1, 1)
+	f.admitTimerSpent(t, round, context.Background(), 0, 1, 1)
+	f.clock.add(50*time.Millisecond + time.Nanosecond)
+	f.admitTimerSpent(t, round, context.Background(), 1, 1, 1)
 	f.requireUsage(t, round, 1, imageUsage(1, 1, 1, 1, 0), imageUsage(1, 1, 2, 2, 0), "the start admitted again on the second session")
-	f.clock.add(10*time.Second + time.Nanosecond)
+	f.clock.add(50*time.Millisecond + time.Nanosecond)
 	f.refusedAfterPass(t, round, 0, 2, errImageLimit, imageDrop{0, 1, 1})
 	f.requireUsage(t, round, 0, imageUsage(0, 1, 1, 1, 0), imageUsage(0, 1, 2, 2, 0), "after the refusal")
 }
@@ -840,12 +846,12 @@ func testImagePerRoundUsage(t *testing.T) {
 		f := newImageTestFixture(t, 1)
 		limits := imageTestLimits()
 		limits.PerPeer.CurrentAssignments, limits.Global.CurrentAssignments = 1, 1
+		limits.AttemptLifetime = time.Second + 50*time.Millisecond
 		r1, r2 := f.round(t, limits, 0), f.round(t, limits, 0)
-		t0 := f.clock.Now()
-		f.admitted(t, r1, context.Background(), 0, 1, 1)
+		ended := f.admitTimerSpent(t, r1, context.Background(), 0, 1, 1)
 		f.clock.add(time.Second)
 		f.admitted(t, r2, context.Background(), 0, 2, 2)
-		f.clock.set(t0.Add(10*time.Second + time.Nanosecond))
+		f.clock.set(ended.deadline.Add(time.Nanosecond))
 		f.refusedAfterPass(t, r2, 0, 3, errImageLimit, imageDrop{0, 0, 1})
 		f.admitted(t, r1, context.Background(), 0, 4, 3)
 	})
@@ -883,11 +889,11 @@ func testImageDeadlines(t *testing.T) {
 	ended := f.instance(6)
 	cancel()
 	f.waitRetired(t, ended, "canceled instance")
-	f.clock.set(t0.Add(55 * time.Second))
-	f.admitted(t, round, context.Background(), 2, 2, 1)
-	require(t, f.instance(2).deadline.Equal(t0.Add(60*time.Second)), "D capped by RD: %v", f.instance(2).deadline)
+	f.clock.set(t0.Add(60*time.Second - 50*time.Millisecond))
+	capped := f.admitTimerSpent(t, round, context.Background(), 2, 2, 1)
+	require(t, capped.deadline.Equal(t0.Add(60*time.Second)), "D capped by RD: %v", capped.deadline)
 	f.clock.set(t0.Add(60*time.Second - time.Nanosecond))
-	f.admitTimerSpent(t, round, 2, 3, 2)
+	f.admitTimerSpent(t, round, context.Background(), 2, 3, 2)
 	f.clock.set(t0.Add(60 * time.Second))
 	f.refused(t, round, context.Background(), 0, 4, errImageRoundDeadline)
 	require(t, round.roundDeadline.Equal(t0.Add(60*time.Second)) && round.limits == limits, "RD=%v limits=%+v, want %+v", round.roundDeadline, round.limits, limits)
@@ -1150,11 +1156,14 @@ func testImageDoneContexts(t *testing.T) {
 	f.admitted(t, live, context.Background(), 0, 1, 1)
 }
 
-// testImageDoneAtAdmissionRead admits start 1 on session 0, then requests start 1 on session 1
-// with live ctxs whose admission clock read ends one ctx and moves now past the first instance's
-// D. The request refuses with that ctx's error, allocates no ID, writes no frame and, for the
-// Request ctx, leaves the first instance unretired; the next request with live ctxs is admitted
-// with ID 1 on session 1. The Request ctx is an imageEndCtx or a context.WithCancel ctx.
+// testImageDoneAtAdmissionRead admits start 1 on session 0 with a live ctx distinct from the later
+// request's and with its deadline timer spent, then requests start 1 on session 1 with live ctxs
+// whose admission clock read ends one ctx and moves now 1 ns past the first instance's D. The
+// request refuses with that ctx's error, allocates no ID, writes no frame and, for the Request
+// ctx, leaves the first instance unretired, which neither its ctx callbacks nor its spent timer
+// can change; the next request with live ctxs is admitted with ID 1 on session 1, and for the
+// Request ctx its pass records errImageExpired for the first instance. The Request ctx is an
+// imageEndCtx or a context.WithCancel ctx.
 func testImageDoneAtAdmissionRead(t *testing.T) {
 	requestEnd, roundEnd := errors.New("request ctx ended"), errors.New("round ctx ended")
 	endCtx := func() (context.Context, context.CancelFunc) { return newImageEndCtx(requestEnd) }
@@ -1171,7 +1180,6 @@ func testImageDoneAtAdmissionRead(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newImageTestFixture(t, 2)
-			t0 := f.clock.Now()
 			roundCtx, cancelRound := newImageEndCtx(roundEnd)
 			defer cancelRound()
 			ctx, cancel := tc.requestCtx()
@@ -1180,16 +1188,17 @@ func testImageDoneAtAdmissionRead(t *testing.T) {
 			if tc.round {
 				end = cancelRound
 			}
-			round := f.roundCtx(t, roundCtx, imageTestLimits(), 0, 1)
-			f.admitted(t, round, context.Background(), 0, 1, 1)
-			first := f.instance(1)
+			limits := imageTestLimits()
+			limits.AttemptLifetime = 50 * time.Millisecond
+			round := f.roundCtx(t, roundCtx, limits, 0, 1)
+			first := f.admitTimerSpent(t, round, context.Background(), 0, 1, 1)
 			hooked := false
 			var hook func(time.Time) time.Time
 			hook = func(now time.Time) time.Time {
 				if imageCalledFrom(".(*ImageRound).admit") {
 					hooked = true
 					end()
-					return t0.Add(10*time.Second + time.Nanosecond)
+					return first.deadline.Add(time.Nanosecond)
 				}
 				f.clock.onRead = hook
 				return now
@@ -1218,14 +1227,14 @@ func testImageDoneAtAdmissionRead(t *testing.T) {
 func testImageRequestRetiresEnded(t *testing.T) {
 	t.Run("same round", func(t *testing.T) {
 		f := newImageTestFixture(t, 2)
-		t0 := f.clock.Now()
-		round := f.round(t, imageTestLimits(), 0, 1)
+		limits := imageTestLimits()
+		limits.AttemptLifetime = 50 * time.Millisecond
+		round := f.round(t, limits, 0, 1)
 		ctx, cancel := context.WithCancel(context.Background())
-		f.admitted(t, round, ctx, 0, 1, 1)
-		inst := f.instance(1)
-		f.clock.set(t0.Add(10 * time.Second))
+		inst := f.admitTimerSpent(t, round, ctx, 0, 1, 1)
+		f.clock.set(inst.deadline)
 		f.refused(t, round, context.Background(), 0, 1, errImageAssignmentCurrent)
-		f.clock.set(t0.Add(10*time.Second + time.Nanosecond))
+		f.clock.set(inst.deadline.Add(time.Nanosecond))
 		f.refusedAfterPass(t, round, 0, 1, errImageAttempted, imageDrop{1, 1, 1})
 		retired, end := f.ended(inst)
 		require(t, retired && end == errImageExpired, "pass: retired=%v end=%v", retired, end) //nolint:errorlint // The recorded end is errImageExpired itself.
@@ -1442,7 +1451,7 @@ func testImageRefusalKeepsPass(t *testing.T) {
 			limits.AttemptLifetime = 50 * time.Millisecond
 			limits.PerPeer.SourceAttempts = 1
 			ended := f.round(t, limits, 0, 1)
-			inst := f.admitTimerSpent(t, ended, 0, 1, 1)
+			inst := f.admitTimerSpent(t, ended, context.Background(), 0, 1, 1)
 			perPeerBefore, globalBefore := f.usage(ended, 0)
 			round, session, start := tc.prepare(t, f, ended, t0)
 			f.refusedAfterPass(t, round, session, start, tc.want, tc.drop)
@@ -1619,7 +1628,7 @@ func testImageCallbacksAndTimer(t *testing.T) {
 		limits := imageTestLimits()
 		limits.AttemptLifetime = 50 * time.Millisecond
 		round := f.round(t, limits, 0)
-		inst := f.admitTimerSpent(t, round, 0, 1, 1)
+		inst := f.admitTimerSpent(t, round, context.Background(), 0, 1, 1)
 		f.requireNoClockRead(t, "clock reads after the timer did nothing")
 		require(t, f.instance(1) == inst, "timer retired a current instance")
 	})
@@ -1822,24 +1831,36 @@ func testImageSaturatedTimer(t *testing.T) {
 	require(t, !retired && f.instance(1) == inst, "instance with a saturated deadline timer: retired=%v", retired)
 }
 
-// admitTimerSpent admits start on session through round, with D a short real time after now and
-// writeMu free, and waits until the clock, which does not move, has been read three times: the
-// admission read first, then the pre-write read and the deadline timer's read in either order,
-// since commitLocked arms the timer after the admission read. The three reads find now not after D. Under
-// the requester mutex, which the timer holds across its read, the instance is unretired and
-// stopping its timer reports that the timer had already fired and was not armed again.
-func (f *imageTestFixture) admitTimerSpent(t *testing.T, round *ImageRound, session int, start byte, wantID uint64) *imageInstance {
+// admitTimerSpent admits start on session through round with ctx, with D a short real time after
+// now and writeMu free, and returns the instance once requireTimerSpent finds its deadline timer
+// spent after three clock reads: the admission read first, then the pre-write read and the
+// deadline timer's read in either order, since commitLocked arms the timer after the admission
+// read.
+func (f *imageTestFixture) admitTimerSpent(t *testing.T, round *ImageRound, ctx context.Context, session int, start byte, wantID uint64) *imageInstance {
 	t.Helper()
 	reads := f.clock.readCount()
-	f.admitted(t, round, context.Background(), session, start, wantID)
-	waitUntil(t, func() bool { return f.clock.readCount() >= reads+3 }, "deadline timer read")
-	inst := f.instance(start)
-	require(t, inst != nil, "start %d has no current instance after its timer read", start)
+	f.admitted(t, round, ctx, session, start, wantID)
+	return f.requireTimerSpent(t, imageTestAnchor, start, reads+3)
+}
+
+// requireTimerSpent waits until the clock, which the caller keeps at a time not after D, has been
+// read reads times, a count that includes the read of the deadline timer of the current instance
+// of anchor and start, and checks that the clock was read exactly reads times. Under the
+// requester mutex, which the timer holds across its read, the instance is unretired and stopping
+// its timer reports that the timer had already fired and was not armed again, so it cannot
+// retire the instance later.
+func (f *imageTestFixture) requireTimerSpent(t *testing.T, anchor ImageAnchor, start byte, reads int) *imageInstance {
+	t.Helper()
+	waitUntil(t, func() bool { return f.clock.readCount() >= reads }, "deadline timer read")
 	req := f.lockRequester()
-	retired, end, rearmed := inst.retired, inst.end, inst.timer.Stop()
+	inst := req.current[imageKey{anchor, imageStart(start)}]
+	retired, rearmed := inst == nil, false
+	if inst != nil {
+		retired, rearmed = inst.retired, inst.timer.Stop()
+	}
 	req.mu.Unlock()
-	require(t, !retired && !rearmed, "timer with now not after D: retired=%v end=%v, timer armed again=%v", retired, end, rearmed)
-	requireEqual(t, f.clock.readCount(), reads+3, "clock reads after the timer read")
+	require(t, !retired && !rearmed, "start %d after its timer read with now not after D: current instance %p, retired=%v, timer armed again=%v", start, inst, retired, rearmed)
+	requireEqual(t, f.clock.readCount(), reads, "clock reads after the timer read")
 	return inst
 }
 
@@ -2042,9 +2063,9 @@ func testImageRequestRefusals(t *testing.T) {
 		f := newImageTestFixture(t, 2)
 		t0 := f.clock.Now()
 		limits := imageTestLimits()
-		limits.PerPeer.AdmittedRequests = 2
+		limits.PerPeer.AdmittedRequests, limits.AttemptLifetime = 2, 50*time.Millisecond
 		round := f.round(t, limits, 0, 1)
-		f.admitted(t, round, context.Background(), 0, 1, 1)
+		f.admitTimerSpent(t, round, context.Background(), 0, 1, 1)
 		f.refused(t, round, context.Background(), 0, 1, errImageAssignmentCurrent)
 		f.refused(t, round, context.Background(), 1, 1, errImageAssignmentCurrent)
 		ctx, cancel := context.WithCancel(context.Background())
