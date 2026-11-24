@@ -2656,7 +2656,7 @@ sn_check "sidecar datadir through a missing directory" "${SN_INVALID}" "datadirs
 sidecar_value_check "node binary through a missing directory" "node-go command/binary is not bound to executable rubin-node-go" unknown public "${TMP_ROOT}/sn-mesh-binary-through-missing-report.json"
 sidecar_value_check "legacy marker through a missing directory" "legacy marker is not a regular file" legacy_marker_invalid public "${TMP_ROOT}/sn-mesh-marker-through-missing-report.json"
 sidecar_value_check "restart datadir through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-report-datadir-through-missing-report.json"
-sidecar_value_check "rust argv datadir through a missing directory" "node command_argv does not match exact launched argv" argv_mismatch producer-tx "${TMP_ROOT}/sn-tx-accept-argv-datadir-through-missing-report.json"
+sidecar_value_check "rust argv datadir through a missing directory" "node command_argv does not match exact launched argv" argv_mismatch producer-tx "${TMP_ROOT}/sn-tx-accept-argv-datadir-through-missing-report.json" combined_report_reason_token
 sidecar_value_check "old rust argv datadir through a missing directory" "rust_restart old argv mismatch" rust_restart_old_argv_mismatch rust-restart "${TMP_ROOT}/sn-restart-old-argv-datadir-through-missing-report.json"
 sidecar_value_check "old rust argv binary through a missing directory" "rust_restart old argv mismatch" rust_restart_old_argv_mismatch rust-restart "${TMP_ROOT}/sn-restart-old-argv-binary-through-missing-report.json"
 sn_check "artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" public mesh-root-through-missing
