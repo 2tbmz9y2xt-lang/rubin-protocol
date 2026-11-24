@@ -1768,6 +1768,10 @@ SN_CASES = (
     (SN_CHAIN, "tip-has-tip-false", SN_I, GO_TIP_PATH + " does not match expected tip", lambda s, r: sn_edit_file(r, GO_TIP, has_tip=False)),
     (SN_CHAIN, "tip-height", SN_I, GO_TIP_PATH + " does not match expected tip", lambda s, r: sn_edit_file(r, GO_TIP, height=102, best_known_height=102)),
     (SN_CHAIN, "tip-hash", SN_I, GO_TIP_PATH + " does not match expected tip", lambda s, r: sn_edit_file(r, GO_TIP, tip_hash="ee" * 32)),
+    (SN_CHAIN, "tip-height-float", SN_I, GO_TIP_PATH + " does not match expected tip", lambda s, r: sn_edit_file(r, GO_TIP, height=float(s["initial_convergence"]["height"]))),
+    (SN_CHAIN, "tip-best-known-float", SN_I, GO_TIP_PATH + " does not match expected tip", lambda s, r: sn_edit_file(r, GO_TIP, best_known_height=float(s["initial_convergence"]["height"]))),
+    (SN_CHAIN, "tip-best-known-below", SN_I, GO_TIP_PATH + " does not match expected tip", lambda s, r: sn_edit_file(r, GO_TIP, best_known_height=s["initial_convergence"]["height"] - 1)),
+    (SN_CHAIN, "tip-in-ibd-zero", SN_I, GO_TIP_PATH + " does not match expected tip", lambda s, r: sn_edit_file(r, GO_TIP, in_ibd=0)),
     (SN_CHAIN, "genesis-list", SN_I, "genesis malformed", lambda s, r: s.update(genesis=[])),
     (SN_CHAIN, "genesis-extra", SN_I, "genesis malformed", lambda s, r: s["genesis"].update(extra=None)),
     (SN_CHAIN, "genesis-missing", SN_I, "genesis malformed", lambda s, r: s["genesis"].pop("rust_block_path")),
@@ -2317,7 +2321,7 @@ while IFS=$'\t' read -r sn_mode sn_name sn_token sn_needle; do
   sn_cases=$((sn_cases + 1))
 done < "${TMP_ROOT}/sn-cases.tsv"
 stop_fifo_watchdog
-(( sn_cases == 226 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 226" >&2; exit 1; }
+(( sn_cases == 234 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 234" >&2; exit 1; }
 sn_output="$(check_report "${TMP_ROOT}/sn-tx-accept-top-extra-report.json" offline producer-tx 2>&1)" && { echo "FAIL: sidecar extra key report should fail" >&2; exit 1; }
 [[ "$(combined_report_reason_token <<<"${sn_output}")" == store_neutrality_sidecar_invalid ]] || { echo "FAIL: combined token for sidecar keys mismatch: $(combined_report_reason_token <<<"${sn_output}")" >&2; exit 1; }
 printf 'PASS: mixed-client mesh check-report public/internal boundaries are covered\n'
