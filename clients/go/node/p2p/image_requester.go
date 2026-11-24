@@ -313,7 +313,9 @@ func (s *Service) resolveImageSources(ids []string) (map[string]*peer, error) {
 	return sources, nil
 }
 
-// Request admits one assignment for start on the captured source sourceID and writes its getutxoimg frame. It holds
+// Request admits one assignment for start on the captured source sourceID and writes its getutxoimg frame. It reads
+// the round it is called on once, at entry, so an assignment to that variable during the call changes neither the
+// round of its query, deadline, limits and charges nor the round its instance releases. It holds
 // one Service lease from entry until it returns; its result and, after a failed write, the session's last error and
 // the close of its connection are fixed before it releases it. Admission is the only request-ID allocator and is
 // all-or-nothing: a refusal returns a zero query, faults no peer, allocates no ID, adds no registry entry, charge or
@@ -368,12 +370,13 @@ func (s *Service) resolveImageSources(ids []string) (map[string]*peer, error) {
 // mutex, which admissions share, is never held across that writeMu wait or a frame write, so admitted
 // Requests on different sessions write their frames in parallel (RUBIN_L1_P2P_AUX.md Section 7.5).
 func (r *ImageRound) Request(ctx context.Context, sourceID string, start [36]byte, byteLimit uint32) (consensus.UTXOImageQuery, error) {
-	s := r.service
+	round := *r
+	s := round.service
 	if !s.acquireWork() {
 		return consensus.UTXOImageQuery{}, errServiceClosed
 	}
 	defer s.releaseWork()
-	inst, payload, err := r.admit(ctx, sourceID, start, byteLimit)
+	inst, payload, err := round.admit(ctx, sourceID, start, byteLimit)
 	if err != nil {
 		return consensus.UTXOImageQuery{}, err
 	}
