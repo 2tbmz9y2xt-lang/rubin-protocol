@@ -1554,10 +1554,12 @@ mine_next_cases = (
     ("rust-conv-go", "go-mine-next.json", rust_converge_report, ("go_mine", "mine_next_path"), GO_MINE_VARIANTS),
     ("converge-rust", "rust-mine-next.json", converge_report, ("rust_mine", "mine_next_path"), ("nonce-string", "timestamp-string", "height-over-rust-mine", "tx-count-over-rust-mine")),
     ("rust-conv-go", "go-mine-next.json", rust_converge_report, ("go_mine", "mine_next_path"), ("nonce-string", "timestamp-string", "height-over-go-mine", "tx-count-over-go-mine")),
-    ("restart-go", "go-restart-mine-next.json", restart_report, ("rust_restart", "go_target_mine_next_path"), ("nonce-over", "timestamp-over", "tx-count-over-restart")),
+    ("restart-go", "go-restart-mine-next.json", restart_report, ("rust_restart", "go_target_mine_next_path"), ("nonce-over", "timestamp-over", "tx-count-over-restart", "nonce-string")),
     ("converge-go-tip", "go-converge-tip.json", converge_report, ("go_converge", "tip_path"), ("best-below", "best-string", "in-ibd-string")),
     ("rust-conv-rust-tip", "rust-converge-tip.json", rust_converge_report, ("rust_converge", "tip_path"), ("best-below", "best-string", "in-ibd-string")),
-    ("restart-pre-tip", "rust-pre-restart-tip.json", restart_report, ("rust_restart", "pre_restart_tip_path"), ("best-over",)),
+    ("restart-pre-tip", "rust-pre-restart-tip.json", restart_report, ("rust_restart", "pre_restart_tip_path"), ("best-over", "in-ibd-string")),
+    ("restart-go-tip", "go-restart-target-tip.json", restart_report, ("rust_restart", "go_target_tip_path"), ("best-over", "in-ibd-string")),
+    ("restart-catch-up-tip", "rust-catch-up-tip.json", restart_report, ("rust_restart", "catch_up_tip_path"), ("best-over", "in-ibd-string")),
 )
 OVER = 1_000_000_001
 def set_over(d: dict, r: dict, key: str, *fields: tuple) -> None:
@@ -1575,7 +1577,7 @@ mine_next_edits = {
     "go-impl": lambda d, r: d.__setitem__("implementation", "go"),
     "go-impl-commit": lambda d, r: d.update(implementation="go", commit_state="committed"),
     "nonce-string": lambda d, r: d.__setitem__("nonce", "0"),
-    "timestamp-string": lambda d, r: d.__setitem__("timestamp", "1"),
+    "timestamp-string": lambda d, r: d.__setitem__("timestamp", "0"),
     "nonce-over": lambda d, r: d.__setitem__("nonce", 2**64),
     "timestamp-over": lambda d, r: d.__setitem__("timestamp", 2**64),
     "height-over-rust-mine": lambda d, r: set_over(d, r, "height", ("rust_mine", "height"), ("go_converge", "height")),
@@ -2261,7 +2263,12 @@ for variant in best-below best-string in-ibd-string; do
   sidecar_value_check "converge go tip ${variant}" "go_converge tip sidecar does not match rust_mine block" converge_tip_invalid producer-tx "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-go-tip-${variant}.json"
   sidecar_value_check "rust-submit rust tip ${variant}" "rust_converge tip sidecar does not match go_mine block" converge_tip_invalid producer-tx "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-rust-tip-${variant}.json"
 done
-sidecar_value_check "restart pre-restart tip best-known height over the bound" "rust_restart.pre_restart_tip_path does not match report" rust_restart_pre_restart_tip_sidecar_invalid rust-restart "${TMP_ROOT}/restart/artifact-root/mine-next-restart-pre-tip-best-over.json"
+sidecar_value_check "restart go target mine_next string nonce" "rust_restart.go_target_mine_next_path.nonce is not an integer" rust_restart_go_target_mine_next_invalid rust-restart "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-nonce-string.json"
+for spec in pre-tip:pre_restart_tip go-tip:go_target_tip catch-up-tip:catch_up_tip; do
+  IFS=: read -r site field <<<"${spec}"
+  sidecar_value_check "restart ${site} best-known height over the bound" "rust_restart.${field}_path does not match report" "rust_restart_${field}_sidecar_invalid" rust-restart "${TMP_ROOT}/restart/artifact-root/mine-next-restart-${site}-best-over.json"
+  sidecar_value_check "restart ${site} string in_ibd" "rust_restart.${field}_path.in_ibd is not a boolean" "rust_restart_${field}_sidecar_invalid" rust-restart "${TMP_ROOT}/restart/artifact-root/mine-next-restart-${site}-in-ibd-string.json"
+done
 expect_fail_contains "producer rejects mesh report" "producer tx validation requires a mixed-client tx-path report" check_report "${MESH_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects missing propagation sample" "raw_samples.propagation requires one observed sample" check_report "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects non-finite propagation sample" "raw_samples.propagation.samples[0].elapsed is not finite" check_report "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
