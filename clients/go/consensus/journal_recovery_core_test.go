@@ -84,6 +84,9 @@ func TestJournalRecoveryCoreGatesV1(t *testing.T) {
 	pHash := initial148Array(t, "dc4836cbaaf9660d09e8d597d22af6947b816ad6b25ba5d2173eceb773bf0989")
 	rHash := initial148Array(t, "2b2aaecd61709389e07f5994a4ce894ffd0e77c3284db39b32d09a9eb1ab1b34")
 	uHash := initial148Array(t, "73a15c4b1917110a18db15334bd269a5ef9f80dcc1d8d530afc4f4f9ff1a75e2")
+	n := bytes.Clone(genesis)
+	n[147] = 0x01
+	nHash := initial148Array(t, "45b92fcc2e13afcfd96c5ad8debdc694cd96df81429a289065840b1a02730cc4")
 
 	g0, g1 := bytes.Clone(genesis), bytes.Clone(genesis)
 	clear(g0[76:108])
@@ -132,6 +135,10 @@ func TestJournalRecoveryCoreGatesV1(t *testing.T) {
 		{"hash includes state root tail", u, gHash, 0, full(limit, limit, nil), "EXPECTED_HASH"},
 		{"hash with exact state root tail", u, uHash, 0, full(limit, limit, nil), "PREDICATE_FALSE"},
 		{"image compares state root tail", u, uHash, 0, image(genesis), "IMAGE_HEADER"},
+		{"hash includes final nonce byte", n, gHash, 0, full(limit, limit, nil), "EXPECTED_HASH"},
+		{"hash with exact final nonce byte", n, nHash, 0, full(limit, limit, nil), "PREDICATE_FALSE"},
+		{"image compares final nonce byte", genesis, gHash, 0, image(n), "IMAGE_HEADER"},
+		{"image with exact final nonce byte", n, nHash, 0, image(n), "PREDICATE_FALSE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requireRecoveryCoreResultV1(t, tc.raw, tc.hash, tc.height, tc.input, RecoveryCoreResultV1{Gate: tc.gate})
@@ -221,6 +228,10 @@ func TestJournalRecoveryCoreDerivationV1(t *testing.T) {
 	empty := recoveryCoreTxV1(0, false)
 	standard := recoveryCoreTxV1(0, false, anchor)
 	chunk := recoveryCoreTxV1(2, false, recoveryCoreOutputV1(7, 2, 32, 0x19))
+	chunkWithDifferentPayload := bytes.Clone(chunk)
+	chunkWithDifferentPayload[len(chunkWithDifferentPayload)-1] = 0x5b
+	const chunkRoot = "0fe742a7ab6d52da927acaf534cfd1c6124c075a668f536339297e1737a14a63"
+	const chunkHash = "09839b76498bce79ee1557618cc4f1413cd56c2e94cecd291d82773827d62ff1"
 	holds := func(kind uint8, count int, reason RecoveryCoreReasonV1) RecoveryCoreResultV1 {
 		return RecoveryCoreResultV1{Fact: RecoveryCoreFactV1{Kind: kind, AnchorCount: count, Reason: reason}}
 	}
@@ -237,9 +248,11 @@ func TestJournalRecoveryCoreDerivationV1(t *testing.T) {
 		{"wrong commitment with witness", [][]byte{recoveryCoreTxV1(0, true, anchor)}, "0217ab40a21df7b8da51c252654f1b5aa2522748082c909f7ce0376e4ca7c2b1", "a8a0230fc736de28266ec052750f793e8c471c953859523dec9c0238ac7efbbf", falseResult},
 		{"distinct anchors", [][]byte{recoveryCoreTxV1(0, false, anchor, distinct)}, "a1be69d52049f51f7e2a3c56c95fc6c21537da8afd80342744604ef92f51dec8", "d31832c96c19ec5107f0306a21b7c2eecf39836bd19601486047d1a97c54f16e", holds(0, 2, "ANCHOR_COUNT")},
 		{"identical anchors", [][]byte{recoveryCoreTxV1(0, false, anchor, anchor)}, "9dbd8edc2dd8291c94790c44be3fbd5d270fadce19778ded889e5d54154faa39", "26317a6e997aea0c73c9e6eee0bf347f9ee372f6f9363cdcd28f18b404a59a48", holds(0, 2, "ANCHOR_COUNT")},
-		{"chunk with valued anchor", [][]byte{chunk}, "0fe742a7ab6d52da927acaf534cfd1c6124c075a668f536339297e1737a14a63", "09839b76498bce79ee1557618cc4f1413cd56c2e94cecd291d82773827d62ff1", holds(2, 1, "POSITION_ZERO_CHUNK")},
+		{"chunk with valued anchor", [][]byte{chunk}, chunkRoot, chunkHash, holds(2, 1, "POSITION_ZERO_CHUNK")},
+		{"chunk with different payload bytes", [][]byte{chunkWithDifferentPayload}, chunkRoot, chunkHash, holds(2, 1, "POSITION_ZERO_CHUNK")},
 		{"anchor count before chunk", [][]byte{recoveryCoreTxV1(2, false, anchor, distinct)}, "41ec08ab7c9bb4afdcd9fdc117cf40402fc58fbd3406901b5050b543ffdd255c", "d541c5479fee42da76f3d5c194ebf8fca8b40ea8d4e334871ba0fa816a5d7c26", holds(2, 2, "ANCHOR_COUNT")},
 		{"manifest with anchor", [][]byte{recoveryCoreTxV1(1, false, anchor)}, "c02073ca1e57945d70fca046ac20cbf1cd8d02e6e0f1215d653de9a9a2a3a68e", "ac2434a719d12c9257582afada67ad37cc8f544a648e9066e4d999c42b7685fa", falseResult},
+		{"manifest without anchors", [][]byte{recoveryCoreTxV1(1, false)}, "6c315d0c8e4af51c2d4438edde473d5ac3b60339437c6e2cbfaae43f56e2844c", "0c98d7f5330c17d22ae5f19464744cd12a18cce8661512db72c94cfc30aad2ea", holds(1, 0, "ANCHOR_COUNT")},
 		{"two transactions in committed order", [][]byte{chunk, empty}, "96f2973895931debc8782be29284f5ec73b940b71e1e0062900344af124ac7f6", "03ca24fb8186744a581eb03b073b3808a27ee48f07366155714156626e9d0e01", holds(2, 1, "POSITION_ZERO_CHUNK")},
 		{"two transactions in reverse order", [][]byte{empty, chunk}, "96f2973895931debc8782be29284f5ec73b940b71e1e0062900344af124ac7f6", "03ca24fb8186744a581eb03b073b3808a27ee48f07366155714156626e9d0e01", RecoveryCoreResultV1{Gate: "TXID_MERKLE"}},
 		{"second transaction anchor outside position zero", [][]byte{chunk, standard}, "a8ab7e2bc73e9e647e5f8d183a0f0fb5c4cedcbd9c2325025d79a6357672f1c4", "3603787f3222e8bc19f20b9730fee5e333e5efb2dbf7f31753323d3caca71fd9", holds(2, 1, "POSITION_ZERO_CHUNK")},
