@@ -75,6 +75,12 @@ def exact_object(data: object, keys: set[str], label: str) -> dict:
     req(isinstance(data, dict), f"{label} is not an object")
     req(set(data) == keys, f"{label} keys mismatch: {sorted(data)}")
     return data
+def unique_members(pairs: list) -> dict:
+    data = {}
+    for key, value in pairs:
+        if key in data: raise ValueError(f"repeated member {key!r}")
+        data[key] = value
+    return data
 def load_bounded_json(label: str, p: Path) -> object:
     try:
         req(p.is_file(), f"{label} is not a regular file")
@@ -85,7 +91,7 @@ def load_bounded_json(label: str, p: Path) -> object:
     req(raw != b"", f"{label} is empty")
     req(len(raw) <= MAX_JSON_BYTES, f"{label} is too large")
     try:
-        return json.loads(raw.decode("utf-8"))
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_members)
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         fail(f"{label} malformed JSON: {exc}")
 def load_json_file(label: str, p: Path) -> dict:
@@ -806,6 +812,10 @@ def sn_dir(label: str, value: object) -> Path:
     p = checked_path(f"{SN_INVALID}: {label}", value)
     sn_req(os.path.isdir(p), f"{label} does not resolve to an existing directory")
     return p
+def distinct_files(a: Path, b: Path) -> bool:
+    try: sa, sb = os.stat(a), os.stat(b)
+    except (OSError, ValueError): return False
+    return (sa.st_dev, sa.st_ino) != (sb.st_dev, sb.st_ino)
 def sn_tip(impl: str, endpoint: str, conv: dict, chain: bool) -> None:
     label, p = sn_file(f"initial_convergence.{impl}_tip_path", conv[f"{impl}_tip_path"])
     if chain:
@@ -838,7 +848,7 @@ def store_neutrality_checks() -> None:
     dirs = sidecar["datadirs"]
     sn_req(isinstance(dirs, dict) and set(dirs) == {"go", "rust", "rust_exact_empty_before_first_start"}, "datadirs mismatch")
     sn_req(sn_dir("datadirs.go", dirs["go"]) == sn_dir("artifact_root/node-go", str(artifact_root / "node-go")) and sn_dir("datadirs.rust", dirs["rust"]) == sn_dir("artifact_root/node-rust", str(artifact_root / "node-rust")) and dirs["rust_exact_empty_before_first_start"] is True, "datadirs mismatch")
-    sn_req(os.path.realpath(artifact_root / "node-go") != os.path.realpath(artifact_root / "node-rust"), "artifact_root/node-go and artifact_root/node-rust resolve to one directory")
+    sn_req(distinct_files(artifact_root / "node-go", artifact_root / "node-rust"), "artifact_root/node-go and artifact_root/node-rust resolve to one directory")
     conv = sidecar["initial_convergence"]
     sn_req(isinstance(conv, dict) and set(conv) == {"go_has_tip", "rust_has_tip", "height", "go_tip_hash", "rust_tip_hash", "go_tip_path", "rust_tip_path"}, "initial_convergence keys mismatch")
     if chain:
@@ -858,8 +868,11 @@ def store_neutrality_checks() -> None:
     sn_req(isinstance(heights, dict) and set(heights) == {"go", "rust"} and all(isinstance(v, int) and not isinstance(v, bool) for v in heights.values()), "header_bytes malformed")
     if partition_mode:
         sn_req(common_mine["height"] > conv["height"], "partition common block height is not above initial_convergence.height")
+    if converge_mode:
+        sn_req(height > conv["height"], f"{mine_label}.height is not above initial_convergence.height")
     if restart_mode:
         sn_req(pre_restart_height >= conv["height"], "rust_restart.pre_restart_height is below initial_convergence.height")
+        sn_req(pre_restart_height > conv["height"] or restart_info["pre_restart_tip"] == conv["rust_tip_hash"], "rust_restart.pre_restart_tip differs from initial_convergence.rust_tip_hash at the same height")
     sn_req(genesis["go_hash"] == genesis["rust_hash"] == ident["genesis_hash_hex"], "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal", SN_GENESIS)
     for impl in ("go", "rust"):
         sn_req(blocks[impl]["hash"] == genesis[f"{impl}_hash"], f"genesis.{impl}_block_path hash differs from genesis.{impl}_hash", SN_GENESIS)
@@ -961,13 +974,10 @@ trap rubin_process_exit_trap_with_tx_secret_cleanup EXIT
 check_report_reason_token() {
   local msg
   msg="$(cat)"
-  python3 - "${msg}" <<'PY'
+  { fail_detail_token_py; cat <<'PY'; } | python3 - "${msg}"
 import sys
 msg = " ".join(x[5:].strip() for x in sys.argv[1].splitlines() if x.startswith("FAIL:"))
 rules = [
-    ("store_neutrality_sidecar_invalid", "store_neutrality_sidecar_invalid"),
-    ("store_neutrality_genesis_mismatch", "store_neutrality_genesis_mismatch"),
-    ("store_neutrality_header_grammar_mismatch", "store_neutrality_header_grammar_mismatch"),
     ("partition-heal-reorg validation requires", "partition_reorg_scenario_required"),
     ("public partition-heal-reorg check-report-live is unsupported", "public_partition_check_report_live_unsupported"),
     ("public partition-heal-reorg check-report is unsupported", "public_partition_check_report_unsupported"),
@@ -1089,16 +1099,19 @@ rules = [
     ("raw_samples.convergence", "convergence_samples_invalid"),
     ("root is not an object", "report_root_invalid"),
 ]
-print(next((token for pattern, token in rules if pattern in msg), "unknown"))
+print(fail_detail_token(sys.argv[1]) or next((token for pattern, token in rules if pattern in msg), "unknown"))
 PY
 }
 tx_report_reason_token() {
   local msg
   msg="$(cat)"
-  python3 - "${msg}" <<'PY'
+  { fail_detail_token_py; cat <<'PY'; } | python3 - "${msg}"
 import re, sys
 msg = "\n".join(line[5:].strip() if line.startswith("FAIL:") else line for line in sys.argv[1].splitlines())
-rules = [("store_neutrality_sidecar_invalid", "store_neutrality_sidecar_invalid"), ("store_neutrality_genesis_mismatch", "store_neutrality_genesis_mismatch"), ("store_neutrality_header_grammar_mismatch", "store_neutrality_header_grammar_mismatch"), ("raw_samples.propagation", "propagation_samples_invalid"), ("raw_samples.convergence", "convergence_samples_invalid"), ("rust_mine is not node-rust mined_included", "rust_mine_class_invalid"), ("go_mine is not node-go mined_included", "go_mine_class_invalid"), ("go_converge is not node-go canonical_block_found", "go_converge_class_invalid"), ("rust_converge is not node-rust canonical_block_found", "rust_converge_class_invalid"), ("mined/converged RPC endpoints are not bound", "converge_rpc_endpoint_mismatch"), ("rust_mine.height is malformed", "rust_mine_height_invalid"), ("go_mine.height is malformed", "go_mine_height_invalid"), ("rust_mine.block_hash is malformed", "rust_mine_hash_invalid"), ("go_mine.block_hash is malformed", "go_mine_hash_invalid"), ("sidecar identity mismatch", "converge_sidecar_identity_mismatch"), ("converge sidecar paths are not pairwise distinct", "converge_sidecar_paths_not_distinct"), ("submitted txid missing from parsed block txids", "block_missing_submitted_txid"), ("parse block_hex failed", "block_hex_parse_failed"), ("parsed block hash mismatch", "block_hash_mismatch"), ("parsed block tx_count mismatch", "block_tx_count_mismatch"), ("basic block validation failed", "block_basic_validation_failed"), ("inclusion check timeout", "block_inclusion_timeout"), ("inclusion check failed", "block_inclusion_failed"), ("mined/converged tx identity differs", "converged_tx_identity_mismatch"), ("go_converge does not match rust_mine", "go_converge_height_hash_mismatch"), ("rust_converge does not match go_mine", "rust_converge_height_hash_mismatch"), ("rust_mine.tx_count", "rust_mine_tx_count_invalid"), ("go_mine.tx_count", "go_mine_tx_count_invalid"), ("mine_next sidecar does not match", "mine_sidecar_invalid"), ("sidecar height/hash/canonical mismatch", "block_sidecar_invalid"), ("block_hex is missing", "block_sidecar_invalid"), ("tip sidecar does not match", "converge_tip_invalid"), ("tx parser consumed mismatch", "tx_parser_consumed_mismatch"), ("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "tx_capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
+if (sn_token := fail_detail_token(sys.argv[1])) is not None:
+    print(sn_token)
+    sys.exit(0)
+rules = [("raw_samples.propagation", "propagation_samples_invalid"), ("raw_samples.convergence", "convergence_samples_invalid"), ("rust_mine is not node-rust mined_included", "rust_mine_class_invalid"), ("go_mine is not node-go mined_included", "go_mine_class_invalid"), ("go_converge is not node-go canonical_block_found", "go_converge_class_invalid"), ("rust_converge is not node-rust canonical_block_found", "rust_converge_class_invalid"), ("mined/converged RPC endpoints are not bound", "converge_rpc_endpoint_mismatch"), ("rust_mine.height is malformed", "rust_mine_height_invalid"), ("go_mine.height is malformed", "go_mine_height_invalid"), ("rust_mine.block_hash is malformed", "rust_mine_hash_invalid"), ("go_mine.block_hash is malformed", "go_mine_hash_invalid"), ("sidecar identity mismatch", "converge_sidecar_identity_mismatch"), ("converge sidecar paths are not pairwise distinct", "converge_sidecar_paths_not_distinct"), ("submitted txid missing from parsed block txids", "block_missing_submitted_txid"), ("parse block_hex failed", "block_hex_parse_failed"), ("parsed block hash mismatch", "block_hash_mismatch"), ("parsed block tx_count mismatch", "block_tx_count_mismatch"), ("basic block validation failed", "block_basic_validation_failed"), ("inclusion check timeout", "block_inclusion_timeout"), ("inclusion check failed", "block_inclusion_failed"), ("mined/converged tx identity differs", "converged_tx_identity_mismatch"), ("go_converge does not match rust_mine", "go_converge_height_hash_mismatch"), ("rust_converge does not match go_mine", "rust_converge_height_hash_mismatch"), ("rust_mine.tx_count", "rust_mine_tx_count_invalid"), ("go_mine.tx_count", "go_mine_tx_count_invalid"), ("mine_next sidecar does not match", "mine_sidecar_invalid"), ("sidecar height/hash/canonical mismatch", "block_sidecar_invalid"), ("block_hex is missing", "block_sidecar_invalid"), ("tip sidecar does not match", "converge_tip_invalid"), ("tx parser consumed mismatch", "tx_parser_consumed_mismatch"), ("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "tx_capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
 for needle, token in rules:
     if needle in msg:
         print(token)
@@ -1132,6 +1145,14 @@ combined_report_reason_token() {
   token="$(tx_report_reason_token <<<"${msg}")"
   if [[ "${token}" == "unclassified" ]]; then token="$(check_report_reason_token <<<"${msg}")"; fi
   [[ "${token}" == "unknown" || "${token}" == "unclassified" ]] && token=tx_report_validation_failed; printf '%s\n' "${token}"
+}
+# Prints Python defining fail_detail_token(text): the store-neutrality refusal token that,
+# followed by a colon, begins the detail of a FAIL line of text, else None.
+fail_detail_token_py() { cat <<'PY'
+def fail_detail_token(text):
+    tokens = ("store_neutrality_sidecar_invalid", "store_neutrality_genesis_mismatch", "store_neutrality_header_grammar_mismatch")
+    return next((token for line in text.splitlines() if line.startswith("FAIL:") for token in tokens if line[5:].strip().startswith(token + ":")), None)
+PY
 }
 rpc_json() {
   local method="$1" addr="$2" path="$3"
@@ -1559,9 +1580,9 @@ if got.get("raw_hex") != txhex:
 PY
 }
 txgen_datadir_guard() {
-  local datadir="" resolved rust_resolved
+  local datadir=""
   while (( $# )); do [[ "$1" == --datadir && $# -ge 2 ]] && datadir="$2"; shift; done
-  resolved="$(_rubin_process_physical_dir "${datadir}" 2>/dev/null)" && rust_resolved="$(_rubin_process_physical_dir "${RUST_DIR}" 2>/dev/null)" && [[ "${resolved}" != "${rust_resolved}" ]] || { TX_REASON=cross_client_datadir_argv; return 1; }
+  [[ -d "${datadir}" && -d "${RUST_DIR}" && ! "${datadir}" -ef "${RUST_DIR}" ]] || { TX_REASON=cross_client_datadir_argv; return 1; }
 }
 submit_go_tx() {
   local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key-file "${TX_FROM_KEY_FILE}" --to-key "${TX_TO_KEY}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}" --submit-to "${GO_RPC_ADDR}")
@@ -2925,6 +2946,31 @@ start_go_node() {
   GO_P2P_ADDR="$(p2p_addr_for_pid "${GO_PID}" "${GO_RPC_ADDR}" 30)" || { rc=$?; [[ ${rc} -eq 42 ]] && finish_no_data "lsof_failed"; [[ ${rc} -eq 43 ]] && finish_no_data "lsof_timeout"; [[ ${rc} -eq 44 ]] && finish_no_data "go_p2p_addr_ambiguous"; [[ ${rc} -eq 45 ]] && finish_no_data "go_p2p_addr_timeout"; return 1; }; loopback_endpoint "${GO_P2P_ADDR}" || finish_no_data "go_p2p_addr_malformed"
   rubin_process_wait_for_rpc_ready "${GO_RPC_ADDR}" 30 || { START_REASON=go_rpc_ready_timeout; return 1; }; GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
+# Runs the live check_report of the run's mode over the PASS report at PASS_REPORT_JSON and
+# moves it to REPORT_JSON; a refusal removes it and ends the run through finish_no_data.
+publish_pass_report() {
+  local check_err
+  if (( TX_PATH_MODE >= 1 )); then
+    if ! check_err="$(check_report "${PASS_REPORT_JSON}" live producer-tx 2>&1)"; then
+      rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(combined_report_reason_token <<<"${check_err}")"
+    fi
+  elif (( RUST_RESTART_MODE == 1 )); then
+    if ! check_err="$(check_report "${PASS_REPORT_JSON}" live rust-restart 2>&1)"; then
+      printf '%s\n' "${check_err}" >"${RUBIN_PROCESS_ARTIFACT_ROOT}/pass-report-live-validation.err" || true
+      rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
+    fi
+  elif (( PARTITION_HEAL_REORG_MODE == 1 )); then
+    if ! check_err="$(check_report "${PASS_REPORT_JSON}" live partition-heal-reorg 2>&1)"; then
+      printf '%s\n' "${check_err}" >"${RUBIN_PROCESS_ARTIFACT_ROOT}/pass-report-live-validation.err" || true
+      rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
+    fi
+  else
+    if ! check_err="$(check_report "${PASS_REPORT_JSON}" live 2>&1)"; then
+      rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
+    fi
+  fi
+  mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}" || finish_no_data "pass_report_publish_failed"
+}
 for tool in lsof perl ps sed sort; do command -v "${tool}" >/dev/null 2>&1 || finish_no_data "${tool}_unavailable"; done
 build_go_node || finish_no_data "${BUILD_REASON:-go_build_failed}"
 build_rust_node || finish_no_data "${BUILD_REASON:-rust_build_failed}"
@@ -2980,25 +3026,6 @@ write_outputs "PASS" || { REPORT_JSON="${FINAL_REPORT_JSON}"; finish_no_data "pa
 if ! run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2; then
   rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "legacy_schema_marker_validation_failed"
 fi
-if (( TX_PATH_MODE >= 1 )); then
-  if ! check_err="$(check_report "${PASS_REPORT_JSON}" live producer-tx 2>&1)"; then
-    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(combined_report_reason_token <<<"${check_err}")"
-  fi
-elif (( RUST_RESTART_MODE == 1 )); then
-  if ! check_err="$(check_report "${PASS_REPORT_JSON}" live rust-restart 2>&1)"; then
-    printf '%s\n' "${check_err}" >"${RUBIN_PROCESS_ARTIFACT_ROOT}/pass-report-live-validation.err" || true
-    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
-  fi
-elif (( PARTITION_HEAL_REORG_MODE == 1 )); then
-  if ! check_err="$(check_report "${PASS_REPORT_JSON}" live partition-heal-reorg 2>&1)"; then
-    printf '%s\n' "${check_err}" >"${RUBIN_PROCESS_ARTIFACT_ROOT}/pass-report-live-validation.err" || true
-    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
-  fi
-else
-  if ! check_err="$(check_report "${PASS_REPORT_JSON}" live 2>&1)"; then
-    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
-  fi
-fi
-mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}" || finish_no_data "pass_report_publish_failed"
+publish_pass_report
 PASS_SCENARIO="mixed-client mesh connected"; (( RUST_RESTART_MODE == 1 )) && PASS_SCENARIO="Rust restart/reconnect/catch-up path observed"; (( PARTITION_HEAL_REORG_MODE == 1 )) && PASS_SCENARIO="Partition/heal/reorg source-bound path observed"; (( TX_PATH_MODE == 1 )) && PASS_SCENARIO="Go-submit/Rust-accept path observed"; (( TX_PATH_MODE == 2 )) && PASS_SCENARIO="Go-submit/Rust-mine/Go-converge path observed"; (( TX_PATH_MODE == 3 )) && PASS_SCENARIO="Rust-submit/Go-mine/Rust-converge path observed"
 [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]] && echo "PASS: ${PASS_SCENARIO} go_pid=${GO_PID} rust_pid=${RUST_PID}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" || echo "PASS: ${PASS_SCENARIO} go_pid=${GO_PID} rust_pid=${RUST_PID}; set KEEP_TMP=1 to retain report"

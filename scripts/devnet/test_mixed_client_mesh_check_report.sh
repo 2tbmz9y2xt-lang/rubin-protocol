@@ -24,6 +24,10 @@ cleanup() {
   rm -rf -- "${TMP_ROOT}"
 }
 trap cleanup EXIT
+# case_folds is 1 when the volume of TMP_ROOT resolves the other-case spelling of a
+# directory name to the same device and inode.
+mkdir -- "${TMP_ROOT}/case-probe"
+case_folds=0; [[ "${TMP_ROOT}/CASE-PROBE" -ef "${TMP_ROOT}/case-probe" ]] && case_folds=1
 
 # Opens and closes the write end of the FIFOs named by its arguments at 2-second
 # intervals, so a reader blocked on opening one sees end of file instead of hanging;
@@ -218,6 +222,7 @@ if start_rust_node_with_log node-rust.log; then echo "FAIL: stub launch should f
 printf 'x\n' >"${probe_root}/empty/CURRENT"; rm -f -- "${SPAWNED}"
 if start_rust_node_with_log node-rust-restart.log; then echo "FAIL: stub relaunch should fail" >&2; exit 1; fi
 [[ "${START_REASON}" == rust_launch_failed && "${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" == true ]] || { echo "FAIL: reopen start reason ${START_REASON}, rust_exact_empty_before_first_start ${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" >&2; exit 1; }
+[[ -s "${SPAWNED}" && "$(head -n 1 "${SPAWNED}")" == "${RUST_NODE_BIN}" ]] || { echo "FAIL: Rust reopen did not reach the process start" >&2; exit 1; }
 ! grep -Fxq -- --create-store "${SPAWNED}" || { echo "FAIL: Rust reopen carries --create-store" >&2; exit 1; }
 SH
   bash "${probe}" "${lib}" "${probe_root}"
@@ -231,7 +236,6 @@ check_txgen_datadir_guard() {
   cat >"${probe}" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-source "$3"
 source "$1"
 probe_root="$2"
 GO_DIR="${probe_root}/go-node"; RUST_DIR="${probe_root}/rust-node"; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"
@@ -257,6 +261,7 @@ expect_guard_refused() {
 }
 expect_guard_refused --datadir "${RUST_DIR}"
 expect_guard_refused --datadir "${probe_root}/rust-alias"
+if [[ "$3" == 1 ]]; then expect_guard_refused --datadir "${probe_root}/RUST-NODE"; else printf 'SKIP: case-alias row %s\n' txgen-datadir-case-alias; fi
 expect_guard_refused --datadir "${probe_root}/missing"
 expect_guard_refused --datadir ""
 expect_guard_refused
@@ -273,7 +278,7 @@ rm -f -- "${SPAWNED}"; TX_REASON=""
 if submit_rust_tx; then echo "FAIL: submit_rust_tx accepted the Rust datadir" >&2; exit 1; fi
 [[ "${TX_REASON}" == cross_client_datadir_argv && ! -e "${SPAWNED}" ]] || { echo "FAIL: submit_rust_tx reason ${TX_REASON} or txgen spawned" >&2; exit 1; }
 SH
-  bash "${probe}" "${lib}" "${probe_root}" "${REPO_ROOT}/scripts/devnet-process-common.sh"
+  bash "${probe}" "${lib}" "${probe_root}" "${case_folds}"
 }
 
 check_initial_convergence_wait() {
@@ -481,6 +486,38 @@ SH
   start_fifo_watchdog "${probe_root}/bin-fifo"
   bash "${probe}" "${lib}" "${main}" "${probe_root}"
   stop_fifo_watchdog
+}
+
+check_publish_pass_report() {
+  local probe="${TMP_ROOT}/publish-pass-report.sh" probe_root="${TMP_ROOT}/publish-pass-report" lib="${TMP_ROOT}/publish-pass-report-lib.sh"
+  mkdir -p -- "${probe_root}"
+  extract_slices "${lib}" "publish_pass_report()" "for tool in lsof perl ps sed sort"
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+source "$2"
+p="$3"
+RUBIN_PROCESS_ARTIFACT_ROOT="${p}"; PASS_REPORT_JSON="${p}/pass-report.json"; REPORT_JSON="${p}/report.json"
+check_report() { printf '%s\n' "$@" >"${p}/check-args"; echo "FAIL: store_neutrality_sidecar_invalid: clients_tree_clean is not true" >&2; return 1; }
+finish_no_data() { printf '%s\n' "$1"; exit 0; }
+# Sets TX_PATH_MODE, RUST_RESTART_MODE and PARTITION_HEAL_REORG_MODE from $1-$3; the rest is
+# the mode argument check_report is expected to receive after the report path and live.
+expect_refused() {
+  local got
+  TX_PATH_MODE="$1"; RUST_RESTART_MODE="$2"; PARTITION_HEAL_REORG_MODE="$3"; shift 3
+  printf '{"verdict":"PASS"}\n' >"${PASS_REPORT_JSON}"; rm -f -- "${REPORT_JSON}" "${p}/check-args"
+  got="$(publish_pass_report; printf 'completed\n')"
+  [[ "${got}" == pass_report_live_validation_store_neutrality_sidecar_invalid ]] || { echo "FAIL: publication in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE} ended with ${got}" >&2; exit 1; }
+  [[ -s "${p}/check-args" && "$(cat -- "${p}/check-args")" == "$(printf '%s\n' "${PASS_REPORT_JSON}" live "$@")" ]] || { echo "FAIL: check_report arguments in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE}: $(cat -- "${p}/check-args" 2>&1)" >&2; exit 1; }
+  [[ ! -e "${REPORT_JSON}" && ! -e "${PASS_REPORT_JSON}" ]] || { echo "FAIL: refused PASS report kept in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE}" >&2; exit 1; }
+}
+expect_refused 1 0 0 producer-tx
+expect_refused 0 1 0 rust-restart
+expect_refused 0 0 1 partition-heal-reorg
+expect_refused 0 0 0
+SH
+  bash "${probe}" "${CHECK_REPORT_LIB}" "${lib}" "${probe_root}"
 }
 
 check_proxy_go_local_addr_reason() {
@@ -1763,9 +1800,9 @@ def sn_lock_report_path(*field: str):
             target = target[key]
         target[field[-1]] = sn_locked(Path(report["artifact_root"]), Path(target[field[-1]]).name)
     return edit
-def sn_alias_rust_datadir(var_root: Path) -> None:
+def sn_alias_rust_datadir(var_root: Path, target: str = "node-go") -> None:
     (var_root / "node-rust").rmdir()
-    (var_root / "node-rust").symlink_to(var_root / "node-go")
+    (var_root / "node-rust").symlink_to(var_root / target)
 def sn_conv_hash(sidecar: dict, var_root: Path, value: str) -> None:
     sidecar["initial_convergence"].update(go_tip_hash=value, rust_tip_hash=value)
     for file_name in ("initial-convergence-go-tip.json", "initial-convergence-rust-tip.json"):
@@ -1927,6 +1964,25 @@ sn_variant("tx-accept-rust-datadir-relative", "tx-accept", lambda s, r: s["datad
 sn_variant("tx-accept-node-go-moved", "tx-accept", lambda s, r: ((r / "node-go").rename(r / "node-go-moved"), s["datadirs"].update(go=str(r / "node-go-moved"))))
 sn_variant("tx-accept-node-rust-moved", "tx-accept", lambda s, r: ((r / "node-rust").rename(r / "node-rust-moved"), s["datadirs"].update(rust=str(r / "node-rust-moved"))))
 sn_variant("tx-accept-rust-node-directory", "tx-accept", lambda s, r: ((r / "rubin-node-rust").unlink(), (r / "rubin-node-rust").mkdir()), sn_move_binary("rust"))
+for column in ("mesh", "tx-accept", "tx-converge", "rust-submit", "partition"):
+    sn_variant(f"{column}-datadir-case-alias", column, lambda s, r: sn_alias_rust_datadir(r, "NODE-GO"))
+for column in ("tx-converge", "rust-submit"):
+    sn_variant(f"{column}-initial-at-mined", column, lambda s, r: sn_set_height(s, r, height))
+    sn_variant(f"{column}-initial-below-mined", column, lambda s, r: sn_set_height(s, r, height - 1))
+    sn_variant(f"{column}-initial-at-mined-and-genesis", column, lambda s, r: (sn_set_height(s, r, height), s["chain_identity"].update(genesis_hash_hex="ee" * 32)))
+sn_variant("restart-at-pre-restart-same-tip", "restart", lambda s, r: (sn_set_height(s, r, 107), sn_conv_hash(s, r, "aa" * 32)))
+sn_variant("restart-at-pre-restart-and-genesis", "restart", lambda s, r: (sn_set_height(s, r, 107), s["chain_identity"].update(genesis_hash_hex="ee" * 32)))
+for column in ("mesh", "tx-accept"):
+    for key in ("store_neutrality_genesis_mismatch", "store_neutrality_sidecar_invalid"):
+        sn_variant(f"{column}-report-key-{key}", column, lambda s, r: None, lambda report, key=key: report.update({key: True}))
+def sn_repeat_member(name: str, file_name: str, anchor: str, member: str) -> None:
+    sn_variant(name, "tx-accept", lambda s, r: None)
+    path = root / f"sn-{name}" / "artifact-root" / file_name
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace(anchor, anchor + member + ", ", 1), encoding="utf-8")
+sn_repeat_member("repeated-tree-clean", SN_NAME, "{", '"clients_tree_clean": false')
+sn_repeat_member("repeated-initial-height", SN_NAME, '"initial_convergence": {', '"height": 100')
+sn_repeat_member("repeated-tip-has-tip", GO_TIP, "{", '"has_tip": false')
 REPORT_LOCKED_CASES = (
     ("mesh", "public", "go-node", "unknown", "node-go command/binary is not bound to executable rubin-node-go", lambda report: sn_set_binary(report, "go", sn_locked(Path(report["artifact_root"]), "rubin-node-go"))),
     ("restart", "rust-restart", "pre-restart-tip", "rust_restart_pre_restart_tip_sidecar_invalid", "rust_restart.pre_restart_tip_path file is missing", sn_lock_report_path("rust_restart", "pre_restart_tip_path")),
@@ -2053,6 +2109,7 @@ check_proxy_go_local_addr_reason
 check_wait_peer_snapshot_normalizes
 check_capture_go_reorg_metrics_reason
 check_wait_peer_snapshot_state_reason
+check_publish_pass_report
 # shellcheck source=/dev/null
 source "${CHECK_REPORT_LIB}"
 [[ "$(tx_path_prepare_reason go_submit_chainstate_prepare_failed 1)" == "go_submit_chainstate_prepare_failed" ]] || { echo "FAIL: go-submit prep reason should remain go_submit scoped" >&2; exit 1; }
@@ -2324,11 +2381,18 @@ expect_fail_contains "rust-submit go mine_next without commit_state at the Rust 
 expect_fail_contains "partition go mine_next not committed at the Rust endpoint" "observations.pre_partition.common_go_mine keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-go-not-committed-rust-rpc.json"
 expect_fail_contains "restart go target mine_next not committed at the Rust endpoint" "rust_restart.go_target_mine_next_path keys mismatch" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-not-committed-rust-rpc.json"
 expect_fail_contains "rust-submit go mine_next not committed at the Rust endpoint" "go_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-not-committed-rust-rpc.json" offline producer-tx
+# Runs check_report once and requires its refusal to carry "FAIL: <needle>" and to map to
+# <token> through <mapper> ($6), by default tx_report_reason_token in producer-tx mode and
+# check_report_reason_token in the other modes.
 sidecar_value_check() {
-  local label="$1" needle="$2" token="$3" mode="$4" report="$5"
-  expect_fail_contains "${label}" "FAIL: ${needle}" check_report "${report}" offline "${mode}"
-  if [[ "${mode}" == producer-tx ]]; then expect_fail_token "${label} token" "${token}" check_report "${report}" offline "${mode}"
-  else expect_fail_check_token "${label} token" "${token}" check_report "${report}" offline "${mode}"; fi
+  local label="$1" needle="$2" token="$3" mode="$4" report="$5" mapper="${6:-check_report_reason_token}" output got
+  [[ -n "${6:-}" || "${mode}" != producer-tx ]] || mapper=tx_report_reason_token
+  if output="$(check_report "${report}" offline "${mode}" 2>&1)"; then
+    echo "FAIL: ${label} should fail" >&2; printf '%s\n' "${output}" >&2; exit 1
+  fi
+  require_contains "${output}" "FAIL: ${needle}" "${label}"
+  got="$(printf '%s\n' "${output}" | "${mapper}")"
+  [[ "${got}" == "${token}" ]] || { echo "FAIL: ${label} produced token ${got}, want ${token}" >&2; printf '%s\n' "${output}" >&2; exit 1; }
 }
 for variant in nonce-string timestamp-string height-over-rust-mine tx-count-over-rust-mine mined-one; do
   sidecar_value_check "converge rust mine_next ${variant}" "rust_mine mine_next sidecar does not match report" mine_sidecar_invalid producer-tx "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-${variant}.json"
@@ -2464,7 +2528,30 @@ sn_check "default sidecar with a present tip" "${SN_INVALID}" "initial_convergen
 sn_check "restart pre-restart height below initial convergence" "${SN_INVALID}" "rust_restart.pre_restart_height is below initial_convergence.height" rust-restart restart-below
 sn_check "restart initial rust tip from the restarted endpoint" "${SN_INVALID}" "initial_convergence.rust_tip_path sidecar identity mismatch" rust-restart restart-new-endpoint
 sn_check "partition common block not above initial convergence" "${SN_INVALID}" "partition common block height is not above initial_convergence.height" partition-heal-reorg partition-not-above
-expect_pass_contains "restart initial convergence at the pre-restart height" "PASS: mixed_client_rust_restart report structurally accepted" check_report "${TMP_ROOT}/sn-restart-at-pre-restart-report.json" offline rust-restart
+sn_check "restart initial convergence tip differs at the pre-restart height" "${SN_INVALID}" "rust_restart.pre_restart_tip differs from initial_convergence.rust_tip_hash at the same height" rust-restart restart-at-pre-restart
+sn_check "restart initial tip check before genesis identity" "${SN_INVALID}" "rust_restart.pre_restart_tip differs from initial_convergence.rust_tip_hash at the same height" rust-restart restart-at-pre-restart-and-genesis
+expect_pass_contains "restart initial convergence at the pre-restart tip" "PASS: mixed_client_rust_restart report structurally accepted" check_report "${TMP_ROOT}/sn-restart-at-pre-restart-same-tip-report.json" offline rust-restart
+for spec in tx-converge:rust_mine:mixed_client_go_submit_rust_mine_go_converge rust-submit:go_mine:mixed_client_rust_submit_go_mine_rust_converge; do
+  IFS=: read -r sn_root sn_mine sn_scenario <<<"${spec}"
+  sn_check "${sn_root} initial convergence at the mined height" "${SN_INVALID}" "${sn_mine}.height is not above initial_convergence.height" tx "${sn_root}-initial-at-mined"
+  sn_check "${sn_root} mined height check before genesis identity" "${SN_INVALID}" "${sn_mine}.height is not above initial_convergence.height" tx "${sn_root}-initial-at-mined-and-genesis"
+  expect_pass_contains "${sn_root} initial convergence below the mined height" "PASS: ${sn_scenario} report structurally accepted" check_report "${TMP_ROOT}/sn-${sn_root}-initial-below-mined-report.json" offline producer-tx
+done
+for spec in public:mesh tx:tx-accept tx:tx-converge tx:rust-submit partition-heal-reorg:partition; do
+  IFS=: read -r sn_mode sn_root <<<"${spec}"
+  if (( case_folds )); then
+    sn_check "${sn_root} rust datadir linked to the other-case go datadir" "${SN_INVALID}" "artifact_root/node-go and artifact_root/node-rust resolve to one directory" "${sn_mode}" "${sn_root}-datadir-case-alias"
+  else
+    printf 'SKIP: case-alias row %s\n' "${sn_root}-datadir-case-alias"
+  fi
+done
+sn_check "sidecar repeated top-level member" "${SN_INVALID}" "store-neutrality sidecar malformed JSON: repeated member 'clients_tree_clean'" tx repeated-tree-clean
+sn_check "sidecar repeated nested member" "${SN_INVALID}" "store-neutrality sidecar malformed JSON: repeated member 'height'" tx repeated-initial-height
+sn_check "initial tip sidecar repeated member" "${SN_INVALID}" "initial_convergence.go_tip_path malformed JSON: repeated member 'has_tip'" tx repeated-tip-has-tip
+for sn_key in store_neutrality_genesis_mismatch store_neutrality_sidecar_invalid; do
+  sidecar_value_check "report top-level key ${sn_key}" "report top-level keys mismatch" report_top_level_keys_mismatch public "${TMP_ROOT}/sn-mesh-report-key-${sn_key}-report.json"
+  sidecar_value_check "tx report top-level key ${sn_key}" "report top-level keys mismatch" report_keys_mismatch producer-tx "${TMP_ROOT}/sn-tx-accept-report-key-${sn_key}-report.json" combined_report_reason_token
+done
 # Stats a file inside a mode 0 directory with the interpreter check_report runs; prints
 # denied when the stat raises PermissionError and allowed when it succeeds.
 pd_access="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 -c '
