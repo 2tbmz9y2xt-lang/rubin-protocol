@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/bits"
 	"os"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -54,6 +55,49 @@ type sourceUsage struct {
 	stageReached, overBytes, forRelease, completeCharge  bool
 	entries                                              []os.DirEntry
 	releaseLeaf                                          string
+	read                                                 sourceReadCensus
+}
+
+type sourceReadCensus struct {
+	name, blockedStage                           string
+	names                                        []string
+	witness                                      sourceDebt
+	target, blockedStageFile                     filelock.IdentityV1
+	pending                                      []sourceReadMismatch
+	nameIndex                                    []int
+	indexLimit, pendingLimit                     int
+	ordinal, refusalOrdinal                      int
+	hasSpellings, stoppedStageUnknown, localized bool
+}
+
+type sourceReadMismatch struct {
+	original, observed             filelock.IdentityV1
+	ordinal                        int
+	identityMismatch, stageReached bool
+}
+
+// sourceEntryNames borrows the ordered names from a scoped or strict listing.
+type sourceEntryNames struct {
+	entries []os.DirEntry
+	names   []string
+}
+
+func sourceListing(entries []os.DirEntry, read []sourceReadCensus) sourceEntryNames {
+	if len(read) != 0 && read[0].name != "" {
+		return sourceEntryNames{names: read[0].names}
+	}
+	return sourceEntryNames{entries: entries}
+}
+
+func (s sourceEntryNames) len() int {
+	return len(s.entries) + len(s.names)
+}
+
+func (s sourceEntryNames) name(i int) string {
+	if s.names != nil {
+		return s.names[i]
+	}
+	return s.entries[i].Name()
 }
 
 var realSourceFS = sourceFS{statfs: syscall.Fstatfs, write: (*os.File).Write, fileSync: (*os.File).Sync, close: (*os.File).Close, chmod: (*os.File).Chmod, namespace: runSourceNamespace, remove: (*os.Root).Remove, dirSync: (*os.File).Sync}
@@ -62,10 +106,13 @@ func runSourceNamespace(op sourceNamespace, r *sourceRoot, from, to string) erro
 	return op(r, from, to)
 }
 
-func (o *SourceOwnerV1) sourceEntries(r *sourceRoot) ([]os.DirEntry, error) {
+func (o *SourceOwnerV1) sourceEntries(r *sourceRoot, read ...sourceReadCensus) ([]os.DirEntry, error) {
 	f, err := openSourceAt(int(r.pin.Fd()), ".", unix.O_DIRECTORY)
 	if err != nil {
 		return nil, err
+	}
+	if len(read) != 0 {
+		return nil, o.sourceReadNames(f, &read[0])
 	}
 	entries, err := f.ReadDir(int(min(o.limits.Scans, math.MaxInt)))
 	_ = f.Close()
@@ -78,13 +125,31 @@ func (o *SourceOwnerV1) sourceEntries(r *sourceRoot) ([]os.DirEntry, error) {
 	return entries, nil
 }
 
+// sourceReadNames retains names without looking up their metadata.
+func (o *SourceOwnerV1) sourceReadNames(f *os.File, read *sourceReadCensus) error {
+	names, err := f.Readdirnames(int(min(o.limits.Scans, math.MaxInt)))
+	_ = f.Close()
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if uint64(len(names)) >= o.limits.Scans {
+		return ErrCapacityV1
+	}
+	read.names = names
+	return nil
+}
+
 func (o *SourceOwnerV1) census(r *sourceRoot, forRelease bool) (sourceUsage, error) {
-	entries, err := o.sourceEntries(r)
+	return o.censusWithRead(r, forRelease)
+}
+
+func (o *SourceOwnerV1) censusWithRead(r *sourceRoot, forRelease bool, read ...sourceReadCensus) (sourceUsage, error) {
+	entries, err := o.sourceEntries(r, read...)
 	if err != nil {
 		return sourceUsage{}, err
 	}
 	o.resolvePublications(r)
-	used, err := o.censusFiles(r, entries, forRelease)
+	used, err := o.censusFiles(r, entries, forRelease, read...)
 	if used.stageReached && used.stage.held() && o.debt.file == used.stage.file {
 		o.debt.leaf = used.stage.leaf
 		o.stage.Clear()
@@ -92,7 +157,7 @@ func (o *SourceOwnerV1) census(r *sourceRoot, forRelease bool) (sourceUsage, err
 	return used, err
 }
 
-func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, forRelease bool) (sourceUsage, error) {
+func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, forRelease bool, read ...sourceReadCensus) (sourceUsage, error) {
 	location, err := o.releaseCensusLocation(r)
 	if err != nil {
 		return sourceUsage{}, err
@@ -100,7 +165,7 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, forRel
 	if o.debt.unlinkTried {
 		_ = o.observeStageRemoval(r)
 	}
-	stage, prefix, stopErr := o.censusStage(r, entries)
+	stage, prefix, stopErr := o.censusStage(r, entries, read...)
 	if stopErr != nil && stage.held() {
 		return sourceUsage{}, stopErr
 	}
@@ -111,10 +176,12 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, forRel
 	used := o.stagingUsage(stage)
 	used.entries = entries
 	used.forRelease, used.stageErr, used.releaseLeaf = forRelease, stageErr, location
+	listed := sourceListing(entries, read)
+	used.read = o.startReadCensus(read)
 	o.chargeBindings(&used)
-	used, err = o.censusCaptures(r, entries[:prefix], used, stopErr)
-	if stopErr != nil && strings.HasPrefix(entries[prefix].Name(), heldStagePrefix) {
-		return sourceUsage{stage: stage, stageReached: used.stageReached, entries: entries}, stopErr
+	used, err = o.censusCaptures(r, listed, prefix, used, stopErr)
+	if stopErr != nil && strings.HasPrefix(listed.name(prefix), heldStagePrefix) {
+		return sourceUsage{stage: stage, stageReached: used.stageReached, entries: entries, read: used.read}, stopErr
 	}
 	return used, err
 }
@@ -150,6 +217,91 @@ func (o *SourceOwnerV1) stagingUsage(stage sourceDebt) sourceUsage {
 	return used
 }
 
+// startReadCensus selects the held target identity when its capture is settled.
+func (o *SourceOwnerV1) startReadCensus(read []sourceReadCensus) sourceReadCensus {
+	if len(read) == 0 {
+		return sourceReadCensus{}
+	}
+	scope := read[0]
+	if target := o.live[scope.name]; settledReadBinding(target) {
+		scope.target = target.file
+	}
+	return scope
+}
+
+// sourceStageSpelling extracts the capture key from a public or held stage name.
+func sourceStageSpelling(leaf string) string {
+	if name, ok := strings.CutPrefix(leaf, publicStagePrefix); ok {
+		return name
+	}
+	return strings.TrimPrefix(leaf, heldStagePrefix)
+}
+
+// settledReadBinding identifies an issued reserve with a confirmed inode.
+func settledReadBinding(b *sourceIncarnation) bool {
+	return b != nil && b.issued && !b.uncertain && b.file != (filelock.IdentityV1{})
+}
+
+// privateReadBinding excludes live ties to a requested capture or a protected holder.
+func (o *SourceOwnerV1) privateReadBinding(used *sourceUsage, name string, b *sourceIncarnation) bool {
+	return settledReadBinding(b) && name != used.read.name && !o.readHolder(used, name, b.file, b)
+}
+
+// readHolder checks the stage, its pending quota, and the release custody.
+func (o *SourceOwnerV1) readHolder(used *sourceUsage, name string, file filelock.IdentityV1, b *sourceIncarnation) bool {
+	read := &used.read
+	if name == o.observedStage || strings.EqualFold(name, read.blockedStage) || file == read.blockedStageFile {
+		return true
+	}
+	for _, stage := range [...]sourceDebt{used.stage, used.pendingStage, o.debt, read.witness} {
+		if strings.EqualFold(name, stage.name) || file == stage.file || b == stage.binding {
+			return true
+		}
+	}
+	return o.release.readHolder(name, file)
+}
+
+// readHolder covers both release backing spellings and its tracked stage key.
+func (d *sourceRelease) readHolder(name string, file filelock.IdentityV1) bool {
+	return d != nil && (name == d.name || file == d.file || strings.EqualFold(name, sourceStageSpelling(d.alias)))
+}
+
+// acceptReadOmissions clears only distinct missing bindings and leaves their reserves charged.
+func (o *SourceOwnerV1) acceptReadOmissions(used *sourceUsage) {
+	read := &used.read
+	for name, b := range o.live {
+		if o.privateReadBinding(used, name, b) && b.file != read.target && o.firstReadName(read, name) == "" {
+			used.releaseMissing--
+			read.localized = true
+			if used.releaseMissing == 0 {
+				break
+			}
+		}
+	}
+}
+
+// selectReadRefusal preserves the first pending observation when the target was not reached.
+func (used *sourceUsage) selectReadRefusal() {
+	if read := &used.read; len(read.pending) != 0 {
+		used.applyPendingRefusal(read.pending[0])
+		read.pending = nil
+	}
+}
+
+// applyPendingRefusal selects the earlier result and its stage boundary.
+func (used *sourceUsage) applyPendingRefusal(pending sourceReadMismatch) {
+	read := &used.read
+	if used.visitErr != nil && pending.ordinal > read.refusalOrdinal {
+		return
+	}
+	refusal := ErrIntegrityV1
+	if pending.identityMismatch {
+		refusal = ErrIdentityV1
+	}
+	used.visitErr, used.stageReached = refusal, pending.stageReached
+	read.refusalOrdinal = pending.ordinal
+}
+
 // chargeBindings reserves space for bound captures, including missing files.
 func (o *SourceOwnerV1) chargeBindings(used *sourceUsage) {
 	for _, backing := range o.live {
@@ -177,24 +329,37 @@ func (used *sourceUsage) bindingCharge(backing *sourceIncarnation) (uint64, bool
 	return size, shared
 }
 
-func (o *SourceOwnerV1) censusCaptures(r *sourceRoot, entries []os.DirEntry, used sourceUsage, stopErr error) (sourceUsage, error) {
+func (o *SourceOwnerV1) censusCaptures(r *sourceRoot, listed sourceEntryNames, prefix int, used sourceUsage, stopErr error) (sourceUsage, error) {
 	absentRelease := o.release
-	for _, entry := range entries {
-		name := entry.Name()
+	for i := range prefix {
+		used.read.ordinal = i
+		name := listed.name(i)
 		if err := o.censusEntry(r, name, &used); err != nil {
+			used.selectReadRefusal()
 			return used, cmp.Or(used.visitErr, err)
 		}
 		if stopErr != nil && used.visitErr != nil {
+			used.selectReadRefusal()
 			return used, used.visitErr
 		}
 		if absentRelease != nil && name == used.releaseLeaf {
 			absentRelease = nil
 		}
 	}
+	used.selectReadRefusal()
 	if stopErr != nil {
 		return used, stopErr
 	}
-	return o.finishCensus(used, absentRelease)
+	return o.finishReadCensus(used, absentRelease)
+}
+
+// finishReadCensus applies private omissions after the ordered and aggregate checks pass.
+func (o *SourceOwnerV1) finishReadCensus(used sourceUsage, absentRelease *sourceRelease) (sourceUsage, error) {
+	used, err := o.finishCensus(used, absentRelease)
+	if used.read.name != "" && used.visitErr == nil && err == nil && used.releaseMissing > 0 {
+		o.acceptReadOmissions(&used)
+	}
+	return used, err
 }
 
 func (o *SourceOwnerV1) censusEntry(r *sourceRoot, name string, used *sourceUsage) error {
@@ -311,6 +476,7 @@ func (o *SourceOwnerV1) visitCensusBytes(used *sourceUsage, size, aliasBytes uin
 	}
 	if size > o.limits.Bytes-used.visitedBytes {
 		used.visitErr = ErrCapacityV1
+		used.read.refusalOrdinal = used.read.ordinal
 		return
 	}
 	used.visitedBytes += size
@@ -337,8 +503,8 @@ func (o *SourceOwnerV1) censusCaptureAt(r *sourceRoot, name, leaf string, used *
 		}
 	}
 	backing := o.live[name]
-	if backing != nil && backing.issued {
-		used.observeIssuedCapture(backing, id, size)
+	if err := o.observeCensusCapture(used, name, backing, info, id, size); err != nil {
+		return err
 	}
 	if backing == nil {
 		o.chargeNamedCapture(used, nil, id, size)
@@ -360,15 +526,20 @@ func (o *SourceOwnerV1) chargeNamedCapture(used *sourceUsage, backing *sourceInc
 
 func (o *SourceOwnerV1) chargeBoundCapture(used *sourceUsage, backing *sourceIncarnation, id filelock.IdentityV1, size uint64) {
 	reserved, shared := used.bindingCharge(backing)
-	if used.forRelease && backing.issued || shared && id != backing.file {
+	if used.namedBackingCharge(backing, id, shared) {
 		o.chargeNamedCapture(used, backing, id, size)
 		return
 	}
 	excess := size - min(size, reserved)
-	if !shared && backing.issued && !used.completeCharge {
+	if !shared && backing.issued && !used.completeCharge && used.read.name == "" {
 		excess = 0
 	}
 	o.chargeReservedCapture(used, backing, id, size, reserved, excess)
+}
+
+// namedBackingCharge separates a distinct read replacement from its issued reserve.
+func (used *sourceUsage) namedBackingCharge(b *sourceIncarnation, id filelock.IdentityV1, shared bool) bool {
+	return used.forRelease && b.issued || id != b.file && (shared || used.read.name != "" && b.issued)
 }
 
 func (o *SourceOwnerV1) chargeReservedCapture(used *sourceUsage, backing *sourceIncarnation, id filelock.IdentityV1, size, reserved, excess uint64) {
@@ -399,13 +570,203 @@ func (used *sourceUsage) coverQuota(id filelock.IdentityV1, size uint64, full bo
 
 func (used *sourceUsage) observeIssuedCapture(backing *sourceIncarnation, id filelock.IdentityV1, size uint64) {
 	used.releaseMissing--
-	switch {
-	case used.visitErr != nil:
-	case backing.file != id:
-		used.visitErr = ErrIdentityV1
-	case backing.size != size:
-		used.visitErr = ErrIntegrityV1
+	if used.visitErr == nil {
+		used.visitErr = backing.censusMismatch(id, size)
 	}
+}
+
+func (b *sourceIncarnation) censusMismatch(id filelock.IdentityV1, size uint64) error {
+	switch {
+	case b.file != id:
+		return ErrIdentityV1
+	case b.size != size:
+		return ErrIntegrityV1
+	default:
+		return nil
+	}
+}
+
+// observeCensusCapture selects the ordered strict or scoped disposition of a listed capture.
+func (o *SourceOwnerV1) observeCensusCapture(used *sourceUsage, name string, b *sourceIncarnation, info os.FileInfo, id filelock.IdentityV1, size uint64) error {
+	if used.read.name == "" {
+		if b != nil && b.issued {
+			used.observeIssuedCapture(b, id, size)
+		}
+		return nil
+	}
+	stat, _ := info.Sys().(*syscall.Stat_t)
+	if stat == nil || stat.Nlink == 0 || id == (filelock.IdentityV1{}) {
+		return ErrIntegrityV1
+	}
+	if !used.completeCharge {
+		o.observeReadCapture(used, name, b, id, size, stat.Nlink == 1)
+	}
+	return nil
+}
+
+// observeReadCapture accounts the issued observation before deciding whether its fault is private.
+func (o *SourceOwnerV1) observeReadCapture(used *sourceUsage, name string, b *sourceIncarnation, id filelock.IdentityV1, size uint64, singleLink bool) {
+	if name == used.read.name {
+		used.observeReadTarget(id)
+	}
+	if b == nil || !b.issued {
+		return
+	}
+	used.releaseMissing--
+	refusal := b.censusMismatch(id, size)
+	if used.visitErr == nil && refusal != nil {
+		private := singleLink && o.privateReadBinding(used, name, b)
+		if !o.isolateReadMismatch(used, name, b, id, private) {
+			used.visitErr, used.read.refusalOrdinal = refusal, used.read.ordinal
+		}
+	}
+}
+
+// isolateReadMismatch retains a private fault's original position until target identity is known.
+func (o *SourceOwnerV1) isolateReadMismatch(used *sourceUsage, name string, b *sourceIncarnation, id filelock.IdentityV1, private bool) bool {
+	read := &used.read
+	if !private || read.stoppedStageUnknown || read.target == id || read.target == b.file || o.readHolder(used, name, id, b) {
+		return false
+	}
+	if o.hasReadSpelling(read, name) {
+		return false
+	}
+	if read.target == (filelock.IdentityV1{}) {
+		return used.deferMismatch(b.file, id)
+	}
+	read.localized = true
+	return true
+}
+
+// deferMismatch records a reached candidate in the space bounded by listed issued keys.
+func (used *sourceUsage) deferMismatch(original, observed filelock.IdentityV1) bool {
+	read := &used.read
+	if len(read.pending) >= read.pendingLimit {
+		return false
+	}
+	if read.pending == nil {
+		read.pending = make([]sourceReadMismatch, 0, read.pendingLimit)
+	}
+	read.pending = append(read.pending, sourceReadMismatch{
+		original: original, observed: observed, ordinal: read.ordinal,
+		identityMismatch: original != observed, stageReached: used.stageReached,
+	})
+	return true
+}
+
+// observeReadTarget resolves reached mismatches against the observed target inode.
+func (used *sourceUsage) observeReadTarget(id filelock.IdentityV1) {
+	read := &used.read
+	if read.target != (filelock.IdentityV1{}) {
+		return
+	}
+	read.target = id
+	for _, pending := range read.pending {
+		if id == pending.original || id == pending.observed {
+			used.applyPendingRefusal(pending)
+			break
+		}
+		read.localized = true
+	}
+	read.pending = nil
+}
+
+// observeReadName counts indexable names and settled issued prefix keys.
+func (o *SourceOwnerV1) observeReadName(read *sourceReadCensus, name string, inPrefix bool) {
+	include, alternate := o.indexableReadName(name)
+	if !include {
+		return
+	}
+	read.indexLimit++
+	if alternate {
+		read.hasSpellings = true
+		return
+	}
+	if inPrefix && name != read.name && settledReadBinding(o.live[name]) {
+		read.pendingLimit++
+	}
+}
+
+// indexableReadName accepts canonical hex and listed alternates of issued keys.
+func (o *SourceOwnerV1) indexableReadName(name string) (include, alternate bool) {
+	if len(name) != 2*sha256.Size {
+		return false, false
+	}
+	if strings.ContainsAny(name, "ABCDEF") {
+		return o.issuedReadSpelling(name), true
+	}
+	return sourceHexKey(name), false
+}
+
+// issuedReadSpelling matches a case variant to a canonical key of a live issued capture.
+func (o *SourceOwnerV1) issuedReadSpelling(name string) bool {
+	var key [2 * sha256.Size]byte
+	for i := range key {
+		c := name[i]
+		if c >= 'A' && c <= 'F' {
+			c += 'a' - 'A'
+		}
+		key[i] = c
+	}
+	b := o.live[string(key[:])]
+	return b != nil && b.issued
+}
+
+// readNameIndex sorts ordinals into the borrowed listing without changing its order.
+func (o *SourceOwnerV1) readNameIndex(read *sourceReadCensus) []int {
+	if read.nameIndex == nil && read.indexLimit != 0 {
+		read.nameIndex = make([]int, read.indexLimit)
+		i := 0
+		for ordinal, leaf := range read.names {
+			if include, _ := o.indexableReadName(leaf); include {
+				read.nameIndex[i] = ordinal
+				i++
+			}
+		}
+		slices.SortFunc(read.nameIndex, func(a, b int) int {
+			return compareReadName(read.names[a], read.names[b])
+		})
+	}
+	return read.nameIndex
+}
+
+// hasReadSpelling checks the first folded match, where alternates precede the lowercase key.
+func (o *SourceOwnerV1) hasReadSpelling(read *sourceReadCensus, name string) bool {
+	if !read.hasSpellings {
+		return false
+	}
+	match := o.firstReadName(read, name)
+	return match != "" && match != name
+}
+
+// firstReadName returns the earliest spelling in the key's folded group.
+func (o *SourceOwnerV1) firstReadName(read *sourceReadCensus, name string) string {
+	index := o.readNameIndex(read)
+	i, found := slices.BinarySearchFunc(index, name, func(i int, key string) int {
+		return compareCaptureSpelling(read.names[i], key)
+	})
+	if !found {
+		return ""
+	}
+	return read.names[index[i]]
+}
+
+func compareReadName(a, b string) int {
+	if order := compareCaptureSpelling(a, b); order != 0 {
+		return order
+	}
+	return cmp.Compare(a, b)
+}
+
+// compareCaptureSpelling compares validated hex keys in ASCII-folded order.
+func compareCaptureSpelling(a, b string) int {
+	for i := range 2 * sha256.Size {
+		left, right := a[i]|('a'-'A'), b[i]|('a'-'A')
+		if left != right {
+			return int(left) - int(right)
+		}
+	}
+	return 0
 }
 
 func (d *sourceDebt) observeAlias(id filelock.IdentityV1, backing *sourceIncarnation) {
@@ -498,25 +859,51 @@ func sourceHexKey(name string) bool {
 
 func (d sourceDebt) held() bool { return strings.HasPrefix(d.leaf, heldStagePrefix) }
 
-// censusStage returns the valid prefix and the first staging error.
-func (o *SourceOwnerV1) censusStage(r *sourceRoot, entries []os.DirEntry) (sourceDebt, int, error) {
+// censusStage inspects stages through the first staging error and reads the listed spellings.
+func (o *SourceOwnerV1) censusStage(r *sourceRoot, entries []os.DirEntry, read ...sourceReadCensus) (sourceDebt, int, error) {
 	var stage sourceDebt
-	for i, entry := range entries {
-		next, err := o.readStageEntry(r, entry.Name())
-		if err != nil {
-			return stage, i, err
+	var stopErr error
+	listed := sourceListing(entries, read)
+	prefix := listed.len()
+	for i := range prefix {
+		leaf := listed.name(i)
+		if len(read) != 0 {
+			o.observeReadName(&read[0], leaf, stopErr == nil)
 		}
-		switch {
-		case next.name == "":
-		case stage.name == "":
-			stage = next
-		case stage.name == next.name && stage.held() != next.held():
-			return stage, i, syscall.EEXIST
-		default:
-			return stage, i, ErrBusyV1
+		if stopErr != nil {
+			continue
+		}
+		stopped, err := o.observeStageEntry(r, &stage, leaf)
+		if err != nil {
+			stopErr = err
+			prefix = i
+			if len(read) == 0 {
+				break
+			}
+			read[0].blockedStage = sourceStageSpelling(stopped.leaf)
+			read[0].blockedStageFile = stopped.file
+			read[0].stoppedStageUnknown = stopped.file == (filelock.IdentityV1{}) && strings.HasPrefix(stopped.leaf, publicStagePrefix)
 		}
 	}
-	return stage, len(entries), nil
+	return stage, prefix, stopErr
+}
+
+// observeStageEntry selects the first stage and returns the stopped stage observation.
+func (o *SourceOwnerV1) observeStageEntry(r *sourceRoot, stage *sourceDebt, leaf string) (sourceDebt, error) {
+	next, err := o.readStageEntry(r, leaf)
+	if err != nil {
+		return next, err
+	}
+	switch {
+	case next.name == "":
+	case stage.name == "":
+		*stage = next
+	case stage.name == next.name && stage.held() != next.held():
+		return next, syscall.EEXIST
+	default:
+		return next, ErrBusyV1
+	}
+	return sourceDebt{}, nil
 }
 
 func (o *SourceOwnerV1) readStageEntry(r *sourceRoot, leaf string) (sourceDebt, error) {
@@ -533,7 +920,7 @@ func (o *SourceOwnerV1) readStageEntry(r *sourceRoot, leaf string) (sourceDebt, 
 	}
 	info, err := sourceEntryInfo(r, leaf, ErrIntegrityV1)
 	if err != nil {
-		return sourceDebt{}, err
+		return sourceDebt{leaf: leaf}, err
 	}
 	size := sourceFileSize(info)
 	id := filelock.FileIdentityV1(info)
@@ -743,8 +1130,8 @@ func fileExporter(f *os.File, m SourceManifestV1, header int) func(func(SourcePa
 
 // WithCapturedSourceV1 qualifies retained bytes before visiting (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.4).
 func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m SourceManifestV1, visit func(SourcePartV1) error) error {
-	return o.withFiles(account, m, false, func(r *sourceRoot, m SourceManifestV1, size uint64, _ sourceUsage) error {
-		name := m.name(o.id)
+	return o.withFiles(account, m, false, func(r *sourceRoot, m SourceManifestV1, size uint64, used sourceUsage) error {
+		name := used.read.name
 		switch {
 		case o.debt.name == name, o.pendingStage.name == name, o.observedStage == name, o.release != nil && o.release.name == name:
 			return ErrBusyV1
@@ -756,7 +1143,11 @@ func (o *SourceOwnerV1) WithCapturedSourceV1(account *mdbx.OperationAccount, m S
 		if expected != nil {
 			unobserved = ErrIntegrityV1
 		}
-		f, err := openSourceFile(r, name, unobserved)
+		var reached []filelock.IdentityV1
+		if used.read.localized {
+			reached = []filelock.IdentityV1{used.read.target}
+		}
+		f, err := openSourceFile(r, name, unobserved, reached...)
 		if err != nil {
 			return err
 		}
@@ -850,10 +1241,14 @@ func (w *sourceWindows) part(section *io.SectionReader, spec SourcePartSpecV1, h
 
 func (o *SourceOwnerV1) withFiles(account *mdbx.OperationAccount, m SourceManifestV1, preparing bool, use func(*sourceRoot, SourceManifestV1, uint64, sourceUsage) error) error {
 	return o.withManifest(account, m, preparing, func(r *sourceRoot, m SourceManifestV1, size uint64) error {
-		_ = o.retireStageWitness(r)
-		used, err := o.census(r, false)
+		witness := o.retireStageWitness(r)
+		var read []sourceReadCensus
+		if !preparing {
+			read = []sourceReadCensus{{name: m.name(o.id), witness: witness}}
+		}
+		used, err := o.censusWithRead(r, false, read...)
 		err = used.admissionError(err)
-		adopt := preparing || used.stage.name == m.name(o.id)
+		adopt := preparing || used.stage.name == used.read.name
 		if err == nil && adopt {
 			err = o.adoptStage(r, used)
 		}
@@ -873,7 +1268,7 @@ func (o *SourceOwnerV1) rememberPublicStage(r *sourceRoot, used sourceUsage, fun
 	if !used.stageReached || stage.held() || o.debt.name != "" || o.observedStage != "" {
 		return
 	}
-	if funded || o.stageWitnessFits(r, stage, used.entries) {
+	if funded || o.stageWitnessFits(r, stage, used.entries, used.read) {
 		o.retainStageWitness(r, stage)
 	}
 	o.observedStage = stage.name
@@ -888,25 +1283,18 @@ func (o *SourceOwnerV1) retainStageWitness(r *sourceRoot, stage sourceDebt) {
 }
 
 // stageWitnessFits charges the full bounded listing without changing the admission error.
-func (o *SourceOwnerV1) stageWitnessFits(r *sourceRoot, stage sourceDebt, entries []os.DirEntry) bool {
+func (o *SourceOwnerV1) stageWitnessFits(r *sourceRoot, stage sourceDebt, entries []os.DirEntry, read ...sourceReadCensus) bool {
 	location, err := o.release.releaseLocation(r)
 	if err != nil {
 		return false
 	}
-	stage.shared, stage.binding = false, nil
-	reserved := o.stagingUsage(stage)
-	reserved.completeCharge, reserved.releaseLeaf = true, location
+	reserved := o.witnessUsage(stage, location, read)
 	o.chargeBindings(&reserved)
 	absentRelease := o.release
-	for _, entry := range entries {
-		name := entry.Name()
-		switch {
-		case sourceHexKey(name), name == releaseDetached:
-			if o.censusEntry(r, name, &reserved) != nil {
-				return false
-			}
-		case name == stage.leaf:
-		case strings.HasPrefix(name, publicStagePrefix), strings.HasPrefix(name, heldStagePrefix):
+	listed := sourceListing(entries, read)
+	for i := range listed.len() {
+		name := listed.name(i)
+		if !o.chargeWitnessEntry(r, name, &reserved) {
 			return false
 		}
 		if name == location {
@@ -917,16 +1305,42 @@ func (o *SourceOwnerV1) stageWitnessFits(r *sourceRoot, stage sourceDebt, entrie
 	return err == nil
 }
 
-// retireStageWitness closes the pin when the name no longer identifies its file.
-func (o *SourceOwnerV1) retireStageWitness(r *sourceRoot) error {
-	if pin := o.stage.File; pin != nil && o.debt.name == "" {
-		pinned, pinErr := pin.Stat()
-		named, err := r.Lstat(pin.Name())
-		if pinErr != nil || errors.Is(err, os.ErrNotExist) || err == nil && !os.SameFile(pinned, named) {
-			o.stage.Clear()
-		}
+// chargeWitnessEntry accounts the listed backing or checks its recognized custody name.
+func (o *SourceOwnerV1) chargeWitnessEntry(r *sourceRoot, name string, used *sourceUsage) bool {
+	switch {
+	case sourceHexKey(name), name == releaseDetached:
+		return o.censusEntry(r, name, used) == nil
+	case name == used.stage.leaf, name == releaseScratch, o.release != nil && name == releaseFile:
+		return true
+	default:
+		return !strings.HasPrefix(name, publicStagePrefix) && !strings.HasPrefix(name, heldStagePrefix)
 	}
-	return nil
+}
+
+// witnessUsage measures the full stage funding independently of the ordered visit.
+func (o *SourceOwnerV1) witnessUsage(stage sourceDebt, location string, read []sourceReadCensus) sourceUsage {
+	stage.shared, stage.binding = false, nil
+	used := o.stagingUsage(stage)
+	used.completeCharge, used.releaseLeaf = true, location
+	if len(read) != 0 {
+		used.read.name = read[0].name
+	}
+	return used
+}
+
+// retireStageWitness closes the pin when the name no longer identifies its file.
+func (o *SourceOwnerV1) retireStageWitness(r *sourceRoot) sourceDebt {
+	pin := o.stage.File
+	if pin == nil || o.debt.name != "" {
+		return sourceDebt{}
+	}
+	pinned, pinErr := pin.Stat()
+	named, err := r.Lstat(pin.Name())
+	if pinErr != nil || errors.Is(err, os.ErrNotExist) || err == nil && !os.SameFile(pinned, named) {
+		o.stage.Clear()
+		return sourceDebt{}
+	}
+	return sourceDebt{name: sourceStageSpelling(pin.Name()), file: filelock.FileIdentityV1(pinned)}
 }
 
 func (o *SourceOwnerV1) adoptStage(r *sourceRoot, used sourceUsage) error {
