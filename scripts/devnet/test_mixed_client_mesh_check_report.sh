@@ -2514,8 +2514,7 @@ sn_check "sidecar recorded length differs from derived length" "${SN_GRAMMAR}" "
 expect_pass_contains "sidecar 148-byte header derivation" "PASS: mixed_client_go_submit_rust_accept report structurally accepted" check_report "${TMP_ROOT}/sn-long-header-report.json" offline producer-tx
 sn_check "sidecar genesis identity mismatch" "${SN_GENESIS}" "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal" tx genesis-identity
 sn_check "sidecar genesis block hash mismatch" "${SN_GENESIS}" "genesis.go_block_path hash differs" tx genesis-block-hash
-expect_fail_contains "argv defect before sidecar extra key" "node command_argv does not match exact launched argv" check_report "${TMP_ROOT}/sn-argv-and-extra-key-report.json" offline producer-tx
-expect_fail_check_token "argv defect before sidecar extra key token" argv_mismatch check_report "${TMP_ROOT}/sn-argv-and-extra-key-report.json" offline producer-tx
+sidecar_value_check "argv defect before sidecar extra key" "node command_argv does not match exact launched argv" argv_mismatch producer-tx "${TMP_ROOT}/sn-argv-and-extra-key-report.json" check_report_reason_token
 sn_check "genesis identity before header grammar" "${SN_GENESIS}" "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal" tx genesis-and-grammar
 sn_check "binaries before genesis identity" "${SN_INVALID}" "binaries.go_node_sha256 does not match" tx binary-and-genesis
 sn_check "initial convergence before header grammar" "${SN_INVALID}" "initial_convergence does not prove equal tips" tx grammar-and-convergence
