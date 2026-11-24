@@ -1561,7 +1561,7 @@ PY
 txgen_datadir_guard() {
   local datadir="" resolved rust_resolved
   while (( $# )); do [[ "$1" == --datadir && $# -ge 2 ]] && datadir="$2"; shift; done
-  [[ -n "${datadir}" ]] && resolved="$(_rubin_process_physical_dir "${datadir}" 2>/dev/null)" && rust_resolved="$(_rubin_process_physical_dir "${RUST_DIR}" 2>/dev/null)" && [[ "${resolved}" != "${rust_resolved}" ]] || { TX_REASON=cross_client_datadir_argv; return 1; }
+  resolved="$(_rubin_process_physical_dir "${datadir}" 2>/dev/null)" && rust_resolved="$(_rubin_process_physical_dir "${RUST_DIR}" 2>/dev/null)" && [[ "${resolved}" != "${rust_resolved}" ]] || { TX_REASON=cross_client_datadir_argv; return 1; }
 }
 submit_go_tx() {
   local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key-file "${TX_FROM_KEY_FILE}" --to-key "${TX_TO_KEY}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}" --submit-to "${GO_RPC_ADDR}")

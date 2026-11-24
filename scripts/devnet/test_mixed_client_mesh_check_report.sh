@@ -260,6 +260,11 @@ expect_guard_refused --datadir "${probe_root}/rust-alias"
 expect_guard_refused --datadir "${probe_root}/missing"
 expect_guard_refused --datadir ""
 expect_guard_refused
+RUST_DIR="${probe_root}/rust-missing"
+expect_guard_refused --datadir "${GO_DIR}"
+RUST_DIR="${probe_root}/rust-node"
+reason="$(TX_REASON=""; txgen_datadir_guard "${TXGEN_BIN}" --datadir 2>"${probe_root}/guard.err" || printf '%s' "${TX_REASON}")" || :
+[[ "${reason}" == cross_client_datadir_argv && ! -s "${probe_root}/guard.err" ]] || { echo "FAIL: trailing --datadir reason '${reason}': $(cat "${probe_root}/guard.err")" >&2; exit 1; }
 TX_REASON=""; txgen_datadir_guard "${TXGEN_BIN}" --datadir "${GO_DIR}" || { echo "FAIL: guard refused the Go datadir" >&2; exit 1; }
 GO_DIR="${probe_root}/rust-alias"; rm -f -- "${SPAWNED}"; TX_REASON=""
 if submit_go_tx; then echo "FAIL: submit_go_tx accepted the Rust datadir" >&2; exit 1; fi
@@ -1432,7 +1437,7 @@ bad_restart["rust_restart"]["catch_up_has_tip"] = False
 bad_restart["rust_restart"]["catch_up_tip"] = None
 dump(root / "restart-catch-up-tip-absent.json", bad_restart)
 bad_restart = json.loads(json.dumps(restart_report))
-bad_restart["rust_restart"]["go_target_height"] = 7
+bad_restart["rust_restart"]["go_target_height"] = 107
 dump(root / "restart-go-target-not-advanced.json", bad_restart)
 bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["pre_restart_height"] = "107"
@@ -1569,8 +1574,8 @@ mine_next_cases = (
     ("converge-rust", "rust-mine-next.json", converge_report, ("rust_mine", "mine_next_path"), ("nonce-string", "timestamp-string", "height-over-rust-mine", "tx-count-over-rust-mine", "mined-one")),
     ("rust-conv-go", "go-mine-next.json", rust_converge_report, ("go_mine", "mine_next_path"), ("nonce-string", "timestamp-string", "height-over-go-mine", "tx-count-over-go-mine")),
     ("restart-go", "go-restart-mine-next.json", restart_report, ("rust_restart", "go_target_mine_next_path"), ("nonce-over", "timestamp-over", "tx-count-over-restart", "nonce-string")),
-    ("converge-go-tip", "go-converge-tip.json", converge_report, ("go_converge", "tip_path"), ("best-below", "best-string", "in-ibd-string")),
-    ("rust-conv-rust-tip", "rust-converge-tip.json", rust_converge_report, ("rust_converge", "tip_path"), ("best-below", "best-string", "in-ibd-string")),
+    ("converge-go-tip", "go-converge-tip.json", converge_report, ("go_converge", "tip_path"), ("best-below", "best-string", "in-ibd-string", "other-impl")),
+    ("rust-conv-rust-tip", "rust-converge-tip.json", rust_converge_report, ("rust_converge", "tip_path"), ("best-below", "best-string", "in-ibd-string", "other-impl")),
     ("restart-pre-tip", "rust-pre-restart-tip.json", restart_report, ("rust_restart", "pre_restart_tip_path"), ("best-over", "in-ibd-string")),
     ("restart-go-tip", "go-restart-target-tip.json", restart_report, ("rust_restart", "go_target_tip_path"), ("best-over", "in-ibd-string")),
     ("restart-catch-up-tip", "rust-catch-up-tip.json", restart_report, ("rust_restart", "catch_up_tip_path"), ("best-over", "in-ibd-string")),
@@ -1604,6 +1609,7 @@ mine_next_edits = {
     "best-string": lambda d, r: d.__setitem__("best_known_height", str(d["height"])),
     "in-ibd-string": lambda d, r: d.__setitem__("in_ibd", "false"),
     "best-over": lambda d, r: d.__setitem__("best_known_height", OVER),
+    "other-impl": lambda d, r: d.__setitem__("implementation", {"go": "rust", "rust": "go"}[d["implementation"]]),
 }
 for site, sidecar_name, base_report, field, variants in mine_next_cases:
     for variant in variants:
@@ -2337,6 +2343,8 @@ for variant in best-below best-string in-ibd-string; do
   sidecar_value_check "converge go tip ${variant}" "go_converge tip sidecar does not match rust_mine block" converge_tip_invalid producer-tx "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-go-tip-${variant}.json"
   sidecar_value_check "rust-submit rust tip ${variant}" "rust_converge tip sidecar does not match go_mine block" converge_tip_invalid producer-tx "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-rust-tip-${variant}.json"
 done
+sidecar_value_check "converge go tip named rust" "go_converge.tip sidecar identity mismatch" converge_sidecar_identity_mismatch producer-tx "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-go-tip-other-impl.json"
+sidecar_value_check "rust-submit rust tip named go" "rust_converge.tip sidecar identity mismatch" converge_sidecar_identity_mismatch producer-tx "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-rust-tip-other-impl.json"
 sidecar_value_check "restart go target mine_next string nonce" "rust_restart.go_target_mine_next_path.nonce is not an integer" rust_restart_go_target_mine_next_invalid rust-restart "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-nonce-string.json"
 for spec in pre-tip:pre_restart_tip go-tip:go_target_tip catch-up-tip:catch_up_tip; do
   IFS=: read -r site field <<<"${spec}"
