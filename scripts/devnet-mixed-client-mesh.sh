@@ -510,6 +510,9 @@ elif partition_mode:
     allowed_keys |= {"artifact_created_at_utc", "observations", "proof", "run_id"}
 req(set(data) == allowed_keys, f"report top-level keys mismatch: {sorted(data)}")
 artifact_root_arg = data.get("artifact_root"); artifact_root = checked_path("artifact_root", artifact_root_arg)
+# artifact_root/<name> spelled on the recorded artifact_root string, on which existence is
+# decided: the realpath of that string drops a missing component that precedes "..".
+def root_entry(name: str) -> str: return os.path.join(artifact_root_arg, name)
 legacy_schema = data.get("legacy_schema_compatibility")
 req(isinstance(legacy_schema, dict) and set(legacy_schema) == {"authoritative", "marker_path", "purpose", "reason"} and legacy_schema.get("authoritative") is False and nonempty_str(legacy_schema.get("marker_path")), "legacy_schema_compatibility missing marker_path")
 if restart_mode:
@@ -600,7 +603,7 @@ if restart_mode:
         datadir_path = Path(datadir_raw).resolve() if isinstance(datadir_raw, str) and Path(datadir_raw).is_absolute() else None
     except (OSError, RuntimeError, ValueError):
         datadir_path = None
-    req(isinstance(datadir_raw, str) and Path(datadir_raw).name == "node-rust" and datadir_path == root_datadir and root_datadir.is_dir() and not root_datadir.is_symlink() and os.path.isdir(datadir_raw), "rust_restart datadir is not bound to artifact root")
+    req(isinstance(datadir_raw, str) and Path(datadir_raw).name == "node-rust" and datadir_path == root_datadir and os.path.isdir(root_entry("node-rust")) and not root_datadir.is_symlink() and os.path.isdir(datadir_raw), "rust_restart datadir is not bound to artifact root")
     pre_restart_height = json_int(restart_info.get("pre_restart_height"), "rust_restart.pre_restart_height")
     req(pre_restart_height == restart["pre_restart_height"], "rust_restart pre_restart_height mismatch")
     go_target_height = json_int(restart_info.get("go_target_height"), "rust_restart.go_target_height")
@@ -833,7 +836,7 @@ def sn_block(impl: str, endpoint: str, genesis: dict) -> dict:
     return block
 def store_neutrality_checks() -> None:
     chain = scenario != SCENARIO_MESH
-    sidecar = load_json_file(*sn_file("store-neutrality sidecar", str(artifact_root / "mixed-client-mesh-store-neutrality.json")))
+    sidecar = load_json_file(*sn_file("store-neutrality sidecar", root_entry("mixed-client-mesh-store-neutrality.json")))
     sn_req(set(sidecar) == {"evidence_domain", "protocol_commit", "clients_tree_clean", "binaries", "chain_identity", "genesis", "header_bytes", "datadirs", "initial_convergence"}, f"sidecar keys mismatch: {sorted(sidecar)}")
     sn_req(sidecar["evidence_domain"] == "pre_switch_store_neutrality", "evidence_domain mismatch")
     sn_req(isinstance(sidecar["protocol_commit"], str) and re.fullmatch(r"[0-9a-f]{40}", sidecar["protocol_commit"]) is not None, "protocol_commit is not 40 lowercase hex")
@@ -844,14 +847,14 @@ def store_neutrality_checks() -> None:
         if key == "txgen_sha256" and not chain:
             sn_req(binaries[key] is None, "binaries.txgen_sha256 is not null")
         else:
-            sn_req(regular_file(artifact_root / name), f"artifact_root/{name} is not a regular file")
+            sn_req(regular_file(root_entry(name)), f"artifact_root/{name} is not a regular file")
             sn_req(hex32(binaries[key]) and binaries[key] == file_sha256(artifact_root / name), f"binaries.{key} does not match artifact_root/{name}")
             sn_req(impl is None or os.path.realpath(nodes_by_impl[impl]["binary"]) == os.path.realpath(artifact_root / name), f"the {impl} node binary does not resolve to artifact_root/{name}")
     ident = sidecar["chain_identity"]
     sn_req(isinstance(ident, dict) and set(ident) == {"network", "chain_id_hex", "genesis_hash_hex"} and ident["network"] == "devnet" and hex32(ident["chain_id_hex"]) and hex32(ident["genesis_hash_hex"]), "chain_identity malformed")
     dirs = sidecar["datadirs"]
     sn_req(isinstance(dirs, dict) and set(dirs) == {"go", "rust", "rust_exact_empty_before_first_start"}, "datadirs mismatch")
-    sn_req(sn_dir("datadirs.go", dirs["go"]) == sn_dir("artifact_root/node-go", str(artifact_root / "node-go")) and sn_dir("datadirs.rust", dirs["rust"]) == sn_dir("artifact_root/node-rust", str(artifact_root / "node-rust")) and dirs["rust_exact_empty_before_first_start"] is True, "datadirs mismatch")
+    sn_req(sn_dir("datadirs.go", dirs["go"]) == sn_dir("artifact_root/node-go", root_entry("node-go")) and sn_dir("datadirs.rust", dirs["rust"]) == sn_dir("artifact_root/node-rust", root_entry("node-rust")) and dirs["rust_exact_empty_before_first_start"] is True, "datadirs mismatch")
     sn_req(distinct_files(artifact_root / "node-go", artifact_root / "node-rust"), "artifact_root/node-go and artifact_root/node-rust resolve to one directory")
     conv = sidecar["initial_convergence"]
     sn_req(isinstance(conv, dict) and set(conv) == {"go_has_tip", "rust_has_tip", "height", "go_tip_hash", "rust_tip_hash", "go_tip_path", "rust_tip_path"}, "initial_convergence keys mismatch")

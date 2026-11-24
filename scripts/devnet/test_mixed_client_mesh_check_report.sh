@@ -19,6 +19,7 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; 
 
 TMP_PARENT="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)" || { echo "test TMPDIR parent is not usable: ${TMPDIR:-/tmp}" >&2; exit 1; }
 TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-mesh-check-report.XXXXXX")"
+printf 'TMP_ROOT: %s\n' "${TMP_ROOT}"
 cleanup() {
   chmod -R u+rwx "${TMP_ROOT}" || true
   rm -rf -- "${TMP_ROOT}"
@@ -79,54 +80,27 @@ expect_fail_contains() {
   require_contains "${output}" "${needle}" "${label}"
 }
 
-expect_fail_token() {
-  local label="$1" expected_token="$2" output token
-  shift 2
-  if output="$("$@" 2>&1)"; then
-    echo "FAIL: ${label} should fail" >&2
-    echo "actual output:" >&2
-    printf '%s\n' "${output}" >&2
-    exit 1
-  fi
-  token="$(printf '%s\n' "${output}" | combined_report_reason_token)"
-  if [[ "${token}" != "${expected_token}" ]]; then
-    echo "FAIL: ${label} produced token ${token}, want ${expected_token}" >&2
-    echo "actual output:" >&2
-    printf '%s\n' "${output}" >&2
-    exit 1
-  fi
-}
+expect_fail_token() { expect_fail_mapped "$1" "" "$2" combined_report_reason_token "${@:3}"; }
 
-# Runs the command once and requires it to fail with output that carries <needle> and maps
-# to <token> through <mapper>.
+# Runs the command once and requires it to fail with output that carries <needle> (when it
+# is not empty) and maps to <token> through the mappers of the space-separated list
+# <mappers>, in order; a mapper that exits non-zero fails the row with its status.
 expect_fail_mapped() {
-  local label="$1" needle="$2" token="$3" mapper="$4" output got
+  local label="$1" needle="$2" token="$3" mappers output got mapper rc
+  read -ra mappers <<<"$4"
   shift 4
   if output="$("$@" 2>&1)"; then
     echo "FAIL: ${label} should fail" >&2; printf '%s\n' "${output}" >&2; exit 1
   fi
-  require_contains "${output}" "${needle}" "${label}"
-  got="$(printf '%s\n' "${output}" | "${mapper}")"
-  [[ "${got}" == "${token}" ]] || { echo "FAIL: ${label} produced token ${got}, want ${token}" >&2; printf '%s\n' "${output}" >&2; exit 1; }
+  [[ -z "${needle}" ]] || require_contains "${output}" "${needle}" "${label}"
+  for mapper in "${mappers[@]}"; do
+    rc=0; got="$(printf '%s\n' "${output}" | "${mapper}")" || rc=$?
+    (( rc == 0 )) || { echo "FAIL: ${label}: ${mapper} exited with status ${rc}" >&2; exit 1; }
+    [[ "${got}" == "${token}" ]] || { echo "FAIL: ${label} produced token ${got} through ${mapper}, want ${token}" >&2; printf '%s\n' "${output}" >&2; exit 1; }
+  done
 }
 
-expect_fail_check_token() {
-  local label="$1" expected_token="$2" output token
-  shift 2
-  if output="$("$@" 2>&1)"; then
-    echo "FAIL: ${label} should fail" >&2
-    echo "actual output:" >&2
-    printf '%s\n' "${output}" >&2
-    exit 1
-  fi
-  token="$(printf '%s\n' "${output}" | check_report_reason_token)"
-  if [[ "${token}" != "${expected_token}" ]]; then
-    echo "FAIL: ${label} produced token ${token}, want ${expected_token}" >&2
-    echo "actual output:" >&2
-    printf '%s\n' "${output}" >&2
-    exit 1
-  fi
-}
+expect_fail_check_token() { expect_fail_mapped "$1" "" "$2" check_report_reason_token "${@:3}"; }
 
 expect_generator_fail_contains() {
   local label="$1" needle="$2" output_path output
@@ -2025,6 +1999,11 @@ sn_variant("tx-accept-datadir-through-missing", "tx-accept", lambda s, r: s["dat
 sn_variant("mesh-binary-through-missing", "mesh", lambda s, r: None, lambda report: sn_set_binary(report, "go", sn_through_missing(Path(report["artifact_root"]), "rubin-node-go")))
 sn_variant("mesh-marker-through-missing", "mesh", lambda s, r: None, lambda report: report["legacy_schema_compatibility"].update(marker_path=sn_through_missing(Path(report["legacy_schema_compatibility"]["marker_path"]).parent, Path(report["legacy_schema_compatibility"]["marker_path"]).name)))
 sn_variant("restart-report-datadir-through-missing", "restart", lambda s, r: None, lambda report: report["rust_restart"].update(datadir=sn_through_missing(Path(report["artifact_root"]), "node-rust")))
+def sn_root_through_missing(report: dict) -> None:
+    recorded = Path(report["artifact_root"])
+    report["artifact_root"] = sn_through_missing(recorded.parent, recorded.name)
+for sn_base in ("mesh", "tx-accept", "restart"):
+    sn_variant(f"{sn_base}-root-through-missing", sn_base, lambda s, r: None, sn_root_through_missing)
 sn_variant("mesh-tip-nan", "mesh", lambda s, r: sn_edit_file(r, GO_TIP, best_known_height=float("nan")))
 sn_variant("tx-accept-height-infinity", "tx-accept", lambda s, r: s["initial_convergence"].update(height=float("-inf")))
 def sn_wide_keys(name: str, base: str) -> None:
@@ -2437,12 +2416,16 @@ expect_fail_contains "partition go mine_next not committed at the Rust endpoint"
 expect_fail_contains "restart go target mine_next not committed at the Rust endpoint" "rust_restart.go_target_mine_next_path keys mismatch" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-not-committed-rust-rpc.json"
 expect_fail_contains "rust-submit go mine_next not committed at the Rust endpoint" "go_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-not-committed-rust-rpc.json" offline producer-tx
 # Runs check_report once and requires its refusal to carry "FAIL: <needle>" and to map to
-# <token> through <mapper> ($6), by default combined_report_reason_token in producer-tx mode
-# and check_report_reason_token in the other modes.
+# <token> through the mappers <mappers> ($6). By default: in producer-tx mode
+# combined_report_reason_token, and for an unsearchable-parent report also
+# tx_report_reason_token before it; check_report_reason_token in the other modes.
 sidecar_value_check() {
-  local label="$1" needle="$2" token="$3" mode="$4" report="$5" mapper="${6:-check_report_reason_token}"
-  [[ -n "${6:-}" || "${mode}" != producer-tx ]] || mapper=combined_report_reason_token
-  expect_fail_mapped "${label}" "FAIL: ${needle}" "${token}" "${mapper}" check_report "${report}" offline "${mode}"
+  local label="$1" needle="$2" token="$3" mode="$4" report="$5" mappers="${6:-check_report_reason_token}"
+  if [[ -z "${6:-}" && "${mode}" == producer-tx ]]; then
+    mappers=combined_report_reason_token
+    [[ "${report}" != *-unsearchable-parent-report.json ]] || mappers="tx_report_reason_token combined_report_reason_token"
+  fi
+  expect_fail_mapped "${label}" "FAIL: ${needle}" "${token}" "${mappers}" check_report "${report}" offline "${mode}"
 }
 for variant in nonce-string timestamp-string height-over-rust-mine tx-count-over-rust-mine mined-one; do
   sidecar_value_check "converge rust mine_next ${variant}" "rust_mine mine_next sidecar does not match report" mine_sidecar_invalid producer-tx "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-${variant}.json"
@@ -2602,6 +2585,9 @@ sn_check "sidecar datadir through a missing directory" "${SN_INVALID}" "datadirs
 sidecar_value_check "node binary through a missing directory" "node-go command/binary is not bound to executable rubin-node-go" unknown public "${TMP_ROOT}/sn-mesh-binary-through-missing-report.json"
 sidecar_value_check "legacy marker through a missing directory" "legacy marker is not a regular file" legacy_marker_invalid public "${TMP_ROOT}/sn-mesh-marker-through-missing-report.json"
 sidecar_value_check "restart datadir through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-report-datadir-through-missing-report.json"
+sn_check "artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" public mesh-root-through-missing
+sn_check "tx artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" tx tx-accept-root-through-missing
+sidecar_value_check "restart artifact root through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-root-through-missing-report.json"
 sn_check "default tip sidecar with best_known_height NaN" "${SN_INVALID}" "initial_convergence.go_tip_path malformed JSON: non-finite constant NaN" public mesh-tip-nan
 sn_check "sidecar with height -Infinity" "${SN_INVALID}" "store-neutrality sidecar malformed JSON: non-finite constant -Infinity" tx tx-accept-height-infinity
 sn_check "default sidecar key list beyond the argument limit" "${SN_INVALID}" "sidecar keys mismatch" public mesh-wide-keys
@@ -2710,6 +2696,5 @@ if (( pd_denied )); then
 fi
 printf 'permission-denial rows ran %d, skipped %d\n' "${pd_ran}" "${pd_skipped}"
 (( pd_ran + pd_skipped == 16 )) || { echo "FAIL: permission-denial rows matched $((pd_ran + pd_skipped)) table rows, want 16" >&2; exit 1; }
-sn_output="$(check_report "${TMP_ROOT}/sn-tx-accept-top-extra-report.json" offline producer-tx 2>&1)" && { echo "FAIL: sidecar extra key report should fail" >&2; exit 1; }
-[[ "$(combined_report_reason_token <<<"${sn_output}")" == store_neutrality_sidecar_invalid ]] || { echo "FAIL: combined token for sidecar keys mismatch: $(combined_report_reason_token <<<"${sn_output}")" >&2; exit 1; }
+expect_fail_mapped "combined token for sidecar keys mismatch" "FAIL: store_neutrality_sidecar_invalid: sidecar keys mismatch" store_neutrality_sidecar_invalid combined_report_reason_token check_report "${TMP_ROOT}/sn-tx-accept-top-extra-report.json" offline producer-tx
 printf 'PASS: mixed-client mesh check-report public/internal boundaries are covered\n'
