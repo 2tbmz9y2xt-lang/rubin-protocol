@@ -111,7 +111,7 @@ def tip_capture(label: str, p: Path, impl: str, endpoint: str) -> dict:
     return tip
 def tip_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str) -> None:
     tip = tip_capture(label, p, impl, endpoint)
-    req(tip.get("has_tip") is True and is_json_int(tip.get("height")) and tip.get("height") == height and tip.get("tip_hash") == block_hash and is_json_int(tip.get("best_known_height")) and tip["best_known_height"] >= height and isinstance(tip.get("in_ibd"), bool), f"{label} does not match expected tip")
+    req(tip_at(tip, height, block_hash) and is_json_int(tip.get("height")) and is_json_int(tip.get("best_known_height")) and tip["best_known_height"] >= height and isinstance(tip.get("in_ibd"), bool), f"{label} does not match expected tip")
 def block_capture(label: str, p: Path, impl: str, endpoint: str, height: int) -> dict:
     block = load_json_file(label, p)
     req(set(block) == BLOCK_SIDECAR_KEYS, f"{label} keys mismatch: {sorted(block)}")
@@ -765,7 +765,7 @@ if tx_mode:
         verify_block_inclusion_sidecar(f"{mine_label}.block_path", mine_block_path, txhex, txid, height, block_hash, mine["tx_count"], mine_impl, nodes_by_impl[mine_impl]["rpc_endpoint"])
         verify_block_inclusion_sidecar(f"{converge_label}.block_path", converge_block_path, txhex, txid, height, block_hash, mine["tx_count"], converge_impl, nodes_by_impl[converge_impl]["rpc_endpoint"])
         tip = tip_capture(f"{converge_label}.tip", converge_tip_path, converge_impl, nodes_by_impl[converge_impl]["rpc_endpoint"])
-        req(tip.get("has_tip") is True and tip.get("height") == height and tip.get("tip_hash") == block_hash, f"{converge_label} tip sidecar does not match {mine_label} block")
+        req(tip_at(tip, height, block_hash), f"{converge_label} tip sidecar does not match {mine_label} block")
     validate_raw_samples(data, tx_mode, go_submit_mode, converge_mode, txid, block_hash if converge_mode else None, height if converge_mode else None)
 else:
     validate_raw_samples(data, tx_mode, go_submit_mode, converge_mode)
@@ -799,8 +799,7 @@ def sn_tip(impl: str, endpoint: str, conv: dict, chain: bool) -> None:
     if chain:
         tip_sidecar(label, p, impl, endpoint, conv["height"], conv[f"{impl}_tip_hash"])
         return
-    tip = tip_capture(label, p, impl, endpoint)
-    req(tip["has_tip"] is False and tip["height"] is None and tip["tip_hash"] is None, f"{label} does not report an absent tip")
+    req(tip_absent(tip_capture(label, p, impl, endpoint)), f"{label} does not report an absent tip")
 def sn_block(impl: str, endpoint: str, genesis: dict) -> dict:
     label, p = sn_file(f"genesis.{impl}_block_path", genesis[f"{impl}_block_path"])
     block = block_capture(label, p, impl, endpoint, 0)
@@ -858,12 +857,15 @@ store_neutrality_checks()
 print(f"PASS: {scenario} report {'accepted' if live else 'structurally accepted'} {path}" + ("" if live else "; live proof not checked"))
 PY
 }
-# Prints the Python derivations shared by the sidecar writer and check_report:
+# Prints the Python derivations shared by the producer side and check_report:
 # file_sha256 is the sha256 hex of a file (None when unreadable); header_length is the
 # unique n in {116, 148} whose SHA3-256 over the first n block bytes equals
-# block_hash, else 0.
+# block_hash, else 0; load_json_or_none is the parsed JSON of a file (None when
+# unreadable or malformed); tip_absent is true for a /get_tip object whose has_tip is
+# false and whose height and tip_hash are present and null; tip_at is true for a
+# /get_tip object whose has_tip is true and whose height and tip_hash equal the given ones.
 sidecar_derivations_py() { cat <<'PY'
-import hashlib
+import hashlib, json
 def file_sha256(path: object) -> object:
     try:
         with open(path, "rb") as f: return hashlib.sha256(f.read()).hexdigest()
@@ -873,6 +875,14 @@ def header_length(block_hex: object, block_hash: object) -> int:
     except ValueError: return 0
     found = [n for n in (116, 148) if len(raw) >= n and hashlib.sha3_256(raw[:n]).hexdigest() == block_hash]
     return found[0] if len(found) == 1 else 0
+def load_json_or_none(path: object) -> object:
+    try:
+        with open(path, encoding="utf-8") as f: return json.load(f)
+    except (OSError, ValueError, RecursionError): return None
+def tip_absent(tip: object) -> bool:
+    return isinstance(tip, dict) and tip.get("has_tip") is False and "height" in tip and tip["height"] is None and "tip_hash" in tip and tip["tip_hash"] is None
+def tip_at(tip: object, height: object, block_hash: object) -> bool:
+    return isinstance(tip, dict) and tip.get("has_tip") is True and tip.get("height") == height and tip.get("tip_hash") == block_hash
 PY
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
@@ -1808,18 +1818,15 @@ go_mine_including_tx() {
   verify_block_inclusion go_mine "${GO_MINE_BLOCK_JSON}" "${GO_MINE_HEIGHT}" "${GO_MINE_HASH}" "${GO_MINE_TX_COUNT}"
 }
 tip_matches() {
-  python3 - "$1" "$2" "$3" <<'PY'
-import json, sys
+  { sidecar_derivations_py; cat <<'PY'; } | python3 - "$1" "$2" "$3"
+import sys
 path, height_raw, block_hash = sys.argv[1:4]
-try:
-    height = int(height_raw)
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
-    sys.exit(2)
+try: height = int(height_raw)
+except ValueError: sys.exit(2)
+data = load_json_or_none(path)
 if not isinstance(data, dict):
     sys.exit(2)
-sys.exit(0 if data.get("has_tip") is True and data.get("height") == height and data.get("tip_hash") == block_hash else 1)
+sys.exit(0 if tip_at(data, height, block_hash) else 1)
 PY
 }
 wait_go_converge_to_rust_mined_block() {
@@ -2605,13 +2612,9 @@ wait_tip_to_match() {
   return 1
 }
 tips_absent() {
-  python3 - "$@" <<'PY'
-import json, sys
-def absent(path: str) -> bool:
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("has_tip") is False and "height" in data and data["height"] is None and "tip_hash" in data and data["tip_hash"] is None
-sys.exit(0 if all(absent(path) for path in sys.argv[1:]) else 1)
+  { sidecar_derivations_py; cat <<'PY'; } | python3 - "$@"
+import sys
+sys.exit(0 if all(tip_absent(load_json_or_none(path)) for path in sys.argv[1:]) else 1)
 PY
 }
 wait_initial_tips_absent() {
@@ -2654,9 +2657,7 @@ import json, os, sys
 out, chain, commit, dirty, ident_path, go_block_path, rust_block_path, go_bin, rust_bin, txgen_bin, go_dir, rust_dir, rust_empty, go_tip_path, rust_tip_path = sys.argv[1:16]
 chain = chain == "1"
 def load(path, code, members=()):
-    try:
-        with open(path, encoding="utf-8") as f: data = json.load(f)
-    except (OSError, ValueError): sys.exit(code)
+    data = load_json_or_none(path)
     if not isinstance(data, dict) or not all(isinstance(data.get(key), str) for key in members): sys.exit(code)
     return data
 def sha256(path):

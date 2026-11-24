@@ -107,46 +107,6 @@ expect_generator_fail_contains() {
   require_contains "${output}" "${needle}" "${label}"
 }
 
-extract_check_report() {
-  python3 - "${HARNESS}" "${CHECK_REPORT_LIB}" <<'PY'
-from pathlib import Path
-import sys
-
-src, dst = map(Path, sys.argv[1:3])
-lines = src.read_text(encoding="utf-8").splitlines()
-start = next(i for i, line in enumerate(lines) if line.startswith("check_report()"))
-end = next(i for i, line in enumerate(lines[start:], start) if line.startswith('[[ "${MESH_TIMEOUT}"'))
-token_start = next(i for i, line in enumerate(lines) if line.startswith("check_report_reason_token()"))
-token_end = next(i for i, line in enumerate(lines[token_start:], token_start) if line.startswith("rpc_json()"))
-capture_start = next(i for i, line in enumerate(lines) if line.startswith("rpc_json()"))
-capture_end = next(i for i, line in enumerate(lines[capture_start:], capture_start) if line.startswith("pid_comm()"))
-tx_capture_start = next(i for i, line in enumerate(lines) if line.startswith("tx_capture_reason()"))
-tx_capture_end = next(i for i, line in enumerate(lines[tx_capture_start:], tx_capture_start) if line.startswith("tx_sidecar_reason()"))
-tx_prepare_reason_start = next(i for i, line in enumerate(lines) if line.startswith("rust_restart_prepare_reason()"))
-tx_prepare_reason_end = next(i for i, line in enumerate(lines[tx_prepare_reason_start:], tx_prepare_reason_start) if line.startswith("parse_txid()"))
-block_reason_start = next(i for i, line in enumerate(lines) if line.startswith("block_inclusion_failure_reason()"))
-block_reason_end = next(i for i, line in enumerate(lines[block_reason_start:], block_reason_start) if line.startswith("verify_block_inclusion()"))
-mine_reason_start = next(i for i, line in enumerate(lines) if line.startswith("mine_next_http_error_reason()"))
-mine_reason_end = next(i for i, line in enumerate(lines[mine_reason_start:], mine_reason_start) if line.startswith("rust_mine_including_tx()"))
-rust_mine_start = next(i for i, line in enumerate(lines) if line.startswith("rust_mine_including_tx()"))
-rust_mine_end = next(i for i, line in enumerate(lines[rust_mine_start:], rust_mine_start) if line.startswith("tip_matches()"))
-Path(dst).write_text("\n".join(lines[start:end] + [""] + lines[token_start:token_end] + [""] + lines[capture_start:capture_end] + [""] + lines[tx_capture_start:tx_capture_end] + [""] + lines[tx_prepare_reason_start:tx_prepare_reason_end] + [""] + lines[block_reason_start:block_reason_end] + [""] + lines[mine_reason_start:mine_reason_end] + [""] + lines[rust_mine_start:rust_mine_end]) + "\n", encoding="utf-8")
-PY
-}
-
-extract_prepare_tx_chainstate() {
-  python3 - "${HARNESS}" "${PREPARE_TX_CHAINSTATE_LIB}" <<'PY'
-from pathlib import Path
-import sys
-
-src, dst = map(Path, sys.argv[1:3])
-lines = src.read_text(encoding="utf-8").splitlines()
-start = next(i for i, line in enumerate(lines) if line.startswith("prepare_tx_chainstate()"))
-end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("parse_txid()"))
-Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
-PY
-}
-
 extract_slices() {
   python3 - "${HARNESS}" "$@" <<'PY'
 from pathlib import Path
@@ -286,7 +246,7 @@ SH
 check_initial_convergence_wait() {
   local probe="${TMP_ROOT}/initial-convergence.sh" probe_root="${TMP_ROOT}/initial-convergence" lib="${TMP_ROOT}/initial-convergence-lib.sh"
   mkdir -p -- "${probe_root}"
-  extract_slices "${lib}" "tx_capture_reason()" "tx_sidecar_reason()" "tip_matches()" "wait_go_converge_to_rust_mined_block()" "parse_restart_tip_sidecar()" "rust_restart_start_reason()" "partition_capture_tip()" "capture_go_reorg_metrics()"
+  extract_slices "${lib}" "tx_capture_reason()" "tx_sidecar_reason()" "tip_matches()" "wait_go_converge_to_rust_mined_block()" "parse_restart_tip_sidecar()" "rust_restart_start_reason()" "partition_capture_tip()" "capture_go_reorg_metrics()" "sidecar_derivations_py()" '[[ "${MESH_TIMEOUT}"'
   cat >"${probe}" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -304,8 +264,8 @@ capture_rpc_sidecar() {
 tip() { printf '{"best_known_height":%s,"has_tip":%s,"height":%s,"in_ibd":false,"tip_hash":%s}\n' "$2" "$3" "$2" "$4" >"${probe_root}/$1.json"; printf '%s\n' "${probe_root}/$1.json"; }
 aa="\"$(printf 'a%.0s' {1..64})\""; bb="\"$(printf 'b%.0s' {1..64})\""
 go101="$(tip go101 101 true "${aa}")"; rust101="$(tip rust101 101 true "${aa}")"; rust100="$(tip rust100 100 true "${bb}")"; rust101b="$(tip rust101b 101 true "${bb}")"
-absent="$(tip absent null false null)"; rust_zero="$(tip rustzero 0 true "${aa}")"
-printf '{"has_tip":false,"tip_hash":null}\n' >"${probe_root}/absent-no-height.json"
+absent="$(tip absent null false null)"; rust_zero="$(tip rustzero 0 true "${aa}")"; present_null="$(tip presentnull null true null)"
+printf '{"has_tip":false,"tip_hash":null}\n' >"${probe_root}/absent-no-height.json"; printf '[]\n' >"${probe_root}/array.json"; printf 'not json\n' >"${probe_root}/garbage.json"
 expect_match() {
   GO_TIP_INPUT="$1"; RUST_TIP_INPUT="$2"; rm -f -- "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}"
   wait_initial_convergence || { echo "FAIL: initial convergence rejected $1 $2: ${PARTITION_REASON}" >&2; exit 1; }
@@ -314,8 +274,9 @@ expect_match() {
 }
 expect_reason() {
   GO_TIP_INPUT="$2"; RUST_TIP_INPUT="$3"
-  if wait_initial_convergence; then echo "FAIL: initial convergence accepted $2 $3" >&2; exit 1; fi
+  if wait_initial_convergence 2>"${probe_root}/wait.err"; then echo "FAIL: initial convergence accepted $2 $3" >&2; exit 1; fi
   [[ "${PARTITION_REASON}" == "$1" ]] || { echo "FAIL: initial convergence reason ${PARTITION_REASON}, want $1" >&2; exit 1; }
+  [[ ! -s "${probe_root}/wait.err" ]] || { echo "FAIL: initial convergence wait wrote to stderr for $2 $3:" >&2; cat -- "${probe_root}/wait.err" >&2; exit 1; }
 }
 TX_PATH_MODE=3
 expect_match "${go101}" "${rust101}"
@@ -333,6 +294,9 @@ expect_match "${absent}" "${absent}"
 expect_reason initial_convergence_timeout "${absent}" "${rust_zero}"
 expect_reason initial_convergence_timeout "${go101}" "${absent}"
 expect_reason initial_convergence_timeout "${absent}" "${probe_root}/absent-no-height.json"
+MESH_TIMEOUT=1 expect_reason initial_convergence_timeout "${absent}" "${present_null}"
+MESH_TIMEOUT=1 expect_reason initial_convergence_timeout "${absent}" "${probe_root}/array.json"
+MESH_TIMEOUT=1 expect_reason initial_convergence_timeout "${probe_root}/garbage.json" "${absent}"
 SH
   bash "${probe}" "${lib}" "${probe_root}"
 }
@@ -452,58 +416,6 @@ rm -f -- "${GENESIS_GO_BLOCK_JSON}" "${GENESIS_RUST_BLOCK_JSON}"
 )
 SH
   bash "${probe}" "${lib}" "${main}" "${probe_root}"
-}
-
-extract_proxy_go_local_addr() {
-  python3 - "${HARNESS}" "${PROXY_GO_LOCAL_ADDR_LIB}" <<'PY'
-from pathlib import Path
-import sys
-
-src, dst = map(Path, sys.argv[1:3])
-lines = src.read_text(encoding="utf-8").splitlines()
-start = next(i for i, line in enumerate(lines) if line.startswith("proxy_go_local_addr()"))
-end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("wait_peer_snapshot_state()"))
-Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
-PY
-}
-
-extract_wait_peer_snapshot() {
-  python3 - "${HARNESS}" "${WAIT_PEER_SNAPSHOT_LIB}" <<'PY'
-from pathlib import Path
-import sys
-
-src, dst = map(Path, sys.argv[1:3])
-lines = src.read_text(encoding="utf-8").splitlines()
-start = next(i for i, line in enumerate(lines) if line.startswith("wait_peer_snapshot()"))
-end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("wait_rust_to_go_link()"))
-Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
-PY
-}
-
-extract_capture_go_reorg_metrics() {
-  python3 - "${HARNESS}" "${CAPTURE_GO_REORG_METRICS_LIB}" <<'PY'
-from pathlib import Path
-import sys
-
-src, dst = map(Path, sys.argv[1:3])
-lines = src.read_text(encoding="utf-8").splitlines()
-start = next(i for i, line in enumerate(lines) if line.startswith("capture_go_reorg_metrics()"))
-end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("run_partition_heal_reorg_scenario()"))
-Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
-PY
-}
-
-extract_wait_peer_snapshot_state() {
-  python3 - "${HARNESS}" "${WAIT_PEER_SNAPSHOT_STATE_LIB}" <<'PY'
-from pathlib import Path
-import sys
-
-src, dst = map(Path, sys.argv[1:3])
-lines = src.read_text(encoding="utf-8").splitlines()
-start = next(i for i, line in enumerate(lines) if line.startswith("wait_peer_snapshot_state()"))
-end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("parse_partition_mine_result()"))
-Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
-PY
 }
 
 check_proxy_go_local_addr_reason() {
@@ -1953,12 +1865,12 @@ PROXY_GO_LOCAL_ADDR_LIB="${TMP_ROOT}/proxy-go-local-addr-lib.sh"
 WAIT_PEER_SNAPSHOT_LIB="${TMP_ROOT}/wait-peer-snapshot-lib.sh"
 CAPTURE_GO_REORG_METRICS_LIB="${TMP_ROOT}/capture-go-reorg-metrics-lib.sh"
 WAIT_PEER_SNAPSHOT_STATE_LIB="${TMP_ROOT}/wait-peer-snapshot-state-lib.sh"
-extract_check_report
-extract_prepare_tx_chainstate
-extract_proxy_go_local_addr
-extract_wait_peer_snapshot
-extract_capture_go_reorg_metrics
-extract_wait_peer_snapshot_state
+extract_slices "${CHECK_REPORT_LIB}" "check_report()" '[[ "${MESH_TIMEOUT}"' "check_report_reason_token()" "rpc_json()" "rpc_json()" "pid_comm()" "tx_capture_reason()" "tx_sidecar_reason()" "rust_restart_prepare_reason()" "parse_txid()" "block_inclusion_failure_reason()" "verify_block_inclusion()" "mine_next_http_error_reason()" "rust_mine_including_tx()" "rust_mine_including_tx()" "tip_matches()"
+extract_slices "${PREPARE_TX_CHAINSTATE_LIB}" "prepare_tx_chainstate()" "parse_txid()"
+extract_slices "${PROXY_GO_LOCAL_ADDR_LIB}" "proxy_go_local_addr()" "wait_peer_snapshot_state()"
+extract_slices "${WAIT_PEER_SNAPSHOT_LIB}" "wait_peer_snapshot()" "wait_rust_to_go_link()"
+extract_slices "${CAPTURE_GO_REORG_METRICS_LIB}" "capture_go_reorg_metrics()" "run_partition_heal_reorg_scenario()"
+extract_slices "${WAIT_PEER_SNAPSHOT_STATE_LIB}" "wait_peer_snapshot_state()" "parse_partition_mine_result()"
 check_prepare_tx_chainstate_cleanup
 check_prepare_tx_chainstate_leaves_rust_empty
 check_rust_datadir_guard
