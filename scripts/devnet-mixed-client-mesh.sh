@@ -349,10 +349,10 @@ def pid_argv(pid: int) -> list[str]:
         if j < 0: break
         args.append(raw[i:j].decode("utf-8", "surrogateescape")); i = j + 1
     return args
-# True when both path strings name an existing object and resolve to one path; a string
-# through a missing directory names nothing, although its realpath may exist.
+# True when both path strings resolve to one path and the actual string holds no ".."
+# component, through which realpath drops a missing directory.
 def same_path(actual_label: str, actual: str, expected_label: str, expected: str) -> bool:
-    return checked_path(actual_label, actual) == checked_path(expected_label, expected) and os.path.exists(actual) and os.path.exists(expected)
+    return checked_path(actual_label, actual) == checked_path(expected_label, expected) and ".." not in Path(actual).parts
 def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live argv", expected_label: str = "report command_argv") -> bool:
     if len(actual) != len(expected) or not actual:
         return False
