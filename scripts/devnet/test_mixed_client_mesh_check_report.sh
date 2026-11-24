@@ -1651,7 +1651,7 @@ for scenario, name in SCENARIO_ROOTS.items():
     shutil.copytree(artifact_root, root / name / "artifact-root", symlinks=True)
     write_store_neutrality(root / name / "artifact-root", scenario)
 SN_DELETE = object()
-SN_BASE_REPORTS = {"mesh": root / "mesh-report.json", "tx-accept": root / "tx-report.json", "restart": root / "restart-report.json", "partition": root / "partition-report.json"}
+SN_BASE_REPORTS = {"mesh": root / "mesh-report.json", "tx-accept": root / "tx-report.json", "tx-converge": root / "converge-report.json", "rust-submit": root / "rust-submit-go-mine-report.json", "restart": root / "restart-report.json", "partition": root / "partition-report.json"}
 def sn_variant(name: str, base: str, edit, report_edit=None) -> None:
     base_root = root / base / "artifact-root"
     var_root = root / f"sn-{name}" / "artifact-root"
@@ -1721,18 +1721,35 @@ def sn_locked(var_root: Path, name: str) -> str:
         shutil.copy(var_root / name, locked / name)
     locked.chmod(0)
     return str(locked / name)
-def sn_move_go_binary(report: dict) -> None:
-    go_node = next(node_obj for node_obj in report["nodes"] if node_obj["implementation"] == "go")
-    moved = Path(report["artifact_root"]) / "bin" / "rubin-node-go"
-    moved.parent.mkdir()
-    shutil.copy2(go_node["binary"], moved)
-    go_node["binary"] = go_node["command_argv"][0] = str(moved)
-    go_node["command"] = " ".join(go_node["command_argv"])
+def sn_set_binary(report: dict, impl: str, binary: str) -> None:
+    node_obj = next(node_obj for node_obj in report["nodes"] if node_obj["implementation"] == impl)
+    node_obj["binary"] = node_obj["command_argv"][0] = binary
+    node_obj["command"] = " ".join(node_obj["command_argv"])
+    if impl == "rust" and "rust_restart" in report:
+        report["rust_restart"]["new_command_argv"] = node_obj["command_argv"]
+        report["rust_restart"]["old_command_argv"][0] = binary
+def sn_move_binary(impl: str):
+    def edit(report: dict) -> None:
+        moved = Path(report["artifact_root"]) / "bin" / f"rubin-node-{impl}"
+        moved.parent.mkdir()
+        shutil.copy2(Path(report["artifact_root"]) / f"rubin-node-{impl}", moved)
+        sn_set_binary(report, impl, str(moved))
+    return edit
+def sn_lock_report_path(*field: str):
+    def edit(report: dict) -> None:
+        target = report
+        for key in field[:-1]:
+            target = target[key]
+        target[field[-1]] = sn_locked(Path(report["artifact_root"]), Path(target[field[-1]]).name)
+    return edit
+def sn_alias_rust_datadir(var_root: Path) -> None:
+    (var_root / "node-rust").rmdir()
+    (var_root / "node-rust").symlink_to(var_root / "node-go")
 def sn_conv_hash(sidecar: dict, var_root: Path, value: str) -> None:
     sidecar["initial_convergence"].update(go_tip_hash=value, rust_tip_hash=value)
     for file_name in ("initial-convergence-go-tip.json", "initial-convergence-rust-tip.json"):
         sn_edit_file(var_root, file_name, tip_hash=value)
-SN_MODES = {"mesh": "public", "tx-accept": "tx", "restart": "rust-restart"}
+SN_MODES = {"mesh": "public", "tx-accept": "tx", "tx-converge": "tx", "rust-submit": "tx", "restart": "rust-restart", "partition": "partition-heal-reorg"}
 SN_ALL, SN_CHAIN = ("mesh", "tx-accept", "restart"), ("tx-accept", "restart")
 SN_I, SN_G, SN_H = "store_neutrality_sidecar_invalid", "store_neutrality_genesis_mismatch", "store_neutrality_header_grammar_mismatch"
 GO_TIP, GO_BLOCK, RUST_BLOCK = "initial-convergence-go-tip.json", "genesis-go-block.json", "genesis-rust-block.json"
@@ -1753,12 +1770,15 @@ SN_CASES = (
     (SN_ALL, "binaries-key-list", SN_I, "binaries keys mismatch", lambda s, r: s.update(binaries=sorted(s["binaries"]))),
     (SN_ALL, "go-node-hash", SN_I, "binaries.go_node_sha256 does not match", lambda s, r: s["binaries"].update(go_node_sha256="00" * 32)),
     (SN_ALL, "rust-node-hash", SN_I, "binaries.rust_node_sha256 does not match", lambda s, r: s["binaries"].update(rust_node_sha256="00" * 32)),
-    (SN_ALL, "go-node-fifo", SN_I, "artifact_root/rubin-node-go is not a regular file", lambda s, r: ((r / "rubin-node-go").unlink(), os.mkfifo(r / "rubin-node-go")), sn_move_go_binary),
-    (SN_ALL, "go-node-directory", SN_I, "artifact_root/rubin-node-go is not a regular file", lambda s, r: ((r / "rubin-node-go").unlink(), (r / "rubin-node-go").mkdir()), sn_move_go_binary),
-    (SN_ALL, "go-node-unreadable-null", SN_I, "binaries.go_node_sha256 does not match", lambda s, r: ((r / "rubin-node-go").chmod(0), s["binaries"].update(go_node_sha256=None)), sn_move_go_binary),
+    (SN_ALL, "go-node-fifo", SN_I, "artifact_root/rubin-node-go is not a regular file", lambda s, r: ((r / "rubin-node-go").unlink(), os.mkfifo(r / "rubin-node-go")), sn_move_binary("go")),
+    (SN_ALL, "go-node-directory", SN_I, "artifact_root/rubin-node-go is not a regular file", lambda s, r: ((r / "rubin-node-go").unlink(), (r / "rubin-node-go").mkdir()), sn_move_binary("go")),
+    (SN_ALL, "go-node-moved", SN_I, "the go node binary does not resolve to artifact_root/rubin-node-go", lambda s, r: None, sn_move_binary("go")),
+    (SN_ALL, "rust-node-moved", SN_I, "the rust node binary does not resolve to artifact_root/rubin-node-rust", lambda s, r: None, sn_move_binary("rust")),
+    (SN_ALL, "go-node-unreadable-null", SN_I, "binaries.go_node_sha256 does not match", lambda s, r: ((r / "rubin-node-go").chmod(0), s["binaries"].update(go_node_sha256=None)), sn_move_binary("go")),
     (SN_ALL, "ident-extra", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(extra="x")),
     (SN_ALL, "ident-missing", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].pop("network")),
     (SN_ALL, "ident-key-list", SN_I, "chain_identity malformed", lambda s, r: s.update(chain_identity=sorted(s["chain_identity"]))),
+    (SN_ALL, "network-mainnet", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network="mainnet")),
     (SN_ALL, "network-empty", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network="")),
     (SN_ALL, "network-number", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network=5)),
     (SN_ALL, "network-whitespace", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network=" \t\n ")),
@@ -1772,6 +1792,7 @@ SN_CASES = (
     (SN_ALL, "datadir-symlink-loop", SN_I, "datadirs.go does not resolve to an existing directory", lambda s, r: ((r / "node-go").rmdir(), (r / "node-go").symlink_to(r / "node-go-loop"), (r / "node-go-loop").symlink_to(r / "node-go"))),
     (SN_ALL, "datadir-missing", SN_I, "datadirs.rust does not resolve to an existing directory", lambda s, r: s["datadirs"].update(rust=str(r / "missing-dir"))),
     (SN_ALL, "datadir-unsearchable-parent", SN_I, "datadirs.go does not resolve to an existing directory", lambda s, r: s["datadirs"].update(go=sn_locked(r, "node-go"))),
+    (("mesh", "tx-accept", "tx-converge", "rust-submit", "partition"), "datadir-alias", SN_I, "artifact_root/node-go and artifact_root/node-rust resolve to one directory", lambda s, r: sn_alias_rust_datadir(r)),
     (SN_ALL, "rust-not-empty", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(rust_exact_empty_before_first_start=False)),
     (SN_ALL, "conv-extra", SN_I, "initial_convergence keys mismatch", lambda s, r: s["initial_convergence"].update(extra=None)),
     (SN_ALL, "conv-missing", SN_I, "initial_convergence keys mismatch", lambda s, r: s["initial_convergence"].pop("go_tip_path")),
@@ -1859,6 +1880,19 @@ with (root / "sn-cases.tsv").open("w", encoding="utf-8") as cases:
         for column in columns:
             sn_variant(f"{column}-{case_name}", column, edit, *report_edit)
             cases.write(f"{SN_MODES[column]}\t{column}-{case_name}\t{token}\t{needle}\n")
+sn_variant("restart-datadir-alias", "restart", lambda s, r: sn_alias_rust_datadir(r))
+REPORT_LOCKED_CASES = (
+    ("mesh", "public", "go-node", "unknown", "node-go command/binary is not bound to executable rubin-node-go", lambda report: sn_set_binary(report, "go", sn_locked(Path(report["artifact_root"]), "rubin-node-go"))),
+    ("restart", "rust-restart", "pre-restart-tip", "rust_restart_pre_restart_tip_sidecar_invalid", "rust_restart.pre_restart_tip_path file is missing", sn_lock_report_path("rust_restart", "pre_restart_tip_path")),
+    ("restart", "rust-restart", "go-target-mine-next", "rust_restart_go_target_mine_next_invalid", "rust_restart.go_target_mine_next_path file is missing", sn_lock_report_path("rust_restart", "go_target_mine_next_path")),
+    ("tx-accept", "producer-tx", "go-submit-status", "go_submit_tx_status_path_file_missing", "go_submit.tx_status_path file is missing", sn_lock_report_path("go_submit", "tx_status_path")),
+    ("tx-converge", "producer-tx", "rust-mine-next", "rust_mine_mine_next_path_file_missing", "rust_mine.mine_next_path file is missing", sn_lock_report_path("rust_mine", "mine_next_path")),
+    ("partition", "partition-heal-reorg", "common-go-mine", "unknown", "observations.pre_partition.common_go_mine file is missing", sn_lock_report_path("observations", "pre_partition", "common_go_mine")),
+)
+with (root / "report-locked-cases.tsv").open("w", encoding="utf-8") as cases:
+    for base, mode, case_name, token, needle, report_edit in REPORT_LOCKED_CASES:
+        sn_variant(f"rp-{case_name}-unsearchable-parent", base, lambda s, r: None, report_edit)
+        cases.write(f"{mode}\trp-{case_name}-unsearchable-parent\t{token}\t{needle}\n")
 artifact_root = root / "partition" / "artifact-root"
 print(root / "mesh-report.json")
 print(root / "tx-report.json")
@@ -2394,8 +2428,18 @@ while IFS=$'\t' read -r sn_mode sn_name sn_token sn_needle; do
   sn_cases=$((sn_cases + 1))
 done < "${TMP_ROOT}/sn-cases.tsv"
 stop_fifo_watchdog
-(( sn_cases == 266 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 266" >&2; exit 1; }
-# Reruns the unsearchable-parent rows under the interpreters python3.9 to python3.13
+(( sn_cases == 280 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 280" >&2; exit 1; }
+sidecar_value_check "restart datadir aliased to the go datadir" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-datadir-alias-report.json"
+report_locked_cases() {
+  local label_suffix="$1" rp_mode rp_name rp_token rp_needle rp_cases=0
+  while IFS=$'\t' read -r rp_mode rp_name rp_token rp_needle; do
+    sidecar_value_check "report ${rp_name}${label_suffix}" "${rp_needle}" "${rp_token}" "${rp_mode}" "${TMP_ROOT}/sn-${rp_name}-report.json"
+    rp_cases=$((rp_cases + 1))
+  done < "${TMP_ROOT}/report-locked-cases.tsv"
+  (( rp_cases == 6 )) || { echo "FAIL: report unsearchable-parent table ran ${rp_cases} rows, want 6" >&2; exit 1; }
+}
+report_locked_cases ""
+# Reruns the sidecar and report unsearchable-parent rows under the interpreters python3.9 to python3.13
 # found on PATH that import jsonschema, which the marker validator run by check_report
 # needs; their pathlib is_dir and is_file raise on such a path.
 printf '#!/usr/bin/env bash\n[[ "$1" == -- && "$2" == python3 ]] && shift 2 && exec "${SN_PYTHON}" "$@"\nexec %q "$@"\n' "${DEV_ENV}" >"${TMP_ROOT}/dev-env-python"
@@ -2407,6 +2451,7 @@ for sn_python in python3.9 python3.10 python3.11 python3.12 python3.13; do
     [[ "${sn_name}" == *-unsearchable-parent ]] || continue
     SN_PYTHON="$(command -v "${sn_python}")" DEV_ENV="${TMP_ROOT}/dev-env-python" sn_check "sidecar ${sn_name} with ${sn_python}" "${sn_token}" "${sn_needle}" "${sn_mode}" "${sn_name}"
   done < "${TMP_ROOT}/sn-cases.tsv"
+  SN_PYTHON="$(command -v "${sn_python}")" DEV_ENV="${TMP_ROOT}/dev-env-python" report_locked_cases " with ${sn_python}"
   sn_pythons+=" ${sn_python}"
 done
 printf 'unsearchable-parent rows rerun under:%s\n' "${sn_pythons:- none}"

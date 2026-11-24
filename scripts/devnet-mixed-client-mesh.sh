@@ -203,7 +203,7 @@ def artifact_file(label: str, value: object, root: Path) -> Path:
     p = checked_path(label, value)
     try: p.relative_to(root)
     except ValueError: fail(f"{label} is outside artifact_root")
-    req(p.is_file(), f"{label} file is missing")
+    req(regular_file(p), f"{label} file is missing")
     return p
 def tx_sidecars(status: dict, got: dict, txid: str, txhex: str, label: str, impl: str, endpoint: str, status_path: str, get_path: str) -> None:
     req(set(status) == {"implementation", "request_path", "rpc_endpoint", "status", "txid"}, f"{label}.tx_status keys mismatch: {sorted(status)}")
@@ -540,7 +540,7 @@ for node in nodes:
     try: binary_path.relative_to(artifact_root)
     except ValueError: fail(f"{name} binary is outside artifact_root")
     req(node.get("process_comm") == expected_bin, f"{name} process_comm does not prove {impl} identity")
-    req(nonempty_str(command) and isinstance(command_argv, list) and all(isinstance(arg, str) for arg in command_argv) and command_argv and checked_path(f"{name}.command_argv[0]", command_argv[0]) == binary_path and binary_path.name == expected_bin and binary_path.is_file() and os.access(binary_path, os.X_OK), f"{name} command/binary is not bound to executable {expected_bin}")
+    req(nonempty_str(command) and isinstance(command_argv, list) and all(isinstance(arg, str) for arg in command_argv) and command_argv and checked_path(f"{name}.command_argv[0]", command_argv[0]) == binary_path and binary_path.name == expected_bin and regular_file(binary_path) and os.access(binary_path, os.X_OK), f"{name} command/binary is not bound to executable {expected_bin}")
     req(ep(node.get("rpc_endpoint")) and ep(node.get("p2p_endpoint")) and ts(node.get("started_at")), f"{name} has malformed endpoint or timestamp")
     req(isinstance(node.get("pid"), int) and not isinstance(node.get("pid"), bool) and node["pid"] > 0, f"{name} pid is not a positive integer")
     if live:
@@ -801,8 +801,7 @@ def sn_req(ok: bool, detail: str, token: str = SN_INVALID) -> None:
     if not ok: fail(f"{token}: {detail}")
 def sn_file(label: str, value: object) -> tuple:
     sn_label = f"{SN_INVALID}: {label}"
-    try: return sn_label, artifact_file(sn_label, value, artifact_root)
-    except OSError: fail(f"{sn_label} file is missing")
+    return sn_label, artifact_file(sn_label, value, artifact_root)
 def sn_dir(label: str, value: object) -> Path:
     p = checked_path(f"{SN_INVALID}: {label}", value)
     sn_req(os.path.isdir(p), f"{label} does not resolve to an existing directory")
@@ -827,17 +826,19 @@ def store_neutrality_checks() -> None:
     sn_req(sidecar["clients_tree_clean"] is True, "clients_tree_clean is not true")
     binaries = sidecar["binaries"]
     sn_req(isinstance(binaries, dict) and set(binaries) == {"go_node_sha256", "rust_node_sha256", "txgen_sha256"}, "binaries keys mismatch")
-    for key, name in (("go_node_sha256", "rubin-node-go"), ("rust_node_sha256", "rubin-node-rust"), ("txgen_sha256", "rubin-txgen")):
+    for key, name, impl in (("go_node_sha256", "rubin-node-go", "go"), ("rust_node_sha256", "rubin-node-rust", "rust"), ("txgen_sha256", "rubin-txgen", None)):
         if key == "txgen_sha256" and not chain:
             sn_req(binaries[key] is None, "binaries.txgen_sha256 is not null")
         else:
             sn_req(regular_file(artifact_root / name), f"artifact_root/{name} is not a regular file")
             sn_req(hex32(binaries[key]) and binaries[key] == file_sha256(artifact_root / name), f"binaries.{key} does not match artifact_root/{name}")
+            sn_req(impl is None or os.path.realpath(nodes_by_impl[impl]["binary"]) == os.path.realpath(artifact_root / name), f"the {impl} node binary does not resolve to artifact_root/{name}")
     ident = sidecar["chain_identity"]
-    sn_req(isinstance(ident, dict) and set(ident) == {"network", "chain_id_hex", "genesis_hash_hex"} and nonempty_str(ident["network"]) and hex32(ident["chain_id_hex"]) and hex32(ident["genesis_hash_hex"]), "chain_identity malformed")
+    sn_req(isinstance(ident, dict) and set(ident) == {"network", "chain_id_hex", "genesis_hash_hex"} and ident["network"] == "devnet" and hex32(ident["chain_id_hex"]) and hex32(ident["genesis_hash_hex"]), "chain_identity malformed")
     dirs = sidecar["datadirs"]
     sn_req(isinstance(dirs, dict) and set(dirs) == {"go", "rust", "rust_exact_empty_before_first_start"}, "datadirs mismatch")
     sn_req(sn_dir("datadirs.go", dirs["go"]) == sn_dir("artifact_root/node-go", str(artifact_root / "node-go")) and sn_dir("datadirs.rust", dirs["rust"]) == sn_dir("artifact_root/node-rust", str(artifact_root / "node-rust")) and dirs["rust_exact_empty_before_first_start"] is True, "datadirs mismatch")
+    sn_req(os.path.realpath(artifact_root / "node-go") != os.path.realpath(artifact_root / "node-rust"), "artifact_root/node-go and artifact_root/node-rust resolve to one directory")
     conv = sidecar["initial_convergence"]
     sn_req(isinstance(conv, dict) and set(conv) == {"go_has_tip", "rust_has_tip", "height", "go_tip_hash", "rust_tip_hash", "go_tip_path", "rust_tip_path"}, "initial_convergence keys mismatch")
     if chain:
