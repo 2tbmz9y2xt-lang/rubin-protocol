@@ -174,7 +174,7 @@ func (o *SourceOwnerV1) censusFiles(r *sourceRoot, entries []os.DirEntry, forRel
 	used.entries = entries
 	used.forRelease, used.stageErr, used.releaseLeaf = forRelease, stageErr, location
 	listed := sourceListing(entries, read)
-	used.read = o.startReadCensus(read, listed, prefix)
+	used.read = o.startReadCensus(read)
 	o.chargeBindings(&used)
 	used, err = o.censusCaptures(r, listed, prefix, used, stopErr)
 	if stopErr != nil && strings.HasPrefix(listed.name(prefix), heldStagePrefix) {
@@ -215,7 +215,7 @@ func (o *SourceOwnerV1) stagingUsage(stage sourceDebt) sourceUsage {
 }
 
 // startReadCensus selects the held target identity when its capture is settled.
-func (o *SourceOwnerV1) startReadCensus(read []sourceReadCensus, listed sourceEntryNames, prefix int) sourceReadCensus {
+func (o *SourceOwnerV1) startReadCensus(read []sourceReadCensus) sourceReadCensus {
 	if len(read) == 0 {
 		return sourceReadCensus{}
 	}
@@ -223,15 +223,15 @@ func (o *SourceOwnerV1) startReadCensus(read []sourceReadCensus, listed sourceEn
 	if target := o.live[scope.name]; settledReadBinding(target) {
 		scope.target = target.file
 	}
-	if prefix < listed.len() {
-		scope.blockedStage = sourceStageSpelling(listed.name(prefix))
-	}
 	return scope
 }
 
 // sourceStageSpelling extracts the capture key from a public or held stage name.
 func sourceStageSpelling(leaf string) string {
-	return strings.TrimPrefix(strings.TrimPrefix(leaf, publicStagePrefix), heldStagePrefix)
+	if name, ok := strings.CutPrefix(leaf, publicStagePrefix); ok {
+		return name
+	}
+	return strings.TrimPrefix(leaf, heldStagePrefix)
 }
 
 // settledReadBinding identifies an issued reserve with a confirmed inode.
@@ -877,6 +877,7 @@ func (o *SourceOwnerV1) censusStage(r *sourceRoot, entries []os.DirEntry, read .
 			if len(read) == 0 {
 				break
 			}
+			read[0].blockedStage = sourceStageSpelling(stopped.leaf)
 			read[0].blockedStageFile = stopped.file
 			read[0].stoppedStageUnknown = stopped.file == (filelock.IdentityV1{}) && strings.HasPrefix(stopped.leaf, publicStagePrefix)
 		}

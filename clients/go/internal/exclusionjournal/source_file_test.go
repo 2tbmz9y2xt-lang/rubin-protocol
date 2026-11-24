@@ -379,6 +379,7 @@ func TestCapturedSourceReadSharedFaultV1(t *testing.T) {
 	t.Run("stage-shared-old-inode", testCapturedReadStageAlias)
 	t.Run("stopped-stage-shared-old-inode", testCapturedReadStoppedStageAlias)
 	t.Run("stopped-stage-unknown-inode", testCapturedReadUnknownStoppedStage)
+	t.Run("malformed-stopped-stage-name", testCapturedReadMalformedStoppedStage)
 	t.Run("active-release-conflict", testCapturedReadReleaseConflict)
 	t.Run("alternate-capture-spelling", testCapturedReadSpelledAlias)
 	t.Run("replacement-with-alternate-spelling", testCapturedReadSpelledReplacement)
@@ -455,7 +456,7 @@ func testCapturedReadOrderedFault(t *testing.T, mode string) {
 	bPath, dPath := filepath.Join(paths.root, b.leaf), filepath.Join(paths.root, d.leaf)
 	held := capturedReadReplace(t, bPath, t.TempDir(), sourceReadFile(t, bPath))
 	checkCapturedReadOrder(t, paths.root, order)
-	if strings.HasSuffix(mode, "eio") {
+	if slices.Contains([]string{"sibling-before-eio", "eio-before-sibling"}, mode) {
 		sourceLookupOnce(t, [2]string{paths.root, d.leaf}, struct{}{})
 		sourceReadRefusal(t, o, c.m, ErrIntegrityV1, "ordered capture lookup refusal")
 	} else {
@@ -963,6 +964,27 @@ func testCapturedReadUnknownStoppedStage(t *testing.T) {
 	sourceMust(t, os.Remove(stagePath))
 	sourceRead(t, o, c.m, c.parts)
 	sourceReadRefusal(t, o, b.m, ErrIdentityV1, "capture replacement after removing the staging alias")
+}
+
+func testCapturedReadMalformedStoppedStage(t *testing.T) {
+	o, paths, ordered := capturedReadRetainedOrder(t, sourceLimits(), 'B', 'C')
+	b, c := ordered[0], ordered[1]
+	sourcePrepare(t, o, b.m, b.parts)
+	bPath, cPath := filepath.Join(paths.root, b.leaf), filepath.Join(paths.root, c.leaf)
+	held := capturedReadReplace(t, bPath, t.TempDir(), sourceReadFile(t, bPath))
+	stage := publicStagePrefix + heldStagePrefix + b.leaf
+	stagePath := filepath.Join(paths.root, stage)
+	malformed := writeSourceEntry(t, stagePath, []byte{1})
+	for _, path := range []string{held, bPath, cPath} {
+		sourceFailIf(t, os.SameFile(malformed, sourceLstat(t, path)), "malformed staging entry shares a capture inode")
+	}
+	actual := capturedReadNames(t, paths.root)
+	want := []string{b.leaf, c.leaf, stage}
+	sourceFailIf(t, !slices.Equal(actual, want), "malformed stage order = %v, want %v", actual, want)
+	sourceReadRefusal(t, o, c.m, ErrIntegrityV1, "malformed stage name after a distinct replacement")
+	sourceMust(t, os.Remove(stagePath))
+	sourceRead(t, o, c.m, c.parts)
+	sourceReadRefusal(t, o, b.m, ErrIdentityV1, "capture replacement after removing the malformed stage")
 }
 
 func testCapturedReadSpelledAlias(t *testing.T) {
