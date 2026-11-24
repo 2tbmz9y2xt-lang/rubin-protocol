@@ -902,7 +902,8 @@ func testCapturedReadStageAlias(t *testing.T) {
 	sourceReadRefusal(t, o, c.m, ErrIntegrityV1, "omitted capture is held at a staging name")
 	sourceMust(t, os.Rename(alias, paths.capture))
 	sourceRead(t, o, c.m, c.parts)
-	sourceRead(t, o, b.m, b.parts)
+	sourceReadRefusal(t, o, b.m, ErrBusyV1, "readback with an observed stage")
+	sourcePrepareAndRead(t, o, b.m, b.parts)
 }
 
 func testCapturedReadStoppedStageAlias(t *testing.T) {
