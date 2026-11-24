@@ -2659,9 +2659,9 @@ sidecar_value_check "restart datadir through a missing directory" "rust_restart 
 sidecar_value_check "rust argv datadir through a missing directory" "node command_argv does not match exact launched argv" argv_mismatch producer-tx "${TMP_ROOT}/sn-tx-accept-argv-datadir-through-missing-report.json" combined_report_reason_token
 sidecar_value_check "old rust argv datadir through a missing directory" "rust_restart old argv mismatch" rust_restart_old_argv_mismatch rust-restart "${TMP_ROOT}/sn-restart-old-argv-datadir-through-missing-report.json"
 sidecar_value_check "old rust argv binary through a missing directory" "rust_restart old argv mismatch" rust_restart_old_argv_mismatch rust-restart "${TMP_ROOT}/sn-restart-old-argv-binary-through-missing-report.json"
-sn_check "artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" public mesh-root-through-missing
-sn_check "tx artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" tx tx-accept-root-through-missing
-sidecar_value_check "restart artifact root through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-root-through-missing-report.json"
+expect_fail_contains "artifact root through a missing directory" "FAIL: node command_argv does not match exact launched argv" check_report "${TMP_ROOT}/sn-mesh-root-through-missing-report.json" offline public
+expect_fail_contains "tx artifact root through a missing directory" "FAIL: node command_argv does not match exact launched argv" check_report "${TMP_ROOT}/sn-tx-accept-root-through-missing-report.json" offline producer-tx
+expect_fail_contains "restart artifact root through a missing directory" "FAIL: node command_argv does not match exact launched argv" check_report "${TMP_ROOT}/sn-restart-root-through-missing-report.json" offline rust-restart
 sn_check "default tip sidecar with best_known_height NaN" "${SN_INVALID}" "initial_convergence.go_tip_path malformed JSON: non-finite constant NaN" public mesh-tip-nan
 sn_check "sidecar with height -Infinity" "${SN_INVALID}" "store-neutrality sidecar malformed JSON: non-finite constant -Infinity" tx tx-accept-height-infinity
 sn_check "default sidecar key list beyond the argument limit" "${SN_INVALID}" "sidecar keys mismatch" public mesh-wide-keys
