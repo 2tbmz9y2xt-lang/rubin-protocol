@@ -3045,7 +3045,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatalf("concurrent %s serialization drifted", name)
 		}
 	}
-	checkLockedRead("ReadTreeAuthorityV1", "treeNativeGet")
+	checkLockedRead("ReadTreeAuthorityV1", "treeAuthorityRead")
 	checkLockedRead("ReadTreeRootBindingV1", "treeNativeGet")
 	checkLockedRead("ReadTreeEvidenceV1", "treeNativeGet")
 	checkLockedRead("Get", "C", "rubin_mdbx_get")
@@ -3289,7 +3289,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatal("Inspection provenance drifted")
 		}
 	}
-	readBodies := body("ReadTreeAuthorityV1") + body("ReadTreeRootBindingV1") + body("ReadTreeEvidenceV1") + body("treeContext") + body("treeRecord") + body("treeNativeGet") + body("treeRequired") + body("treeEmptyCensus") + body("treeControlRows") + body("treeEvidenceOrigin") + body("treeResolvedEvidence") + body("readerDBI") + body("readerKey") + body("readerValueBounds") + body("treeMetaBounds") + body("validReaderFormat") + body("selectedFormat") + body("copiedGetResult") + body("copiedGetResultFor") + body("View") + body("viewWithStartupCompletion") + body("Get") + body("GetOptionalSide") + body("optionalSideResult") + body("GetInitial148OptionalSide") + body("initial148OptionalSideResult") + body("ReadRequiredSideLink") + body("ReadStorageAuthorityV1") + body("PrefixPage") + body("prefixPageInputError") + body("supportedPrefixPageDBI") + body("validPrefixPagePrefix") + body("validPrefixPageContinuation") + body("prefixPageMinimumBytes") + body("validatePrefixPageRequest") + body("validatePrefixPageLimits") + body("newPrefixPageScan") + body("prefixPageShapeError") + body("prefixPageNativeKey") + body("prefixPageFoundCode") + body("prefixPageValueShape") + body("prefixPageNativeRow") + body("prefixPageStoredRow") + body("prefixPageValueLength") + body("prefixPageNativeResult") + body("prefixPageStop") + body("copyPrefixPageRow") + body("advancePrefixPageSeek") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
+	readBodies := body("ReadTreeAuthorityV1") + body("treeAuthorityRead") + body("ReadTreeRootBindingV1") + body("ReadTreeEvidenceV1") + body("treeContext") + body("treeRecord") + body("treeNativeGet") + body("treeRequired") + body("treeEmptyCensus") + body("treeControlRows") + body("treeEvidenceOrigin") + body("treeResolvedEvidence") + body("readerDBI") + body("readerKey") + body("readerValueBounds") + body("treeMetaBounds") + body("validReaderFormat") + body("selectedFormat") + body("copiedGetResult") + body("copiedGetResultFor") + body("View") + body("viewWithStartupCompletion") + body("Get") + body("GetOptionalSide") + body("optionalSideResult") + body("GetInitial148OptionalSide") + body("initial148OptionalSideResult") + body("ReadRequiredSideLink") + body("ReadStorageAuthorityV1") + body("PrefixPage") + body("prefixPageInputError") + body("supportedPrefixPageDBI") + body("validPrefixPagePrefix") + body("validPrefixPageContinuation") + body("prefixPageMinimumBytes") + body("validatePrefixPageRequest") + body("validatePrefixPageLimits") + body("newPrefixPageScan") + body("prefixPageShapeError") + body("prefixPageNativeKey") + body("prefixPageFoundCode") + body("prefixPageValueShape") + body("prefixPageNativeRow") + body("prefixPageStoredRow") + body("prefixPageValueLength") + body("prefixPageNativeResult") + body("prefixPageStop") + body("copyPrefixPageRow") + body("advancePrefixPageSeek") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
 	readBodies += body("observeServingReadV1")
 	servingSource, err := os.ReadFile("serving_view_cgo.go")
 	mustEnvironment(t, err)
@@ -3736,7 +3736,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		"treeMainCount":        "int|C.mdbx_dbi_open|nativeError|int|C.mdbx_dbi_stat|C.size_t|unsafe.Sizeof|nativeError|uint64|treeIntegrity",
 		"treeRecognizedFormat": "treeOpenFamily|treeRequired|len|bytes.Equal|treeIntegrity",
 		"inspectTreeSchema":    "treeRecognizedFormat|treeMainCount|uint64|len|formatDBIs|treeOpenFamilies|treeOpenConfig|adapterError|treeOpenAuthority",
-		"treeOpenAuthority":    "treeRequired|bytes.Equal|treeIntegrity|treeNativeGet|treeEmptyCensus|DecodeTreeAuthorityV1|treeIntegrity",
+		"treeOpenAuthority":    "treeRequired|bytes.Equal|treeIntegrity|treeAuthorityRead",
+		"treeAuthorityRead":    "treeNativeGet|treeEmptyCensus|DecodeTreeAuthorityV1|treeIntegrity",
 		"treeOpenConfig":       "treeRequired|DecodeConfigV1|treeIntegrity|validateStoredConfig|treeIntegrity|readEffective|validateEffective|treeIntegrity",
 	} {
 		var observed []string
