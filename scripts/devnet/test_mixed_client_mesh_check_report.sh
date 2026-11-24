@@ -363,7 +363,7 @@ for name, size in (("116", 116), ("148", 148)):
 h116, h148 = bytes(range(116)), bytes(range(148))
 for impl, block_hex, block_hash in (("go", h116 + bytes(8), hashlib.sha3_256(h116).hexdigest()), ("rust", h148 + bytes(8), hashlib.sha3_256(h148).hexdigest())):
     json.dump({"block_hex": block_hex.hex(), "hash": block_hash}, open(f"{root}/block-differ-{impl}.json", "w"))
-    json.dump({"block_hex": (h148 + bytes(8)).hex(), "hash": hashlib.sha3_256(h116).hexdigest() if impl == "go" else "ff" * 32}, open(f"{root}/block-nomatch-{impl}.json", "w"))
+    json.dump({"block_hex": (h148 + bytes(8)).hex(), "hash": hashlib.sha3_256(h116).hexdigest() if impl == "go" else "ff" * 32}, open(f"{root}/block-go-116-rust-none-{impl}.json", "w"))
 ident = {"network": "devnet", "chain_id_hex": "dd" * 32, "genesis_hash_hex": "ee" * 32}
 json.dump({**ident, "peer_count": 3}, open(f"{root}/ident.json", "w"))
 block = json.load(open(f"{root}/block-116-go.json"))
@@ -437,7 +437,7 @@ PY
 }
 expect_heights() { python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["header_bytes"] != {"go": int(sys.argv[2]), "rust": int(sys.argv[3])})' "${STORE_NEUTRALITY_JSON}" "$1" "$2" || { echo "FAIL: sidecar header_bytes is not go $1 rust $2" >&2; exit 1; }; }
 BLOCKS=148 expect_end completed; expect_heights 148 148
-BLOCKS=nomatch expect_end completed; expect_heights 116 0
+BLOCKS=go-116-rust-none expect_end completed; expect_heights 116 0
 BLOCKS=differ expect_end completed; expect_sidecar true true chain
 BLOCKS=differ GIT_STATUS=" M clients/go/node/miner.go" RUST_EXACT_EMPTY_BEFORE_FIRST_START=false expect_end completed; expect_sidecar false false chain
 expect_end completed; expect_heights 116 116
@@ -1566,7 +1566,7 @@ mine_next_cases = (
     ("restart-go", "go-restart-mine-next.json", restart_report, ("rust_restart", "go_target_mine_next_path"), GO_MINE_VARIANTS),
     ("converge-rust", "rust-mine-next.json", converge_report, ("rust_mine", "mine_next_path"), RUST_MINE_VARIANTS),
     ("rust-conv-go", "go-mine-next.json", rust_converge_report, ("go_mine", "mine_next_path"), GO_MINE_VARIANTS),
-    ("converge-rust", "rust-mine-next.json", converge_report, ("rust_mine", "mine_next_path"), ("nonce-string", "timestamp-string", "height-over-rust-mine", "tx-count-over-rust-mine")),
+    ("converge-rust", "rust-mine-next.json", converge_report, ("rust_mine", "mine_next_path"), ("nonce-string", "timestamp-string", "height-over-rust-mine", "tx-count-over-rust-mine", "mined-one")),
     ("rust-conv-go", "go-mine-next.json", rust_converge_report, ("go_mine", "mine_next_path"), ("nonce-string", "timestamp-string", "height-over-go-mine", "tx-count-over-go-mine")),
     ("restart-go", "go-restart-mine-next.json", restart_report, ("rust_restart", "go_target_mine_next_path"), ("nonce-over", "timestamp-over", "tx-count-over-restart", "nonce-string")),
     ("converge-go-tip", "go-converge-tip.json", converge_report, ("go_converge", "tip_path"), ("best-below", "best-string", "in-ibd-string")),
@@ -1590,6 +1590,7 @@ mine_next_edits = {
     "commit": lambda d, r: d.__setitem__("commit_state", "committed"),
     "go-impl": lambda d, r: d.__setitem__("implementation", "go"),
     "go-impl-commit": lambda d, r: d.update(implementation="go", commit_state="committed"),
+    "mined-one": lambda d, r: d.__setitem__("mined", 1),
     "nonce-string": lambda d, r: d.__setitem__("nonce", "0"),
     "timestamp-string": lambda d, r: d.__setitem__("timestamp", "0"),
     "nonce-over": lambda d, r: d.__setitem__("nonce", 2**64),
@@ -1895,6 +1896,13 @@ with (root / "sn-cases.tsv").open("w", encoding="utf-8") as cases:
             sn_variant(f"{column}-{case_name}", column, edit, *report_edit)
             cases.write(f"{SN_MODES[column]}\t{column}-{case_name}\t{token}\t{needle}\n")
 sn_variant("restart-datadir-alias", "restart", lambda s, r: sn_alias_rust_datadir(r))
+sn_variant("mesh-rust-empty-one", "mesh", lambda s, r: s["datadirs"].update(rust_exact_empty_before_first_start=1))
+sn_variant("tx-accept-go-has-tip-one", "tx-accept", lambda s, r: s["initial_convergence"].update(go_has_tip=1))
+sn_variant("tx-accept-rust-has-tip-one", "tx-accept", lambda s, r: s["initial_convergence"].update(rust_has_tip=1))
+sn_variant("mesh-go-has-tip-zero", "mesh", lambda s, r: s["initial_convergence"].update(go_has_tip=0))
+sn_variant("mesh-rust-has-tip-zero", "mesh", lambda s, r: s["initial_convergence"].update(rust_has_tip=0))
+sn_variant("mesh-tip-has-tip-zero", "mesh", lambda s, r: sn_edit_file(r, GO_TIP, has_tip=0))
+sn_variant("tx-accept-tip-has-tip-one", "tx-accept", lambda s, r: sn_edit_file(r, GO_TIP, has_tip=1))
 REPORT_LOCKED_CASES = (
     ("mesh", "public", "go-node", "unknown", "node-go command/binary is not bound to executable rubin-node-go", lambda report: sn_set_binary(report, "go", sn_locked(Path(report["artifact_root"]), "rubin-node-go"))),
     ("restart", "rust-restart", "pre-restart-tip", "rust_restart_pre_restart_tip_sidecar_invalid", "rust_restart.pre_restart_tip_path file is missing", sn_lock_report_path("rust_restart", "pre_restart_tip_path")),
@@ -2298,7 +2306,7 @@ sidecar_value_check() {
   if [[ "${mode}" == producer-tx ]]; then expect_fail_token "${label} token" "${token}" check_report "${report}" offline "${mode}"
   else expect_fail_check_token "${label} token" "${token}" check_report "${report}" offline "${mode}"; fi
 }
-for variant in nonce-string timestamp-string height-over-rust-mine tx-count-over-rust-mine; do
+for variant in nonce-string timestamp-string height-over-rust-mine tx-count-over-rust-mine mined-one; do
   sidecar_value_check "converge rust mine_next ${variant}" "rust_mine mine_next sidecar does not match report" mine_sidecar_invalid producer-tx "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-${variant}.json"
 done
 for variant in nonce-string timestamp-string height-over-go-mine tx-count-over-go-mine; do
@@ -2472,6 +2480,13 @@ done < "${TMP_ROOT}/sn-cases.tsv"
 stop_fifo_watchdog
 (( sn_cases == 280 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 280" >&2; exit 1; }
 sidecar_value_check "restart datadir aliased to the go datadir" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-datadir-alias-report.json"
+sn_check "sidecar rust_exact_empty_before_first_start 1" "${SN_INVALID}" "datadirs mismatch" public mesh-rust-empty-one
+sn_check "sidecar go_has_tip 1" "${SN_INVALID}" "initial_convergence does not prove equal tips" tx tx-accept-go-has-tip-one
+sn_check "sidecar rust_has_tip 1" "${SN_INVALID}" "initial_convergence does not prove equal tips" tx tx-accept-rust-has-tip-one
+sn_check "default sidecar go_has_tip 0" "${SN_INVALID}" "initial_convergence does not prove two absent tips" public mesh-go-has-tip-zero
+sn_check "default sidecar rust_has_tip 0" "${SN_INVALID}" "initial_convergence does not prove two absent tips" public mesh-rust-has-tip-zero
+sn_check "default sidecar go tip has_tip 0" "${SN_INVALID}" "initial_convergence.go_tip_path does not report an absent tip" public mesh-tip-has-tip-zero
+sn_check "sidecar go tip has_tip 1" "${SN_INVALID}" "initial_convergence.go_tip_path does not match expected tip" tx tx-accept-tip-has-tip-one
 report_locked_cases() {
   local label_suffix="$1" rp_mode rp_name rp_token rp_needle rp_cases=0
   while IFS=$'\t' read -r rp_mode rp_name rp_token rp_needle; do
