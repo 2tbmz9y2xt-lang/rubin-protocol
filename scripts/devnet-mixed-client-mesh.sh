@@ -65,7 +65,7 @@ def eventually(fn, message: str) -> None:
 def checked_path(label: str, value: object) -> Path:
     req(isinstance(value, str) and value.strip() == value and value and value[0] not in "'\"" and value[-1] not in "'\"" and "\0" not in value and all(ord(c) >= 32 for c in value), f"{label} is not a safe unquoted path string")
     try: p = Path(value); req(p.is_absolute(), f"{label} is not absolute"); return p.resolve()
-    except (OSError, ValueError) as exc: fail(f"{label} path is invalid: {exc}")
+    except (OSError, RuntimeError, ValueError) as exc: fail(f"{label} path is invalid: {exc}")
 def ep(value: object) -> bool:
     if not isinstance(value, str): return False
     host, sep, port = value.partition(":")
@@ -582,7 +582,7 @@ if restart_mode:
     root_datadir = artifact_root / "node-rust"
     try:
         datadir_path = Path(datadir_raw).resolve() if isinstance(datadir_raw, str) and Path(datadir_raw).is_absolute() else None
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         datadir_path = None
     req(isinstance(datadir_raw, str) and Path(datadir_raw).name == "node-rust" and datadir_path == root_datadir and root_datadir.is_dir() and not root_datadir.is_symlink(), "rust_restart datadir is not bound to artifact root")
     pre_restart_height = json_int(restart_info.get("pre_restart_height"), "rust_restart.pre_restart_height")
@@ -818,12 +818,13 @@ def store_neutrality_checks() -> None:
         if key == "txgen_sha256" and not chain:
             sn_req(binaries[key] is None, "binaries.txgen_sha256 is not null")
         else:
+            sn_req(regular_file(artifact_root / name), f"artifact_root/{name} is not a regular file")
             sn_req(hex32(binaries[key]) and binaries[key] == file_sha256(artifact_root / name), f"binaries.{key} does not match artifact_root/{name}")
     ident = sidecar["chain_identity"]
     sn_req(isinstance(ident, dict) and set(ident) == {"network", "chain_id_hex", "genesis_hash_hex"} and nonempty_str(ident["network"]) and hex32(ident["chain_id_hex"]) and hex32(ident["genesis_hash_hex"]), "chain_identity malformed")
     dirs = sidecar["datadirs"]
     sn_req(isinstance(dirs, dict) and set(dirs) == {"go", "rust", "rust_exact_empty_before_first_start"}, "datadirs mismatch")
-    sn_req(checked_path(f"{SN_INVALID}: datadirs.go", dirs["go"]) == (artifact_root / "node-go").resolve() and checked_path(f"{SN_INVALID}: datadirs.rust", dirs["rust"]) == (artifact_root / "node-rust").resolve() and dirs["rust_exact_empty_before_first_start"] is True, "datadirs mismatch")
+    sn_req(checked_path(f"{SN_INVALID}: datadirs.go", dirs["go"]) == checked_path(f"{SN_INVALID}: artifact_root/node-go", str(artifact_root / "node-go")) and checked_path(f"{SN_INVALID}: datadirs.rust", dirs["rust"]) == checked_path(f"{SN_INVALID}: artifact_root/node-rust", str(artifact_root / "node-rust")) and dirs["rust_exact_empty_before_first_start"] is True, "datadirs mismatch")
     conv = sidecar["initial_convergence"]
     sn_req(isinstance(conv, dict) and set(conv) == {"go_has_tip", "rust_has_tip", "height", "go_tip_hash", "rust_tip_hash", "go_tip_path", "rust_tip_path"}, "initial_convergence keys mismatch")
     if chain:
@@ -858,17 +859,23 @@ print(f"PASS: {scenario} report {'accepted' if live else 'structurally accepted'
 PY
 }
 # Prints the Python derivations shared by the producer side and check_report:
-# file_sha256 is the sha256 hex of a file (None when unreadable); header_length is the
+# regular_file is true for a path resolving to a regular file; file_sha256 is the sha256
+# hex of such a file (None for any other path, not opened, or when unreadable); header_length is the
 # unique n in {116, 148} whose SHA3-256 over the first n block bytes equals
 # block_hash, else 0; load_json_or_none is the parsed JSON of a file (None when
 # unreadable or malformed); tip_absent is true for a /get_tip object whose has_tip is
 # false and whose height and tip_hash are present and null; tip_at is true for a
 # /get_tip object whose has_tip is true and whose height and tip_hash equal the given ones.
 sidecar_derivations_py() { cat <<'PY'
-import hashlib, json
+import hashlib, json, os, stat
+def regular_file(path: object) -> bool:
+    try: return stat.S_ISREG(os.stat(path).st_mode)
+    except (OSError, ValueError): return False
 def file_sha256(path: object) -> object:
+    if not regular_file(path): return None
     try:
-        with open(path, "rb") as f: return hashlib.sha256(f.read()).hexdigest()
+        with open(path, "rb", opener=lambda name, flags: os.open(name, flags | os.O_NONBLOCK)) as f:
+            return hashlib.sha256(f.read()).hexdigest() if stat.S_ISREG(os.fstat(f.fileno()).st_mode) else None
     except OSError: return None
 def header_length(block_hex: object, block_hash: object) -> int:
     try: raw = bytes.fromhex(block_hex)
@@ -2639,73 +2646,85 @@ wait_initial_convergence() {
   IFS='|' read -r height tip_hash _ <<<"${parsed}"
   wait_tip_to_match initial_convergence rust "${RUST_RPC_ADDR}" "${height}" "${tip_hash}" "${INITIAL_RUST_TIP_JSON}"
 }
-# Writes mixed-client-mesh-store-neutrality.json from the public captures and the
-# local build. The default mode (no chain) captures no genesis block, so genesis,
-# header_bytes and binaries.txgen_sha256 are null there. Each field is described
-# next to the code that writes it below.
-write_store_neutrality_sidecar() {
-  local chain=0 commit tree rc=0
-  chain_mode && chain=1
-  SIDECAR_REASON=""
-  capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /chain_identity "${CHAIN_IDENTITY_JSON}" || { SIDECAR_REASON=store_neutrality_chain_identity_capture_failed; return 1; }
-  if (( chain )); then
-    { capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=0" "${GENESIS_GO_BLOCK_JSON}" && capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" "/get_block?height=0" "${GENESIS_RUST_BLOCK_JSON}"; } || { SIDECAR_REASON=store_neutrality_genesis_capture_failed; return 1; }
-  fi
-  commit="$(git -C "${REPO_ROOT}" rev-parse HEAD)" && tree="$(git -C "${REPO_ROOT}" status --porcelain -- clients)" || { SIDECAR_REASON=store_neutrality_commit_unavailable; return 1; }
-  { sidecar_derivations_py; cat <<'PY'; } | python3 - "${STORE_NEUTRALITY_JSON}" "${chain}" "${commit}" "${tree:+dirty}" "${CHAIN_IDENTITY_JSON}" "${GENESIS_GO_BLOCK_JSON}" "${GENESIS_RUST_BLOCK_JSON}" "${GO_NODE_BIN}" "${RUST_NODE_BIN}" "${TXGEN_BIN}" "${GO_DIR}" "${RUST_DIR}" "${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}" || rc=$?
-import json, os, sys
-out, chain, commit, dirty, ident_path, go_block_path, rust_block_path, go_bin, rust_bin, txgen_bin, go_dir, rust_dir, rust_empty, go_tip_path, rust_tip_path = sys.argv[1:16]
-chain = chain == "1"
-def load(path, code, members=()):
+# Runs one store-neutrality producer step over its arguments and prints its JSON result:
+# identity and genesis read the members of the captured /chain_identity and
+# /get_block?height=0 answers (genesis also derives each header length), binaries hashes
+# the binary files, write writes the sidecar. A step exits non-zero when it fails.
+store_neutrality_step() { { sidecar_derivations_py; cat <<'PY'; } | python3 - "$@"; }
+import os, sys
+step, args = sys.argv[1], sys.argv[2:]
+def members(path, keys):
     data = load_json_or_none(path)
-    if not isinstance(data, dict) or not all(isinstance(data.get(key), str) for key in members): sys.exit(code)
-    return data
+    if not isinstance(data, dict) or not all(isinstance(data.get(key), str) for key in keys): sys.exit(1)
+    return {key: data[key] for key in keys}
 def sha256(path):
     digest = file_sha256(path)
-    if digest is None: sys.exit(5)
+    if digest is None: sys.exit(1)
     return digest
-ident_keys = ("network", "chain_id_hex", "genesis_hash_hex")
-ident = load(ident_path, 2, ident_keys)
-genesis = heights = None
-if chain:
-    go_block, rust_block = load(go_block_path, 3, ("hash", "block_hex")), load(rust_block_path, 3, ("hash", "block_hex"))
-    genesis = {"go_hash": go_block["hash"], "rust_hash": rust_block["hash"], "go_block_path": go_block_path, "rust_block_path": rust_block_path}
-    heights = {impl: header_length(block["block_hex"], block["hash"]) for impl, block in (("go", go_block), ("rust", rust_block))}
-go_tip, rust_tip = load(go_tip_path, 6), load(rust_tip_path, 6)
-sidecar = {
-    # Constant tag: store neutrality observed on the header grammar both binaries share.
-    "evidence_domain": "pre_switch_store_neutrality",
-    # git rev-parse HEAD; true when git status --porcelain -- clients prints nothing.
-    "protocol_commit": commit,
-    "clients_tree_clean": dirty == "",
+if step == "identity":
+    print(json.dumps(members(args[0], ("network", "chain_id_hex", "genesis_hash_hex"))))
+elif step == "genesis":
+    go_block, rust_block = members(args[0], ("hash", "block_hex")), members(args[1], ("hash", "block_hex"))
+    print(json.dumps({
+        # hash of each client's /get_block?height=0 answer and the path of that capture.
+        "genesis": {"go_hash": go_block["hash"], "rust_hash": rust_block["hash"], "go_block_path": args[0], "rust_block_path": args[1]},
+        # Per client, the n in {116, 148} whose SHA3-256 over the first n genesis block
+        # bytes equals the genesis hash; 0 when no unique n matches.
+        "header_bytes": {impl: header_length(block["block_hex"], block["hash"]) for impl, block in (("go", go_block), ("rust", rust_block))},
+    }))
+elif step == "binaries":
+    chain, go_bin, rust_bin, txgen_bin = args
     # sha256 of artifact_root/rubin-node-go, rubin-node-rust and rubin-txgen.
-    "binaries": {"go_node_sha256": sha256(go_bin), "rust_node_sha256": sha256(rust_bin), "txgen_sha256": sha256(txgen_bin) if chain else None},
-    # network, chain_id_hex and genesis_hash_hex copied from Go /chain_identity.
-    "chain_identity": {key: ident[key] for key in ident_keys},
-    # hash of each client's /get_block?height=0 answer and the path of that capture.
-    "genesis": genesis,
-    # Per client, the n in {116, 148} whose SHA3-256 over the first n genesis block
-    # bytes equals the genesis hash; 0 when no unique n matches.
-    "header_bytes": heights,
-    # Both datadir paths; true when the Rust datadir held no entry before its first start.
-    "datadirs": {"go": go_dir, "rust": rust_dir, "rust_exact_empty_before_first_start": rust_empty == "true"},
-    # has_tip and tip_hash of the Go and Rust /get_tip answers the convergence wait
-    # accepted, the Go tip height, and the paths of those two captures.
-    "initial_convergence": {"go_has_tip": go_tip.get("has_tip"), "rust_has_tip": rust_tip.get("has_tip"), "height": go_tip.get("height"), "go_tip_hash": go_tip.get("tip_hash"), "rust_tip_hash": rust_tip.get("tip_hash"), "go_tip_path": go_tip_path, "rust_tip_path": rust_tip_path},
-}
-try:
-    with open(out + ".tmp", "w", encoding="utf-8") as f: json.dump(sidecar, f, indent=2, sort_keys=True); f.write("\n")
-    os.replace(out + ".tmp", out)
-except OSError: sys.exit(4)
+    print(json.dumps({"go_node_sha256": sha256(go_bin), "rust_node_sha256": sha256(rust_bin), "txgen_sha256": sha256(txgen_bin) if chain == "1" else None}))
+else:
+    out, ident, genesis, binaries, commit, dirty, go_dir, rust_dir, rust_empty, go_tip_path, rust_tip_path = args
+    go_tip, rust_tip = load_json_or_none(go_tip_path), load_json_or_none(rust_tip_path)
+    if not isinstance(go_tip, dict) or not isinstance(rust_tip, dict): sys.exit(1)
+    sidecar = {
+        # Constant tag: store neutrality observed on the header grammar both binaries share.
+        "evidence_domain": "pre_switch_store_neutrality",
+        # git rev-parse HEAD; true when git status --porcelain -- clients prints nothing.
+        "protocol_commit": commit,
+        "clients_tree_clean": dirty == "",
+        "binaries": json.loads(binaries),
+        # network, chain_id_hex and genesis_hash_hex copied from Go /chain_identity.
+        "chain_identity": json.loads(ident),
+        **(json.loads(genesis) if genesis else {"genesis": None, "header_bytes": None}),
+        # Both datadir paths; true when the Rust datadir held no entry before its first start.
+        "datadirs": {"go": go_dir, "rust": rust_dir, "rust_exact_empty_before_first_start": rust_empty == "true"},
+        # has_tip and tip_hash of the Go and Rust /get_tip answers the convergence wait
+        # accepted, the Go tip height, and the paths of those two captures.
+        "initial_convergence": {"go_has_tip": go_tip.get("has_tip"), "rust_has_tip": rust_tip.get("has_tip"), "height": go_tip.get("height"), "go_tip_hash": go_tip.get("tip_hash"), "rust_tip_hash": rust_tip.get("tip_hash"), "go_tip_path": go_tip_path, "rust_tip_path": rust_tip_path},
+    }
+    try:
+        with open(out + ".tmp", "w", encoding="utf-8") as f: json.dump(sidecar, f, indent=2, sort_keys=True); f.write("\n")
+        os.replace(out + ".tmp", out)
+    except OSError: sys.exit(1)
 PY
-  case "${rc}" in
-    0) return 0 ;;
-    2) SIDECAR_REASON=store_neutrality_chain_identity_capture_failed ;;
-    3) SIDECAR_REASON=store_neutrality_genesis_capture_failed ;;
-    5) SIDECAR_REASON=store_neutrality_binary_hash_failed ;;
-    *) SIDECAR_REASON=store_neutrality_sidecar_write_failed ;;
-  esac
-  return 1
+# Writes mixed-client-mesh-store-neutrality.json from the public captures and the
+# local build, one step after another: /chain_identity, genesis blocks (chain modes
+# only), binary hashes, git state, sidecar write. SIDECAR_REASON names the failed step.
+# The default mode (no chain) captures no genesis block, so genesis, header_bytes and
+# binaries.txgen_sha256 are null there.
+write_store_neutrality_sidecar() {
+  local chain=0 ident genesis="" binaries commit tree
+  chain_mode && chain=1
+  SIDECAR_REASON=store_neutrality_chain_identity_capture_failed
+  capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /chain_identity "${CHAIN_IDENTITY_JSON}" || return 1
+  ident="$(store_neutrality_step identity "${CHAIN_IDENTITY_JSON}")" || return 1
+  if (( chain )); then
+    SIDECAR_REASON=store_neutrality_genesis_capture_failed
+    capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=0" "${GENESIS_GO_BLOCK_JSON}" || return 1
+    capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" "/get_block?height=0" "${GENESIS_RUST_BLOCK_JSON}" || return 1
+    genesis="$(store_neutrality_step genesis "${GENESIS_GO_BLOCK_JSON}" "${GENESIS_RUST_BLOCK_JSON}")" || return 1
+  fi
+  SIDECAR_REASON=store_neutrality_binary_hash_failed
+  binaries="$(store_neutrality_step binaries "${chain}" "${GO_NODE_BIN}" "${RUST_NODE_BIN}" "${TXGEN_BIN}")" || return 1
+  SIDECAR_REASON=store_neutrality_commit_unavailable
+  commit="$(git -C "${REPO_ROOT}" rev-parse HEAD)" && tree="$(git -C "${REPO_ROOT}" status --porcelain -- clients)" || return 1
+  SIDECAR_REASON=store_neutrality_sidecar_write_failed
+  store_neutrality_step write "${STORE_NEUTRALITY_JSON}" "${ident}" "${genesis}" "${binaries}" "${commit}" "${tree:+dirty}" "${GO_DIR}" "${RUST_DIR}" "${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}" || return 1
+  SIDECAR_REASON=""
 }
 capture_go_reorg_metrics() {
   local parsed

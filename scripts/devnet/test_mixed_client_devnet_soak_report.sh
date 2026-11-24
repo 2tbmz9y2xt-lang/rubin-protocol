@@ -8,7 +8,7 @@ LINK_PARENT="${TMP_ROOT}-parent-link"
 ALIAS_ROOT="${LINK_PARENT}/$(basename "${TMP_ROOT}")"
 SPACE_LINK_PARENT="${TMP_ROOT}-parent link"
 SPACE_ALIAS_ROOT="${SPACE_LINK_PARENT}/$(basename "${TMP_ROOT}")"
-trap 'chmod -R u+w "${TMP_ROOT}"; rm -rf -- "${TMP_ROOT}" "${LINK_PARENT}" "${SPACE_LINK_PARENT}"' EXIT
+trap 'chmod -R u+w "${TMP_ROOT}" || true; rm -rf -- "${TMP_ROOT}" "${LINK_PARENT}" "${SPACE_LINK_PARENT}"' EXIT
 python3 - "${TMP_ROOT}" <<'PY'
 import hashlib, json, os, sys; from pathlib import Path
 root = Path(os.path.realpath(sys.argv[1])); root.mkdir(exist_ok=True)

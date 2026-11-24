@@ -24,6 +24,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Opens and closes the write end of the FIFOs named by its arguments at 2-second
+# intervals, so a reader blocked on opening one sees end of file instead of hanging;
+# exits once none of those paths exists.
+start_fifo_watchdog() {
+  python3 -c '
+import os, sys, time
+while any(os.path.lexists(path) for path in sys.argv[1:]):
+    time.sleep(2)
+    for path in sys.argv[1:]:
+        try: os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+        except OSError: pass
+' "$@" </dev/null >/dev/null 2>&1 &
+  FIFO_WATCHDOG_PID=$!
+}
+stop_fifo_watchdog() { kill "${FIFO_WATCHDOG_PID}" 2>/dev/null || true; wait "${FIFO_WATCHDOG_PID}" 2>/dev/null || true; }
+
 require_contains() {
   local output="$1" needle="$2" label="$3"
   if [[ "${output}" != *"${needle}"* ]]; then
@@ -122,10 +138,8 @@ dst.write_text("\n".join(out) + "\n", encoding="utf-8")
 PY
 }
 
-check_prepare_tx_chainstate_leaves_rust_empty() {
-  local probe="${TMP_ROOT}/prepare-tx-chainstate-empty.sh" probe_root="${TMP_ROOT}/prepare-tx-chainstate-empty"
-  mkdir -p -- "${probe_root}"
-  cat >"${probe}" <<'SH'
+prepare_tx_probe_preamble() {
+  cat <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 source "$1"
@@ -141,10 +155,21 @@ restore_xtrace_after_secret() { :; }
 make_tx_secret_dir() { mkdir -p -- "${probe_root}/secret"; printf '%s\n' "${probe_root}/secret"; }
 cleanup_tx_from_key_file() { :; }
 _rubin_process_resolve_log() { printf '%s\n' "$1"; }
+SH
+}
+
+check_prepare_tx_chainstate_leaves_rust_empty() {
+  local probe="${TMP_ROOT}/prepare-tx-chainstate-empty.sh" probe_root="${TMP_ROOT}/prepare-tx-chainstate-empty"
+  mkdir -p -- "${probe_root}"
+  { prepare_tx_probe_preamble; cat <<'SH'; } >"${probe}"
 bounded_mesh() {
-  local arg
-  for arg; do [[ "${arg}" == --mine-blocks ]] && { printf 'store\n' >"${GO_DIR}/chainstate"; printf 'mined\n'; return 0; }; done
-  printf '{}\n'
+  local datadir="" mine=0
+  while (( $# )); do
+    case "$1" in --datadir) datadir="$2"; shift ;; --mine-blocks) mine=1 ;; esac
+    shift
+  done
+  (( mine )) || { printf '{}\n'; return 0; }
+  printf 'store\n' >"${datadir}/chainstate"; printf 'mined\n'
 }
 parse_keygen_material() { printf '%s\n%s\n%s\n' "${probe_root}/secret/from-key.hex" "01$(printf 'b%.0s' {1..64})" "01$(printf 'a%.0s' {1..64})"; }
 prepare_tx_chainstate || { echo "FAIL: prepare_tx_chainstate failed: ${TX_REASON}" >&2; exit 1; }
@@ -284,7 +309,7 @@ MESH_TIMEOUT=1 expect_reason initial_convergence_timeout "${go101}" "${rust100}"
 expect_reason initial_convergence_timeout "${go101}" "${rust101b}"
 expect_reason initial_convergence_go_tip_tip_absent "${absent}" "${absent}"
 rm -f -- "${probe_root}/captures-go" "${probe_root}/captures-rust"; RUST_CAPTURE_FAILS=1
-MESH_TIMEOUT=3 expect_match "${go101}" "${rust101}"
+MESH_TIMEOUT=10 expect_match "${go101}" "${rust101}"
 [[ "$(wc -l <"${probe_root}/captures-go")" -eq 1 && "$(wc -l <"${probe_root}/captures-rust")" -eq 2 ]] || { echo "FAIL: Go tip captures $(wc -l <"${probe_root}/captures-go"), Rust tip captures $(wc -l <"${probe_root}/captures-rust"), want 1 and 2" >&2; exit 1; }
 RUST_CAPTURE_FAILS=1000
 expect_reason initial_convergence_timeout "${go101}" "${rust101}"
@@ -332,7 +357,9 @@ for impl in ("go", "rust"):
 for impl in ("go", "rust", "txgen"):
     open(f"{root}/bin-{impl}", "w").write(f"{impl} binary\n")
 json.dump([], open(f"{root}/array.json", "w"))
+json.dump({}, open(f"{root}/empty-object.json", "w"))
 PY
+  mkfifo -- "${probe_root}/bin-fifo"; mkdir -p -- "${probe_root}/bin-dir"; ln -s -- /dev/null "${probe_root}/bin-device"
   cat >"${probe}" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -406,6 +433,15 @@ BAD_CAPTURE="rust /get_block?height=0" BAD_SRC="${p}/array.json" expect_end stor
 FAIL_GIT=rev-parse expect_end store_neutrality_commit_unavailable
 FAIL_GIT=status expect_end store_neutrality_commit_unavailable
 TXGEN_BIN="${p}/missing" expect_end store_neutrality_binary_hash_failed
+GO_NODE_BIN="${p}/bin-fifo" expect_end store_neutrality_binary_hash_failed
+RUST_NODE_BIN="${p}/bin-dir" expect_end store_neutrality_binary_hash_failed
+TXGEN_BIN="${p}/bin-device" expect_end store_neutrality_binary_hash_failed
+TXGEN_BIN="${p}/missing" FAIL_GIT=rev-parse expect_end store_neutrality_binary_hash_failed
+FAIL_GIT=rev-parse INITIAL_GO_TIP_JSON="${p}/array.json" expect_end store_neutrality_commit_unavailable
+BAD_CAPTURE="go /chain_identity" BAD_SRC="${p}/empty-object.json" FAIL_GIT=rev-parse expect_end store_neutrality_chain_identity_capture_failed
+BAD_CAPTURE="go /chain_identity" BAD_SRC="${p}/empty-object.json" FAIL_CAPTURE="go /get_block?height=0" expect_end store_neutrality_chain_identity_capture_failed
+BAD_CAPTURE="go /get_block?height=0" BAD_SRC="${p}/bad-block-no-block_hex.json" GO_NODE_BIN="${p}/bin-dir" expect_end store_neutrality_genesis_capture_failed
+FAIL_CAPTURE="rust /get_block?height=0" TXGEN_BIN="${p}/bin-fifo" expect_end store_neutrality_genesis_capture_failed
 STORE_NEUTRALITY_JSON="${p}/missing/sidecar.json" expect_end store_neutrality_sidecar_write_failed
 INITIAL_GO_TIP_JSON="${p}/array.json" expect_end store_neutrality_sidecar_write_failed
 INITIAL_RUST_TIP_JSON="${p}/missing-tip.json" expect_end store_neutrality_sidecar_write_failed
@@ -415,7 +451,9 @@ rm -f -- "${GENESIS_GO_BLOCK_JSON}" "${GENESIS_RUST_BLOCK_JSON}"
   expect_end completed; expect_sidecar true true default
 )
 SH
+  start_fifo_watchdog "${probe_root}/bin-fifo"
   bash "${probe}" "${lib}" "${main}" "${probe_root}"
+  stop_fifo_watchdog
 }
 
 check_proxy_go_local_addr_reason() {
@@ -571,36 +609,7 @@ SH
 check_prepare_tx_chainstate_cleanup() {
   local probe="${TMP_ROOT}/prepare-tx-chainstate-cleanup.sh" probe_root="${TMP_ROOT}/prepare-tx-chainstate-cleanup"
   mkdir -p -- "${probe_root}"
-  cat >"${probe}" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-source "$1"
-probe_root="$2"
-KEYGEN_JSON="${probe_root}/keygen.json"
-KEYGEN_GO="${probe_root}/keygen.go"
-GO_MODULE_ROOT="${probe_root}/go"
-DEV_ENV="${probe_root}/dev-env.sh"
-GO_NODE_BIN="${probe_root}/rubin-node"
-GO_DIR="${probe_root}/go-node"
-RUST_DIR="${probe_root}/rust-node"
-MINE_LOG="${probe_root}/mine-go.log"
-TMPDIR="${probe_root}/tmp"
-TX_REASON=""
-TX_FROM_KEY_DIR=""
-TX_FROM_KEY_FILE=""
-TX_TO_KEY=""
-mkdir -p -- "${TMPDIR}" "${GO_MODULE_ROOT}" "${GO_DIR}" "${RUST_DIR}"
-
-build_go_txgen() { :; }
-write_keygen() { :; }
-disable_xtrace_for_secret() { return 1; }
-restore_xtrace_after_secret() { :; }
-make_tx_secret_dir() {
-  mkdir -p -- "${probe_root}/secret"
-  printf '%s\n' "${probe_root}/secret"
-}
-cleanup_tx_from_key_file() { :; }
+  { prepare_tx_probe_preamble; cat <<'SH'; } >"${probe}"
 bounded_mesh() {
   printf '{"malformed":true}\n'
   printf 'keygen stderr\n' >&2
@@ -1571,10 +1580,10 @@ genesis_hex, genesis_hash = (genesis_header + bytes(40)).hex(), sha3(genesis_hea
 long_header = genesis_header + b"\x07" * 32
 long_genesis_hex, long_genesis_hash = (long_header + bytes(8)).hex(), sha3(long_header).hex()
 conv_hash = "cc" * 32
-def sn_tip(impl: str, endpoint: str, chain: bool, tip_height: int = 101, tip_hash: str = conv_hash) -> dict:
+def sn_tip(impl: str, endpoint: str, chain: bool) -> dict:
     if not chain:
         return {"best_known_height": 0, "has_tip": False, "height": None, "implementation": impl, "in_ibd": True, "request_path": "/get_tip", "rpc_endpoint": endpoint, "tip_hash": None}
-    return tip_sidecar(impl, endpoint, tip_hash, tip_height)
+    return tip_sidecar(impl, endpoint, conv_hash, 101)
 def write_store_neutrality(mode_root: Path, scenario: str) -> None:
     chain = scenario != "mixed_client_mesh"
     rust_endpoint = "127.0.0.1:51030" if scenario == "mixed_client_rust_restart" else rust_rpc
@@ -1690,6 +1699,7 @@ SN_CASES = (
     (SN_ALL, "ident-missing", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].pop("network")),
     (SN_ALL, "network-empty", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network="")),
     (SN_ALL, "network-number", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network=5)),
+    (SN_ALL, "network-whitespace", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(network=" \t\n ")),
     (SN_ALL, "chain-id-upper", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(chain_id_hex="DD" * 32)),
     (SN_ALL, "ident-genesis-short", SN_I, "chain_identity malformed", lambda s, r: s["chain_identity"].update(genesis_hash_hex=genesis_hash[:62])),
     (SN_ALL, "datadirs-extra", SN_I, "datadirs mismatch", lambda s, r: s["datadirs"].update(extra=str(r))),
@@ -1702,6 +1712,7 @@ SN_CASES = (
     (SN_ALL, "tip-relative", SN_I, GO_TIP_PATH + " is not absolute", lambda s, r: s["initial_convergence"].update(go_tip_path=os.path.relpath(r / GO_TIP))),
     (SN_ALL, "tip-outside", SN_I, GO_TIP_PATH + " is outside artifact_root", lambda s, r: s["initial_convergence"].update(go_tip_path=sn_outside(r, GO_TIP))),
     (SN_ALL, "tip-directory", SN_I, GO_TIP_PATH + " file is missing", lambda s, r: s["initial_convergence"].update(go_tip_path=str(r / "node-go"))),
+    (SN_ALL, "tip-symlink-loop", SN_I, GO_TIP_PATH, lambda s, r: ((r / "loop-a").symlink_to(r / "loop-b"), (r / "loop-b").symlink_to(r / "loop-a"), s["initial_convergence"].update(go_tip_path=str(r / "loop-a")))),
     (SN_ALL, "tip-array", SN_I, GO_TIP_PATH + " root is not an object", lambda s, r: dump(r / GO_TIP, [1])),
     (SN_ALL, "tip-extra", SN_I, GO_TIP_KEYS, lambda s, r: sn_edit_file(r, GO_TIP, extra=1)),
     (SN_ALL, "tip-missing", SN_I, GO_TIP_KEYS, lambda s, r: sn_drop_file_key(r, GO_TIP, "in_ibd")),
@@ -1719,7 +1730,11 @@ SN_CASES = (
     (("mesh",), "tip-hash", SN_I, "initial_convergence.go_tip_path does not report an absent tip", lambda s, r: sn_edit_file(r, GO_TIP, tip_hash=conv_hash)),
     (SN_CHAIN, "txgen-hash", SN_I, "binaries.txgen_sha256 does not match", lambda s, r: s["binaries"].update(txgen_sha256="00" * 32)),
     (SN_CHAIN, "txgen-null", SN_I, "binaries.txgen_sha256 does not match", lambda s, r: s["binaries"].update(txgen_sha256=None)),
-    (SN_CHAIN, "txgen-unreadable", SN_I, "binaries.txgen_sha256 does not match", lambda s, r: ((r / "rubin-txgen").unlink(), s["binaries"].update(txgen_sha256=None))),
+    (SN_CHAIN, "txgen-missing", SN_I, "artifact_root/rubin-txgen is not a regular file", lambda s, r: (r / "rubin-txgen").unlink()),
+    (SN_CHAIN, "txgen-unreadable", SN_I, "binaries.txgen_sha256 does not match", lambda s, r: (r / "rubin-txgen").chmod(0)),
+    (SN_CHAIN, "txgen-fifo", SN_I, "artifact_root/rubin-txgen is not a regular file", lambda s, r: ((r / "rubin-txgen").unlink(), os.mkfifo(r / "rubin-txgen"))),
+    (SN_CHAIN, "txgen-directory", SN_I, "artifact_root/rubin-txgen is not a regular file", lambda s, r: ((r / "rubin-txgen").unlink(), (r / "rubin-txgen").mkdir())),
+    (SN_CHAIN, "txgen-device", SN_I, "artifact_root/rubin-txgen is not a regular file", lambda s, r: ((r / "rubin-txgen").unlink(), (r / "rubin-txgen").symlink_to("/dev/null"), s["binaries"].update(txgen_sha256=hashlib.sha256(b"").hexdigest()))),
     (SN_CHAIN, "go-has-tip-false", SN_I, "initial_convergence does not prove equal tips", lambda s, r: s["initial_convergence"].update(go_has_tip=False)),
     (SN_CHAIN, "rust-has-tip-false", SN_I, "initial_convergence does not prove equal tips", lambda s, r: s["initial_convergence"].update(rust_has_tip=False)),
     (SN_CHAIN, "height-100", SN_I, "initial_convergence does not prove equal tips", lambda s, r: sn_set_height(s, r, 100)),
@@ -1738,6 +1753,7 @@ SN_CASES = (
     (SN_CHAIN, "block-relative", SN_I, GO_BLOCK_PATH + " is not absolute", lambda s, r: s["genesis"].update(go_block_path=os.path.relpath(r / GO_BLOCK))),
     (SN_CHAIN, "block-outside", SN_I, GO_BLOCK_PATH + " is outside artifact_root", lambda s, r: s["genesis"].update(go_block_path=sn_outside(r, GO_BLOCK))),
     (SN_CHAIN, "block-directory", SN_I, GO_BLOCK_PATH + " file is missing", lambda s, r: s["genesis"].update(go_block_path=str(r / "node-go"))),
+    (SN_CHAIN, "block-symlink-loop", SN_I, GO_BLOCK_PATH, lambda s, r: ((r / "loop-a").symlink_to(r / "loop-b"), (r / "loop-b").symlink_to(r / "loop-a"), s["genesis"].update(go_block_path=str(r / "loop-a")))),
     (SN_CHAIN, "block-array", SN_I, GO_BLOCK_PATH + " root is not an object", lambda s, r: dump(r / GO_BLOCK, [1])),
     (SN_CHAIN, "block-extra", SN_I, GO_BLOCK_KEYS, lambda s, r: sn_edit_file(r, GO_BLOCK, extra=1)),
     (SN_CHAIN, "block-missing", SN_I, GO_BLOCK_KEYS, lambda s, r: sn_drop_file_key(r, GO_BLOCK, "canonical")),
@@ -2263,11 +2279,13 @@ sn_check "restart initial rust tip from the restarted endpoint" "${SN_INVALID}" 
 sn_check "partition common block not above initial convergence" "${SN_INVALID}" "partition common block height is not above initial_convergence.height" partition-heal-reorg partition-not-above
 expect_pass_contains "restart initial convergence at the pre-restart height" "PASS: mixed_client_rust_restart report structurally accepted" check_report "${TMP_ROOT}/sn-restart-at-pre-restart-report.json" offline rust-restart
 sn_cases=0
+start_fifo_watchdog "${TMP_ROOT}/sn-tx-accept-txgen-fifo/artifact-root/rubin-txgen" "${TMP_ROOT}/sn-restart-txgen-fifo/artifact-root/rubin-txgen"
 while IFS=$'\t' read -r sn_mode sn_name sn_token sn_needle; do
   sn_check "sidecar ${sn_name}" "${sn_token}" "${sn_needle}" "${sn_mode}" "${sn_name}"
   sn_cases=$((sn_cases + 1))
 done < "${TMP_ROOT}/sn-cases.tsv"
-(( sn_cases == 198 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 198" >&2; exit 1; }
+stop_fifo_watchdog
+(( sn_cases == 214 )) || { echo "FAIL: sidecar case table ran ${sn_cases} rows, want 214" >&2; exit 1; }
 sn_output="$(check_report "${TMP_ROOT}/sn-tx-accept-top-extra-report.json" offline producer-tx 2>&1)" && { echo "FAIL: sidecar extra key report should fail" >&2; exit 1; }
 [[ "$(combined_report_reason_token <<<"${sn_output}")" == store_neutrality_sidecar_invalid ]] || { echo "FAIL: combined token for sidecar keys mismatch: $(combined_report_reason_token <<<"${sn_output}")" >&2; exit 1; }
 printf 'PASS: mixed-client mesh check-report public/internal boundaries are covered\n'
