@@ -566,16 +566,21 @@ func testCapturedReadPendingTargetStop(t *testing.T) {
 }
 
 func testCapturedReadMixedPending(t *testing.T, withStage bool) {
-	o, paths, order := capturedReadRetainedOrder(t, sourceLimits(), 'A', 'B', 'C')
-	b, d, c := order[0], order[1], order[2]
-	sourcePrepare(t, o, b.m, b.parts)
-	sourcePrepare(t, o, d.m, d.parts)
-	bPath, dPath, cPath := filepath.Join(paths.root, b.leaf), filepath.Join(paths.root, d.leaf), filepath.Join(paths.root, c.leaf)
-	stage := capturedReadRecordFor('D')
+	var o *SourceOwnerV1
+	var paths sourceTestPaths
+	var order []capturedReadRecord
+	var stage capturedReadRecord
 	var stagePath string
 	if withStage {
-		stagePath = placeCapturedReadStage(t, paths.root, stage, b.leaf, d.leaf, c.leaf)
+		o, paths, order, stage, stagePath = capturedReadSelectedStage(t)
+	} else {
+		o, paths, order = capturedReadRetainedOrder(t, sourceLimits(), 'A', 'B', 'C')
+		for _, record := range order[:2] {
+			sourcePrepare(t, o, record.m, record.parts)
+		}
 	}
+	b, d, c := order[0], order[1], order[2]
+	bPath, dPath, cPath := filepath.Join(paths.root, b.leaf), filepath.Join(paths.root, d.leaf), filepath.Join(paths.root, c.leaf)
 	bOriginal, dOriginal := sourceLstat(t, bPath), sourceLstat(t, dPath)
 	bBytes, dBytes := sourceReadFile(t, bPath), sourceReadFile(t, dPath)
 	sourceMust(t, os.Truncate(bPath, bOriginal.Size()-1))
@@ -607,19 +612,42 @@ func testCapturedReadMixedPending(t *testing.T, withStage bool) {
 	sourceRead(t, o, c.m, c.parts)
 }
 
-func placeCapturedReadStage(t *testing.T, root string, stage capturedReadRecord, captures ...string) string {
+func capturedReadSelectedStage(t *testing.T) (*SourceOwnerV1, sourceTestPaths, []capturedReadRecord, capturedReadRecord, string) {
 	t.Helper()
-	outside := t.TempDir()
-	for _, name := range captures {
-		sourceMust(t, os.Rename(filepath.Join(root, name), filepath.Join(outside, name)))
+	limits := sourceLimits()
+	for i := range 63 {
+		first := byte('A' + 3*i)
+		captures := []capturedReadRecord{capturedReadRecordFor(first), capturedReadRecordFor(first + 1), capturedReadRecordFor(first + 2)}
+		stage := capturedReadRecordFor(first + 3)
+		name := publicStagePrefix + stage.leaf
+		s, paths, prepared := capturedReadFreshDirectory(t, limits, captures...)
+		path := filepath.Join(paths.root, name)
+		for j, record := range captures {
+			if j == 1 {
+				writeSourceEntry(t, path, make([]byte, sourceSize(t, stage.m)))
+			}
+			sourceMust(t, os.Rename(filepath.Join(prepared, record.leaf), filepath.Join(paths.root, record.leaf)))
+		}
+		names := capturedReadNames(t, paths.root)
+		if len(names) != 4 || names[1] != name {
+			sourceMust(t, s.Close())
+			continue
+		}
+		slices.SortFunc(captures, func(a, b capturedReadRecord) int { return slices.Index(names, a.leaf) - slices.Index(names, b.leaf) })
+		held := filepath.Join(prepared, name)
+		sourceMust(t, os.Rename(path, held))
+		o := sourceOpen(t, s, sourceID(), limits, nil)
+		for _, record := range captures[:2] {
+			sourcePrepare(t, o, record.m, record.parts)
+		}
+		sourceMust(t, os.Rename(held, path))
+		if slices.Equal(capturedReadNames(t, paths.root), names) {
+			return o, paths, captures, stage, path
+		}
+		sourceMust(t, s.Close())
 	}
-	sourceMust(t, os.Rename(filepath.Join(outside, captures[0]), filepath.Join(root, captures[0])))
-	path := filepath.Join(root, publicStagePrefix+stage.leaf)
-	writeSourceEntry(t, path, make([]byte, sourceSize(t, stage.m)))
-	for _, name := range captures[1:] {
-		sourceMust(t, os.Rename(filepath.Join(outside, name), filepath.Join(root, name)))
-	}
-	return path
+	t.Fatal("no matching selected stage order")
+	return nil, sourceTestPaths{}, nil, capturedReadRecord{}, ""
 }
 
 func testCapturedReadDeferredStage(t *testing.T) {
@@ -950,16 +978,25 @@ func testCapturedReadStoppedStageAlias(t *testing.T) {
 	sourceReadRefusal(t, o, b.m, ErrIdentityV1, "replacement after clearing the staging conflict")
 }
 
+func capturedReadFreshDirectory(t *testing.T, limits SourceLimitsV1, captures ...capturedReadRecord) (*policycontrol.Store, sourceTestPaths, string) {
+	t.Helper()
+	s, o, dir := sourceScene(t, limits)
+	for _, record := range captures {
+		sourcePrepare(t, o, record.m, record.parts)
+	}
+	s = sourceReopenStore(t, s, dir)
+	paths := sourcePaths(dir, "")
+	prepared := filepath.Join(t.TempDir(), "captures")
+	sourceMust(t, os.Rename(paths.root, prepared))
+	sourceMust(t, os.Mkdir(paths.root, 0o700))
+	return s, paths, prepared
+}
+
 func capturedReadFreshPair(t *testing.T, first byte) (*policycontrol.Store, *SourceOwnerV1, sourceTestPaths, capturedReadRecord, capturedReadRecord) {
 	t.Helper()
 	limits := sourceLimits()
 	b, c := capturedReadRecordFor(first), capturedReadRecordFor(first+1)
-	s, o, paths, _ := sourcePreparedScene(t, limits, b.m, b.parts)
-	sourcePrepare(t, o, c.m, c.parts)
-	s = sourceReopenStore(t, s, paths.dir)
-	prepared := filepath.Join(t.TempDir(), "captures")
-	sourceMust(t, os.Rename(paths.root, prepared))
-	sourceMust(t, os.Mkdir(paths.root, 0o700))
+	s, paths, prepared := capturedReadFreshDirectory(t, limits, b, c)
 	// Populate the reopened directory without temporary publication names.
 	for _, record := range []capturedReadRecord{b, c} {
 		sourceMust(t, os.Rename(filepath.Join(prepared, record.leaf), filepath.Join(paths.root, record.leaf)))
@@ -967,7 +1004,7 @@ func capturedReadFreshPair(t *testing.T, first byte) (*policycontrol.Store, *Sou
 	if capturedReadNames(t, paths.root)[0] == c.leaf {
 		b, c = c, b
 	}
-	o = sourceOpen(t, s, sourceID(), limits, nil)
+	o := sourceOpen(t, s, sourceID(), limits, nil)
 	sourcePrepare(t, o, b.m, b.parts)
 	return s, o, paths, b, c
 }
