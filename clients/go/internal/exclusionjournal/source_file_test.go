@@ -250,15 +250,27 @@ func TestCapturedSourceReadCapacityV1(t *testing.T) {
 func testCapturedReadRetainedBytes(t *testing.T, mode string) {
 	size, limits := capturedReadSize(t, 'B'), sourceLimits()
 	const extra = 7
+	growing := mode == "same-inode-growth"
 	limits.Bytes, limits.Files = 2*size+extra, 3
+	if growing {
+		limits.Bytes, limits.Files = 3*size+extra, 4
+	}
 	_, o, paths, b, c := capturedReadPair(t, limits)
 	sourceFailIf(t, capturedReadSize(t, 'C') != size, "capture sizes differ")
+	if growing {
+		// The absent capture contributes reserved bytes without adding ordered bytes.
+		e := capturedReadRecordFor('E')
+		sourcePrepare(t, o, e.m, e.parts)
+		held := filepath.Join(paths.dir, "retained-growth-charge")
+		sourceMust(t, os.Rename(filepath.Join(paths.root, e.leaf), held))
+		sourceFailIf(t, sourceLstat(t, held).Size() != int64(size), "retained capture size differs from %d", size)
+	}
 	modeByCharge := map[string]string{"missing-charge": "missing", "same-inode-floor": "same-inode-shrink", "same-inode-growth": "same-inode-growth"}
 	restore, refusal := capturedReadDefect(t, paths, modeByCharge[mode])
 	d := capturedReadRecordFor('D')
 	path := filepath.Join(paths.root, d.leaf)
 	length := int64(extra)
-	if mode == "same-inode-growth" {
+	if growing {
 		length--
 	}
 	sourceMust(t, os.WriteFile(path, make([]byte, length), 0o600))
