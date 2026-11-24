@@ -75,32 +75,38 @@ func tiAbortName(mode uint32, consumed bool) string {
 	return fmt.Sprintf("leaves the Store POISONED_THREAD on fault mode %d abort THREAD_MISMATCH", mode)
 }
 
-// tiProbe runs call under SelectedDamageProbeOnly and requires one ORIGINAL OLD
-// begin and abort with no write or read transaction, delete, commit or fault.
-func tiProbe(t *testing.T, s *Store, o *OperationReservationOwner, call func()) SelectedDamageEvidence {
+// tiProbe runs call under SelectedDamageProbeOnly. The returned function requires one
+// ORIGINAL OLD begin and abort with no write or read transaction, delete, commit or fault,
+// and gets meta DBI gets on ORIGINAL OLD.
+func tiProbe(t *testing.T, s *Store, o *OperationReservationOwner, gets uint64, call func()) func() {
 	t.Helper()
 	evidence, err := FixtureSelectedDamage(s, o, SelectedDamageProbeOnly, 0, nil, call)
 	mustEnvironment(t, err)
-	if evidence.BeginOld != 1 || evidence.BeginWrite != 0 || evidence.BeginRead != 0 || evidence.Deletes != 0 || evidence.Commits != 0 || evidence.Faults != 0 || evidence.OldAborts != 1 {
-		t.Fatalf("native evidence %+v", evidence)
-	}
-	return evidence
-}
-
-// tiNative runs call under SelectedDamageProbeOnly for mode 0, requiring gets
-// meta DBI gets on ORIGINAL OLD, and under fixtureLargeFault mode at rank and
-// key otherwise, requiring no commit and one ORIGINAL OLD abort.
-func tiNative(t *testing.T, s *Store, o *OperationReservationOwner, mode uint32, rank uint8, key []byte, gets uint64, call func()) {
-	t.Helper()
-	if mode == 0 {
-		if evidence := tiProbe(t, s, o, call); evidence.OldGets[0] != gets {
+	return func() {
+		t.Helper()
+		if evidence.BeginOld != 1 || evidence.BeginWrite != 0 || evidence.BeginRead != 0 || evidence.Deletes != 0 || evidence.Commits != 0 || evidence.Faults != 0 || evidence.OldAborts != 1 {
+			t.Fatalf("native evidence %+v", evidence)
+		}
+		if evidence.OldGets[0] != gets {
 			t.Fatalf("meta gets on ORIGINAL OLD %d, want %d", evidence.OldGets[0], gets)
 		}
-		return
+	}
+}
+
+// tiNative runs call under tiProbe for mode 0 and under fixtureLargeFault mode at rank and key
+// otherwise. The returned function checks the native evidence: tiProbe's for mode 0, no commit
+// and one ORIGINAL OLD abort otherwise.
+func tiNative(t *testing.T, s *Store, o *OperationReservationOwner, mode uint32, rank uint8, key []byte, gets uint64, call func()) func() {
+	t.Helper()
+	if mode == 0 {
+		return tiProbe(t, s, o, gets, call)
 	}
 	evidence := ctxTreeFault(t, s, mode, rank, key, call)
-	if evidence.commits != 0 || evidence.aborts != 1 {
-		t.Fatalf("fault mode %d evidence %+v", mode, evidence)
+	return func() {
+		t.Helper()
+		if evidence.commits != 0 || evidence.aborts != 1 {
+			t.Fatalf("fault mode %d evidence %+v", mode, evidence)
+		}
 	}
 }
 
@@ -126,18 +132,14 @@ func tiDisposition(t *testing.T, s *Store, mode uint32, consumed bool, err error
 			t.Fatalf("Store %s terminal %v, want CLOSED with %v", s.state, s.terminal, err)
 		}
 		if !hasPrimary {
-			if requireEnvironmentError(t, err, "IO", operationAbort, 5, "error 5").Cause != nil {
-				t.Fatal("abort EIO without a primary carries a cause")
-			}
+			treeNativeError(t, err, operationAbort, "IO", 5, "error 5", nil)
 			return nil
 		}
 		parts, ok := err.(interface{ Unwrap() []error })
 		if !ok || len(parts.Unwrap()) != 2 {
 			t.Fatalf("primary and abort EIO join %v", err)
 		}
-		if requireEnvironmentError(t, parts.Unwrap()[1], "IO", operationAbort, 5, "error 5").Cause != nil {
-			t.Fatal("abort EIO carries a cause")
-		}
+		treeNativeError(t, parts.Unwrap()[1], operationAbort, "IO", 5, "error 5", nil)
 		return parts.Unwrap()[0]
 	}
 	if s.state != storePOISONEDTHREAD || any(s.terminal) != any(err) {
@@ -151,13 +153,13 @@ func tiDisposition(t *testing.T, s *Store, mode uint32, consumed bool, err error
 }
 
 // tiAfter observes the next public calls: the repeated call and the Store
-// operations for an OPEN Store, the cached terminal otherwise, then releases a
-// retained transaction. terminal is the error the call returned, or the cached
-// terminal when the planner unwound.
-func tiAfter(t *testing.T, s *Store, o *OperationReservationOwner, kind OperationKind, p *tiPlanner, terminal error, check func(tiOutcome)) {
+// operations for an OPEN Store, with view run in its View, the cached terminal
+// otherwise, then releases a retained transaction. terminal is the error the
+// call returned, or the cached terminal when the planner unwound.
+func tiAfter(t *testing.T, s *Store, o *OperationReservationOwner, kind OperationKind, p *tiPlanner, terminal error, check func(tiOutcome), view func(*Reader)) {
 	t.Helper()
 	if s.state == storeOPEN {
-		tiOpenNext(t, s, o, kind, p, check)
+		tiOpenNext(t, s, o, kind, p, check, view)
 		return
 	}
 	retained := s.state == storePOISONEDTHREAD
@@ -168,7 +170,8 @@ func tiAfter(t *testing.T, s *Store, o *OperationReservationOwner, kind Operatio
 }
 
 // tiRow is one publication on a seeded Store: seed prepares the Store, edit
-// changes the Tag 1 publication, want checks the returned primary, consumed
+// changes the Tag 1 publication, zero has the planner replace the caller
+// account with the zero value, want checks the returned primary, consumed
 // tells whether a successful abort consumes the Store and gets is the number
 // of meta DBI gets on ORIGINAL OLD under SelectedDamageProbeOnly.
 type tiRow struct {
@@ -176,6 +179,7 @@ type tiRow struct {
 	kind     OperationKind
 	seed     func(*testing.T, *Store)
 	edit     func(*TreeImagePublicationV1)
+	zero     bool
 	modes    []uint32
 	fault    uint32
 	faultKey []byte
@@ -273,18 +277,26 @@ func tiPublicationCase(t *testing.T, s *Store, o *OperationReservationOwner, row
 		returned = tiReturned(t, out)
 		row.want(t, tiDisposition(t, s, mode, row.consumed, returned, true))
 	}
+	bind := func(a *OperationAccount) func(*Reader) (TreeImagePublicationV1, error) {
+		if !row.zero {
+			return p.imagePlan
+		}
+		return func(r *Reader) (TreeImagePublicationV1, error) { *a = OperationAccount{}; return p.imagePlan(r) }
+	}
 	var out tiOutcome
 	fault, rank, key := mode, uint8(0), []byte{0}
 	if row.fault != 0 {
 		fault, key = row.fault, row.faultKey
 	}
-	tiNative(t, s, o, fault, rank, key, row.gets, func() { out = tiCall(s, o, kind, p.imagePlan) })
+	native := tiNative(t, s, o, fault, rank, key, row.gets, func() { out = tiCallAccount(s, o, kind, bind) })
 	check(out)
 	if p.calls != 1 || replays != 0 || reservationLive(o) != 0 {
 		t.Fatalf("planner %d replay %d live %d", p.calls, replays, reservationLive(o))
 	}
-	tsExpiredReader(t, p.kept)
-	tiAfter(t, s, o, kind, p, returned, check)
+	native()
+	kept := p.kept
+	tiAfter(t, s, o, kind, p, returned, check, nil)
+	tsExpiredReader(t, kept)
 }
 
 func tiForeignIdentity(t *testing.T) {
@@ -300,19 +312,22 @@ func tiForeignIdentity(t *testing.T) {
 	p := &tiPlanner{replays: &replays, outcome: func(*Reader) (TreeImagePublicationV1, error) { return publication, nil }}
 	check := func(out tiOutcome) { tiInvalidBatch(t, tiDisposition(t, s, 0, false, tiReturned(t, out), true)) }
 	var out tiOutcome
-	tiNative(t, s, o, 0, 0, nil, 1, func() { out = tiCall(s, o, LaneOperation, p.imagePlan) })
+	native := tiNative(t, s, o, 0, 0, nil, 1, func() { out = tiCall(s, o, LaneOperation, p.imagePlan) })
 	check(out)
-	mustEnvironment(t, s.View(func(r *Reader) error {
-		got, present, err := r.ReadTreeAuthorityV1()
-		if err != nil || !present || !reflect.DeepEqual(got, want) || !r.usable() {
-			t.Fatalf("seeded authority after the refusal = %+v, %v, %v usable %v", got, present, err, r.usable())
-		}
-		return nil
-	}))
 	if p.calls != 1 || replays != 0 {
 		t.Fatalf("planner %d replay %d", p.calls, replays)
 	}
-	tiAfter(t, s, o, LaneOperation, p, nil, check)
+	native()
+	var got TreeAuthorityV1
+	var present, usable bool
+	readErr := errors.New("View did not read the authority")
+	tiAfter(t, s, o, LaneOperation, p, nil, check, func(r *Reader) {
+		got, present, readErr = r.ReadTreeAuthorityV1()
+		usable = r.usable()
+	})
+	if readErr != nil || !present || !reflect.DeepEqual(got, want) || !usable {
+		t.Fatalf("seeded authority after the refusal = %+v, %v, %v usable %v", got, present, readErr, usable)
+	}
 }
 
 func tiCensusFailure(t *testing.T, err error) { treeNativeIntegrity(t, err, operationUpdate, nil) }
@@ -332,6 +347,7 @@ func tiReadRows(t *testing.T) []tiRow {
 		{name: "census failure from a rank-1 row after Tag 3 passes", seed: tiRankOne, edit: func(p *TreeImagePublicationV1) { p.Tag = 3 }, want: tiCensusFailure, gets: 1},
 		{name: "census failure from a rank-1 row after Tag 4 and a 1048576-byte Authority pass", seed: tiRankOne, edit: func(p *TreeImagePublicationV1) { p.Tag, p.RecordLimit, p.Authority = 4, 1, bound }, want: tiCensusFailure, gets: 1},
 		{name: "census failure from a foreign meta 03", seed: foreign, want: tiCensusFailure, gets: 4},
+		{name: "census failure from a rank-1 row after the planner zeroes the caller account", seed: tiRankOne, zero: true, want: tiCensusFailure, gets: 1},
 		{name: "get EIO at key 0x02", seed: empty, fault: 28, faultKey: []byte{2}, want: func(t *testing.T, err error) {
 			treeNativeError(t, err, operationUpdate, "IO", 5, "error 5", nil)
 		}},
@@ -381,14 +397,14 @@ func tiNewTerminal(t *testing.T) {
 	}
 	calls, replays := 0, 0
 	out := tiCall(s, o, LaneOperation, tiCounted(t, &calls, &replays))
-	if !out.returned || out.live != 0 {
-		t.Fatalf("NEW terminal call returned %v recovered %v live %d", out.returned, out.recovered, out.live)
+	if !out.returned {
+		t.Fatalf("NEW terminal call returned %v recovered %v", out.returned, out.recovered)
 	}
 	out.r.tuple(t, 2, 1, -1)
+	tiAccountKept(t, out)
 	if any(out.r.err) != any(r.err) || calls != 0 || replays != 0 || s.state != storeCLOSED || any(s.terminal) != any(r.err) {
 		t.Fatalf("NEW terminal returned %v planner %d Replay %d state %s", out.r.err, calls, replays, s.state)
 	}
-	tsConsumed(t, s, o, 2, r.err)
 	tiTerminal(t, s, o, 2, r.err)
 }
 
@@ -407,7 +423,7 @@ func tiPlannerCase(t *testing.T, outcome string, mode uint32) {
 	case "wrapped":
 		application = fmt.Errorf("planner context: %w", marker)
 	case "typed-nil":
-		var typed *nilPointerError
+		var typed *tiFieldError
 		application = typed
 	}
 	if outcome != "nil" {
@@ -433,14 +449,23 @@ func tiPlannerCase(t *testing.T, outcome string, mode uint32) {
 		gets = 4
 	}
 	var out tiOutcome
-	tiNative(t, s, o, mode, 0, []byte{0}, gets, func() { out = tiCall(s, o, LaneOperation, p.imagePlan) })
+	native := tiNative(t, s, o, mode, 0, []byte{0}, gets, func() { out = tiCall(s, o, LaneOperation, p.imagePlan) })
 	check(out)
 	if p.calls != 1 || replays != 0 || reservationLive(o) != 0 {
 		t.Fatalf("planner %d replay %d live %d", p.calls, replays, reservationLive(o))
 	}
-	tsExpiredReader(t, p.kept)
-	tiAfter(t, s, o, LaneOperation, p, returned, check)
+	native()
+	kept := p.kept
+	tiAfter(t, s, o, LaneOperation, p, returned, check, nil)
+	tsExpiredReader(t, kept)
 }
+
+// tiFieldError reads its text field in Error and Unwrap, so a call through a nil
+// *tiFieldError panics.
+type tiFieldError struct{ text string }
+
+func (e *tiFieldError) Error() string { return e.text }
+func (e *tiFieldError) Unwrap() error { return errors.New(e.text) }
 
 // tiPlannerEnd checks how the call ended for outcome and the primary the abort of mode carries.
 // It returns the error the call returned, or the cached terminal when the planner unwound.
@@ -505,10 +530,7 @@ func tiRecordedCase(t *testing.T, mode string) {
 		return TreeImagePublicationV1{}, application
 	}}
 	var out tiOutcome
-	evidence := tiProbe(t, s, o, func() { out = tiCall(s, o, LaneOperation, p.imagePlan) })
-	if evidence.OldGets[0] != 1 {
-		t.Fatalf("meta gets on ORIGINAL OLD %d, want the planner read only", evidence.OldGets[0])
-	}
+	native := tiProbe(t, s, o, 1, func() { out = tiCall(s, o, LaneOperation, p.imagePlan) })
 	treeNativeIntegrity(t, f, operationGet, nil)
 	terminal := f
 	switch mode {
@@ -531,6 +553,7 @@ func tiRecordedCase(t *testing.T, mode string) {
 	if p.calls != 1 || reservationLive(o) != 0 {
 		t.Fatalf("planner %d live %d", p.calls, reservationLive(o))
 	}
-	tsExpiredReader(t, p.kept)
+	native()
 	tiTerminal(t, s, o, 1, terminal)
+	tsExpiredReader(t, p.kept)
 }
