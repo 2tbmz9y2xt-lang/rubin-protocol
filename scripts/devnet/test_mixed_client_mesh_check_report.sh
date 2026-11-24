@@ -2431,10 +2431,42 @@ sn_check "restart pre-restart height below initial convergence" "${SN_INVALID}" 
 sn_check "restart initial rust tip from the restarted endpoint" "${SN_INVALID}" "initial_convergence.rust_tip_path sidecar identity mismatch" rust-restart restart-new-endpoint
 sn_check "partition common block not above initial convergence" "${SN_INVALID}" "partition common block height is not above initial_convergence.height" partition-heal-reorg partition-not-above
 expect_pass_contains "restart initial convergence at the pre-restart height" "PASS: mixed_client_rust_restart report structurally accepted" check_report "${TMP_ROOT}/sn-restart-at-pre-restart-report.json" offline rust-restart
+# Stats a file inside a mode 0 directory with the interpreter check_report runs; prints
+# denied when the stat raises PermissionError and allowed when it succeeds.
+pd_access="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 -c '
+import os, sys
+probe = os.path.join(sys.argv[1], "permission-probe")
+os.mkdir(probe)
+open(os.path.join(probe, "file"), "w").close()
+os.chmod(probe, 0)
+try:
+    os.stat(os.path.join(probe, "file"))
+    print("allowed")
+except PermissionError:
+    print("denied")
+finally:
+    os.chmod(probe, 0o700)
+' "${TMP_ROOT}")"
+pd_denied=1; [[ "${pd_access}" != allowed ]] || pd_denied=0
+# Rows whose expected refusal needs mode 0 to deny this user access; they are skipped,
+# with a SKIP line, when the probe stat succeeds.
+pd_rows=" mesh-datadir-unsearchable-parent tx-accept-datadir-unsearchable-parent restart-datadir-unsearchable-parent \
+  mesh-tip-unsearchable-parent tx-accept-tip-unsearchable-parent restart-tip-unsearchable-parent \
+  tx-accept-block-unsearchable-parent restart-block-unsearchable-parent tx-accept-txgen-unreadable restart-txgen-unreadable \
+  rp-go-node-unsearchable-parent rp-pre-restart-tip-unsearchable-parent rp-go-target-mine-next-unsearchable-parent \
+  rp-go-submit-status-unsearchable-parent rp-rust-mine-next-unsearchable-parent rp-common-go-mine-unsearchable-parent "
+pd_ran=0; pd_skipped=0
+pd_run_row() {
+  [[ "${pd_rows}" == *" $1 "* ]] || return 0
+  if (( pd_denied )); then pd_ran=$((pd_ran + 1)); return 0; fi
+  printf 'SKIP: permission-denial row %s\n' "$1"
+  pd_skipped=$((pd_skipped + 1))
+  return 1
+}
 sn_cases=0
 start_fifo_watchdog "${TMP_ROOT}/sn-tx-accept-txgen-fifo/artifact-root/rubin-txgen" "${TMP_ROOT}/sn-restart-txgen-fifo/artifact-root/rubin-txgen" "${TMP_ROOT}"/sn-{mesh,tx-accept,restart}-go-node-fifo/artifact-root/rubin-node-go
 while IFS=$'\t' read -r sn_mode sn_name sn_token sn_needle; do
-  sn_check "sidecar ${sn_name}" "${sn_token}" "${sn_needle}" "${sn_mode}" "${sn_name}"
+  if pd_run_row "${sn_name}"; then sn_check "sidecar ${sn_name}" "${sn_token}" "${sn_needle}" "${sn_mode}" "${sn_name}"; fi
   sn_cases=$((sn_cases + 1))
 done < "${TMP_ROOT}/sn-cases.tsv"
 stop_fifo_watchdog
@@ -2443,28 +2475,35 @@ sidecar_value_check "restart datadir aliased to the go datadir" "rust_restart da
 report_locked_cases() {
   local label_suffix="$1" rp_mode rp_name rp_token rp_needle rp_cases=0
   while IFS=$'\t' read -r rp_mode rp_name rp_token rp_needle; do
-    sidecar_value_check "report ${rp_name}${label_suffix}" "${rp_needle}" "${rp_token}" "${rp_mode}" "${TMP_ROOT}/sn-${rp_name}-report.json"
+    # The pass without a label suffix counts the row and skips it when the probe stat succeeds.
+    if [[ -n "${label_suffix}" ]] || pd_run_row "${rp_name}"; then
+      sidecar_value_check "report ${rp_name}${label_suffix}" "${rp_needle}" "${rp_token}" "${rp_mode}" "${TMP_ROOT}/sn-${rp_name}-report.json"
+    fi
     rp_cases=$((rp_cases + 1))
   done < "${TMP_ROOT}/report-locked-cases.tsv"
   (( rp_cases == 6 )) || { echo "FAIL: report unsearchable-parent table ran ${rp_cases} rows, want 6" >&2; exit 1; }
 }
 report_locked_cases ""
-# Reruns the sidecar and report unsearchable-parent rows under the interpreters python3.9 to python3.13
-# found on PATH that import jsonschema, which the marker validator run by check_report
-# needs; their pathlib is_dir and is_file raise on such a path.
-printf '#!/usr/bin/env bash\n[[ "$1" == -- && "$2" == python3 ]] && shift 2 && exec "${SN_PYTHON}" "$@"\nexec %q "$@"\n' "${DEV_ENV}" >"${TMP_ROOT}/dev-env-python"
-chmod +x "${TMP_ROOT}/dev-env-python"
-sn_pythons=""
-for sn_python in python3.9 python3.10 python3.11 python3.12 python3.13; do
-  command -v "${sn_python}" >/dev/null 2>&1 && "${sn_python}" -c 'import jsonschema' >/dev/null 2>&1 || continue
-  while IFS=$'\t' read -r sn_mode sn_name sn_token sn_needle; do
-    [[ "${sn_name}" == *-unsearchable-parent ]] || continue
-    SN_PYTHON="$(command -v "${sn_python}")" DEV_ENV="${TMP_ROOT}/dev-env-python" sn_check "sidecar ${sn_name} with ${sn_python}" "${sn_token}" "${sn_needle}" "${sn_mode}" "${sn_name}"
-  done < "${TMP_ROOT}/sn-cases.tsv"
-  SN_PYTHON="$(command -v "${sn_python}")" DEV_ENV="${TMP_ROOT}/dev-env-python" report_locked_cases " with ${sn_python}"
-  sn_pythons+=" ${sn_python}"
-done
-printf 'unsearchable-parent rows rerun under:%s\n' "${sn_pythons:- none}"
+if (( pd_denied )); then
+  # Reruns the sidecar and report unsearchable-parent rows under the interpreters python3.9 to python3.13
+  # found on PATH that import jsonschema, which the marker validator run by check_report
+  # needs; their pathlib is_dir and is_file raise on such a path.
+  printf '#!/usr/bin/env bash\n[[ "$1" == -- && "$2" == python3 ]] && shift 2 && exec "${SN_PYTHON}" "$@"\nexec %q "$@"\n' "${DEV_ENV}" >"${TMP_ROOT}/dev-env-python"
+  chmod +x "${TMP_ROOT}/dev-env-python"
+  sn_pythons=""
+  for sn_python in python3.9 python3.10 python3.11 python3.12 python3.13; do
+    command -v "${sn_python}" >/dev/null 2>&1 && "${sn_python}" -c 'import jsonschema' >/dev/null 2>&1 || continue
+    while IFS=$'\t' read -r sn_mode sn_name sn_token sn_needle; do
+      [[ "${sn_name}" == *-unsearchable-parent ]] || continue
+      SN_PYTHON="$(command -v "${sn_python}")" DEV_ENV="${TMP_ROOT}/dev-env-python" sn_check "sidecar ${sn_name} with ${sn_python}" "${sn_token}" "${sn_needle}" "${sn_mode}" "${sn_name}"
+    done < "${TMP_ROOT}/sn-cases.tsv"
+    SN_PYTHON="$(command -v "${sn_python}")" DEV_ENV="${TMP_ROOT}/dev-env-python" report_locked_cases " with ${sn_python}"
+    sn_pythons+=" ${sn_python}"
+  done
+  printf 'unsearchable-parent rows rerun under:%s\n' "${sn_pythons:- none}"
+fi
+printf 'permission-denial rows ran %d, skipped %d\n' "${pd_ran}" "${pd_skipped}"
+(( pd_ran + pd_skipped == 16 )) || { echo "FAIL: permission-denial rows matched $((pd_ran + pd_skipped)) table rows, want 16" >&2; exit 1; }
 sn_output="$(check_report "${TMP_ROOT}/sn-tx-accept-top-extra-report.json" offline producer-tx 2>&1)" && { echo "FAIL: sidecar extra key report should fail" >&2; exit 1; }
 [[ "$(combined_report_reason_token <<<"${sn_output}")" == store_neutrality_sidecar_invalid ]] || { echo "FAIL: combined token for sidecar keys mismatch: $(combined_report_reason_token <<<"${sn_output}")" >&2; exit 1; }
 printf 'PASS: mixed-client mesh check-report public/internal boundaries are covered\n'
