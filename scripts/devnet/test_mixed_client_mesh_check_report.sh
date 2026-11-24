@@ -88,13 +88,26 @@ expect_fail_token() {
     printf '%s\n' "${output}" >&2
     exit 1
   fi
-  token="$(printf '%s\n' "${output}" | tx_report_reason_token)"
+  token="$(printf '%s\n' "${output}" | combined_report_reason_token)"
   if [[ "${token}" != "${expected_token}" ]]; then
     echo "FAIL: ${label} produced token ${token}, want ${expected_token}" >&2
     echo "actual output:" >&2
     printf '%s\n' "${output}" >&2
     exit 1
   fi
+}
+
+# Runs the command once and requires it to fail with output that carries <needle> and maps
+# to <token> through <mapper>.
+expect_fail_mapped() {
+  local label="$1" needle="$2" token="$3" mapper="$4" output got
+  shift 4
+  if output="$("$@" 2>&1)"; then
+    echo "FAIL: ${label} should fail" >&2; printf '%s\n' "${output}" >&2; exit 1
+  fi
+  require_contains "${output}" "${needle}" "${label}"
+  got="$(printf '%s\n' "${output}" | "${mapper}")"
+  [[ "${got}" == "${token}" ]] || { echo "FAIL: ${label} produced token ${got}, want ${token}" >&2; printf '%s\n' "${output}" >&2; exit 1; }
 }
 
 expect_fail_check_token() {
@@ -356,6 +369,22 @@ MESH_TIMEOUT=1 expect_polled_timeout "${absent}" "${probe_root}/array.json"
 MESH_TIMEOUT=1 expect_polled_timeout "${probe_root}/garbage.json" "${absent}"
 SH
   bash "${probe}" "${lib}" "${probe_root}"
+}
+
+check_repo_git_reads_repo_root() {
+  local lib="${TMP_ROOT}/repo-git-lib.sh" other="${TMP_ROOT}/repo-git-other" clean_env want_head want_status other_head got
+  extract_slices "${lib}" "repo_git()" "# Writes mixed-client-mesh-store-neutrality.json"
+  clean_env=(env -i "PATH=${PATH}" "HOME=${HOME}")
+  "${clean_env[@]}" git init -q "${other}"
+  "${clean_env[@]}" git -C "${other}" -c user.name=probe -c user.email=probe@localhost -c commit.gpgsign=false commit -q --allow-empty -m probe
+  other_head="$("${clean_env[@]}" git -C "${other}" rev-parse HEAD)"
+  want_head="$("${clean_env[@]}" git -C "${REPO_ROOT}" rev-parse HEAD)"
+  want_status="$("${clean_env[@]}" git -C "${REPO_ROOT}" status --porcelain -- clients)"
+  [[ "${want_head}" != "${other_head}" ]] || { echo "FAIL: probe repository shares HEAD with REPO_ROOT" >&2; exit 1; }
+  got="$(GIT_DIR="${other}/.git" GIT_WORK_TREE="${other}" bash -c 'source "$1"; REPO_ROOT="$2"; repo_git rev-parse HEAD' _ "${lib}" "${REPO_ROOT}")"
+  [[ "${got}" == "${want_head}" ]] || { echo "FAIL: repo_git rev-parse HEAD under another GIT_DIR printed ${got}, want ${want_head}" >&2; exit 1; }
+  got="$(GIT_INDEX_FILE="${TMP_ROOT}/repo-git-no-index" bash -c 'source "$1"; REPO_ROOT="$2"; repo_git status --porcelain -- clients' _ "${lib}" "${REPO_ROOT}")"
+  [[ "${got}" == "${want_status}" ]] || { echo "FAIL: repo_git status under another GIT_INDEX_FILE differs from the REPO_ROOT status" >&2; exit 1; }
 }
 
 check_store_neutrality_producer_reasons() {
@@ -1661,6 +1690,11 @@ for site, sidecar_name, base_report, field, variants in mine_next_cases:
         target[field[-1]] = str(sidecar_path)
         dump(artifact_root / f"mine-next-{site}-{variant}.json", bad)
 import shutil
+def relocate(value: object, old: str, new: str) -> object:
+    if isinstance(value, str): return value.replace(old, new)
+    if isinstance(value, list): return [relocate(item, old, new) for item in value]
+    if isinstance(value, dict): return {relocate(key, old, new): relocate(item, old, new) for key, item in value.items()}
+    return value
 SN_NAME = "mixed-client-mesh-store-neutrality.json"
 SCENARIO_ROOTS = {"mixed_client_mesh": "mesh", "mixed_client_go_submit_rust_accept": "tx-accept", "mixed_client_go_submit_rust_mine_go_converge": "tx-converge", "mixed_client_rust_submit_go_mine_rust_converge": "rust-submit", "mixed_client_rust_restart": "restart", "mixed_client_partition_heal_reorg": "partition"}
 old_root = str(artifact_root)
@@ -1672,7 +1706,8 @@ for report_path in sorted(root.rglob("*.json")):
         continue
     if isinstance(report_obj, dict) and report_obj.get("artifact_root") == old_root and report_obj.get("scenario") in SCENARIO_ROOTS:
         mode_root = root / SCENARIO_ROOTS[report_obj["scenario"]] / "artifact-root"
-        report_path.write_text(report_text.replace(old_root, str(mode_root)), encoding="utf-8")
+        for old, new in ((old_root, str(mode_root)), (json.dumps(old_root)[1:-1], json.dumps(str(mode_root))[1:-1])): report_text = report_text.replace(old, new)
+        report_path.write_text(report_text, encoding="utf-8")
 genesis_header = (1).to_bytes(4, "little") + bytes(64) + (1).to_bytes(8, "little") + b"\xff" * 32 + (0).to_bytes(8, "little")
 genesis_hex, genesis_hash = (genesis_header + bytes(40)).hex(), sha3(genesis_header).hex()
 long_header = genesis_header + b"\x07" * 32
@@ -1714,10 +1749,10 @@ def sn_variant(name: str, base: str, edit, report_edit=None) -> None:
     base_root = root / base / "artifact-root"
     var_root = root / f"sn-{name}" / "artifact-root"
     shutil.copytree(base_root, var_root, symlinks=True)
-    report = json.loads(SN_BASE_REPORTS[base].read_text(encoding="utf-8").replace(str(base_root), str(var_root)))
+    report = relocate(json.loads(SN_BASE_REPORTS[base].read_text(encoding="utf-8")), str(base_root), str(var_root))
     if report_edit is not None:
         report_edit(report)
-    sidecar = json.loads((var_root / SN_NAME).read_text(encoding="utf-8").replace(str(base_root), str(var_root)))
+    sidecar = relocate(json.loads((var_root / SN_NAME).read_text(encoding="utf-8")), str(base_root), str(var_root))
     if edit(sidecar, var_root) is SN_DELETE:
         (var_root / SN_NAME).unlink()
     else:
@@ -1981,6 +2016,25 @@ def sn_repeat_member(name: str, file_name: str, anchor: str, member: str) -> Non
     text = path.read_text(encoding="utf-8")
     path.write_text(text.replace(anchor, anchor + member + ", ", 1), encoding="utf-8")
 sn_repeat_member("repeated-tree-clean", SN_NAME, "{", '"clients_tree_clean": false')
+def sn_through_missing(var_root: Path, name: str) -> str:
+    return str(var_root / "missing" / ".." / name)
+sn_variant("tx-accept-tip-through-missing", "tx-accept", lambda s, r: s["initial_convergence"].update(go_tip_path=sn_through_missing(r, GO_TIP)))
+sn_variant("tx-accept-tip-trailing-slash", "tx-accept", lambda s, r: s["initial_convergence"].update(go_tip_path=str(r / GO_TIP) + "/"))
+sn_variant("tx-accept-block-through-missing", "tx-accept", lambda s, r: s["genesis"].update(rust_block_path=sn_through_missing(r, RUST_BLOCK)))
+sn_variant("tx-accept-datadir-through-missing", "tx-accept", lambda s, r: s["datadirs"].update(rust=sn_through_missing(r, "node-rust")))
+sn_variant("mesh-binary-through-missing", "mesh", lambda s, r: None, lambda report: sn_set_binary(report, "go", sn_through_missing(Path(report["artifact_root"]), "rubin-node-go")))
+sn_variant("mesh-marker-through-missing", "mesh", lambda s, r: None, lambda report: report["legacy_schema_compatibility"].update(marker_path=sn_through_missing(Path(report["legacy_schema_compatibility"]["marker_path"]).parent, Path(report["legacy_schema_compatibility"]["marker_path"]).name)))
+sn_variant("restart-report-datadir-through-missing", "restart", lambda s, r: None, lambda report: report["rust_restart"].update(datadir=sn_through_missing(Path(report["artifact_root"]), "node-rust")))
+sn_variant("mesh-tip-nan", "mesh", lambda s, r: sn_edit_file(r, GO_TIP, best_known_height=float("nan")))
+sn_variant("tx-accept-height-infinity", "tx-accept", lambda s, r: s["initial_convergence"].update(height=float("-inf")))
+def sn_wide_keys(name: str, base: str) -> None:
+    sn_variant(name, base, lambda s, r: None)
+    path = root / f"sn-{name}" / "artifact-root" / SN_NAME
+    sidecar = json.loads(path.read_text(encoding="utf-8"))
+    sidecar.update({f"{i:04d}" + "\x7f" * 100: 0 for i in range(3000)})
+    path.write_text(json.dumps(sidecar, ensure_ascii=False), encoding="utf-8")
+sn_wide_keys("mesh-wide-keys", "mesh")
+sn_wide_keys("tx-accept-wide-keys", "tx-accept")
 sn_repeat_member("repeated-initial-height", SN_NAME, '"initial_convergence": {', '"height": 100')
 sn_repeat_member("repeated-tip-has-tip", GO_TIP, "{", '"has_tip": false')
 REPORT_LOCKED_CASES = (
@@ -2104,6 +2158,7 @@ check_prepare_tx_chainstate_leaves_rust_empty
 check_rust_datadir_guard
 check_txgen_datadir_guard
 check_initial_convergence_wait
+check_repo_git_reads_repo_root
 check_store_neutrality_producer_reasons
 check_proxy_go_local_addr_reason
 check_wait_peer_snapshot_normalizes
@@ -2360,16 +2415,16 @@ expect_pass_contains "producer tx internal check" "PASS: mixed_client_go_submit_
 expect_pass_contains "producer converge internal check" "PASS: mixed_client_go_submit_rust_mine_go_converge report structurally accepted" check_report "${CONVERGE_REPORT}" offline producer-tx
 expect_pass_contains "producer rust-submit converge internal check" "PASS: mixed_client_rust_submit_go_mine_rust_converge report structurally accepted" check_report "${RUST_SUBMIT_GO_MINE_REPORT}" offline producer-tx
 for variant in no-commit not-committed; do
-  expect_fail_contains "partition go mine_next ${variant}" "observations.pre_partition.common_go_mine keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-go-${variant}.json"
+  expect_fail_mapped "partition go mine_next ${variant}" "observations.pre_partition.common_go_mine keys mismatch" unknown check_report_reason_token "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-go-${variant}.json"
   expect_generator_fail_contains "partition generator go mine_next ${variant}" "partition_reorg_source_binding_contradiction:mine_sidecar_invalid" --partition-heal-reorg-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-go-${variant}.json"
-  expect_fail_contains "restart go target mine_next ${variant}" "rust_restart.go_target_mine_next_path keys mismatch" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-${variant}.json"
+  expect_fail_mapped "restart go target mine_next ${variant}" "rust_restart.go_target_mine_next_path keys mismatch" rust_restart_go_target_mine_next_invalid check_report_reason_token "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-${variant}.json"
   expect_generator_fail_contains "restart generator go target mine_next ${variant}" "restart_source_binding_contradiction:go_target_mine_next_invalid" --rust-restart-report "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-${variant}.json"
-  expect_fail_contains "rust-submit go mine_next ${variant}" "go_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-${variant}.json" offline producer-tx
+  expect_fail_mapped "rust-submit go mine_next ${variant}" "go_mine.mine_next keys mismatch" go_mine_mine_next_keys_mismatch combined_report_reason_token check_report "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-${variant}.json" offline producer-tx
   expect_generator_fail_contains "rust-submit generator go mine_next ${variant}" "convergence_sidecar_invalid" --rust-submit-go-mine-rust-converge-report "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-${variant}.json"
 done
-expect_fail_contains "partition rust mine_next with commit_state" "observations.fork.rust_mine_1 keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-rust-commit.json"
+expect_fail_mapped "partition rust mine_next with commit_state" "observations.fork.rust_mine_1 keys mismatch" unknown check_report_reason_token "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-rust-commit.json"
 expect_generator_fail_contains "partition generator rust mine_next with commit_state" "partition_reorg_source_binding_contradiction:mine_sidecar_invalid" --partition-heal-reorg-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-rust-commit.json"
-expect_fail_contains "converge rust mine_next with commit_state" "rust_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-commit.json" offline producer-tx
+expect_fail_mapped "converge rust mine_next with commit_state" "rust_mine.mine_next keys mismatch" rust_mine_mine_next_keys_mismatch combined_report_reason_token check_report "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-commit.json" offline producer-tx
 expect_generator_fail_contains "converge generator rust mine_next with commit_state" "convergence_sidecar_invalid" --go-submit-rust-mine-go-converge-report "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-commit.json"
 expect_fail_contains "partition rust mine_next named go" "observations.fork.rust_mine_1 sidecar identity mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${TMP_ROOT}/partition/artifact-root/mine-next-partition-rust-go-impl.json"
 expect_fail_contains "converge rust mine_next named go" "rust_mine mine_next sidecar identity mismatch" check_report "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-go-impl.json" offline producer-tx
@@ -2382,17 +2437,12 @@ expect_fail_contains "partition go mine_next not committed at the Rust endpoint"
 expect_fail_contains "restart go target mine_next not committed at the Rust endpoint" "rust_restart.go_target_mine_next_path keys mismatch" "${HARNESS}" --rust-restart --check-report "${TMP_ROOT}/restart/artifact-root/mine-next-restart-go-not-committed-rust-rpc.json"
 expect_fail_contains "rust-submit go mine_next not committed at the Rust endpoint" "go_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-not-committed-rust-rpc.json" offline producer-tx
 # Runs check_report once and requires its refusal to carry "FAIL: <needle>" and to map to
-# <token> through <mapper> ($6), by default tx_report_reason_token in producer-tx mode and
-# check_report_reason_token in the other modes.
+# <token> through <mapper> ($6), by default combined_report_reason_token in producer-tx mode
+# and check_report_reason_token in the other modes.
 sidecar_value_check() {
-  local label="$1" needle="$2" token="$3" mode="$4" report="$5" mapper="${6:-check_report_reason_token}" output got
-  [[ -n "${6:-}" || "${mode}" != producer-tx ]] || mapper=tx_report_reason_token
-  if output="$(check_report "${report}" offline "${mode}" 2>&1)"; then
-    echo "FAIL: ${label} should fail" >&2; printf '%s\n' "${output}" >&2; exit 1
-  fi
-  require_contains "${output}" "FAIL: ${needle}" "${label}"
-  got="$(printf '%s\n' "${output}" | "${mapper}")"
-  [[ "${got}" == "${token}" ]] || { echo "FAIL: ${label} produced token ${got}, want ${token}" >&2; printf '%s\n' "${output}" >&2; exit 1; }
+  local label="$1" needle="$2" token="$3" mode="$4" report="$5" mapper="${6:-check_report_reason_token}"
+  [[ -n "${6:-}" || "${mode}" != producer-tx ]] || mapper=combined_report_reason_token
+  expect_fail_mapped "${label}" "FAIL: ${needle}" "${token}" "${mapper}" check_report "${report}" offline "${mode}"
 }
 for variant in nonce-string timestamp-string height-over-rust-mine tx-count-over-rust-mine mined-one; do
   sidecar_value_check "converge rust mine_next ${variant}" "rust_mine mine_next sidecar does not match report" mine_sidecar_invalid producer-tx "${TMP_ROOT}/tx-converge/artifact-root/mine-next-converge-rust-${variant}.json"
@@ -2514,7 +2564,7 @@ sn_check "sidecar recorded length differs from derived length" "${SN_GRAMMAR}" "
 expect_pass_contains "sidecar 148-byte header derivation" "PASS: mixed_client_go_submit_rust_accept report structurally accepted" check_report "${TMP_ROOT}/sn-long-header-report.json" offline producer-tx
 sn_check "sidecar genesis identity mismatch" "${SN_GENESIS}" "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal" tx genesis-identity
 sn_check "sidecar genesis block hash mismatch" "${SN_GENESIS}" "genesis.go_block_path hash differs" tx genesis-block-hash
-sidecar_value_check "argv defect before sidecar extra key" "node command_argv does not match exact launched argv" argv_mismatch producer-tx "${TMP_ROOT}/sn-argv-and-extra-key-report.json" check_report_reason_token
+sidecar_value_check "argv defect before sidecar extra key" "node command_argv does not match exact launched argv" argv_mismatch producer-tx "${TMP_ROOT}/sn-argv-and-extra-key-report.json"
 sn_check "genesis identity before header grammar" "${SN_GENESIS}" "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal" tx genesis-and-grammar
 sn_check "binaries before genesis identity" "${SN_INVALID}" "binaries.go_node_sha256 does not match" tx binary-and-genesis
 sn_check "initial convergence before header grammar" "${SN_INVALID}" "initial_convergence does not prove equal tips" tx grammar-and-convergence
@@ -2545,6 +2595,17 @@ for spec in public:mesh tx:tx-accept tx:tx-converge tx:rust-submit partition-hea
   fi
 done
 sn_check "sidecar repeated top-level member" "${SN_INVALID}" "store-neutrality sidecar malformed JSON: repeated member 'clients_tree_clean'" tx repeated-tree-clean
+sn_check "sidecar tip path through a missing directory" "${SN_INVALID}" "initial_convergence.go_tip_path file is missing" tx tx-accept-tip-through-missing
+sn_check "sidecar tip path with a trailing slash" "${SN_INVALID}" "initial_convergence.go_tip_path file is missing" tx tx-accept-tip-trailing-slash
+sn_check "sidecar block path through a missing directory" "${SN_INVALID}" "genesis.rust_block_path file is missing" tx tx-accept-block-through-missing
+sn_check "sidecar datadir through a missing directory" "${SN_INVALID}" "datadirs.rust does not resolve to an existing directory" tx tx-accept-datadir-through-missing
+sidecar_value_check "node binary through a missing directory" "node-go command/binary is not bound to executable rubin-node-go" unknown public "${TMP_ROOT}/sn-mesh-binary-through-missing-report.json"
+sidecar_value_check "legacy marker through a missing directory" "legacy marker is not a regular file" legacy_marker_invalid public "${TMP_ROOT}/sn-mesh-marker-through-missing-report.json"
+sidecar_value_check "restart datadir through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-report-datadir-through-missing-report.json"
+sn_check "default tip sidecar with best_known_height NaN" "${SN_INVALID}" "initial_convergence.go_tip_path malformed JSON: non-finite constant NaN" public mesh-tip-nan
+sn_check "sidecar with height -Infinity" "${SN_INVALID}" "store-neutrality sidecar malformed JSON: non-finite constant -Infinity" tx tx-accept-height-infinity
+sn_check "default sidecar key list beyond the argument limit" "${SN_INVALID}" "sidecar keys mismatch" public mesh-wide-keys
+sn_check "tx sidecar key list beyond the argument limit" "${SN_INVALID}" "sidecar keys mismatch" tx tx-accept-wide-keys
 sn_check "sidecar repeated nested member" "${SN_INVALID}" "store-neutrality sidecar malformed JSON: repeated member 'height'" tx repeated-initial-height
 sn_check "initial tip sidecar repeated member" "${SN_INVALID}" "initial_convergence.go_tip_path malformed JSON: repeated member 'has_tip'" tx repeated-tip-has-tip
 for sn_key in store_neutrality_genesis_mismatch store_neutrality_sidecar_invalid; do

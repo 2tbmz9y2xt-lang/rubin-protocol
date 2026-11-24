@@ -81,6 +81,7 @@ def unique_members(pairs: list) -> dict:
         if key in data: raise ValueError(f"repeated member {key!r}")
         data[key] = value
     return data
+def no_constant(name: str) -> object: raise ValueError(f"non-finite constant {name}")
 def load_bounded_json(label: str, p: Path) -> object:
     try:
         req(p.is_file(), f"{label} is not a regular file")
@@ -91,7 +92,7 @@ def load_bounded_json(label: str, p: Path) -> object:
     req(raw != b"", f"{label} is empty")
     req(len(raw) <= MAX_JSON_BYTES, f"{label} is too large")
     try:
-        return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_members)
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_members, parse_constant=no_constant)
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         fail(f"{label} malformed JSON: {exc}")
 def load_json_file(label: str, p: Path) -> dict:
@@ -205,11 +206,13 @@ def peer_snapshot(label: str, p: Path, expected, want_connected: bool) -> None:
         req(expected is not None and complete == [expected] and len(peers) == 1, f"{label} does not prove expected connected peer")
     else:
         req(expected is None and complete == [] and len(peers) == 0, f"{label} does not prove partitioned peer state")
+# Both the recorded string and its realpath must name a regular file: realpath drops a
+# missing component that precedes "..", and a trailing slash, before the test.
 def artifact_file(label: str, value: object, root: Path) -> Path:
     p = checked_path(label, value)
     try: p.relative_to(root)
     except ValueError: fail(f"{label} is outside artifact_root")
-    req(regular_file(p), f"{label} file is missing")
+    req(regular_file(p) and regular_file(value), f"{label} file is missing")
     return p
 def tx_sidecars(status: dict, got: dict, txid: str, txhex: str, label: str, impl: str, endpoint: str, status_path: str, get_path: str) -> None:
     req(set(status) == {"implementation", "request_path", "rpc_endpoint", "status", "txid"}, f"{label}.tx_status keys mismatch: {sorted(status)}")
@@ -226,7 +229,7 @@ def tx_rpc(addr: str, path_suffix: str, label: str, impl: str) -> dict:
         with urllib.request.urlopen(f"http://{addr}{path_suffix}", timeout=5) as resp: raw = resp.read(1000001)
     except (urllib.error.URLError, TimeoutError, socket.timeout) as exc: fail(f"{label} rpc failed: {exc}")
     req(len(raw) <= 1000000, f"{label} rpc response too large")
-    try: data = json.loads(raw.decode("utf-8"))
+    try: data = json.loads(raw.decode("utf-8"), parse_constant=no_constant)
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc: fail(f"{label} rpc malformed JSON: {exc}")
     req(isinstance(data, dict), f"{label} rpc root is not an object")
     data.update({"implementation": impl, "rpc_endpoint": addr, "request_path": path_suffix})
@@ -386,7 +389,7 @@ def peers(addr: str) -> dict:
         return None
     req(len(raw) <= MAX_JSON_BYTES, f"live peer snapshot too large for {addr}")
     try:
-        data = json.loads(raw.decode("utf-8"))
+        data = json.loads(raw.decode("utf-8"), parse_constant=no_constant)
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         fail(f"live peer snapshot malformed JSON for {addr}: {exc}")
     req(isinstance(data, dict), f"live peer snapshot malformed JSON for {addr}")
@@ -518,6 +521,7 @@ if partition_mode:
 marker_path = checked_path("legacy_schema_compatibility.marker_path", legacy_schema.get("marker_path"))
 try: marker_path.relative_to(artifact_root)
 except ValueError: fail("legacy marker is outside artifact_root")
+req(regular_file(legacy_schema["marker_path"]) or not regular_file(marker_path), "legacy marker is not a regular file")
 marker = load_json_file("legacy marker", marker_path)
 req(isinstance(marker, dict) and marker.get("scenario") == "mixed_client_mesh_schema_marker" and marker.get("evidence_type") == "mixed_client_process_soak", "legacy marker has wrong schema marker shape")
 if tx_mode:
@@ -546,7 +550,7 @@ for node in nodes:
     try: binary_path.relative_to(artifact_root)
     except ValueError: fail(f"{name} binary is outside artifact_root")
     req(node.get("process_comm") == expected_bin, f"{name} process_comm does not prove {impl} identity")
-    req(nonempty_str(command) and isinstance(command_argv, list) and all(isinstance(arg, str) for arg in command_argv) and command_argv and checked_path(f"{name}.command_argv[0]", command_argv[0]) == binary_path and binary_path.name == expected_bin and regular_file(binary_path) and os.access(binary_path, os.X_OK), f"{name} command/binary is not bound to executable {expected_bin}")
+    req(nonempty_str(command) and isinstance(command_argv, list) and all(isinstance(arg, str) for arg in command_argv) and command_argv and checked_path(f"{name}.command_argv[0]", command_argv[0]) == binary_path and binary_path.name == expected_bin and regular_file(binary_path) and regular_file(binary) and regular_file(command_argv[0]) and os.access(binary_path, os.X_OK), f"{name} command/binary is not bound to executable {expected_bin}")
     req(ep(node.get("rpc_endpoint")) and ep(node.get("p2p_endpoint")) and ts(node.get("started_at")), f"{name} has malformed endpoint or timestamp")
     req(isinstance(node.get("pid"), int) and not isinstance(node.get("pid"), bool) and node["pid"] > 0, f"{name} pid is not a positive integer")
     if live:
@@ -596,7 +600,7 @@ if restart_mode:
         datadir_path = Path(datadir_raw).resolve() if isinstance(datadir_raw, str) and Path(datadir_raw).is_absolute() else None
     except (OSError, RuntimeError, ValueError):
         datadir_path = None
-    req(isinstance(datadir_raw, str) and Path(datadir_raw).name == "node-rust" and datadir_path == root_datadir and root_datadir.is_dir() and not root_datadir.is_symlink(), "rust_restart datadir is not bound to artifact root")
+    req(isinstance(datadir_raw, str) and Path(datadir_raw).name == "node-rust" and datadir_path == root_datadir and root_datadir.is_dir() and not root_datadir.is_symlink() and os.path.isdir(datadir_raw), "rust_restart datadir is not bound to artifact root")
     pre_restart_height = json_int(restart_info.get("pre_restart_height"), "rust_restart.pre_restart_height")
     req(pre_restart_height == restart["pre_restart_height"], "rust_restart pre_restart_height mismatch")
     go_target_height = json_int(restart_info.get("go_target_height"), "rust_restart.go_target_height")
@@ -810,7 +814,7 @@ def sn_file(label: str, value: object) -> tuple:
     return sn_label, artifact_file(sn_label, value, artifact_root)
 def sn_dir(label: str, value: object) -> Path:
     p = checked_path(f"{SN_INVALID}: {label}", value)
-    sn_req(os.path.isdir(p), f"{label} does not resolve to an existing directory")
+    sn_req(os.path.isdir(p) and os.path.isdir(value), f"{label} does not resolve to an existing directory")
     return p
 def distinct_files(a: Path, b: Path) -> bool:
     try: sa, sb = os.stat(a), os.stat(b)
@@ -901,7 +905,10 @@ def regular_file(path: object) -> bool:
 def file_sha256(path: object) -> object:
     if not regular_file(path): return None
     try:
-        with open(path, "rb") as f: return hashlib.sha256(f.read()).hexdigest()
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""): digest.update(chunk)
+        return digest.hexdigest()
     except OSError: return None
 def header_length(block_hex: object, block_hash: object) -> int:
     try: raw = bytes.fromhex(block_hex)
@@ -974,9 +981,10 @@ trap rubin_process_exit_trap_with_tx_secret_cleanup EXIT
 check_report_reason_token() {
   local msg
   msg="$(cat)"
-  { fail_detail_token_py; cat <<'PY'; } | python3 - "${msg}"
+  { fail_detail_token_py; cat <<'PY'; } | python3 - 3<<<"${msg}"
 import sys
-msg = " ".join(x[5:].strip() for x in sys.argv[1].splitlines() if x.startswith("FAIL:"))
+text = open(3, encoding="utf-8", errors="surrogateescape").read()
+msg = " ".join(x[5:].strip() for x in text.splitlines() if x.startswith("FAIL:"))
 rules = [
     ("partition-heal-reorg validation requires", "partition_reorg_scenario_required"),
     ("public partition-heal-reorg check-report-live is unsupported", "public_partition_check_report_live_unsupported"),
@@ -1099,16 +1107,17 @@ rules = [
     ("raw_samples.convergence", "convergence_samples_invalid"),
     ("root is not an object", "report_root_invalid"),
 ]
-print(fail_detail_token(sys.argv[1]) or next((token for pattern, token in rules if pattern in msg), "unknown"))
+print(fail_detail_token(text) or next((token for pattern, token in rules if pattern in msg), "unknown"))
 PY
 }
 tx_report_reason_token() {
   local msg
   msg="$(cat)"
-  { fail_detail_token_py; cat <<'PY'; } | python3 - "${msg}"
+  { fail_detail_token_py; cat <<'PY'; } | python3 - 3<<<"${msg}"
 import re, sys
-msg = "\n".join(line[5:].strip() if line.startswith("FAIL:") else line for line in sys.argv[1].splitlines())
-if (sn_token := fail_detail_token(sys.argv[1])) is not None:
+text = open(3, encoding="utf-8", errors="surrogateescape").read()
+msg = "\n".join(line[5:].strip() if line.startswith("FAIL:") else line for line in text.splitlines())
+if (sn_token := fail_detail_token(text)) is not None:
     print(sn_token)
     sys.exit(0)
 rules = [("raw_samples.propagation", "propagation_samples_invalid"), ("raw_samples.convergence", "convergence_samples_invalid"), ("rust_mine is not node-rust mined_included", "rust_mine_class_invalid"), ("go_mine is not node-go mined_included", "go_mine_class_invalid"), ("go_converge is not node-go canonical_block_found", "go_converge_class_invalid"), ("rust_converge is not node-rust canonical_block_found", "rust_converge_class_invalid"), ("mined/converged RPC endpoints are not bound", "converge_rpc_endpoint_mismatch"), ("rust_mine.height is malformed", "rust_mine_height_invalid"), ("go_mine.height is malformed", "go_mine_height_invalid"), ("rust_mine.block_hash is malformed", "rust_mine_hash_invalid"), ("go_mine.block_hash is malformed", "go_mine_hash_invalid"), ("sidecar identity mismatch", "converge_sidecar_identity_mismatch"), ("converge sidecar paths are not pairwise distinct", "converge_sidecar_paths_not_distinct"), ("submitted txid missing from parsed block txids", "block_missing_submitted_txid"), ("parse block_hex failed", "block_hex_parse_failed"), ("parsed block hash mismatch", "block_hash_mismatch"), ("parsed block tx_count mismatch", "block_tx_count_mismatch"), ("basic block validation failed", "block_basic_validation_failed"), ("inclusion check timeout", "block_inclusion_timeout"), ("inclusion check failed", "block_inclusion_failed"), ("mined/converged tx identity differs", "converged_tx_identity_mismatch"), ("go_converge does not match rust_mine", "go_converge_height_hash_mismatch"), ("rust_converge does not match go_mine", "rust_converge_height_hash_mismatch"), ("rust_mine.tx_count", "rust_mine_tx_count_invalid"), ("go_mine.tx_count", "go_mine_tx_count_invalid"), ("mine_next sidecar does not match", "mine_sidecar_invalid"), ("sidecar height/hash/canonical mismatch", "block_sidecar_invalid"), ("block_hex is missing", "block_sidecar_invalid"), ("tip sidecar does not match", "converge_tip_invalid"), ("tx parser consumed mismatch", "tx_parser_consumed_mismatch"), ("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "tx_capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
@@ -2745,6 +2754,14 @@ else:
         os.replace(out + ".tmp", out)
     except OSError: sys.exit(1)
 PY
+# Runs git -C REPO_ROOT with the repository-local git variables of the caller (the names
+# git rev-parse --local-env-vars prints, such as GIT_DIR and GIT_WORK_TREE) unset.
+repo_git() (
+  local vars name
+  vars="$(command git rev-parse --local-env-vars)" || exit 1
+  while IFS= read -r name; do unset "${name}"; done <<<"${vars}"
+  git -C "${REPO_ROOT}" "$@"
+)
 # Writes mixed-client-mesh-store-neutrality.json from the public captures and the
 # local build, one step after another: /chain_identity, genesis blocks (chain modes
 # only), binary hashes, git state, sidecar write. SIDECAR_REASON names the failed step.
@@ -2766,7 +2783,7 @@ write_store_neutrality_sidecar() {
   SIDECAR_REASON=store_neutrality_binary_hash_failed
   binaries="$(store_neutrality_step binaries "${chain}" "${GO_NODE_BIN}" "${RUST_NODE_BIN}" "${TXGEN_BIN}")" || return 1
   SIDECAR_REASON=store_neutrality_commit_unavailable
-  commit="$(git -C "${REPO_ROOT}" rev-parse HEAD)" && tree="$(git -C "${REPO_ROOT}" status --porcelain -- clients)" || return 1
+  commit="$(repo_git rev-parse HEAD)" && tree="$(repo_git status --porcelain -- clients)" || return 1
   SIDECAR_REASON=store_neutrality_sidecar_write_failed
   store_neutrality_step write "${STORE_NEUTRALITY_JSON}" "${ident}" "${genesis}" "${binaries}" "${commit}" "${tree:+dirty}" "${GO_DIR}" "${RUST_DIR}" "${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}" || return 1
   SIDECAR_REASON=""
