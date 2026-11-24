@@ -80,7 +80,8 @@ expect_fail_contains() {
   require_contains "${output}" "${needle}" "${label}"
 }
 
-expect_fail_token() { expect_fail_mapped "$1" "" "$2" combined_report_reason_token "${@:3}"; }
+TX_MAPPERS="tx_report_reason_token combined_report_reason_token"
+expect_fail_token() { expect_fail_mapped "$1" "" "$2" "${TX_MAPPERS}" "${@:3}"; }
 
 # Runs the command once and requires it to fail with output that carries <needle> (when it
 # is not empty) and maps to <token> through the mappers of the space-separated list
@@ -2417,14 +2418,11 @@ expect_fail_contains "restart go target mine_next not committed at the Rust endp
 expect_fail_contains "rust-submit go mine_next not committed at the Rust endpoint" "go_mine.mine_next keys mismatch" check_report "${TMP_ROOT}/rust-submit/artifact-root/mine-next-rust-conv-go-not-committed-rust-rpc.json" offline producer-tx
 # Runs check_report once and requires its refusal to carry "FAIL: <needle>" and to map to
 # <token> through the mappers <mappers> ($6). By default: in producer-tx mode
-# combined_report_reason_token, and for an unsearchable-parent report also
-# tx_report_reason_token before it; check_report_reason_token in the other modes.
+# tx_report_reason_token and then combined_report_reason_token; check_report_reason_token
+# in the other modes.
 sidecar_value_check() {
   local label="$1" needle="$2" token="$3" mode="$4" report="$5" mappers="${6:-check_report_reason_token}"
-  if [[ -z "${6:-}" && "${mode}" == producer-tx ]]; then
-    mappers=combined_report_reason_token
-    [[ "${report}" != *-unsearchable-parent-report.json ]] || mappers="tx_report_reason_token combined_report_reason_token"
-  fi
+  [[ -n "${6:-}" || "${mode}" != producer-tx ]] || mappers="${TX_MAPPERS}"
   expect_fail_mapped "${label}" "FAIL: ${needle}" "${token}" "${mappers}" check_report "${report}" offline "${mode}"
 }
 for variant in nonce-string timestamp-string height-over-rust-mine tx-count-over-rust-mine mined-one; do
@@ -2547,7 +2545,7 @@ sn_check "sidecar recorded length differs from derived length" "${SN_GRAMMAR}" "
 expect_pass_contains "sidecar 148-byte header derivation" "PASS: mixed_client_go_submit_rust_accept report structurally accepted" check_report "${TMP_ROOT}/sn-long-header-report.json" offline producer-tx
 sn_check "sidecar genesis identity mismatch" "${SN_GENESIS}" "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal" tx genesis-identity
 sn_check "sidecar genesis block hash mismatch" "${SN_GENESIS}" "genesis.go_block_path hash differs" tx genesis-block-hash
-sidecar_value_check "argv defect before sidecar extra key" "node command_argv does not match exact launched argv" argv_mismatch producer-tx "${TMP_ROOT}/sn-argv-and-extra-key-report.json"
+sidecar_value_check "argv defect before sidecar extra key" "node command_argv does not match exact launched argv" argv_mismatch producer-tx "${TMP_ROOT}/sn-argv-and-extra-key-report.json" combined_report_reason_token
 sn_check "genesis identity before header grammar" "${SN_GENESIS}" "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal" tx genesis-and-grammar
 sn_check "binaries before genesis identity" "${SN_INVALID}" "binaries.go_node_sha256 does not match" tx binary-and-genesis
 sn_check "initial convergence before header grammar" "${SN_INVALID}" "initial_convergence does not prove equal tips" tx grammar-and-convergence
