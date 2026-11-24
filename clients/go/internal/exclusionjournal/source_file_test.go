@@ -1020,10 +1020,16 @@ func capturedReadStoppedStageFixture(t *testing.T, shape string) capturedReadSta
 		first := byte('B' + 3*i)
 		s, o, paths, b, c := capturedReadFreshPair(t, first)
 		bPath := filepath.Join(paths.root, b.leaf)
+		cPath, outside := filepath.Join(paths.root, c.leaf), filepath.Join(t.TempDir(), c.leaf)
+		sourceMust(t, os.Rename(cPath, outside))
 		original := capturedReadReplace(t, bPath, t.TempDir(), sourceReadFile(t, bPath))
-		stage := capturedReadStoppedStageFile(t, paths.root, original, b, c, first+3, shape)
+		if shape != "held" {
+			sourceMust(t, os.Rename(outside, cPath))
+		}
+		stage := capturedReadStoppedStageFile(t, paths.root, original, b, first+3, shape)
 		want := []string{b.leaf, c.leaf, stage}
 		if shape == "held" {
+			sourceMust(t, os.Rename(outside, cPath))
 			want[1], want[2] = want[2], want[1]
 		}
 		actual := capturedReadNames(t, paths.root)
@@ -1037,7 +1043,7 @@ func capturedReadStoppedStageFixture(t *testing.T, shape string) capturedReadSta
 	return capturedReadStageFixture{}
 }
 
-func capturedReadStoppedStageFile(t *testing.T, root, original string, b, c capturedReadRecord, label byte, shape string) string {
+func capturedReadStoppedStageFile(t *testing.T, root, original string, b capturedReadRecord, label byte, shape string) string {
 	t.Helper()
 	key := capturedReadRecordFor(label).leaf
 	switch shape {
@@ -1051,10 +1057,7 @@ func capturedReadStoppedStageFile(t *testing.T, root, original string, b, c capt
 		return stage
 	case "held":
 		stage := heldStagePrefix + key
-		cPath, outside := filepath.Join(root, c.leaf), filepath.Join(t.TempDir(), c.leaf)
-		sourceMust(t, os.Rename(cPath, outside))
 		writeSourceEntry(t, filepath.Join(root, stage), []byte{1})
-		sourceMust(t, os.Rename(outside, cPath))
 		return stage
 	}
 	t.Fatalf("invalid stopped stage shape %q", shape)
