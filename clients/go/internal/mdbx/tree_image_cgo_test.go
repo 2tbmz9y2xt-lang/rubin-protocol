@@ -11,10 +11,11 @@ import (
 
 // tiOutcome is how one UpdateImageV1 call ended: returned with r, or unwound
 // with the recovered panic value (nil for Goexit). The rest is observed on the
-// caller's own account value a inside WithOperation, after the call returns or
-// while it unwinds: original and account are *a before and after the call,
-// before and after the state that original names, live the live sum, and reuse
-// and reuseLive the result and live sum of a one-byte a.WithReservation.
+// caller's own account value a inside WithOperation while the caller holds a
+// one-byte a.WithReservation, after the call returns or while it unwinds:
+// original and account are *a before and after the call, before and after the
+// state that original names, live the live sum, and reuse and reuseLive the
+// result and live sum of a further one-byte a.WithReservation.
 // wantZero is set by a row whose planner replaces *a with the zero value.
 type tiOutcome struct {
 	r                 tsResult
@@ -29,9 +30,9 @@ type tiOutcome struct {
 }
 
 // tiPlanner counts calls and keeps the last Reader. From its second call on it
-// reads meta key 0x02 through the kept Reader and meta key 0x00 through the
-// live Reader before it calls outcome. replays counts the Replay calls of the
-// publication that outcome returns.
+// reads meta key 0x02 through the kept Reader and meta keys 0x00 and 0x02
+// through the live Reader before it calls outcome. replays counts the Replay
+// calls of the publication that outcome returns.
 type tiPlanner struct {
 	calls          int
 	replays        *int
@@ -41,6 +42,9 @@ type tiPlanner struct {
 	expired        error
 	live           []byte
 	liveErr        error
+	live02         []byte
+	live02Present  bool
+	live02Err      error
 	outcome        func(*Reader) (TreeImagePublicationV1, error)
 }
 
@@ -49,6 +53,7 @@ func (p *tiPlanner) imagePlan(r *Reader) (TreeImagePublicationV1, error) {
 	if p.kept != nil {
 		p.expiredValue, p.expiredPresent, p.expired = p.kept.Get(TreeSchemaV1DBIs()[0], []byte{2})
 		p.live, _, p.liveErr = r.Get(TreeSchemaV1DBIs()[0], []byte{0})
+		p.live02, p.live02Present, p.live02Err = r.Get(TreeSchemaV1DBIs()[0], []byte{2})
 	}
 	p.kept = r
 	return p.outcome(r)
@@ -73,14 +78,16 @@ func tiCallAccount(s *Store, o *OperationReservationOwner, kind OperationKind, b
 		defer close(done)
 		defer func() { out.recovered = recover() }()
 		_ = o.WithOperation(kind, func(a *OperationAccount) error {
-			out.original, out.before = *a, *a.shared
-			defer func() {
-				out.account, out.after, out.live = *a, *out.original.shared, reservationLive(o)
-				out.reuse = a.WithReservation(1, func() error { out.reuseLive = reservationLive(o); return nil })
-			}()
-			out.r = tiInvoke(s, a, bind(a))
-			out.returned = true
-			return nil
+			return a.WithReservation(1, func() error {
+				out.original, out.before = *a, *a.shared
+				defer func() {
+					out.account, out.after, out.live = *a, *out.original.shared, reservationLive(o)
+					out.reuse = a.WithReservation(1, func() error { out.reuseLive = reservationLive(o); return nil })
+				}()
+				out.r = tiInvoke(s, a, bind(a))
+				out.returned = true
+				return nil
+			})
 		})
 	}()
 	<-done
@@ -125,12 +132,13 @@ func tiReturnedAt(t *testing.T, out tiOutcome, truth CommitTruth) error {
 	return out.r.err
 }
 
-// tiAccountKept requires live sum 0 after the call, the state of the caller's account unchanged
-// by the call, and the caller's account value either unchanged with a one-byte WithReservation
-// admitted at live sum 1, or, for wantZero, the zero value refused as invalid input.
+// tiAccountKept requires the caller's one-byte hold as the live sum after the call, the state of
+// the caller's account unchanged by the call, and the caller's account value either unchanged
+// with a further one-byte WithReservation admitted at live sum 2, or, for wantZero, the zero
+// value refused as invalid input.
 func tiAccountKept(t *testing.T, out tiOutcome) {
 	t.Helper()
-	if out.live != 0 || out.after != out.before || out.before.held != 0 || out.before.everPositive || out.before.closed {
+	if out.live != 1 || out.after != out.before || out.before.held != 1 || !out.before.everPositive || out.before.closed {
 		t.Fatalf("live sum %d, account before %+v after %+v", out.live, out.before, out.after)
 	}
 	if out.wantZero {
@@ -139,7 +147,7 @@ func tiAccountKept(t *testing.T, out tiOutcome) {
 		}
 		return
 	}
-	if out.account != out.original || out.reuse != nil || out.reuseLive != 1 {
+	if out.account != out.original || out.reuse != nil || out.reuseLive != 2 {
 		t.Fatalf("account %+v, want %+v; reuse returned %v with live sum %d", out.account, out.original, out.reuse, out.reuseLive)
 	}
 }
@@ -233,19 +241,22 @@ func tiTerminal(t *testing.T, s *Store, o *OperationReservationOwner, truth Comm
 	}
 }
 
-// tiErrorTree appends err, and for an *EngineError a copy of its value, then the same for each
-// error that err unwraps to, depth first. It reads only the dynamic type of each node, so a nil
-// pointer err is appended and none of its methods is called.
+// tiErrorTree appends err, and for a pointer to a comparable struct a copy of the struct, then
+// the same for the ReadbackCause of a *CommitError and for each error that err unwraps to, depth
+// first. It reads only the dynamic type of each node, so a nil pointer err is appended and none
+// of its methods is called.
 func tiErrorTree(err error, out []any) []any {
 	if err == nil {
 		return out
 	}
 	out = append(out, err)
-	if v := reflect.ValueOf(err); v.Kind() == reflect.Pointer && v.IsNil() {
+	v := reflect.ValueOf(err)
+	if v.Kind() == reflect.Pointer && v.IsNil() {
 		return out
 	}
-	if e, ok := any(err).(*EngineError); ok {
-		out = append(out, *e)
+	out = tiErrorValue(v, out)
+	if c, ok := any(err).(*CommitError); ok {
+		out = tiErrorTree(c.ReadbackCause, out)
 	}
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		for _, inner := range joined.Unwrap() {
@@ -254,6 +265,14 @@ func tiErrorTree(err error, out []any) []any {
 		return out
 	}
 	return tiErrorTree(errors.Unwrap(err), out)
+}
+
+// tiErrorValue appends a copy of the struct that v points to when that struct is comparable.
+func tiErrorValue(v reflect.Value, out []any) []any {
+	if v.Kind() == reflect.Pointer && v.Elem().Kind() == reflect.Struct && v.Elem().Comparable() {
+		return append(out, v.Elem().Interface())
+	}
+	return out
 }
 
 // tiSameTree reports whether two tiErrorTree results hold equal elements in the same order.
@@ -341,6 +360,9 @@ func tiAdmissionRead(t *testing.T, present bool) {
 	tiOpenNext(t, s, o, LaneOperation, p, check, func(r *Reader) {
 		afterValue, afterPresent, afterErr = r.Get(TreeSchemaV1DBIs()[0], []byte{2})
 	})
+	if p.live02Err != nil || p.live02Present != beforePresent || !bytes.Equal(p.live02, beforeValue) {
+		t.Fatalf("meta key 0x02 in the repeated call %x present %v error %v", p.live02, p.live02Present, p.live02Err)
+	}
 	if afterErr != nil || afterPresent != beforePresent || !bytes.Equal(afterValue, beforeValue) {
 		t.Fatalf("meta key 0x02 after the calls %x present %v error %v", afterValue, afterPresent, afterErr)
 	}
@@ -360,6 +382,7 @@ func tiAdmissionAccount(t *testing.T, name string) {
 	case "zero":
 		account = &OperationAccount{}
 	}
+	value, state := tiAccountSnapshot(account)
 	calls, replays := 0, 0
 	s.operations.Lock()
 	r := tiInvoke(s, account, tiCounted(t, &calls, &replays))
@@ -369,7 +392,25 @@ func tiAdmissionAccount(t *testing.T, name string) {
 	if calls != 0 || replays != 0 || reservationLive(o) != 0 || s.state != storeOPEN || s.terminal != nil {
 		t.Fatalf("account refusal planner %d Replay %d live %d state %s terminal %v", calls, replays, reservationLive(o), s.state, s.terminal)
 	}
+	if gotValue, gotState := tiAccountSnapshot(account); gotValue != value || gotState != state {
+		t.Fatalf("refused account %+v state %+v, want %+v state %+v", gotValue, gotState, value, state)
+	}
+	ran := false
+	if err := account.WithReservation(1, func() error { ran = true; return nil }); any(err) != any(errOperationReservationInput) || ran || reservationLive(o) != 0 {
+		t.Fatalf("refused account WithReservation returned %v ran %v live %d", err, ran, reservationLive(o))
+	}
 	tiNextAdmission(t, s, o)
+}
+
+// tiAccountSnapshot copies the value of a and of the state it names (zero values when absent).
+func tiAccountSnapshot(a *OperationAccount) (OperationAccount, operationAccountState) {
+	if a == nil {
+		return OperationAccount{}, operationAccountState{}
+	}
+	if a.shared == nil {
+		return *a, operationAccountState{}
+	}
+	return *a, *a.shared
 }
 
 func tiAdmissionNilPlanner(t *testing.T, account bool) {
@@ -411,7 +452,7 @@ func tiAdmissionStore(t *testing.T, name string) {
 	case "closed":
 		mustEnvironment(t, s.Close())
 	}
-	state := s.state
+	state, values := s.state, tiErrorTree(terminal, nil)
 	calls, replays := 0, 0
 	planner := tiCounted(t, &calls, &replays)
 	refuse := func() {
@@ -423,7 +464,7 @@ func tiAdmissionStore(t *testing.T, name string) {
 			s.operations.Unlock()
 		}
 		tiStoreRefusal(t, name, tiReturned(t, out), terminal)
-		if calls != 0 || replays != 0 || reservationLive(o) != 0 || s.state != state || any(s.terminal) != any(terminal) {
+		if calls != 0 || replays != 0 || reservationLive(o) != 0 || s.state != state || any(s.terminal) != any(terminal) || !tiSameTree(values, tiErrorTree(terminal, nil)) {
 			t.Fatalf("Store refusal planner %d Replay %d live %d state %s terminal %v", calls, replays, reservationLive(o), s.state, s.terminal)
 		}
 	}

@@ -15,6 +15,7 @@ import (
 
 func TestTreeImageLifecycleV1(t *testing.T) {
 	// OpenTreeV1 checks the meta 03 identity before it reads meta key 0x02.
+	t.Run("bound and PRUNED B 1 U 0 Authority bytes decode as built", tiAuthorityDecodes)
 	t.Run("OpenTreeV1 refuses meta 03 identity mismatch before one-byte key 0x02 decode", func(t *testing.T) {
 		store, path, identity := treeNativeStore(t)
 		treeNativeSeed(t, store, 0, []byte{2}, []byte{0})
@@ -95,18 +96,25 @@ func tiProbe(t *testing.T, s *Store, o *OperationReservationOwner, gets uint64, 
 }
 
 // tiNative runs call under tiProbe for mode 0 and under fixtureLargeFault mode at rank and key
-// otherwise. The returned function checks the native evidence: tiProbe's for mode 0, no commit
-// and one ORIGINAL OLD abort otherwise.
+// otherwise. The returned function checks the native evidence: tiProbe's for mode 0; otherwise no
+// commit, one ORIGINAL OLD abort and exactly the native calls of the ORIGINAL OLD begin, gets
+// gets, the abort and, when the call left the Store CLOSED, the environment close, so a write
+// transaction begin or commit changes the count.
 func tiNative(t *testing.T, s *Store, o *OperationReservationOwner, mode uint32, rank uint8, key []byte, gets uint64, call func()) func() {
 	t.Helper()
 	if mode == 0 {
 		return tiProbe(t, s, o, gets, call)
 	}
-	evidence := ctxTreeFault(t, s, mode, rank, key, call)
+	var calls uint32
+	evidence := ctxTreeFault(t, s, mode, rank, key, func() { call(); calls = fixtureLargeNativeCalls() })
 	return func() {
 		t.Helper()
-		if evidence.commits != 0 || evidence.aborts != 1 {
-			t.Fatalf("fault mode %d evidence %+v", mode, evidence)
+		want := gets + 2
+		if s.state == storeCLOSED {
+			want++
+		}
+		if evidence.commits != 0 || evidence.aborts != 1 || uint64(calls) != want {
+			t.Fatalf("fault mode %d evidence %+v native calls %d, want %d", mode, evidence, calls, want)
 		}
 	}
 }
@@ -177,7 +185,7 @@ func tiAfter(t *testing.T, s *Store, o *OperationReservationOwner, kind Operatio
 // changes the Tag 1 publication, zero has the planner replace the caller
 // account with the zero value, want checks the returned primary, consumed
 // tells whether a successful abort consumes the Store and gets is the number
-// of meta DBI gets on ORIGINAL OLD under SelectedDamageProbeOnly.
+// of meta DBI gets on ORIGINAL OLD.
 type tiRow struct {
 	name     string
 	kind     OperationKind
@@ -230,15 +238,23 @@ func tiDescriptorRows(t *testing.T) []tiRow {
 	return rows
 }
 
-// tiAuthorityAtBound encodes a valid NONE-phase envelope of exactly
-// MaxMetadataBytes by padding ExcludedInvalidBranch.ExactConsensusError.
+// tiBasePad is the ExactConsensusError length of the small envelope that tiAuthorityAtBound grows.
+const tiBasePad = 64
+
+// tiAuthorityAtBound is a NONE-phase envelope of exactly 1048576 bytes: the Encode output with
+// a tiBasePad-byte ExactConsensusError grown by tiGrowPad, which turns the Encode output of
+// tiBasePad bytes into the Encode output of tiBasePad+1 bytes.
 func tiAuthorityAtBound(t *testing.T) []byte {
 	t.Helper()
-	encoded := tiPaddedAuthority(t, MaxMetadataBytes-27-84)
-	if len(encoded) != MaxMetadataBytes {
-		t.Fatalf("bound Authority %d bytes", len(encoded))
+	base := tiPaddedAuthority(t, tiBasePad)
+	if grown := tiGrowPad(t, base, tiBasePad, 1); !bytes.Equal(grown, tiPaddedAuthority(t, tiBasePad+1)) {
+		t.Fatal("pad growth does not reproduce the encoded Authority")
 	}
-	return encoded
+	bound := tiGrowPad(t, base, tiBasePad, 1048576-27-84-tiBasePad)
+	if len(bound) != 1048576 {
+		t.Fatalf("bound Authority %d bytes", len(bound))
+	}
+	return bound
 }
 
 func tiPaddedAuthority(t *testing.T, pad int) []byte {
@@ -250,40 +266,49 @@ func tiPaddedAuthority(t *testing.T, pad int) []byte {
 	return encoded
 }
 
-// tiAuthorityOverBound is the tiAuthorityAtBound envelope with one more
-// ExactConsensusError byte: one inserted pad byte and both enclosing lengths
-// (the authority length at bytes 18..21 and the pad blob length) raised by one.
-// The same edit turns the Encode output of one byte less padding into the
-// tiAuthorityAtBound bytes, so the result differs from a valid envelope only
-// in its size.
+// tiAuthorityOverBound is the tiAuthorityAtBound envelope with one more ExactConsensusError
+// byte, so it differs from a valid envelope only in its size.
 func tiAuthorityOverBound(t *testing.T) []byte {
 	t.Helper()
-	pad := MaxMetadataBytes - 27 - 84
-	bound := tiAuthorityAtBound(t)
-	if grown := tiGrowPad(t, tiPaddedAuthority(t, pad-1), pad-1); !bytes.Equal(grown, bound) {
-		t.Fatal("pad growth does not reproduce the encoded bound Authority")
-	}
-	return tiGrowPad(t, bound, pad)
+	return tiGrowPad(t, tiAuthorityAtBound(t), 1048576-27-84, 1)
 }
 
-// tiGrowPad inserts one pad byte into b, whose ExactConsensusError is pad bytes of 1.
-func tiGrowPad(t *testing.T, b []byte, pad int) []byte {
+// tiGrowPad inserts n pad bytes into b, whose ExactConsensusError is pad bytes of 1, and raises
+// both enclosing lengths (the authority length at bytes 18..21 and the pad blob length) by n.
+func tiGrowPad(t *testing.T, b []byte, pad, n int) []byte {
 	t.Helper()
 	at := bytes.Index(b, append(binary.BigEndian.AppendUint32(nil, uint32(pad)), 1))
 	if at < 22 || !bytes.Equal(b[at+4:at+4+pad], bytes.Repeat([]byte{1}, pad)) {
 		t.Fatalf("pad blob of %d bytes at %d", pad, at)
 	}
-	out := make([]byte, 0, len(b)+1)
+	out := make([]byte, 0, len(b)+n)
 	out = append(out, b[:at+4]...)
-	out = append(out, 1)
+	out = append(out, bytes.Repeat([]byte{1}, n)...)
 	out = append(out, b[at+4:]...)
-	binary.BigEndian.PutUint32(out[18:22], binary.BigEndian.Uint32(out[18:22])+1)
-	binary.BigEndian.PutUint32(out[at:at+4], uint32(pad+1))
+	binary.BigEndian.PutUint32(out[18:22], binary.BigEndian.Uint32(out[18:22])+uint32(n))
+	binary.BigEndian.PutUint32(out[at:at+4], uint32(pad+n))
 	return out
 }
 
+// tiAuthorityDecodes requires the decoder to accept the bound Authority, to refuse the PRUNED
+// B 1 U 0 bytes, and to accept those bytes with U 13681 in bytes 32..39.
+func tiAuthorityDecodes(t *testing.T) {
+	if _, err := DecodeTreeAuthorityV1(tiAuthorityAtBound(t)); err != nil {
+		t.Fatalf("bound Authority decode %v", err)
+	}
+	pruned := tiPrunedB1U0(t)
+	if _, err := DecodeTreeAuthorityV1(pruned); !errors.Is(err, errSchema) {
+		t.Fatalf("B 1 U 0 decode %v", err)
+	}
+	fixed := bytes.Clone(pruned)
+	fixed[38], fixed[39] = 0x35, 0x71
+	if _, err := DecodeTreeAuthorityV1(fixed); err != nil {
+		t.Fatalf("B 1 U 13681 decode %v", err)
+	}
+}
+
 // tiPrunedB1U0 is the tsEntry envelope (PRUNED, B 0, U 0) with B set to 1 in
-// envelope bytes 24..31; with U 13681 in bytes 32..39 the same bytes decode.
+// envelope bytes 24..31.
 func tiPrunedB1U0(t *testing.T) []byte {
 	t.Helper()
 	b := bytes.Clone(tsEntry(t).Pair.Mutations[0].Literal)
@@ -291,14 +316,6 @@ func tiPrunedB1U0(t *testing.T) []byte {
 		t.Fatalf("envelope layout %x", b[:40])
 	}
 	b[31] = 1
-	if _, err := DecodeTreeAuthorityV1(b); !errors.Is(err, errSchema) {
-		t.Fatalf("B 1 U 0 decode %v", err)
-	}
-	fixed := bytes.Clone(b)
-	fixed[38], fixed[39] = 0x35, 0x71
-	if _, err := DecodeTreeAuthorityV1(fixed); err != nil {
-		t.Fatalf("B 1 U 13681 decode %v", err)
-	}
 	return b
 }
 
@@ -378,6 +395,9 @@ func tiForeignIdentity(t *testing.T) {
 		got, present, readErr = r.ReadTreeAuthorityV1()
 		usable = r.usable()
 	})
+	if p.live02Err != nil || !p.live02Present || !bytes.Equal(p.live02, encoded) {
+		t.Fatalf("meta key 0x02 in the repeated call %x present %v error %v", p.live02, p.live02Present, p.live02Err)
+	}
 	if readErr != nil || !present || !reflect.DeepEqual(got, want) || !usable {
 		t.Fatalf("seeded authority after the refusal = %+v, %v, %v usable %v", got, present, readErr, usable)
 	}
@@ -401,10 +421,10 @@ func tiReadRows(t *testing.T) []tiRow {
 		{name: "census failure from a rank-1 row after Tag 4 and a 1048576-byte Authority pass", seed: tiRankOne, edit: func(p *TreeImagePublicationV1) { p.Tag, p.RecordLimit, p.Authority = 4, 1, bound }, want: tiCensusFailure, gets: 1},
 		{name: "census failure from a foreign meta 03", seed: foreign, want: tiCensusFailure, gets: 4},
 		{name: "census failure from a rank-1 row after the planner zeroes the caller account", seed: tiRankOne, zero: true, want: tiCensusFailure, gets: 1},
-		{name: "get EIO at key 0x02", seed: empty, fault: 28, faultKey: []byte{2}, want: func(t *testing.T, err error) {
+		{name: "get EIO at key 0x02", seed: empty, fault: 28, faultKey: []byte{2}, gets: 1, want: func(t *testing.T, err error) {
 			treeNativeError(t, err, operationUpdate, "IO", 5, "error 5", nil)
 		}},
-		{name: "invalid get result shape at census key 0x00", seed: empty, fault: 17, faultKey: []byte{0}, want: func(t *testing.T, err error) {
+		{name: "invalid get result shape at census key 0x00", seed: empty, fault: 17, faultKey: []byte{0}, gets: 2, want: func(t *testing.T, err error) {
 			treeNativeError(t, err, operationUpdate, "LocalInvariant", -30779, "mdbx_get returned invalid result shape", nil)
 		}},
 		{name: "decode failure of a one-byte key 0x02", seed: func(t *testing.T, s *Store) { treeNativeSeed(t, s, 0, []byte{2}, []byte{0}) }, want: tiSchemaFailure, gets: 1},
@@ -448,10 +468,10 @@ func tiNewTerminal(t *testing.T) {
 	if s.state != storeCLOSED || any(s.terminal) != any(r.err) || s.terminalTruth != 2 {
 		t.Fatalf("crossed producer left %s terminal %v truth %d", s.state, s.terminal, s.terminalTruth)
 	}
-	calls, replays := 0, 0
+	calls, replays, values := 0, 0, tiErrorTree(r.err, nil)
 	out := tiCall(s, o, LaneOperation, tiCounted(t, &calls, &replays))
-	if any(tiReturnedAt(t, out, 2)) != any(r.err) || calls != 0 || replays != 0 || s.state != storeCLOSED || any(s.terminal) != any(r.err) {
-		t.Fatalf("NEW terminal returned %v planner %d Replay %d state %s", out.r.err, calls, replays, s.state)
+	if any(tiReturnedAt(t, out, 2)) != any(r.err) || calls != 0 || replays != 0 || s.state != storeCLOSED || any(s.terminal) != any(r.err) || s.terminalTruth != 2 || !tiSameTree(values, tiErrorTree(r.err, nil)) {
+		t.Fatalf("NEW terminal returned %v planner %d Replay %d state %s truth %d", out.r.err, calls, replays, s.state, s.terminalTruth)
 	}
 	tiTerminal(t, s, o, 2, r.err)
 }
