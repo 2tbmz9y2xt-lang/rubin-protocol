@@ -1629,6 +1629,7 @@ func testImageTimerShortOfD(t *testing.T) {
 // onSecondErr runs inside the second Err call.
 type imageHookCtx struct {
 	mu                               sync.Mutex
+	once                             sync.Once
 	done                             chan struct{}
 	err                              error
 	errCalls, applierErrs            int
@@ -1660,7 +1661,9 @@ func (c *imageHookCtx) Err() error {
 	return err
 }
 
-func (c *imageHookCtx) end(err error) { c.mu.Lock(); c.err = err; close(c.done); c.mu.Unlock() }
+func (c *imageHookCtx) end(err error) { c.mu.Lock(); c.err = err; c.once.Do(c.shut); c.mu.Unlock() }
+
+func (c *imageHookCtx) shut() { close(c.done) }
 
 func (c *imageHookCtx) endAndRun(err error) int {
 	c.end(err)
@@ -1982,26 +1985,28 @@ func testImageCallbackAfterRetirement(t *testing.T) {
 	f := newImageTestFixture(t, 1)
 	round, ctx := f.round(t, imageTestLimits(math.MaxInt64, math.MaxInt64), 0), newImageHookCtx()
 	inst := f.admitted(t, round, ctx, 0, 1, 1)
-	req, ran := f.lockRequester(), make(chan int, 1)
-	// sync.Mutex starts with the internal/sync.Mutex state word: bit 0 locked, waiter count from bit 3.
-	state := (*int32)(unsafe.Pointer(&req.mu))
-	requireEqual(t, atomic.LoadInt32(state), int32(1), "requester mutex state held by the test alone")
-	leases := f.leases()
-	go func() { ran <- ctx.endAndRun(context.Canceled) }()
-	for deadline := time.Now().Add(lifecycleWatchdog); atomic.LoadInt32(state)>>3 == 0; runtime.Gosched() {
-		require(t, time.Now().Before(deadline), "Request ctx callback not waiting for the requester mutex within %s", lifecycleWatchdog)
-	}
+	req, ran, leases := f.lockRequester(), make(chan int, 1), f.leases()
+	waitImageMutexWaiter(t, &req.mu, func() { go func() { ran <- ctx.endAndRun(context.Canceled) }() })
 	req.retireLocked(inst, errImageExpired)
 	reads := f.clock.readCount()
 	req.mu.Unlock()
 	requireEqual(t, awaitImageResult(t, ran, "Request ctx functions"), 1, "Request ctx functions run")
-	for deadline := time.Now().Add(lifecycleWatchdog); f.leases() != leases; runtime.Gosched() {
-		require(t, time.Now().Before(deadline), "Request ctx callback still holds its Service lease after %s", lifecycleWatchdog)
-	}
+	waitUntil(t, func() bool { return f.leases() == leases }, "Service lease release by the Request ctx callback")
 	require(t, f.clock.readCount() == reads && ctx.applierErrs == 0, "callback after the retirement: clock reads %d->%d, ctx Err calls %d, want none", reads, f.clock.readCount(), ctx.applierErrs)
 	f.requireEnd(t, inst, errImageExpired, "instance retired while its callback waited")
 	f.requireOwners(t, round, 0, imageOneInstance(0), "after the callback")
 	f.requireUsage(t, round, 0, imageUsage(0, 1, 1, 1, 0), imageUsage(0, 1, 1, 1, 0), "after the callback")
+}
+
+func waitImageMutexWaiter(t *testing.T, mu *sync.Mutex, start func()) {
+	t.Helper()
+	// sync.Mutex starts with the internal/sync.Mutex state word: bit 0 locked, waiter count from bit 3.
+	state := (*int32)(unsafe.Pointer(mu))
+	requireEqual(t, atomic.LoadInt32(state), int32(1), "requester mutex state locked with no waiter")
+	start()
+	for deadline := time.Now().Add(lifecycleWatchdog); atomic.LoadInt32(state)>>3 == 0; runtime.Gosched() {
+		require(t, time.Now().Before(deadline), "Request ctx callback not waiting for the requester mutex within %s", lifecycleWatchdog)
+	}
 }
 
 func testImageStaleCallback(t *testing.T) {
@@ -2699,13 +2704,23 @@ func testImageUnwindWrite(t *testing.T) {
 
 func testImageUnwindArming(t *testing.T, goexit, roundCtx bool) {
 	inImageBubble(func(t *testing.T) {
-		c := newImageHookCtx()
-		c.onAfterFunc = imageUnwinder(goexit)
-		cr := newImageHookCtx()
+		c, cr, ran := newImageHookCtx(), newImageHookCtx(), make(chan int, 1)
 		roundC, requestC := imageUnwindCtx(c, cr, roundCtx)
 		f := newImageTestFixture(t, 2)
-		round := f.roundCtx(t, roundC, imageUnwindLimits(), 0, 1)
+		round, leases, reads := f.roundCtx(t, roundC, imageUnwindLimits(), 0, 1), f.leases(), f.clock.readCount()
+		c.onAfterFunc = func() {
+			if roundCtx {
+				waitImageMutexWaiter(t, &f.s.imageRequester.mu, func() { go func() { ran <- cr.endAndRun(context.Canceled) }() })
+			}
+			imageUnwinder(goexit)()
+		}
 		f.requireUnwound(t, f.goRecovered(round, requestC, 0, 1), goexit)
+		if roundCtx {
+			requireEqual(t, awaitImageResult(t, ran, "Request ctx functions"), 1, "Request ctx functions run")
+			waitUntil(t, func() bool { return f.leases() == leases }, "Service lease release by the Request ctx callback")
+			require(t, f.clock.readCount() == reads+1 && cr.applierErrs == 0 && f.instance(1) == nil, "Request ctx callback waiting through the unwind: clock reads %d->%d, Err calls %d, registered %v, want only the admission read", reads, f.clock.readCount(), cr.applierErrs, f.instance(1) != nil)
+			f.requireUsage(t, round, 0, imageUnitVector{}, imageUnitVector{}, "after the Request ctx callback waiting through the unwind")
+		}
 		f.requireNextAfterUnwind(t, round, 0, 1, 1)
 		f.admitted(t, round, context.Background(), 0, 2, 2)
 		g := newImageTestFixture(t, 2)
