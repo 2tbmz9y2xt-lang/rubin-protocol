@@ -291,14 +291,14 @@ source "$1"
 probe_root="$2"
 MESH_TIMEOUT=2; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"; TX_PATH_MODE=0; RUST_RESTART_MODE=0; PARTITION_HEAL_REORG_MODE=0
 INITIAL_GO_TIP_JSON="${probe_root}/go-tip.json"; INITIAL_RUST_TIP_JSON="${probe_root}/rust-tip.json"
-GO_CAPTURE_FAILS=0; RUST_CAPTURE_FAILS=0; GO_FIRST_TIP=""; RUST_FIRST_TIP=""
-# Capture N of a client fails while N is at most its CAPTURE_FAILS count, then answers
-# its FIRST_TIP once when that is set, then its TIP_INPUT.
+GO_CAPTURE_FAILS=0; RUST_CAPTURE_FAILS=0; GO_FAIL_AT=0; RUST_FAIL_AT=0; GO_FIRST_TIP=""; RUST_FIRST_TIP=""
+# Capture N of a client fails when N is at most its CAPTURE_FAILS count or equals its FAIL_AT;
+# a capture that does not fail answers its FIRST_TIP at N = CAPTURE_FAILS+1 when that is set, else its TIP_INPUT.
 capture_rpc_sidecar() {
-  local fails="${RUST_CAPTURE_FAILS}" first="${RUST_FIRST_TIP}" input="${RUST_TIP_INPUT}" n
-  [[ "$1" != go ]] || { fails="${GO_CAPTURE_FAILS}"; first="${GO_FIRST_TIP}"; input="${GO_TIP_INPUT}"; }
+  local fails="${RUST_CAPTURE_FAILS}" fail_at="${RUST_FAIL_AT}" first="${RUST_FIRST_TIP}" input="${RUST_TIP_INPUT}" n
+  [[ "$1" != go ]] || { fails="${GO_CAPTURE_FAILS}"; fail_at="${GO_FAIL_AT}"; first="${GO_FIRST_TIP}"; input="${GO_TIP_INPUT}"; }
   printf '%s\n' "$4" >>"${probe_root}/captures-$1"; n="$(wc -l <"${probe_root}/captures-$1")"
-  (( n > fails )) || return 1
+  (( n > fails && n != fail_at )) || return 1
   (( n > fails + 1 )) || [[ -z "${first}" ]] || input="${first}"
   cp -- "${input}" "$5"
 }
@@ -346,6 +346,8 @@ RUST_CAPTURE_FAILS=1 expect_match_after 2 2 "${absent}" "${absent}"
 RUST_FIRST_TIP="${rust_zero}" expect_match_after 2 2 "${absent}" "${absent}"
 GO_CAPTURE_FAILS=1 expect_match_after 2 2 "${absent}" "${absent}"
 GO_FIRST_TIP="${go101}" expect_match_after 2 2 "${absent}" "${absent}"
+RUST_CAPTURE_FAILS=1 GO_FAIL_AT=2 expect_match_after 3 3 "${absent}" "${absent}"
+GO_CAPTURE_FAILS=1 RUST_FAIL_AT=2 expect_match_after 3 3 "${absent}" "${absent}"
 expect_reason initial_convergence_timeout "${absent}" "${rust_zero}"
 expect_reason initial_convergence_timeout "${go101}" "${absent}"
 expect_reason initial_convergence_timeout "${absent}" "${probe_root}/absent-no-height.json"

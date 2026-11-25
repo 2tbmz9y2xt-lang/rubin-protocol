@@ -10,7 +10,7 @@ SPACE_LINK_PARENT="${TMP_ROOT}-parent link"
 SPACE_ALIAS_ROOT="${SPACE_LINK_PARENT}/$(basename "${TMP_ROOT}")"
 trap 'chmod -R u+w "${TMP_ROOT}" || true; rm -rf -- "${TMP_ROOT}" "${LINK_PARENT}" "${SPACE_LINK_PARENT}"' EXIT
 python3 - "${TMP_ROOT}" <<'PY'
-import hashlib, json, os, sys; from pathlib import Path
+import hashlib, json, os, shlex, sys; from pathlib import Path
 root = Path(os.path.realpath(sys.argv[1])); root.mkdir(exist_ok=True)
 link_parent = root.parent / f"{root.name}-parent-link"; link_parent.symlink_to(root.parent, target_is_directory=True); alias_root = link_parent / root.name; space_link_parent = root.parent / f"{root.name}-parent link"; space_link_parent.symlink_to(root.parent, target_is_directory=True); space_alias_root = space_link_parent / root.name
 h = lambda ch: ch * 64
@@ -51,13 +51,13 @@ for path in (root / "rubin-node-go", root / "rubin-node-rust"):
     path.chmod(0o755)
 (root / "rubin-node-not-exec").write_text("#!/bin/sh\n", encoding="utf-8")
 nodes = [
-  {"name":"node-go","implementation":"go","pid":101,"rpc_endpoint":"localhost:5101","p2p_endpoint":"localhost:5102","binary":go_binary,"command":" ".join(go_argv),"command_argv":go_argv,"started_at":"2026-05-12T10:00:00Z","process_comm":"rubin-node-go","process_alive":True,"rpc_endpoint_process_backed":True,"p2p_endpoint_process_backed":True},
-  {"name":"node-rust","implementation":"rust","pid":102,"rpc_endpoint":"rust-node:5201","p2p_endpoint":"rust-node:5202","binary":rust_binary,"command":" ".join(rust_argv + create),"command_argv":rust_argv + create,"started_at":"2026-05-12T10:00:03Z","process_comm":"rubin-node-rust","process_alive":True,"rpc_endpoint_process_backed":True,"p2p_endpoint_process_backed":True},
+  {"name":"node-go","implementation":"go","pid":101,"rpc_endpoint":"localhost:5101","p2p_endpoint":"localhost:5102","binary":go_binary,"command":shlex.join(go_argv),"command_argv":go_argv,"started_at":"2026-05-12T10:00:00Z","process_comm":"rubin-node-go","process_alive":True,"rpc_endpoint_process_backed":True,"p2p_endpoint_process_backed":True},
+  {"name":"node-rust","implementation":"rust","pid":102,"rpc_endpoint":"rust-node:5201","p2p_endpoint":"rust-node:5202","binary":rust_binary,"command":shlex.join(rust_argv + create),"command_argv":rust_argv + create,"started_at":"2026-05-12T10:00:03Z","process_comm":"rubin-node-rust","process_alive":True,"rpc_endpoint_process_backed":True,"p2p_endpoint_process_backed":True},
 ]
 def argv_nodes(go_cmd, rust_cmd):
     out = json.loads(json.dumps(nodes))
     for node, argv in zip(out, (go_cmd, rust_cmd)):
-        node["command_argv"], node["command"] = argv, " ".join(argv)
+        node["command_argv"], node["command"] = argv, shlex.join(argv)
     return out
 def dump(name, obj):
     path = root / name
@@ -145,7 +145,7 @@ def peers(addr):
     return {"count":len(items),"peers":items}
 partition_proxy = "proxy.local:5300"; partition_go_peer = "rust-local:5300"; common_height = 8; fork_height = 9; rust_win_height = 10
 common_hex, common_hash = build_block(common_height, nonce=1); go_hex, go_hash = build_block(fork_height, common_hash, nonce=1); rust1_hex, rust1_hash = build_block(fork_height, common_hash, nonce=2); rust2_hex, rust2_hash = build_block(rust_win_height, rust1_hash, nonce=3)
-partition_nodes = json.loads(json.dumps(nodes)); partition_nodes[1]["command_argv"][-2] = partition_proxy; partition_nodes[1]["command"] = " ".join(partition_nodes[1]["command_argv"])
+partition_nodes = json.loads(json.dumps(nodes)); partition_nodes[1]["command_argv"][-2] = partition_proxy; partition_nodes[1]["command"] = shlex.join(partition_nodes[1]["command_argv"])
 for name, obj in {"pre-rust-peers.json":peers(partition_proxy),"pre-go-peers.json":peers(partition_go_peer),"partition-rust-peers.json":peers(None),"partition-go-peers.json":peers(None),"fork-rust-peers.json":peers(None),"fork-go-peers.json":peers(None),"heal-rust-peers.json":peers(partition_proxy),"heal-go-peers.json":peers(partition_go_peer)}.items(): dump(name, obj)
 for name, obj in {"common-go-mine.json":sidecar_mine("go", "localhost:5101", common_hash, common_height),"common-go-block.json":sidecar_block("go", "localhost:5101", common_hex, common_hash, common_height),"common-rust-tip.json":sidecar_tip("rust", "rust-node:5201", common_hash, common_height),"common-rust-block.json":sidecar_block("rust", "rust-node:5201", common_hex, common_hash, common_height),"go-mine.json":sidecar_mine("go", "localhost:5101", go_hash, fork_height),"go-tip.json":sidecar_tip("go", "localhost:5101", go_hash, fork_height),"go-block.json":sidecar_block("go", "localhost:5101", go_hex, go_hash, fork_height),"rust-mine-1.json":sidecar_mine("rust", "rust-node:5201", rust1_hash, fork_height),"rust-block-1.json":sidecar_block("rust", "rust-node:5201", rust1_hex, rust1_hash, fork_height),"rust-mine-2.json":sidecar_mine("rust", "rust-node:5201", rust2_hash, rust_win_height),"rust-tip.json":sidecar_tip("rust", "rust-node:5201", rust2_hash, rust_win_height),"rust-block-2.json":sidecar_block("rust", "rust-node:5201", rust2_hex, rust2_hash, rust_win_height),"final-go-tip.json":sidecar_tip("go", "localhost:5101", rust2_hash, rust_win_height),"final-rust-tip.json":sidecar_tip("rust", "rust-node:5201", rust2_hash, rust_win_height),"go-reorg-parent-block.json":sidecar_block("go", "localhost:5101", rust1_hex, rust1_hash, fork_height),"go-tip-block.json":sidecar_block("go", "localhost:5101", rust2_hex, rust2_hash, rust_win_height),"rust-tip-block.json":sidecar_block("rust", "rust-node:5201", rust2_hex, rust2_hash, rust_win_height)}.items(): dump(name, obj)
 (root / "partition-metrics.prom").write_text("rubin_node_reorg_total 1\nrubin_node_last_reorg_depth 0\n", encoding="utf-8")
@@ -220,7 +220,7 @@ bad = json.loads((root / "go_accept.json").read_text()); bad["nodes"] = argv_nod
 bad = json.loads((root / "go_accept.json").read_text()); bad["nodes"] = argv_nodes(go_argv, rust_argv); dump("go_accept_rust_without_create.json", bad)
 bad = json.loads(json.dumps(restart)); bad["rust_restart"]["old_command_argv"] = rust_argv; dump("restart_old_without_create.json", bad)
 bad = json.loads(json.dumps(restart)); bad["nodes"] = argv_nodes(go_argv, rust_argv + create); bad["rust_restart"]["new_command_argv"] = rust_argv + create; dump("restart_new_with_create.json", bad)
-bad = json.loads(json.dumps(part)); bad["nodes"][1]["command_argv"] = bad["nodes"][1]["command_argv"][:-1]; bad["nodes"][1]["command"] = " ".join(bad["nodes"][1]["command_argv"]); dump("partition_rust_without_create.json", bad)
+bad = json.loads(json.dumps(part)); bad["nodes"][1]["command_argv"] = bad["nodes"][1]["command_argv"][:-1]; bad["nodes"][1]["command"] = shlex.join(bad["nodes"][1]["command_argv"]); dump("partition_rust_without_create.json", bad)
 PY
 complete="${TMP_ROOT}/complete.json"; home_complete="${TMP_ROOT}/home-complete.json"; partial="${TMP_ROOT}/partial.json"; empty_input="${TMP_ROOT}/empty-input.json"; unbound_metrics="${TMP_ROOT}/unbound-metrics.json"; zero_height="${TMP_ROOT}/restart-zero-height-out.json"; symlink_parent="${TMP_ROOT}/restart-symlink-parent-out.json"; mesh_symlink_parent="${TMP_ROOT}/mesh-symlink-parent-out.json"; mesh_escaped_command="${TMP_ROOT}/mesh-escaped-command-out.json"; base_args=(--mesh-report "${TMP_ROOT}/mesh.json" --go-submit-rust-accept-report "${TMP_ROOT}/go_accept.json" --go-submit-rust-mine-go-converge-report "${TMP_ROOT}/go_conv.json" --rust-submit-go-mine-rust-converge-report "${TMP_ROOT}/rust_conv.json" --rust-restart-report "${TMP_ROOT}/restart.json" --partition-heal-reorg-report "${TMP_ROOT}/partition.json")
 tilde_partition="~""/partition.json"
