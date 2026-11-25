@@ -65,13 +65,13 @@ func tiInvoke(s *Store, a *OperationAccount, planner func(*Reader) (TreeImagePub
 }
 
 // tiCall runs one UpdateImageV1 on a fresh goroutine inside WithOperation(kind) while the
-// caller holds one byte on the account.
-func tiCall(s *Store, o *OperationReservationOwner, kind OperationKind, planner func(*Reader) (TreeImagePublicationV1, error)) tiOutcome {
-	return tiCallAccount(s, o, kind, 1, func(*OperationAccount) func(*Reader) (TreeImagePublicationV1, error) { return planner })
+// caller holds hold bytes (0 or 1) on the account.
+func tiCall(s *Store, o *OperationReservationOwner, kind OperationKind, hold uint64, planner func(*Reader) (TreeImagePublicationV1, error)) tiOutcome {
+	return tiCallAccount(s, o, kind, hold, func(*OperationAccount) func(*Reader) (TreeImagePublicationV1, error) { return planner })
 }
 
-// tiCallAccount is tiCall with a caller hold of hold bytes (0 or 1) and the planner that bind
-// returns for the account WithOperation passes.
+// tiCallAccount is tiCall with the planner that bind returns for the account WithOperation
+// passes.
 func tiCallAccount(s *Store, o *OperationReservationOwner, kind OperationKind, hold uint64, bind func(*OperationAccount) func(*Reader) (TreeImagePublicationV1, error)) tiOutcome {
 	out := tiOutcome{hold: hold}
 	done := make(chan struct{})
@@ -168,11 +168,16 @@ func tiMeta02(t *testing.T, s *Store) ([]byte, bool) {
 	t.Helper()
 	var value []byte
 	var present bool
+	calls := 0
 	mustEnvironment(t, s.View(func(r *Reader) error {
 		var err error
+		calls++
 		value, present, err = r.Get(TreeSchemaV1DBIs()[0], []byte{2})
 		return err
 	}))
+	if calls != 1 {
+		t.Fatalf("View ran its callback %d times, want 1", calls)
+	}
 	return value, present
 }
 
@@ -196,26 +201,29 @@ func tiOpenNext(t *testing.T, s *Store, o *OperationReservationOwner, kind Opera
 	if p.liveErr != nil || !bytes.Equal(p.live, TreeSchemaVersionValue()) {
 		t.Fatalf("live Reader meta key 0x00 = %x, %v", p.live, p.liveErr)
 	}
+	viewCalls := 0
 	mustEnvironment(t, s.View(func(r *Reader) error {
+		viewCalls++
 		if view != nil {
 			view(r)
 		}
 		return nil
 	}))
 	app, treeCalls := errors.New("tree callback error"), 0
+	var r tsResult
 	mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
-		r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { treeCalls++; return TreeOperationV1{}, app })
-		r.tuple(t, 1, 1, -1)
-		if any(r.err) != any(app) || treeCalls != 1 {
-			t.Fatalf("UpdateTreeV1 on the OPEN Store returned %v with %d callback calls", r.err, treeCalls)
-		}
+		r = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { treeCalls++; return TreeOperationV1{}, app })
 		return nil
 	}))
+	r.tuple(t, 1, 1, -1)
+	if viewCalls != 1 || any(r.err) != any(app) || treeCalls != 1 {
+		t.Fatalf("View ran %d callbacks; UpdateTreeV1 on the OPEN Store returned %v with %d callback calls", viewCalls, r.err, treeCalls)
+	}
 }
 
-// tiTerminal requires UpdateImageV1 and UpdateTreeV1 to return (truth, 1, -1, terminal), View
-// and Close to return terminal, zero callback calls and live sum 0, the caller's account kept by
-// UpdateImageV1, and after each of these four calls the Store state, terminal, terminal truth,
+// tiTerminal requires UpdateImageV1 under caller holds 1 and 0 and UpdateTreeV1 to return
+// (truth, 1, -1, terminal), View and Close to return terminal, zero callback calls and live sum 0,
+// the caller's account kept by UpdateImageV1, and after each of these four calls the Store state, terminal, terminal truth,
 // transaction and environment it had before, with every error in terminal's tree unchanged.
 func tiTerminal(t *testing.T, s *Store, o *OperationReservationOwner, truth CommitTruth, terminal error) {
 	t.Helper()
@@ -227,7 +235,8 @@ func tiTerminal(t *testing.T, s *Store, o *OperationReservationOwner, truth Comm
 		}
 	}
 	same("Store")
-	image := tiCall(s, o, LaneOperation, func(*Reader) (TreeImagePublicationV1, error) { calls++; return TreeImagePublicationV1{}, nil })
+	planner := func(*Reader) (TreeImagePublicationV1, error) { calls++; return TreeImagePublicationV1{}, nil }
+	image, fresh := tiCall(s, o, LaneOperation, 1, planner), tiCall(s, o, LaneOperation, 0, planner)
 	same("UpdateImageV1")
 	var tree tsResult
 	mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
@@ -236,8 +245,8 @@ func tiTerminal(t *testing.T, s *Store, o *OperationReservationOwner, truth Comm
 	}))
 	same("UpdateTreeV1")
 	tree.tuple(t, truth, 1, -1)
-	if image := tiReturnedAt(t, image, truth); any(image) != any(terminal) || any(tree.err) != any(terminal) {
-		t.Fatalf("terminal Store returned %v and %v, want %v", image, tree.err, terminal)
+	if image, fresh := tiReturnedAt(t, image, truth), tiReturnedAt(t, fresh, truth); any(image) != any(terminal) || any(fresh) != any(terminal) || any(tree.err) != any(terminal) {
+		t.Fatalf("terminal Store returned %v, %v and %v, want %v", image, fresh, tree.err, terminal)
 	}
 	if err := s.View(func(*Reader) error { calls++; return nil }); any(err) != any(terminal) {
 		t.Fatalf("terminal View returned %v", err)
@@ -299,15 +308,18 @@ func tiSameTree(a, b []any) bool {
 	return true
 }
 
-// tiNextAdmission runs the tiPublication publication on s and requires "invalid Update Batch"
-// at (1, 1, -1) with live sum 0, one planner call, no Replay call and the Store OPEN.
+// tiNextAdmission runs the tiPublication publication on s under caller holds 1 and 0 and requires
+// "invalid Update Batch" at (1, 1, -1) each time with live sum 0, one planner call per call, no
+// Replay call and the Store OPEN.
 func tiNextAdmission(t *testing.T, s *Store, o *OperationReservationOwner) {
 	t.Helper()
 	replays := 0
 	publication := tiPublication(t, &replays)
 	p := &tiPlanner{replays: &replays, outcome: func(*Reader) (TreeImagePublicationV1, error) { return publication, nil }}
-	tiInvalidBatch(t, tiReturned(t, tiCall(s, o, LaneOperation, p.imagePlan)))
-	if p.calls != 1 || replays != 0 || s.state != storeOPEN {
+	for _, hold := range []uint64{1, 0} {
+		tiInvalidBatch(t, tiReturned(t, tiCall(s, o, LaneOperation, hold, p.imagePlan)))
+	}
+	if p.calls != 2 || replays != 0 || s.state != storeOPEN {
 		t.Fatalf("next admission planner %d replay %d state %s", p.calls, replays, s.state)
 	}
 }
@@ -328,7 +340,7 @@ func TestTreeImageAdmissionV1(t *testing.T) {
 		calls, replays := 0, 0
 		planner := tiCounted(t, &calls, &replays)
 		var s *Store
-		for _, err := range []error{tiReturned(t, tiCall(s, o, LaneOperation, planner)), tiNilAll(t, s)} {
+		for _, err := range []error{tiReturned(t, tiCall(s, o, LaneOperation, 1, planner)), tiReturned(t, tiCall(s, o, LaneOperation, 0, planner)), tiNilAll(t, s)} {
 			treeNativeError(t, err, operationUpdate, "InvalidInput", 22, "nil Store", nil)
 		}
 		if calls != 0 || replays != 0 || reservationLive(o) != 0 {
@@ -361,7 +373,7 @@ func tiAdmissionRead(t *testing.T, present bool) {
 	publication := tiPublication(t, &replays)
 	p := &tiPlanner{replays: &replays, outcome: func(*Reader) (TreeImagePublicationV1, error) { return publication, nil }}
 	check := func(out tiOutcome) { tiInvalidBatch(t, tiReturned(t, out)) }
-	check(tiCall(s, o, LaneOperation, p.imagePlan))
+	check(tiCall(s, o, LaneOperation, 1, p.imagePlan))
 	if p.calls != 1 || replays != 0 || s.state != storeOPEN {
 		t.Fatalf("planner %d replay %d state %s", p.calls, replays, s.state)
 	}
@@ -427,11 +439,13 @@ func tiAccountSnapshot(a *OperationAccount) (OperationAccount, operationAccountS
 func tiAdmissionNilPlanner(t *testing.T, account bool) {
 	s, _, _ := treeNativeStore(t)
 	o := reservationOwner(t, MinReservationLimit)
-	err := tiNilAll(t, s)
+	errs := []error{tiNilAll(t, s)}
 	if account {
-		err = tiReturned(t, tiCall(s, o, LaneOperation, nil))
+		errs = []error{tiReturned(t, tiCall(s, o, LaneOperation, 1, nil)), tiReturned(t, tiCall(s, o, LaneOperation, 0, nil))}
 	}
-	treeNativeError(t, err, operationUpdate, "InvalidInput", 22, "nil UpdateImageV1 callback", nil)
+	for _, err := range errs {
+		treeNativeError(t, err, operationUpdate, "InvalidInput", 22, "nil UpdateImageV1 callback", nil)
+	}
 	if reservationLive(o) != 0 || s.state != storeOPEN || s.terminal != nil {
 		t.Fatalf("nil planner refusal live %d state %s terminal %v", reservationLive(o), s.state, s.terminal)
 	}
@@ -470,11 +484,12 @@ func tiAdmissionStore(t *testing.T, name string) {
 		if name == "busy" {
 			s.operations.Lock()
 		}
-		out := tiCall(s, o, LaneOperation, planner)
+		out, fresh := tiCall(s, o, LaneOperation, 1, planner), tiCall(s, o, LaneOperation, 0, planner)
 		if name == "busy" {
 			s.operations.Unlock()
 		}
 		tiStoreRefusal(t, name, tiReturned(t, out), terminal)
+		tiStoreRefusal(t, name, tiReturned(t, fresh), terminal)
 		if calls != 0 || replays != 0 || reservationLive(o) != 0 || s.state != state || any(s.terminal) != any(terminal) || !tiSameTree(values, tiErrorTree(terminal, nil)) {
 			t.Fatalf("Store refusal planner %d Replay %d live %d state %s terminal %v", calls, replays, reservationLive(o), s.state, s.terminal)
 		}
@@ -484,7 +499,11 @@ func tiAdmissionStore(t *testing.T, name string) {
 	case "busy":
 		tiNextAdmission(t, s, o)
 	case "format2":
-		mustEnvironment(t, s.View(func(*Reader) error { return nil }))
+		viewCalls := 0
+		mustEnvironment(t, s.View(func(*Reader) error { viewCalls++; return nil }))
+		if viewCalls != 1 {
+			t.Fatalf("format 2 View ran its callback %d times, want 1", viewCalls)
+		}
 		refuse()
 	case "closed":
 		refuse()

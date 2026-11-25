@@ -1692,8 +1692,8 @@ func TestTreeStreamCallbackLifecycleV1(t *testing.T) {
 					t.Fatalf("panic identity %v", recovered)
 				}
 				if mode == "panic-nil" {
-					if panicNil, ok := recovered.(*runtime.PanicNilError); !ok || panicNil == nil {
-						t.Fatalf("nil panic %T %v", recovered, recovered)
+					if _, ok := recovered.(*runtime.PanicNilError); !ok {
+						t.Fatalf("nil panic %T", recovered)
 					}
 				}
 			default:

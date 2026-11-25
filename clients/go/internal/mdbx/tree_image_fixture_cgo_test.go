@@ -50,17 +50,27 @@ func TestTreeImageLifecycleV1(t *testing.T) {
 		code     int
 	}{{SelectedDamageBeginEIO, "IO", 5}, {SelectedDamageBeginTxnFull, "Transaction", -30788}} {
 		t.Run(fmt.Sprintf("ORIGINAL OLD begin failure %d consumes the Store", row.code), func(t *testing.T) {
-			tiBeginFailure(t, row.scenario, row.class, row.code)
+			for _, hold := range []uint64{1, 0} {
+				tiBeginFailure(t, row.scenario, row.class, row.code, hold)
+			}
 		})
 	}
 	t.Run("NEW cached terminal returns truth 2", tiNewTerminal)
 	for _, outcome := range []string{"nil", "error", "typed-nil", "wrapped", "panic", "panic-nil", "goexit"} {
 		for _, mode := range []uint32{0, 9, 2, 10} {
-			t.Run(fmt.Sprintf("planner outcome %s %s", outcome, tiAbortName(mode, false)), func(t *testing.T) { tiPlannerCase(t, outcome, mode) })
+			t.Run(fmt.Sprintf("planner outcome %s %s", outcome, tiAbortName(mode, false)), func(t *testing.T) {
+				for _, hold := range []uint64{1, 0} {
+					tiPlannerCase(t, outcome, mode, hold)
+				}
+			})
 		}
 	}
 	for _, mode := range []string{"ignored", "returned", "wrapped", "other", "panic", "goexit"} {
-		t.Run("Reader-recorded census failure with planner outcome "+mode+" consumes the Store", func(t *testing.T) { tiRecordedCase(t, mode) })
+		t.Run("Reader-recorded census failure with planner outcome "+mode+" consumes the Store", func(t *testing.T) {
+			for _, hold := range []uint64{1, 0} {
+				tiRecordedCase(t, mode, hold)
+			}
+		})
 	}
 }
 
@@ -320,17 +330,21 @@ func tiPrunedB1U0(t *testing.T) []byte {
 }
 
 // tiSeededCase runs the row on a fresh exact-empty tree Store after its seed.
+// tiSeededCase runs tiPublicationCase on a freshly seeded Store under caller hold 1, then on
+// another under caller hold 0.
 func tiSeededCase(t *testing.T, row tiRow, mode uint32) {
-	s, _, _ := treeNativeStore(t)
-	row.seed(t, s)
-	tiPublicationCase(t, s, reservationOwner(t, MinReservationLimit), row, mode)
+	for _, hold := range []uint64{1, 0} {
+		s, _, _ := treeNativeStore(t)
+		row.seed(t, s)
+		tiPublicationCase(t, s, reservationOwner(t, MinReservationLimit), row, mode, hold)
+	}
 }
 
-// tiPublicationCase runs the row's publication once, under the row's fault at its key when it
+// tiPublicationCase runs the row's publication once with caller hold hold, under the row's fault at its key when it
 // has one, under SelectedDamageProbeOnly for mode 0 and under fault mode at rank 0 key 0x00
 // otherwise, and checks the result against mode, the planner, Replay and Reader, then the next
 // public calls.
-func tiPublicationCase(t *testing.T, s *Store, o *OperationReservationOwner, row tiRow, mode uint32) {
+func tiPublicationCase(t *testing.T, s *Store, o *OperationReservationOwner, row tiRow, mode uint32, hold uint64) {
 	t.Helper()
 	replays := 0
 	publication := tiPublication(t, &replays)
@@ -360,7 +374,7 @@ func tiPublicationCase(t *testing.T, s *Store, o *OperationReservationOwner, row
 		fault, key = row.fault, row.faultKey
 	}
 	tiReleaseRetained(t, s)
-	native := tiNative(t, s, o, fault, rank, key, row.gets, func() { out = tiCallAccount(s, o, kind, 1, bind) })
+	native := tiNative(t, s, o, fault, rank, key, row.gets, func() { out = tiCallAccount(s, o, kind, hold, bind) })
 	check(out)
 	if p.calls != 1 || replays != 0 || reservationLive(o) != 0 {
 		t.Fatalf("planner %d replay %d live %d", p.calls, replays, reservationLive(o))
@@ -382,7 +396,7 @@ func tiForeignIdentity(t *testing.T) {
 	p := &tiPlanner{replays: &replays, outcome: func(*Reader) (TreeImagePublicationV1, error) { return publication, nil }}
 	check := func(out tiOutcome) { tiInvalidBatch(t, tiDisposition(t, s, 0, false, tiReturned(t, out), true)) }
 	var out tiOutcome
-	native := tiNative(t, s, o, 0, 0, nil, 1, func() { out = tiCall(s, o, LaneOperation, p.imagePlan) })
+	native := tiNative(t, s, o, 0, 0, nil, 1, func() { out = tiCall(s, o, LaneOperation, 1, p.imagePlan) })
 	check(out)
 	if p.calls != 1 || replays != 0 {
 		t.Fatalf("planner %d replay %d", p.calls, replays)
@@ -439,13 +453,14 @@ func tiReadRows(t *testing.T) []tiRow {
 	return rows
 }
 
-func tiBeginFailure(t *testing.T, scenario SelectedDamageScenario, class EngineClass, code int) {
+// tiBeginFailure runs one UpdateImageV1 with caller hold hold under the begin fault scenario.
+func tiBeginFailure(t *testing.T, scenario SelectedDamageScenario, class EngineClass, code int, hold uint64) {
 	s, _, _ := treeNativeStore(t)
 	o := reservationOwner(t, MinReservationLimit)
 	calls, replays := 0, 0
 	var out tiOutcome
 	evidence, err := FixtureSelectedDamage(s, o, scenario, 0, []byte{0}, func() {
-		out = tiCall(s, o, LaneOperation, tiCounted(t, &calls, &replays))
+		out = tiCall(s, o, LaneOperation, hold, tiCounted(t, &calls, &replays))
 	})
 	mustEnvironment(t, err)
 	result := tiReturned(t, out)
@@ -469,8 +484,9 @@ func tiNewTerminal(t *testing.T) {
 		t.Fatalf("crossed producer left %s terminal %v truth %d", s.state, s.terminal, s.terminalTruth)
 	}
 	calls, replays, values := 0, 0, tiErrorTree(r.err, nil)
-	out := tiCall(s, o, LaneOperation, tiCounted(t, &calls, &replays))
-	if any(tiReturnedAt(t, out, 2)) != any(r.err) || calls != 0 || replays != 0 || s.state != storeCLOSED || any(s.terminal) != any(r.err) || s.terminalTruth != 2 || !tiSameTree(values, tiErrorTree(r.err, nil)) {
+	planner := tiCounted(t, &calls, &replays)
+	out, fresh := tiCall(s, o, LaneOperation, 1, planner), tiCall(s, o, LaneOperation, 0, planner)
+	if any(tiReturnedAt(t, out, 2)) != any(r.err) || any(tiReturnedAt(t, fresh, 2)) != any(r.err) || calls != 0 || replays != 0 || s.state != storeCLOSED || any(s.terminal) != any(r.err) || s.terminalTruth != 2 || !tiSameTree(values, tiErrorTree(r.err, nil)) {
 		t.Fatalf("NEW terminal returned %v planner %d Replay %d state %s truth %d", out.r.err, calls, replays, s.state, s.terminalTruth)
 	}
 	tiTerminal(t, s, o, 2, r.err)
@@ -478,8 +494,8 @@ func tiNewTerminal(t *testing.T) {
 
 // tiPlannerCase runs one planner outcome under SelectedDamageProbeOnly for mode 0 and under mode
 // at rank 0 key 0x00 otherwise, then checks the end, the planner, Replay and Reader and the next
-// public calls.
-func tiPlannerCase(t *testing.T, outcome string, mode uint32) {
+// public calls, with caller hold hold on the first call.
+func tiPlannerCase(t *testing.T, outcome string, mode uint32, hold uint64) {
 	s, _, _ := treeNativeStore(t)
 	o := reservationOwner(t, MinReservationLimit)
 	replays := 0
@@ -518,7 +534,7 @@ func tiPlannerCase(t *testing.T, outcome string, mode uint32) {
 	}
 	var out tiOutcome
 	tiReleaseRetained(t, s)
-	native := tiNative(t, s, o, mode, 0, []byte{0}, gets, func() { out = tiCall(s, o, LaneOperation, p.imagePlan) })
+	native := tiNative(t, s, o, mode, 0, []byte{0}, gets, func() { out = tiCall(s, o, LaneOperation, hold, p.imagePlan) })
 	check(out)
 	if p.calls != 1 || replays != 0 || reservationLive(o) != 0 {
 		t.Fatalf("planner %d replay %d live %d", p.calls, replays, reservationLive(o))
@@ -574,8 +590,8 @@ func tiPlannerEnd(t *testing.T, s *Store, outcome string, mode uint32, out tiOut
 
 // tiRecordedCase: the planner's ReadTreeAuthorityV1 records the census failure f
 // on a Store with a rank-1 row; readPrimary composes f with the error the planner returns,
-// nil when it returns nil, panics or calls Goexit.
-func tiRecordedCase(t *testing.T, mode string) {
+// nil when it returns nil, panics or calls Goexit. The call runs with caller hold hold.
+func tiRecordedCase(t *testing.T, mode string, hold uint64) {
 	s, _, _ := treeNativeStore(t)
 	tiRankOne(t, s)
 	o := reservationOwner(t, MinReservationLimit)
@@ -598,7 +614,7 @@ func tiRecordedCase(t *testing.T, mode string) {
 		return TreeImagePublicationV1{}, application
 	}}
 	var out tiOutcome
-	native := tiProbe(t, s, o, 1, func() { out = tiCall(s, o, LaneOperation, p.imagePlan) })
+	native := tiProbe(t, s, o, 1, func() { out = tiCall(s, o, LaneOperation, hold, p.imagePlan) })
 	treeNativeIntegrity(t, f, operationGet, nil)
 	terminal := f
 	switch mode {
