@@ -272,10 +272,11 @@ SH
 }
 
 check_txgen_datadir_guard() {
-  local probe="${TMP_ROOT}/txgen-datadir-guard.sh" probe_root="${TMP_ROOT}/txgen-datadir-guard" lib="${TMP_ROOT}/txgen-datadir-guard-lib.sh"
+  local probe="${TMP_ROOT}/txgen-datadir-guard.sh" probe_root="${TMP_ROOT}/txgen-datadir-guard" lib="${TMP_ROOT}/txgen-datadir-guard-lib.sh" argv_py="${TMP_ROOT}/argv-compare.py"
   mkdir -p -- "${probe_root}/go-node" "${probe_root}/rust-node"
   ln -s -- "${probe_root}/rust-node" "${probe_root}/rust-alias"
   extract_slices "${lib}" "txgen_datadir_guard()" "wait_rust_accept()"
+  extract_slices "${argv_py}" "def fail(" "def eventually(" "def safe_path_str(" "def ep(" "def argv_eq(" "def report_node_argv_eq("
   cat >"${probe}" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -298,9 +299,10 @@ if argv[argv.index("--datadir") + 1] != sys.argv[2] or argv[argv.index("--submit
     sys.exit(f"submit_rust_tx txgen argv {argv}")
 PY
 expect_guard_refused() {
+  local rc=0
   TX_REASON=""
-  if txgen_datadir_guard "${TXGEN_BIN}" "$@" --submit-to "${GO_RPC_ADDR}" 2>"${probe_root}/guard.err"; then echo "FAIL: guard accepted $*" >&2; exit 1; fi
-  [[ "${TX_REASON}" == cross_client_datadir_argv ]] || { echo "FAIL: guard reason ${TX_REASON} for $*" >&2; exit 1; }
+  txgen_datadir_guard "${TXGEN_BIN}" "$@" --submit-to "${GO_RPC_ADDR}" 2>"${probe_root}/guard.err" || rc=$?
+  [[ ${rc} == 1 && "${TX_REASON}" == cross_client_datadir_argv ]] || { echo "FAIL: guard exited ${rc} with reason ${TX_REASON} for $*" >&2; exit 1; }
   [[ ! -s "${probe_root}/guard.err" ]] || { echo "FAIL: guard wrote to stderr for $*" >&2; exit 1; }
 }
 expect_guard_refused --datadir "${RUST_DIR}"
@@ -315,14 +317,39 @@ RUST_DIR="${probe_root}/rust-node"
 reason="$(TX_REASON=""; txgen_datadir_guard "${TXGEN_BIN}" --datadir 2>"${probe_root}/guard.err" || printf '%s' "${TX_REASON}")" || :
 [[ "${reason}" == cross_client_datadir_argv && ! -s "${probe_root}/guard.err" ]] || { echo "FAIL: trailing --datadir reason '${reason}': $(cat "${probe_root}/guard.err")" >&2; exit 1; }
 TX_REASON=""; txgen_datadir_guard "${TXGEN_BIN}" --datadir "${GO_DIR}" || { echo "FAIL: guard refused the Go datadir" >&2; exit 1; }
-GO_DIR="${probe_root}/rust-alias"; rm -f -- "${SPAWNED}"; TX_REASON=""
-if submit_go_tx; then echo "FAIL: submit_go_tx accepted the Rust datadir" >&2; exit 1; fi
-[[ "${TX_REASON}" == cross_client_datadir_argv && ! -e "${SPAWNED}" ]] || { echo "FAIL: submit_go_tx reason ${TX_REASON} or txgen spawned" >&2; exit 1; }
-rm -f -- "${SPAWNED}"; TX_REASON=""
-if submit_rust_tx; then echo "FAIL: submit_rust_tx accepted the Rust datadir" >&2; exit 1; fi
-[[ "${TX_REASON}" == cross_client_datadir_argv && ! -e "${SPAWNED}" ]] || { echo "FAIL: submit_rust_tx reason ${TX_REASON} or txgen spawned" >&2; exit 1; }
+nonclean=("/${GO_DIR}" "${probe_root}//go-node" "${probe_root}/./go-node" "${RUST_DIR}/../go-node" "${GO_DIR}/")
+for path in "${nonclean[@]}"; do expect_guard_refused --datadir "${path}"; done
+for submit in submit_go_tx submit_rust_tx; do
+  for GO_DIR in "${probe_root}/rust-alias" "${nonclean[2]}"; do
+    rc=0; rm -f -- "${SPAWNED}"; "${submit}" || rc=$?
+    [[ ${rc} == 1 && "${TX_REASON}" == cross_client_datadir_argv && ! -e "${SPAWNED}" ]] || { echo "FAIL: ${submit} exited ${rc} with ${TX_REASON} or spawned txgen for ${GO_DIR}" >&2; exit 1; }
+  done
+done
+python3 - "$4" "${probe_root}/go-node" "${nonclean[@]}" <<'PY'
+import io, os, sys
+from contextlib import redirect_stderr
+from pathlib import Path
+scope = {"os": os, "sys": sys, "Path": Path}
+exec(Path(sys.argv[1]).read_text(encoding="utf-8"), scope)
+argv_eq = scope["argv_eq"]
+binary = str(Path(sys.argv[2]).parent / "rubin-node-go")
+clean = [binary, "--network", "devnet", "--datadir", sys.argv[2]]
+assert argv_eq(clean, clean), "clean live and report datadirs differ"
+for path in sys.argv[3:] + ["relative/node-go"]:
+    changed = [*clean[:4], path]
+    reason = "not absolute" if path == "relative/node-go" else "not a lexically clean path"
+    for left, right, label in ((changed, clean, "live argv"), (clean, changed, "report command_argv")):
+        stderr = io.StringIO()
+        try:
+            with redirect_stderr(stderr):
+                argv_eq(left, right)
+        except SystemExit as exc:
+            assert exc.code == 1 and stderr.getvalue() == f"FAIL: {label}[4] is {reason}\n", (path, exc.code, stderr.getvalue())
+        else:
+            raise AssertionError(f"{label} did not refuse {path!r} with a path diagnostic")
+PY
 SH
-  bash "${probe}" "${lib}" "${probe_root}" "${case_folds}"
+  bash "${probe}" "${lib}" "${probe_root}" "${case_folds}" "${argv_py}"
 }
 
 check_initial_convergence_wait() {
@@ -900,6 +927,60 @@ SH
   start_fifo_watchdog "${probe_root}/bin-fifo"
   bash "${probe}" "${lib}" "${main}" "${probe_root}" "${first}"
   stop_fifo_watchdog
+  (
+    source "${lib}"
+    { sidecar_derivations_py; cat <<'PY'; } | python3 - "${probe_root}" "${GENERATOR}"
+import errno, runpy, sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+path = Path(sys.argv[1]) / "reader.json"
+path.write_bytes(b'{"value":7}\n')
+generator_load = runpy.run_path(sys.argv[2])["load"]
+real_open, real_fstat = os.open, os.fstat
+
+def check_reader(reader, valid, refused, open_error):
+    observed_paths = []
+    def observe_open(name, flags, *args, **kwargs):
+        assert flags & os.O_ACCMODE == os.O_RDONLY and flags & os.O_NONBLOCK, (reader.__name__, flags)
+        observed_paths.append(Path(name))
+        return real_open(name, flags, *args, **kwargs)
+    with patch.object(os, "open", observe_open):
+        assert reader(path) == valid, reader.__name__
+    assert observed_paths == [path], (reader.__name__, observed_paths)
+    with patch.object(os, "open", side_effect=PermissionError(errno.EACCES, "open refused")):
+        assert reader(path) == open_error, reader.__name__
+    assert reader(path) == valid, reader.__name__
+
+    for raise_error in (False, True):
+        observed = []
+        def observe_mode(fd):
+            observed.append((fd, os.dup(fd)))
+            if raise_error:
+                raise OSError(errno.EIO, "descriptor stat failed")
+            return SimpleNamespace(st_mode=stat.S_IFDIR)
+        with patch.object(os, "fstat", observe_mode):
+            got = reader(path)
+        assert got == refused, (reader.__name__, raise_error, got)
+        assert reader(path) == valid, (reader.__name__, raise_error)
+        (fd, duplicate), = observed
+        try:
+            try:
+                real_fstat(fd)
+            except OSError as exc:
+                assert exc.errno == errno.EBADF, (reader.__name__, exc)
+            else:
+                raise AssertionError(f"{reader.__name__} retained the rejected descriptor")
+            assert os.lseek(duplicate, 0, os.SEEK_CUR) == 0, (reader.__name__, raise_error)
+        finally:
+            os.close(duplicate)
+
+check_reader(file_sha256, "6a89805d7a1b132e1cc7e8fcc02d32b8ef8e60bc0652024192dbc9a0ffd40a07", None, None)
+check_reader(load_json_or_none, {"value": 7}, None, None)
+check_reader(generator_load, ({"value": 7}, None), (None, "malformed_json:OSError"), (None, "malformed_json:PermissionError"))
+PY
+  )
 }
 
 check_publish_pass_report() {
@@ -2527,6 +2608,16 @@ def sn_argv_control(index: int, name: str):
     return edit
 sn_variant("mesh-argv0-control", "mesh", lambda s, r: None, sn_argv_control(0, "rubin-node-go"))
 sn_variant("mesh-argv4-control", "mesh", lambda s, r: None, sn_argv_control(4, "node-go"))
+for sn_name, sn_spelling in (("double-leading", "/{root}/node-go"), ("double-interior", "{root}//node-go"),
+                            ("dot", "{root}/./node-go"), ("parent", "{root}/node-rust/../node-go"), ("trailing", "{root}/node-go/")):
+    report = json.loads(SN_BASE_REPORTS["mesh"].read_text(encoding="utf-8"))
+    node = next(n for n in report["nodes"] if n["name"] == "node-go")
+    node["command_argv"][4] = sn_spelling.format(root=report["artifact_root"])
+    node["command"] = shlex.join(node["command_argv"])
+    dump(root / f"mesh-datadir-{sn_name}.json", report)
+def sn_old_datadir_with_dot(report: dict) -> None:
+    report["rust_restart"]["old_command_argv"][4] = f"{report['artifact_root']}/./node-rust"
+sn_variant("restart-old-argv-datadir", "restart", lambda s, r: None, sn_old_datadir_with_dot)
 sn_variant("restart-report-datadir-control", "restart", lambda s, r: None, lambda report: report["rust_restart"].update(datadir=sn_control_dot_dot(report, "node-rust")))
 sn_variant("mesh-marker-unsearchable-parent", "mesh", lambda s, r: None, sn_lock_report_path("legacy_schema_compatibility", "marker_path"))
 def sn_root_through_missing(report: dict) -> None:
@@ -3129,6 +3220,10 @@ done
 expect_pass_contains "legacy marker path in a directory holding a space" "PASS: mixed_client_mesh report structurally accepted" check_report "${TMP_ROOT}/sn-mesh-marker-space-dir-report.json" offline public
 expect_fail_contains "go command_argv[0] through a control character" "FAIL: node-go.command_argv[0] is not a safe unquoted path string" check_report "${TMP_ROOT}/sn-mesh-argv0-control-report.json" offline public
 expect_fail_contains "go command_argv[4] through a control character" "FAIL: report command_argv[4] is not a safe unquoted path string" check_report "${TMP_ROOT}/sn-mesh-argv4-control-report.json" offline public
+for spelling in double-leading double-interior dot parent trailing; do
+  expect_fail_contains "go datadir ${spelling}" "FAIL: report command_argv[4] is not a lexically clean path" check_report "${TMP_ROOT}/mesh-datadir-${spelling}.json" offline public
+done
+expect_fail_contains "old Rust datadir with a dot component" "FAIL: rust_restart.old_command_argv[4] is not a lexically clean path" check_report "${TMP_ROOT}/sn-restart-old-argv-datadir-report.json" offline rust-restart
 sn_check "artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" public mesh-root-through-missing
 sn_check "tx artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" tx tx-accept-root-through-missing
 sidecar_value_check "restart artifact root through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-root-through-missing-report.json"

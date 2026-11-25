@@ -2,6 +2,7 @@
 # ruff: noqa: E302,E305,E401,E701
 from __future__ import annotations
 import argparse, json, math, os, re, shlex, subprocess, sys, tempfile  # nosec B404
+import stat
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -18,6 +19,7 @@ PATH_FIELD_DOTTED_NAMES = {
     "observations.partition.go_peer_snapshot", "observations.partition.rust_peer_snapshot", "observations.fork.go_block", "observations.fork.go_mine", "observations.fork.go_peer_snapshot", "observations.fork.go_tip", "observations.fork.rust_block_1", "observations.fork.rust_block_2", "observations.fork.rust_mine_1", "observations.fork.rust_mine_2", "observations.fork.rust_peer_snapshot", "observations.fork.rust_tip",
     "observations.heal.go_peer_snapshot", "observations.heal.rust_peer_snapshot", "observations.reorg.go_metrics", "observations.reorg.go_reorg_parent_block", "observations.reorg.go_tip", "observations.reorg.go_tip_block", "observations.reorg.rust_tip", "observations.reorg.rust_tip_block",
 }
+MAX_DOTTED_PATH_LEN = max(map(len, PATH_FIELD_DOTTED_NAMES))
 TX_OBJECT_KEYS = {
     "go_submit": {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"},
     "rust_submit": {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"},
@@ -138,9 +140,18 @@ def section(name: str, status: str, reason: str | None = None, **kw: Any) -> dic
         if value is not None and value != []:
             out[key] = str(value) if isinstance(value, Path) else value
     return out
+def open_regular_read(path: str | bytes, flags: int) -> int:
+    fd = os.open(path, flags | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("descriptor is not a regular file")
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
 def load(path: Path) -> tuple[Any | None, str | None]:
     try:
-        with path.open("rb") as src: raw = src.read(MAX_JSON_BYTES + 1)
+        with open(path, "rb", opener=open_regular_read) as src: raw = src.read(MAX_JSON_BYTES + 1)
         if len(raw) > MAX_JSON_BYTES: return None, "json_too_large"  # noqa: E701
         return json.loads(raw.decode("utf-8"), object_pairs_hook=NO_DUPES, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"non_finite_json_constant:{c}"))), None
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
@@ -177,7 +188,20 @@ def same_arg_path(left: str, right: str) -> bool:
     except (OSError, ValueError):
         return False
 def argv_eq(actual: Any, expected: Any, path_indexes: set[int]) -> bool:
-    return str_list(actual) and str_list(expected) and len(actual) == len(expected) and all(safe_path_str(actual[i]) and same_arg_path(actual[i], expected[i]) if i in path_indexes else actual[i] == expected[i] for i in range(len(expected)))
+    if not str_list(actual) or not str_list(expected) or len(actual) != len(expected):
+        return False
+    for i, reference in enumerate(expected):
+        value = actual[i]
+        if i not in path_indexes:
+            if value != reference:
+                return False
+        elif (
+            not safe_path_str(value)
+            or (i == 4 and (not value.startswith("/") or any(part in {"", ".", ".."} for part in value[1:].split("/"))))
+            or not same_arg_path(value, reference)
+        ):
+            return False
+    return True
 def get(data: Any, dotted: str) -> tuple[Any, bool]:
     cur = data
     for part in dotted.split("."):
@@ -1367,24 +1391,29 @@ def write_atomic(path: Path, data: dict[str, Any]) -> None:
             pass
         raise
 def path_field_targets(value: Any, base: Path) -> list[tuple[Path, bool]]:
-    out: list[tuple[Path, bool]] = []; stack: list[tuple[Any, str]] = [(value, "")]  # noqa: E702
+    out: list[tuple[Path, bool]] = []
+    stack: list[tuple[Any, str, str | None]] = [(value, "", "")]
     def add_path(text: str, directory: bool = False) -> None:
         raw = (_ for _ in ()).throw(ValueError("path_field_contains_nul")) if "\x00" in text else Path(os.path.expanduser(text)); out.append((Path(os.path.realpath(raw if raw.is_absolute() else base / raw)), directory))  # noqa: E702
     while stack:
-        item, prefix = stack.pop()
+        item, last_key, prefix = stack.pop()
         if isinstance(item, dict):
             for key, child in item.items():
-                dotted = f"{prefix}.{key}" if prefix else key; is_path = key in PATH_FIELD_NAMES or (key.endswith("_path") and key != "tx_path") or dotted in PATH_FIELD_DOTTED_NAMES  # noqa: E702
+                dotted = None
+                if prefix is not None and len(prefix) + bool(prefix) + len(key) <= MAX_DOTTED_PATH_LEN:
+                    dotted = f"{prefix}.{key}" if prefix else key
+                is_path = key in PATH_FIELD_NAMES or (key.endswith("_path") and key != "tx_path") or dotted in PATH_FIELD_DOTTED_NAMES
                 if is_path and not isinstance(child, str): raise ValueError("path_field_not_string")  # noqa: E701
                 if is_path: add_path(child, key in DIRECTORY_PATH_FIELD_NAMES)  # noqa: E701
-                else: stack.append((child, dotted))  # noqa: E701
+                else:
+                    stack.append((child, key, dotted))
         elif isinstance(item, list):
-            if prefix.endswith("command_argv"):
+            if last_key.endswith("command_argv"):
                 for child in item:
                     if isinstance(child, str):
                         for text in (child, child.split("=", 1)[1] if "=" in child else ""):
                             if text and (text.startswith(("~", "/", ".")) or os.sep in text): add_path(text)  # noqa: E701
-            stack.extend((child, prefix) for child in item)
+            stack.extend((child, last_key, prefix) for child in item)
     return out
 def same_path(left: Path, right: Path) -> bool:
     if left == right: return True  # noqa: E701

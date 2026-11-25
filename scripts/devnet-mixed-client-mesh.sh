@@ -65,9 +65,14 @@ def eventually(fn, message: str) -> None:
         if time.monotonic() >= deadline: fail(message)
 def safe_path_str(value: object) -> bool:
     return isinstance(value, str) and value.strip() == value and bool(value) and value[0] not in "'\"" and value[-1] not in "'\"" and "\0" not in value and all(ord(c) >= 32 for c in value)
-def checked_path(label: str, value: object) -> Path:
+def checked_path(label: str, value: object, *, clean_datadir: bool = False) -> Path:
     req(safe_path_str(value), f"{label} is not a safe unquoted path string")
-    try: p = Path(value); req(p.is_absolute(), f"{label} is not absolute"); return Path(os.path.realpath(p))
+    try:
+        p = Path(value)
+        req(p.is_absolute(), f"{label} is not absolute")
+        if clean_datadir:
+            req(not any(part in {"", ".", ".."} for part in value[1:].split("/")), f"{label} is not a lexically clean path")
+        return Path(os.path.realpath(p))
     except (OSError, RuntimeError, ValueError) as exc: fail(f"{label} path is invalid: {exc}")
 def ep(value: object) -> bool:
     if not isinstance(value, str): return False
@@ -352,7 +357,7 @@ def pid_argv(pid: int) -> list[str]:
         if j < 0: break
         args.append(raw[i:j].decode("utf-8", "surrogateescape")); i = j + 1
     return args
-def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live argv", expected_label: str = "report command_argv") -> bool:
+def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live argv", expected_label: str = "report command_argv", *, expected_raw_datadir: bool = True) -> bool:
     if len(actual) != len(expected) or not actual:
         return False
     if checked_path(f"{actual_label}[0]", actual[0]) != checked_path(f"{expected_label}[0]", expected[0]):
@@ -363,7 +368,7 @@ def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live ar
         if expected[i] in path_flags:
             if i + 1 >= len(expected):
                 return False
-            if actual[i] != expected[i] or checked_path(f"{actual_label}[{i + 1}]", actual[i + 1]) != checked_path(f"{expected_label}[{i + 1}]", expected[i + 1]):
+            if actual[i] != expected[i] or checked_path(f"{actual_label}[{i + 1}]", actual[i + 1], clean_datadir=True) != checked_path(f"{expected_label}[{i + 1}]", expected[i + 1], clean_datadir=expected_raw_datadir):
                 return False
             i += 2
             continue
@@ -374,7 +379,7 @@ def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live ar
 def report_node_argv_eq(node: dict, datadir_name: str, extra: list[str]) -> bool:
     argv = node.get("command_argv")
     expected = [node["binary"], "--network", "devnet", "--datadir", str(Path(artifact_root_arg) / datadir_name), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + extra
-    return isinstance(argv, list) and len(argv) == len(expected) and argv_eq(argv, expected, "report command_argv", "expected command_argv")
+    return isinstance(argv, list) and len(argv) == len(expected) and argv_eq(argv, expected, "report command_argv", "expected command_argv", expected_raw_datadir=False)
 def lsof_lines(pid: int, state: str) -> list[str]:
     try:
         p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
@@ -655,7 +660,7 @@ if restart_mode:
     expected_old_rust_argv = [nodes_by_impl["rust"]["binary"], "--network", "devnet", "--datadir", str(artifact_root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", nodes_by_impl["go"]["p2p_endpoint"], "--create-store"]
     old_argv = restart_info.get("old_command_argv")
     new_argv = restart_info.get("new_command_argv")
-    req(isinstance(old_argv, list) and all(isinstance(arg, str) for arg in old_argv) and argv_eq(old_argv, expected_old_rust_argv, "rust_restart.old_command_argv", "expected old rust argv"), "rust_restart old argv mismatch")
+    req(isinstance(old_argv, list) and all(isinstance(arg, str) for arg in old_argv) and argv_eq(old_argv, expected_old_rust_argv, "rust_restart.old_command_argv", "expected old rust argv", expected_raw_datadir=False), "rust_restart old argv mismatch")
     req(isinstance(new_argv, list) and new_argv == nodes_by_impl["rust"]["command_argv"], "rust_restart new argv mismatch")
 if partition_mode:
     req(nonempty_str(data.get("run_id")), "partition report run_id missing")
@@ -905,14 +910,24 @@ PY
 # /get_tip object whose has_tip is true and whose height and tip_hash equal the given ones.
 sidecar_derivations_py() { cat <<'PY'
 import hashlib, json, os, stat
+from typing import Union
 def regular_file(path: object) -> bool:
     try: return stat.S_ISREG(os.stat(path).st_mode)
     except (OSError, ValueError): return False
+def open_regular_read(path: Union[str, bytes], flags: int) -> int:
+    fd = os.open(path, flags | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("descriptor is not a regular file")
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
 def file_sha256(path: object) -> object:
     if not regular_file(path): return None
     try:
         digest = hashlib.sha256()
-        with open(path, "rb") as f:
+        with open(path, "rb", opener=open_regular_read) as f:
             for chunk in iter(lambda: f.read(1 << 20), b""): digest.update(chunk)
         return digest.hexdigest()
     except OSError: return None
@@ -923,7 +938,7 @@ def header_length(block_hex: object, block_hash: object) -> int:
     return found[0] if len(found) == 1 else 0
 def load_json_or_none(path: object) -> object:
     try:
-        with open(path, encoding="utf-8") as f: return json.load(f)
+        with open(path, encoding="utf-8", opener=open_regular_read) as f: return json.load(f)
     except (OSError, ValueError, RecursionError): return None
 def tip_absent(tip: object) -> bool:
     return isinstance(tip, dict) and tip.get("has_tip") is False and "height" in tip and tip["height"] is None and "tip_hash" in tip and tip["tip_hash"] is None
@@ -1597,7 +1612,8 @@ PY
 txgen_datadir_guard() {
   local datadir=""
   while (( $# )); do [[ "$1" == --datadir && $# -ge 2 ]] && datadir="$2"; shift; done
-  [[ -d "${datadir}" && -d "${RUST_DIR}" && ! "${datadir}" -ef "${RUST_DIR}" ]] || { TX_REASON=cross_client_datadir_argv; return 1; }
+  [[ "${datadir}" == /* && "${datadir}/" != *//* && "${datadir}/" != */./* && "${datadir}/" != */../* &&
+     -d "${datadir}" && -d "${RUST_DIR}" && ! "${datadir}" -ef "${RUST_DIR}" ]] || { TX_REASON=cross_client_datadir_argv; return 1; }
 }
 submit_go_tx() {
   local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key-file "${TX_FROM_KEY_FILE}" --to-key "${TX_TO_KEY}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}" --submit-to "${GO_RPC_ADDR}")

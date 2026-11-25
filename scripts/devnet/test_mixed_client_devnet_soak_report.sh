@@ -248,6 +248,24 @@ for name, src, field, target in (("mesh_marker_tab_dir.json", "mesh.json", "lega
 (root / "x\x01").mkdir()
 for index, name in ((0, "rubin-node-go"), (4, "node-go")):
     bad = load_report("mesh.json"); bad["nodes"][0]["command_argv"][index] = str(root / "x\x01" / ".." / name); bad["nodes"][0]["command"] = shlex.join(bad["nodes"][0]["command_argv"]); dump(f"mesh_argv{index}_control.json", bad)
+(root / "node-go").mkdir(exist_ok=True)
+for spelling, path in (("double-leading", f"/{root}/node-go"), ("double-interior", f"{root}//node-go"),
+                       ("dot", f"{root}/./node-go"), ("parent", f"{root}/node-rust/../node-go"), ("trailing", f"{root}/node-go/")):
+    bad = load_report("mesh.json")
+    node = bad["nodes"][0]
+    node["command_argv"][4] = path
+    node["command"] = shlex.join(node["command_argv"])
+    dump(f"mesh-datadir-{spelling}.json", bad)
+for source in ("go_accept", "restart", "partition"):
+    bad = load_report(f"{source}.json")
+    node = bad["nodes"][0]
+    node["command_argv"][4] = f"{root}/./node-go"
+    node["command"] = shlex.join(node["command_argv"])
+    dump(f"{source}-datadir-dot.json", bad)
+for label in ("old", "new"):
+    bad = load_report("restart.json")
+    bad["rust_restart"][f"{label}_command_argv"][4] = f"{root}/./node-rust"
+    dump(f"restart-{label}-datadir-dot.json", bad)
 bad = load_report("restart.json"); bad["rust_restart"]["datadir"] = str(root / "x\x01" / ".." / "node-rust"); dump("restart_datadir_control.json", bad)
 tab_root = root / "tab\troot"; tab_root.mkdir(); tab_link = root / "tab-root-link"; tab_link.symlink_to(tab_root, target_is_directory=True)
 for name in ("rubin-node-go", "rubin-node-rust", "marker.json"):
@@ -371,6 +389,13 @@ expect_fail_reason partition_reorg_source_binding_contradiction:sidecar_invalid 
 expect_fail_reason partition_reorg_source_binding_contradiction:sidecar_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition_metrics_tab_outside.json"
 expect_fail_reason process_identity_missing_or_invalid --mesh-report "${TMP_ROOT}/mesh_argv0_control.json"
 expect_fail_reason process_identity_missing_or_invalid --mesh-report "${TMP_ROOT}/mesh_argv4_control.json"
+for spelling in double-leading double-interior dot parent trailing; do
+  expect_fail_reason "FAIL: mesh:process_identity_missing_or_invalid" --mesh-report "${TMP_ROOT}/mesh-datadir-${spelling}.json"
+done
+expect_fail_reason process_identity_missing_or_invalid --go-submit-rust-accept-report "${TMP_ROOT}/go_accept-datadir-dot.json"
+expect_fail_reason restart_source_binding_contradiction:node_identity_invalid --rust-restart-report "${TMP_ROOT}/restart-datadir-dot.json"
+expect_fail_reason partition_reorg_source_binding_contradiction:node_identity_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition-datadir-dot.json"
+for phase in old new; do expect_fail_reason restart_source_binding_contradiction:argv_mismatch --rust-restart-report "${TMP_ROOT}/restart-${phase}-datadir-dot.json"; done
 expect_mesh_pass "${TMP_ROOT}/tab-root-link/mesh.json"
 expect_fail_reason restart_source_binding_contradiction:datadir_not_bound --rust-restart-report "${TMP_ROOT}/restart_datadir_control.json"
 expect_fail_reason malformed_source_fields:legacy_schema_compatibility.marker_path --mesh-report "${TMP_ROOT}/mesh_marker_trailing_space.json"
@@ -414,6 +439,68 @@ for pair in "--mesh-report mesh.json" "--go-submit-rust-accept-report go_accept.
   expect_output_refused_unchanged "${sidecar_path}" "${report_arg}" "${TMP_ROOT}/${report_name}"
 done
 for target in "${TMP_ROOT}/rubin-txgen" "${TMP_ROOT}/sidecar-go-tip.json" "${TMP_ROOT}/sidecar-go-block.json"; do expect_output_refused_unchanged "${target}" --mesh-report "${TMP_ROOT}/mesh.json"; done
+python3 - "${GEN}" "${TMP_ROOT}" "${sidecar_path}" <<'PY'
+import io, json, os, runpy, stat, sys, tracemalloc
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+generator = runpy.run_path(sys.argv[1])
+root, sidecar = map(Path, sys.argv[2:])
+wide = {"p" * 20000: {str(i): {} for i in range(4000)}}
+tracemalloc.start()
+targets = generator["path_field_targets"](wide, root)
+_, peak = tracemalloc.get_traced_memory()
+tracemalloc.stop()
+assert targets == [], targets
+assert peak < 20 * 1024 * 1024, f"path traversal peak allocation: {peak} bytes"
+
+def run_mesh(out):
+    err = io.StringIO()
+    with redirect_stderr(err), redirect_stdout(io.StringIO()):
+        rc = generator["main"](["--mesh-report", str(root / "mesh.json"), "--output", str(out)])
+    return rc, err.getvalue()
+
+fresh, fixed = root / "descriptor-out.json", root / "rubin-txgen"
+sidecar.write_text(json.dumps({"initial_convergence": {"go_tip_path": str(fresh)}}), encoding="utf-8")
+refused = (1, "FAIL: output_overwrites_input\n")
+assert not fresh.exists(), fresh
+assert run_mesh(fresh) == refused and not fresh.exists(), "sidecar target was not refused"
+sidecar_info, original_fstat = sidecar.stat(), os.fstat
+def observe_mode(fd):
+    info = original_fstat(fd)
+    if (info.st_dev, info.st_ino) == (sidecar_info.st_dev, sidecar_info.st_ino):
+        return SimpleNamespace(st_mode=stat.S_IFDIR)
+    return info
+
+with patch.object(os, "fstat", observe_mode):
+    assert run_mesh(fresh) == (0, ""), "output was refused with an unreadable sidecar"
+    report = json.loads(fresh.read_bytes())
+    assert report["sections"]["mesh"]["status"] == "pass"
+    assert ("mesh", "pass") in {(claim["section"], claim["token"]) for claim in report["claim_inventory"]}
+    original = fixed.read_bytes()
+    assert run_mesh(fixed) == refused and fixed.read_bytes() == original, "fixed output target was not refused unchanged"
+PY
+for field in dotted argv scoped_dotted; do
+  target="${TMP_ROOT}/sidecar-go-block.json"
+  if [[ "${field}" == scoped_dotted ]]; then target="${TMP_ROOT}/scoped-fresh.json"; fi
+  python3 - "${sidecar_path}" "${field}" "${target}" <<'PY'
+import json, sys
+from pathlib import Path
+sidecar, field, target = sys.argv[1:]
+parent = "p" * 128
+dotted = {"observations": {"fork": {"go_block": target}}}
+value = {"dotted": dotted, "argv": {parent: {"go_command_argv": [target]}}, "scoped_dotted": {parent: dotted}}[field]
+Path(sidecar).write_text(json.dumps(value), encoding="utf-8")
+PY
+  if [[ "${field}" == scoped_dotted ]]; then
+    [[ ! -e "${target}" ]] || { echo "FAIL: output ${target} is already present" >&2; exit 1; }
+    expect_mesh_output_pass "${target}"
+  else
+    expect_output_refused_unchanged "${target}" --mesh-report "${TMP_ROOT}/mesh.json"
+  fi
+done
 expect_fresh_output_written
 printf '{' >"${sidecar_path}"
 expect_fresh_output_written
