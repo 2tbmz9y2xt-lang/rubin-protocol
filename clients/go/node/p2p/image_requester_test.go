@@ -2278,7 +2278,9 @@ func testImageBackoffGate(t *testing.T) {
 	require(t, f.clock.readCount() == reads+1, "clock reads %d, want one", f.clock.readCount()-reads)
 	f.clock.onNextRead(nil)
 	config.NotBefore = t0
-	f.admitted(t, f.roundCtx(t, context.Background(), config.Limits, 0), context.Background(), 0, 1, 1)
+	round, err := f.begin(context.Background(), config)
+	must(t, err, "BeginImageRound at NotBefore")
+	f.admitted(t, round, context.Background(), 0, 1, 1)
 	requireReturned(t, lifecycleClose(f.s), "Close after the refused round")
 	mono := newImageTestFixtureAt(t, 1, time.Now())
 	now := mono.clock.Now()
