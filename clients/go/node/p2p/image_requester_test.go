@@ -2505,10 +2505,12 @@ func testImageUnwind(t *testing.T) {
 	t.Run("runtime.Goexit in the clock read of the pre-write decision made with writeMu acquired", func(t *testing.T) { testImageUnwindWithWriteMu(t, true) })
 	t.Run("a panic in a clock read made after a failed TryLock", testImageUnwindWaiting)
 	t.Run("a panic in the connection write of the request frame", testImageUnwindWrite)
-	t.Run("a panic in the AfterFunc method of the request ctx at admission", func(t *testing.T) { testImageUnwindArming(t, false, false) })
-	t.Run("runtime.Goexit in the AfterFunc method of the request ctx at admission", func(t *testing.T) { testImageUnwindArming(t, true, false) })
-	t.Run("a panic in the AfterFunc method of the round ctx at admission", func(t *testing.T) { testImageUnwindArming(t, false, true) })
-	t.Run("runtime.Goexit in the AfterFunc method of the round ctx at admission", func(t *testing.T) { testImageUnwindArming(t, true, true) })
+	t.Run("a panic in the AfterFunc method of the request ctx at admission", func(t *testing.T) { testImageUnwindArming(t, false, false, true) })
+	t.Run("runtime.Goexit in the AfterFunc method of the request ctx at admission", func(t *testing.T) { testImageUnwindArming(t, true, false, true) })
+	t.Run("a panic in the AfterFunc method of the round ctx at admission", func(t *testing.T) { testImageUnwindArming(t, false, true, true) })
+	t.Run("runtime.Goexit in the AfterFunc method of the round ctx at admission", func(t *testing.T) { testImageUnwindArming(t, true, true, true) })
+	t.Run("a panic in the round ctx AfterFunc method with the request ctx callback first run after the unwind", func(t *testing.T) { testImageUnwindArming(t, false, true, false) })
+	t.Run("runtime.Goexit in the round ctx AfterFunc method with the request ctx callback first run after the unwind", func(t *testing.T) { testImageUnwindArming(t, true, true, false) })
 	t.Run("a panic in the stop call of the pre-write retirement with D before RD", func(t *testing.T) { testImageUnwindStop(t, false, false, false) })
 	t.Run("a panic in the stop call of the pre-write retirement at RD with D equal to RD", func(t *testing.T) { testImageUnwindStop(t, true, false, false) })
 	t.Run("a panic in the round ctx stop call of the pre-write retirement with D before RD", func(t *testing.T) { testImageUnwindStop(t, false, true, false) })
@@ -2670,8 +2672,7 @@ func testImageUnwindWithWriteMu(t *testing.T, goexit bool) {
 func testImageUnwindWaiting(t *testing.T) {
 	f := newImageTestFixture(t, 1)
 	round := f.round(t, imageUnwindLimits(), 0)
-	session := f.peers[0]
-	session.writeMu.Lock()
+	f.peers[0].writeMu.Lock()
 	f.unwindAtPreWriteRead(func() { panic(imageUnwindSentinel) })
 	f.requireUnwound(t, f.goRecovered(round, context.Background(), 0, 1), false)
 	pending := f.goRequest(round, t.Context(), 0, 2)
@@ -2682,7 +2683,7 @@ func testImageUnwindWaiting(t *testing.T) {
 	for range 3 {
 		requireChannelClosed(t, f.clock.readFrom(".(*ImageRound).endBeforeWrite"), "pre-write clock read of the request waiting for writeMu")
 	}
-	session.writeMu.Unlock()
+	f.peers[0].writeMu.Unlock()
 	requireImageResult(t, awaitImageResult(t, pending, "request after the unwind"), 2, 2, nil, "request after the unwind")
 	f.requireFrames(t, 0, "after the test released writeMu", expectedImageQuery(2, 2))
 	requireReturned(t, lifecycleClose(f.s), "Close")
@@ -2702,19 +2703,19 @@ func testImageUnwindWrite(t *testing.T) {
 	}
 }
 
-func testImageUnwindArming(t *testing.T, goexit, roundCtx bool) {
+func testImageUnwindArming(t *testing.T, goexit, roundCtx, parked bool) {
 	inImageBubble(func(t *testing.T) {
 		c, cr, ran, f := newImageHookCtx(), newImageHookCtx(), make(chan int, 1), newImageTestFixture(t, 2)
 		roundC, requestC := imageUnwindCtx(c, cr, roundCtx)
 		round, leases, reads := f.roundCtx(t, roundC, imageUnwindLimits(), 0, 1), f.leases(), f.clock.readCount()
 		c.onAfterFunc = func() {
-			if roundCtx {
+			if roundCtx && parked {
 				waitImageMutexWaiter(t, &f.s.imageRequester.mu, func() { go func() { ran <- cr.endAndRun(context.Canceled) }() })
 			}
 			imageUnwinder(goexit)()
 		}
 		unwound := f.goRecovered(round, requestC, 0, 1)
-		if roundCtx {
+		if roundCtx && parked {
 			requireEqual(t, awaitImageResult(t, ran, "Request ctx functions"), 1, "Request ctx functions run")
 			waitUntil(t, func() bool { return f.leases() == leases }, "Service lease release by the Request ctx callback")
 			require(t, f.clock.readCount() == reads+1 && cr.applierErrs == 0 && f.instance(1) == nil, "Request ctx callback waiting through the unwind: clock reads %d->%d, Err calls %d, registered %v, want only the admission read", reads, f.clock.readCount(), cr.applierErrs, f.instance(1) != nil)
@@ -2806,15 +2807,14 @@ func (f *imageTestFixture) unwindRetirement(t *testing.T, round *ImageRound, c *
 		requireEqual(t, awaitImageResult(t, f.goRecovered(round, context.Background(), 1, 2), "unwinding request"), any(imageUnwindSentinel), "value the unwinding request panicked with")
 		return inst, func() {}
 	}
-	session := f.peers[0]
-	session.writeMu.Lock()
+	f.peers[0].writeMu.Lock()
 	unwound := f.goRecovered(round, ctx, 0, 1)
 	f.waitAdmitted(t, 0, 1, "request waiting for writeMu")
 	inst := f.instance(1)
 	f.clock.set(end)
 	requireEqual(t, awaitImageResult(t, unwound, "request waiting for writeMu"), any(imageUnwindSentinel), "value the unwinding request panicked with")
 	return inst, func() {
-		require(t, !session.writeMu.TryLock(), "writeMu released while the test held it")
-		session.writeMu.Unlock()
+		require(t, !f.peers[0].writeMu.TryLock(), "writeMu released while the test held it")
+		f.peers[0].writeMu.Unlock()
 	}
 }
