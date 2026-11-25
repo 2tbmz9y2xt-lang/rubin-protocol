@@ -284,7 +284,17 @@ func (s *TreeDeltaSinkV1) WindowV1() []byte {
 // failures consume or retain Store resources under the existing owner; clean
 // writer unwind leaves OPEN, readback failure preserves UNKNOWN and its causes.
 func (s *Store) UpdateTreeV1(account *OperationAccount, callback func(*Reader) (TreeOperationV1, error)) (CommitTruth, UpdateStage, int, error) {
-	err := treeEntryInputV1(s, account, callback)
+	return s.treeEntryGateV1(account, callback == nil, "nil UpdateTreeV1 callback", func() (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
+		return s.treeEntryLockedV1(account, callback)
+	})
+}
+
+// treeEntryGateV1 returns the input precheck refusal before the serving mark
+// and the busy refusal when the Store operation owner is held; otherwise it runs
+// locked under that owner and, after unlocking, resumes the panic or Goexit that
+// the treeUnwindV1 returned by locked records.
+func (s *Store) treeEntryGateV1(account *OperationAccount, nilCallback bool, diagnostic string, locked func() (CommitTruth, UpdateStage, int, treeUnwindV1, error)) (CommitTruth, UpdateStage, int, error) {
+	err := treeEntryInputV1(s, account, nilCallback, diagnostic)
 	if err != nil {
 		return CommitTruthOld, UpdateStagePrewrite, -1, err
 	}
@@ -298,17 +308,17 @@ func (s *Store) UpdateTreeV1(account *OperationAccount, callback func(*Reader) (
 	defer func() { unwind.resumeV1() }()
 	defer s.notifyServingCompletionV1()
 	defer s.operations.Unlock()
-	truth, stage, index, unwind, err := s.treeEntryLockedV1(account, callback)
+	truth, stage, index, unwind, err := locked()
 	return truth, stage, index, err
 }
 
-func treeEntryInputV1(s *Store, account *OperationAccount, callback func(*Reader) (TreeOperationV1, error)) error {
+func treeEntryInputV1(s *Store, account *OperationAccount, nilCallback bool, callbackDiagnostic string) error {
 	var diagnostic string
 	switch {
 	case s == nil:
 		diagnostic = "nil Store"
-	case callback == nil:
-		diagnostic = "nil UpdateTreeV1 callback"
+	case nilCallback:
+		diagnostic = callbackDiagnostic
 	case account == nil:
 		diagnostic = "nil operation account"
 	case !account.openV1():
@@ -320,6 +330,18 @@ func treeEntryInputV1(s *Store, account *OperationAccount, callback func(*Reader
 }
 
 func (s *Store) treeEntryLockedV1(account *OperationAccount, callback func(*Reader) (TreeOperationV1, error)) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
+	return s.treeOriginalOldV1(func(e *treePublicEntryV1) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
+		return e.executeV1(account, callback)
+	})
+}
+
+// treeOriginalOldV1 returns the refusedUpdate result for each state that
+// observationStateError refuses (invalid state or resource shape, cached
+// terminal, closed Store) and the format refusal for a non-tree Store. Otherwise
+// it begins ORIGINAL OLD and returns a begin failure through failedReadBegin or
+// the result of run over a fresh update Reader; latchUpdateTerminalTruth runs on
+// every exit after the format check.
+func (s *Store) treeOriginalOldV1(run func(*treePublicEntryV1) (CommitTruth, UpdateStage, int, treeUnwindV1, error)) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
 	if err, _ := s.observationStateError(operationUpdate); err != nil {
 		truth, stage, refused := s.refusedUpdate(err)
 		return truth, stage, -1, treeUnwindV1{}, refused
@@ -332,8 +354,7 @@ func (s *Store) treeEntryLockedV1(account *OperationAccount, callback func(*Read
 	if err != nil {
 		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, s.failedReadBegin(old, err)
 	}
-	e := treePublicEntryV1{store: s, old: old, reader: s.newUpdateReaderV1(old)}
-	return e.executeV1(account, callback)
+	return run(&treePublicEntryV1{store: s, old: old, reader: s.newUpdateReaderV1(old)})
 }
 
 // treePublicEntryV1 owns ORIGINAL OLD only until callback refusal or composer handoff.
@@ -348,6 +369,18 @@ type treePublicEntryV1 struct {
 
 // callbackV1 expires public borrows while retaining successful ENTRY recipes for admission.
 func (e *treePublicEntryV1) callbackV1(callback func(*Reader) (TreeOperationV1, error)) (TreeOperationV1, treeUnwindV1, error) {
+	return treeCallbackV1(e, callback, func(op TreeOperationV1) bool { return op.Pair.PreserveReplayObservations })
+}
+
+// treeCallbackV1 runs callback with the entry Reader and expires the Reader on
+// return, panic and Goexit. It keeps the canonical tip only when callback
+// returns, readPrimary of its error and the Reader's recorded failure is nil,
+// and preserve accepts the result. On a panic, a Goexit or a non-nil readPrimary
+// result it aborts ORIGINAL OLD through abortReadLocked with that result as the
+// primary; a recovered panic returns as unwind kind 1 with its value, and a
+// Goexit continues after the abort.
+func treeCallbackV1[T any](e *treePublicEntryV1, callback func(*Reader) (T, error), preserve func(T) bool) (T, treeUnwindV1, error) {
+	var zero T
 	returned := false
 	defer func() {
 		if !returned {
@@ -357,25 +390,25 @@ func (e *treePublicEntryV1) callbackV1(callback func(*Reader) (TreeOperationV1, 
 			_ = e.store.abortReadLocked(e.old, primary, infrastructure)
 		}
 	}()
-	op, value, panicked, err := invokeUpdate(callback, e.reader)
+	result, value, panicked, err := invokeUpdate(callback, e.reader)
 	returned = true
 	tip := e.reader.expire()
 	e.expireEntryV1()
 	primary, infrastructure := readPrimary(err, e.reader.failure)
-	if !panicked && primary == nil && op.Pair.PreserveReplayObservations {
+	if !panicked && primary == nil && preserve(result) {
 		e.tip = tip
 	} else {
 		tip.retire()
 	}
 	if panicked {
 		e.retireEntryV1()
-		return TreeOperationV1{}, treeUnwindV1{kind: 1, value: value}, e.store.abortReadLocked(e.old, primary, infrastructure)
+		return zero, treeUnwindV1{kind: 1, value: value}, e.store.abortReadLocked(e.old, primary, infrastructure)
 	}
 	if primary != nil {
 		e.retireEntryV1()
-		return TreeOperationV1{}, treeUnwindV1{}, e.store.abortReadLocked(e.old, primary, infrastructure)
+		return zero, treeUnwindV1{}, e.store.abortReadLocked(e.old, primary, infrastructure)
 	}
-	return op, treeUnwindV1{}, nil
+	return result, treeUnwindV1{}, nil
 }
 
 func (e *treePublicEntryV1) executeV1(account *OperationAccount, callback func(*Reader) (TreeOperationV1, error)) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {

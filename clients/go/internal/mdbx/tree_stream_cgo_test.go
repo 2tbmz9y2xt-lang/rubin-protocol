@@ -1737,8 +1737,9 @@ func TestTreeStreamSurfaceV1(t *testing.T) {
 	want = append(want, "TreeRootReadV1", "CheckTreeRootReadV1", "DeriveTreeRootV1")
 	want = append(want, "TreeRoleDeltaV1", "TreeUndoFamilyEffectV1", "TreeUndoFamilyNoneV1", "TreeUndoFamilyWrittenV1", "TreeUndoFamilyKeptV1", "TreeUndoFamilyDeletedV1", "TreeUndoChargeV1", "TreeDeltaReportV1")
 	want = append(want, "TreeHeaderSlotV1")
+	want = append(want, "TreeImagePublicationV1", "TreeImageRecordV1", "UpdateImageV1")
 	var got []string
-	for _, path := range []string{"tree_stream.go", "tree_stream_cgo.go", "tree_read_cgo.go"} {
+	for _, path := range []string{"tree_stream.go", "tree_stream_cgo.go", "tree_read_cgo.go", "tree_image_cgo.go"} {
 		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 		mustEnvironment(t, err)
 		for _, decl := range f.Decls {
