@@ -8,19 +8,23 @@ import (
 	"testing"
 )
 
-// tiOutcome is how one UpdateImageV1 call ended: returned with r and the live
-// sum seen right after it, or unwound with the recovered panic value (nil for
-// Goexit). before and after are the caller account state around the call, and
-// reuse and reuseLive the result and live sum of a one-byte WithReservation on
-// that account right after it.
+// tiOutcome is how one UpdateImageV1 call ended: returned with r, or unwound
+// with the recovered panic value (nil for Goexit). The rest is observed on the
+// caller's own account value a inside WithOperation, after the call returns or
+// while it unwinds: original and account are *a before and after the call,
+// before and after the state that original names, live the live sum, and reuse
+// and reuseLive the result and live sum of a one-byte a.WithReservation.
+// wantZero is set by a row whose planner replaces *a with the zero value.
 type tiOutcome struct {
-	r             tsResult
-	live          uint64
-	returned      bool
-	recovered     any
-	before, after operationAccountState
-	reuse         error
-	reuseLive     uint64
+	r                 tsResult
+	live              uint64
+	returned          bool
+	recovered         any
+	original, account OperationAccount
+	before, after     operationAccountState
+	reuse             error
+	reuseLive         uint64
+	wantZero          bool
 }
 
 // tiPlanner counts calls and keeps the last Reader. From its second call on it
@@ -68,12 +72,12 @@ func tiCallAccount(s *Store, o *OperationReservationOwner, kind OperationKind, b
 		defer close(done)
 		defer func() { out.recovered = recover() }()
 		_ = o.WithOperation(kind, func(a *OperationAccount) error {
-			shared := a.shared
-			out.before = *shared
+			out.original, out.before = *a, *a.shared
+			defer func() {
+				out.account, out.after, out.live = *a, *out.original.shared, reservationLive(o)
+				out.reuse = a.WithReservation(1, func() error { out.reuseLive = reservationLive(o); return nil })
+			}()
 			out.r = tiInvoke(s, a, bind(a))
-			out.live = reservationLive(o)
-			out.after = *shared
-			out.reuse = (&OperationAccount{shared: shared}).WithReservation(1, func() error { out.reuseLive = reservationLive(o); return nil })
 			out.returned = true
 			return nil
 		})
@@ -114,15 +118,22 @@ func tiReturned(t *testing.T, out tiOutcome) error {
 	return out.r.err
 }
 
-// tiAccountKept requires live sum 0 after the call, the caller account state equal to its state
-// before the call, and a one-byte WithReservation on that account admitted with live sum 1.
+// tiAccountKept requires live sum 0 after the call, the state of the caller's account unchanged
+// by the call, and the caller's account value either unchanged with a one-byte WithReservation
+// admitted at live sum 1, or, for wantZero, the zero value refused as invalid input.
 func tiAccountKept(t *testing.T, out tiOutcome) {
 	t.Helper()
 	if out.live != 0 || out.after != out.before || out.before.held != 0 || out.before.everPositive || out.before.closed {
 		t.Fatalf("live sum %d, account before %+v after %+v", out.live, out.before, out.after)
 	}
-	if out.reuse != nil || out.reuseLive != 1 {
-		t.Fatalf("account reuse returned %v with live sum %d", out.reuse, out.reuseLive)
+	if out.wantZero {
+		if out.account != (OperationAccount{}) || out.reuse != errOperationReservationInput || out.reuseLive != 0 {
+			t.Fatalf("zeroed account %+v reuse returned %v with live sum %d", out.account, out.reuse, out.reuseLive)
+		}
+		return
+	}
+	if out.account != out.original || out.reuse != nil || out.reuseLive != 1 {
+		t.Fatalf("account %+v, want %+v; reuse returned %v with live sum %d", out.account, out.original, out.reuse, out.reuseLive)
 	}
 }
 

@@ -4,6 +4,7 @@ package mdbx
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -154,16 +155,19 @@ func tiDisposition(t *testing.T, s *Store, mode uint32, consumed bool, err error
 
 // tiAfter observes the next public calls: the repeated call and the Store
 // operations for an OPEN Store, with view run in its View, the cached terminal
-// otherwise, then releases a retained transaction. terminal is the error the
-// call returned, or the cached terminal when the planner unwound.
-func tiAfter(t *testing.T, s *Store, o *OperationReservationOwner, kind OperationKind, p *tiPlanner, terminal error, check func(tiOutcome), view func(*Reader)) {
+// otherwise, then requires kept expired and only then releases a retained
+// transaction. terminal is the error the call returned, or the cached terminal
+// when the planner unwound.
+func tiAfter(t *testing.T, s *Store, o *OperationReservationOwner, kind OperationKind, p *tiPlanner, kept *Reader, terminal error, check func(tiOutcome), view func(*Reader)) {
 	t.Helper()
 	if s.state == storeOPEN {
 		tiOpenNext(t, s, o, kind, p, check, view)
+		tsExpiredReader(t, kept)
 		return
 	}
 	retained := s.state == storePOISONEDTHREAD
 	tiTerminal(t, s, o, 1, terminal)
+	tsExpiredReader(t, kept)
 	if retained {
 		mustEnvironment(t, fixtureLargeRelease(s))
 	}
@@ -192,7 +196,7 @@ func tiRankOne(t *testing.T, s *Store) { treeNativeSeed(t, s, 1, []byte{0xfe}, [
 
 func tiDescriptorRows(t *testing.T) []tiRow {
 	t.Helper()
-	oversized := append(bytes.Clone(tiAuthorityAtBound(t)), 0)
+	oversized := tiAuthorityOverBound(t)
 	rows := []tiRow{
 		{name: "Tag 0", edit: func(p *TreeImagePublicationV1) { p.Tag = 0 }, modes: []uint32{0, 9, 10}},
 		{name: "Tag 5", edit: func(p *TreeImagePublicationV1) { p.Tag = 5 }},
@@ -219,14 +223,52 @@ func tiDescriptorRows(t *testing.T) []tiRow {
 // MaxMetadataBytes by padding ExcludedInvalidBranch.ExactConsensusError.
 func tiAuthorityAtBound(t *testing.T) []byte {
 	t.Helper()
-	a := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 18561)
-	a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 20001, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: bytes.Repeat([]byte{1}, MaxMetadataBytes-27-84)}
-	encoded, err := a.Encode()
-	mustEnvironment(t, err)
+	encoded := tiPaddedAuthority(t, MaxMetadataBytes-27-84)
 	if len(encoded) != MaxMetadataBytes {
 		t.Fatalf("bound Authority %d bytes", len(encoded))
 	}
 	return encoded
+}
+
+func tiPaddedAuthority(t *testing.T, pad int) []byte {
+	t.Helper()
+	a := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 18561)
+	a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 20001, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: bytes.Repeat([]byte{1}, pad)}
+	encoded, err := a.Encode()
+	mustEnvironment(t, err)
+	return encoded
+}
+
+// tiAuthorityOverBound is the tiAuthorityAtBound envelope with one more
+// ExactConsensusError byte: one inserted pad byte and both enclosing lengths
+// (the authority length at bytes 18..21 and the pad blob length) raised by one.
+// The same edit turns the Encode output of one byte less padding into the
+// tiAuthorityAtBound bytes, so the result differs from a valid envelope only
+// in its size.
+func tiAuthorityOverBound(t *testing.T) []byte {
+	t.Helper()
+	pad := MaxMetadataBytes - 27 - 84
+	bound := tiAuthorityAtBound(t)
+	if grown := tiGrowPad(t, tiPaddedAuthority(t, pad-1), pad-1); !bytes.Equal(grown, bound) {
+		t.Fatal("pad growth does not reproduce the encoded bound Authority")
+	}
+	return tiGrowPad(t, bound, pad)
+}
+
+// tiGrowPad inserts one pad byte into b, whose ExactConsensusError is pad bytes of 1.
+func tiGrowPad(t *testing.T, b []byte, pad int) []byte {
+	t.Helper()
+	at := bytes.Index(b, append(binary.BigEndian.AppendUint32(nil, uint32(pad)), 1))
+	if at < 22 || !bytes.Equal(b[at+4:at+4+pad], bytes.Repeat([]byte{1}, pad)) {
+		t.Fatalf("pad blob of %d bytes at %d", pad, at)
+	}
+	out := make([]byte, 0, len(b)+1)
+	out = append(out, b[:at+4]...)
+	out = append(out, 1)
+	out = append(out, b[at+4:]...)
+	binary.BigEndian.PutUint32(out[18:22], binary.BigEndian.Uint32(out[18:22])+1)
+	binary.BigEndian.PutUint32(out[at:at+4], uint32(pad+1))
+	return out
 }
 
 // tiPrunedB1U0 is the tsEntry envelope (PRUNED, B 0, U 0) with B set to 1 in
@@ -274,6 +316,7 @@ func tiPublicationCase(t *testing.T, s *Store, o *OperationReservationOwner, row
 	}
 	p := &tiPlanner{replays: &replays, outcome: func(*Reader) (TreeImagePublicationV1, error) { return publication, nil }}
 	check := func(out tiOutcome) {
+		out.wantZero = row.zero
 		returned = tiReturned(t, out)
 		row.want(t, tiDisposition(t, s, mode, row.consumed, returned, true))
 	}
@@ -294,9 +337,7 @@ func tiPublicationCase(t *testing.T, s *Store, o *OperationReservationOwner, row
 		t.Fatalf("planner %d replay %d live %d", p.calls, replays, reservationLive(o))
 	}
 	native()
-	kept := p.kept
-	tiAfter(t, s, o, kind, p, returned, check, nil)
-	tsExpiredReader(t, kept)
+	tiAfter(t, s, o, kind, p, p.kept, returned, check, nil)
 }
 
 func tiForeignIdentity(t *testing.T) {
@@ -321,7 +362,7 @@ func tiForeignIdentity(t *testing.T) {
 	var got TreeAuthorityV1
 	var present, usable bool
 	readErr := errors.New("View did not read the authority")
-	tiAfter(t, s, o, LaneOperation, p, nil, check, func(r *Reader) {
+	tiAfter(t, s, o, LaneOperation, p, p.kept, nil, check, func(r *Reader) {
 		got, present, readErr = r.ReadTreeAuthorityV1()
 		usable = r.usable()
 	})
@@ -455,9 +496,7 @@ func tiPlannerCase(t *testing.T, outcome string, mode uint32) {
 		t.Fatalf("planner %d replay %d live %d", p.calls, replays, reservationLive(o))
 	}
 	native()
-	kept := p.kept
-	tiAfter(t, s, o, LaneOperation, p, returned, check, nil)
-	tsExpiredReader(t, kept)
+	tiAfter(t, s, o, LaneOperation, p, p.kept, returned, check, nil)
 }
 
 // tiFieldError reads its text field in Error and Unwrap, so a call through a nil
@@ -477,6 +516,7 @@ func tiPlannerEnd(t *testing.T, s *Store, outcome string, mode uint32, out tiOut
 		if out.returned {
 			t.Fatal("unwinding planner returned")
 		}
+		tiAccountKept(t, out)
 		tiDisposition(t, s, mode, false, result, false)
 	default:
 		result = tiReturned(t, out)
@@ -538,6 +578,7 @@ func tiRecordedCase(t *testing.T, mode string) {
 		if out.returned || (mode == "panic") != (out.recovered == any(value)) || (mode == "goexit") != (out.recovered == nil) {
 			t.Fatalf("unwind %v returned %v", out.recovered, out.returned)
 		}
+		tiAccountKept(t, out)
 	case "ignored", "returned":
 		if any(tiReturned(t, out)) != any(f) {
 			t.Fatalf("recorded failure identity %v", out.r.err)
