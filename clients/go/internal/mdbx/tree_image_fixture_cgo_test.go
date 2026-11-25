@@ -409,6 +409,7 @@ func tiForeignIdentityHold(t *testing.T, hold uint64) {
 	p := &tiPlanner{replays: &replays, want02: encoded, want02Present: true, outcome: func(*Reader) (TreeImagePublicationV1, error) { return publication, nil }}
 	check := func(out tiOutcome) { tiInvalidBatch(t, tiDisposition(t, s, 0, false, tiReturned(t, out), true)) }
 	var out tiOutcome
+	tiReleaseRetained(t, s)
 	native := tiNative(t, s, o, 0, 0, nil, 1, func() { out = tiCall(s, o, LaneOperation, hold, p.imagePlan) })
 	check(out)
 	if p.calls != 1 || replays != 0 {
@@ -471,6 +472,7 @@ func tiBeginFailure(t *testing.T, scenario SelectedDamageScenario, class EngineC
 	o := reservationOwner(t, MinReservationLimit)
 	calls, replays := 0, 0
 	var out tiOutcome
+	tiReleaseRetained(t, s)
 	evidence, err := FixtureSelectedDamage(s, o, scenario, 0, []byte{0}, func() {
 		out = tiCall(s, o, LaneOperation, hold, tiCounted(t, &calls, &replays))
 	})
@@ -486,9 +488,13 @@ func tiBeginFailure(t *testing.T, scenario SelectedDamageScenario, class EngineC
 
 func tiNewTerminal(t *testing.T) {
 	s, o, w := ctxTreePairScene(t)
+	tiReleaseRetained(t, s)
 	var r tsResult
 	evidence := ctxTreeFault(t, s, 12, 0, []byte{9}, func() { r = tsRun(t, s, o, TreeOperation, ctxTreeOp(60, w)) })
 	r.tuple(t, 2, 3, -1)
+	if r.err == nil {
+		t.Fatal("crossed producer returned (2, 3, -1) with a nil error")
+	}
 	if evidence.commits != 1 || evidence.drift != 0 {
 		t.Fatalf("crossed producer evidence %+v err %v", evidence, r.err)
 	}
@@ -658,6 +664,7 @@ func tiRecordedCase(t *testing.T, source tiRecordedSource, mode string, hold uin
 		return TreeImagePublicationV1{}, application
 	}}
 	var out tiOutcome
+	tiReleaseRetained(t, s)
 	native := tiNative(t, s, o, source.fault, 0, []byte{2}, 1, func() { out = tiCall(s, o, LaneOperation, hold, p.imagePlan) })
 	source.want(t, f)
 	if !reflect.DeepEqual(authority, TreeAuthorityV1{}) || present {

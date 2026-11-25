@@ -272,6 +272,9 @@ func tiRequireOpen(t *testing.T, s *Store) {
 // terminal's tree unchanged; then zero callback calls and live sum 0.
 func tiTerminal(t *testing.T, s *Store, o *OperationReservationOwner, hold uint64, truth CommitTruth, terminal error) {
 	t.Helper()
+	if terminal == nil {
+		t.Fatal("terminal Store check called with a nil terminal")
+	}
 	calls := 0
 	state, txn, env, values := s.state, s.txn, s.env, tiErrorTree(terminal, nil)
 	same := func(call string) {
