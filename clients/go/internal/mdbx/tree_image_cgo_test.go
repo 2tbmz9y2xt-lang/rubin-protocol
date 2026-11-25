@@ -5,6 +5,7 @@ package mdbx
 import (
 	"bytes"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -110,10 +111,16 @@ func tiInvalidBatch(t *testing.T, err error) {
 // tiReturned requires a returned (1, 1, -1) call with tiAccountKept and returns its error.
 func tiReturned(t *testing.T, out tiOutcome) error {
 	t.Helper()
+	return tiReturnedAt(t, out, 1)
+}
+
+// tiReturnedAt is tiReturned for (truth, 1, -1).
+func tiReturnedAt(t *testing.T, out tiOutcome, truth CommitTruth) error {
+	t.Helper()
 	if !out.returned || out.recovered != nil {
 		t.Fatalf("UpdateImageV1 returned %v recovered %v", out.returned, out.recovered)
 	}
-	out.r.tuple(t, 1, 1, -1)
+	out.r.tuple(t, truth, 1, -1)
 	tiAccountKept(t, out)
 	return out.r.err
 }
@@ -188,31 +195,31 @@ func tiOpenNext(t *testing.T, s *Store, o *OperationReservationOwner, kind Opera
 }
 
 // tiTerminal requires UpdateImageV1 and UpdateTreeV1 to return (truth, 1, -1, terminal), View
-// and Close to return terminal, zero callback calls and live sum 0, and after these four
-// calls the Store state, terminal, terminal truth, transaction and environment it had before.
+// and Close to return terminal, zero callback calls and live sum 0, the caller's account kept by
+// UpdateImageV1, and after each of these four calls the Store state, terminal, terminal truth,
+// transaction and environment it had before, with every error in terminal's tree unchanged.
 func tiTerminal(t *testing.T, s *Store, o *OperationReservationOwner, truth CommitTruth, terminal error) {
 	t.Helper()
 	calls := 0
-	state, txn, env := s.state, s.txn, s.env
+	state, txn, env, values := s.state, s.txn, s.env, tiErrorTree(terminal, nil)
 	same := func(call string) {
-		if s.state != state || any(s.terminal) != any(terminal) || s.terminalTruth != truth || s.txn != txn || s.env != env {
-			t.Fatalf("terminal %s left %s terminal %v truth %d, want %s with the same transaction and environment", call, s.state, s.terminal, s.terminalTruth, state)
+		if s.state != state || any(s.terminal) != any(terminal) || s.terminalTruth != truth || s.txn != txn || s.env != env || !tiSameTree(values, tiErrorTree(terminal, nil)) {
+			t.Fatalf("terminal %s left %s terminal %v truth %d, want %s with the same transaction, environment and terminal values", call, s.state, s.terminal, s.terminalTruth, state)
 		}
 	}
 	same("Store")
+	image := tiCall(s, o, LaneOperation, func(*Reader) (TreeImagePublicationV1, error) { calls++; return TreeImagePublicationV1{}, nil })
+	same("UpdateImageV1")
+	var tree tsResult
 	mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
-		image := tiInvoke(s, a, func(*Reader) (TreeImagePublicationV1, error) { calls++; return TreeImagePublicationV1{}, nil })
-		same("UpdateImageV1")
-		tree := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { calls++; return TreeOperationV1{}, nil })
-		same("UpdateTreeV1")
-		for _, r := range []tsResult{image, tree} {
-			r.tuple(t, truth, 1, -1)
-			if any(r.err) != any(terminal) {
-				t.Fatalf("terminal Store returned %v, want %v", r.err, terminal)
-			}
-		}
+		tree = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { calls++; return TreeOperationV1{}, nil })
 		return nil
 	}))
+	same("UpdateTreeV1")
+	tree.tuple(t, truth, 1, -1)
+	if image := tiReturnedAt(t, image, truth); any(image) != any(terminal) || any(tree.err) != any(terminal) {
+		t.Fatalf("terminal Store returned %v and %v, want %v", image, tree.err, terminal)
+	}
 	if err := s.View(func(*Reader) error { calls++; return nil }); any(err) != any(terminal) {
 		t.Fatalf("terminal View returned %v", err)
 	}
@@ -224,6 +231,42 @@ func tiTerminal(t *testing.T, s *Store, o *OperationReservationOwner, truth Comm
 	if calls != 0 || reservationLive(o) != 0 {
 		t.Fatalf("terminal Store ran %d callbacks, live %d", calls, reservationLive(o))
 	}
+}
+
+// tiErrorTree appends err, and for an *EngineError a copy of its value, then the same for each
+// error that err unwraps to, depth first. It reads only the dynamic type of each node, so a nil
+// pointer err is appended and none of its methods is called.
+func tiErrorTree(err error, out []any) []any {
+	if err == nil {
+		return out
+	}
+	out = append(out, err)
+	if v := reflect.ValueOf(err); v.Kind() == reflect.Pointer && v.IsNil() {
+		return out
+	}
+	if e, ok := any(err).(*EngineError); ok {
+		out = append(out, *e)
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, inner := range joined.Unwrap() {
+			out = tiErrorTree(inner, out)
+		}
+		return out
+	}
+	return tiErrorTree(errors.Unwrap(err), out)
+}
+
+// tiSameTree reports whether two tiErrorTree results hold equal elements in the same order.
+func tiSameTree(a, b []any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // tiNextAdmission runs the tiPublication publication on s and requires "invalid Update Batch"
@@ -254,14 +297,10 @@ func TestTreeImageAdmissionV1(t *testing.T) {
 		o := reservationOwner(t, MinReservationLimit)
 		calls, replays := 0, 0
 		planner := tiCounted(t, &calls, &replays)
-		mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
-			var s *Store
-			for _, r := range []tsResult{tiInvoke(s, a, planner), tiInvoke(s, nil, nil)} {
-				r.tuple(t, 1, 1, -1)
-				treeNativeError(t, r.err, operationUpdate, "InvalidInput", 22, "nil Store", nil)
-			}
-			return nil
-		}))
+		var s *Store
+		for _, err := range []error{tiReturned(t, tiCall(s, o, LaneOperation, planner)), tiNilAll(t, s)} {
+			treeNativeError(t, err, operationUpdate, "InvalidInput", 22, "nil Store", nil)
+		}
 		if calls != 0 || replays != 0 || reservationLive(o) != 0 {
 			t.Fatalf("nil Store planner %d Replay %d live %d", calls, replays, reservationLive(o))
 		}
@@ -336,19 +375,23 @@ func tiAdmissionAccount(t *testing.T, name string) {
 func tiAdmissionNilPlanner(t *testing.T, account bool) {
 	s, _, _ := treeNativeStore(t)
 	o := reservationOwner(t, MinReservationLimit)
-	mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
-		if !account {
-			a = nil
-		}
-		r := tiInvoke(s, a, nil)
-		r.tuple(t, 1, 1, -1)
-		treeNativeError(t, r.err, operationUpdate, "InvalidInput", 22, "nil UpdateImageV1 callback", nil)
-		return nil
-	}))
+	err := tiNilAll(t, s)
+	if account {
+		err = tiReturned(t, tiCall(s, o, LaneOperation, nil))
+	}
+	treeNativeError(t, err, operationUpdate, "InvalidInput", 22, "nil UpdateImageV1 callback", nil)
 	if reservationLive(o) != 0 || s.state != storeOPEN || s.terminal != nil {
 		t.Fatalf("nil planner refusal live %d state %s terminal %v", reservationLive(o), s.state, s.terminal)
 	}
 	tiNextAdmission(t, s, o)
+}
+
+// tiNilAll runs UpdateImageV1(nil, nil) on s and requires (1, 1, -1).
+func tiNilAll(t *testing.T, s *Store) error {
+	t.Helper()
+	r := tiInvoke(s, nil, nil)
+	r.tuple(t, 1, 1, -1)
+	return r.err
 }
 
 func tiAdmissionStore(t *testing.T, name string) {
@@ -372,16 +415,14 @@ func tiAdmissionStore(t *testing.T, name string) {
 	calls, replays := 0, 0
 	planner := tiCounted(t, &calls, &replays)
 	refuse := func() {
-		mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
-			if name == "busy" {
-				s.operations.Lock()
-				defer s.operations.Unlock()
-			}
-			r := tiInvoke(s, a, planner)
-			r.tuple(t, 1, 1, -1)
-			tiStoreRefusal(t, name, r.err, terminal)
-			return nil
-		}))
+		if name == "busy" {
+			s.operations.Lock()
+		}
+		out := tiCall(s, o, LaneOperation, planner)
+		if name == "busy" {
+			s.operations.Unlock()
+		}
+		tiStoreRefusal(t, name, tiReturned(t, out), terminal)
 		if calls != 0 || replays != 0 || reservationLive(o) != 0 || s.state != state || any(s.terminal) != any(terminal) {
 			t.Fatalf("Store refusal planner %d Replay %d live %d state %s terminal %v", calls, replays, reservationLive(o), s.state, s.terminal)
 		}

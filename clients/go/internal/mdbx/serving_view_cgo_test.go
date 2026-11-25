@@ -977,6 +977,8 @@ func servingOptionalPendingRouteV1(t *testing.T, route string) {
 // serving epoch is active, with independent native input diagnostics.
 func servingNativeInputsV1(t *testing.T) {
 	s, o, reservations := servingSetupV1(t)
+	var closed *OperationAccount
+	mustEnvironment(t, reservations.WithOperation(LaneOperation, func(a *OperationAccount) error { closed = a; return nil }))
 	_, err := servingCallV1(t, o, s, reservations, func(_ *Reader, e *ServingEpochV1, _ *OperationAccount) error {
 		truth, stage, result := s.Update(nil)
 		if truth != 1 || stage != 1 {
@@ -1004,7 +1006,7 @@ func servingNativeInputsV1(t *testing.T) {
 		for _, row := range []struct {
 			account *OperationAccount
 			text    string
-		}{{nil, "nil operation account"}, {&OperationAccount{}, "closed operation account"}} {
+		}{{nil, "nil operation account"}, {closed, "closed operation account"}, {&OperationAccount{}, "closed operation account"}} {
 			truth, stage, index, result = s.UpdateTreeV1(row.account, use)
 			if truth != 1 || stage != 1 || index != -1 {
 				t.Fatal("tree static account tuple")
@@ -1015,9 +1017,9 @@ func servingNativeInputsV1(t *testing.T) {
 				t.Fatal("image static account tuple")
 			}
 			treeNativeError(t, result, engineOperation("update"), EngineClass("InvalidInput"), 22, row.text, nil)
-		}
-		if e.closing {
-			t.Fatal("refused static input changed serving priority")
+			if e.closing {
+				t.Fatalf("refused %q input changed serving priority", row.text)
+			}
 		}
 		return e.CheckV1()
 	})

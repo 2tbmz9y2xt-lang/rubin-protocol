@@ -466,6 +466,7 @@ func servingFixtureTerminalEntriesV1(t *testing.T) {
 	for _, mode := range []uint32{9, 10} {
 		t.Run(fmt.Sprint(mode), func(t *testing.T) {
 			s, o, reservations := servingSetupV1(t)
+			tiReleaseRetained(t, s)
 			_, err := fixtureLargeFault(s, mode, 0, []byte{0}, func() {
 				_, _ = servingCallV1(t, o, s, reservations, func(*Reader, *ServingEpochV1, *OperationAccount) error { return nil })
 			})

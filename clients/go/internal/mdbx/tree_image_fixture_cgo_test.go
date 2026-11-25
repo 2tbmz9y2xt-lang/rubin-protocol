@@ -192,11 +192,22 @@ type tiRow struct {
 	gets     uint64
 }
 
+// tiReleaseRetained registers a cleanup, run before the earlier registered Store.Close, that
+// releases the native transaction of a Store left POISONED_THREAD.
+func tiReleaseRetained(t *testing.T, s *Store) {
+	t.Helper()
+	t.Cleanup(func() {
+		if s.state == storePOISONEDTHREAD {
+			_ = fixtureLargeRelease(s)
+		}
+	})
+}
+
 func tiRankOne(t *testing.T, s *Store) { treeNativeSeed(t, s, 1, []byte{0xfe}, []byte{1}) }
 
 func tiDescriptorRows(t *testing.T) []tiRow {
 	t.Helper()
-	oversized := tiAuthorityOverBound(t)
+	oversized, pruned := tiAuthorityOverBound(t), tiPrunedB1U0(t)
 	rows := []tiRow{
 		{name: "Tag 0", edit: func(p *TreeImagePublicationV1) { p.Tag = 0 }, modes: []uint32{0, 9, 10}},
 		{name: "Tag 5", edit: func(p *TreeImagePublicationV1) { p.Tag = 5 }},
@@ -205,7 +216,7 @@ func tiDescriptorRows(t *testing.T) []tiRow {
 		{name: "a TreeOperation account", kind: TreeOperation},
 		{name: "nil Authority", edit: func(p *TreeImagePublicationV1) { p.Authority = nil }},
 		{name: "an Authority of 1048577 bytes", edit: func(p *TreeImagePublicationV1) { p.Authority = oversized }},
-		{name: "a PRUNED B 1 U 0 Authority", edit: func(p *TreeImagePublicationV1) { p.Authority = tiPrunedB1U0(t) }},
+		{name: "a PRUNED B 1 U 0 Authority", edit: func(p *TreeImagePublicationV1) { p.Authority = pruned }},
 	}
 	for i := range rows {
 		rows[i].seed, rows[i].want = tiRankOne, tiInvalidBatch
@@ -331,6 +342,7 @@ func tiPublicationCase(t *testing.T, s *Store, o *OperationReservationOwner, row
 	if row.fault != 0 {
 		fault, key = row.fault, row.faultKey
 	}
+	tiReleaseRetained(t, s)
 	native := tiNative(t, s, o, fault, rank, key, row.gets, func() { out = tiCallAccount(s, o, kind, bind) })
 	check(out)
 	if p.calls != 1 || replays != 0 || reservationLive(o) != 0 {
@@ -438,12 +450,7 @@ func tiNewTerminal(t *testing.T) {
 	}
 	calls, replays := 0, 0
 	out := tiCall(s, o, LaneOperation, tiCounted(t, &calls, &replays))
-	if !out.returned {
-		t.Fatalf("NEW terminal call returned %v recovered %v", out.returned, out.recovered)
-	}
-	out.r.tuple(t, 2, 1, -1)
-	tiAccountKept(t, out)
-	if any(out.r.err) != any(r.err) || calls != 0 || replays != 0 || s.state != storeCLOSED || any(s.terminal) != any(r.err) {
+	if any(tiReturnedAt(t, out, 2)) != any(r.err) || calls != 0 || replays != 0 || s.state != storeCLOSED || any(s.terminal) != any(r.err) {
 		t.Fatalf("NEW terminal returned %v planner %d Replay %d state %s", out.r.err, calls, replays, s.state)
 	}
 	tiTerminal(t, s, o, 2, r.err)
@@ -490,6 +497,7 @@ func tiPlannerCase(t *testing.T, outcome string, mode uint32) {
 		gets = 4
 	}
 	var out tiOutcome
+	tiReleaseRetained(t, s)
 	native := tiNative(t, s, o, mode, 0, []byte{0}, gets, func() { out = tiCall(s, o, LaneOperation, p.imagePlan) })
 	check(out)
 	if p.calls != 1 || replays != 0 || reservationLive(o) != 0 {
