@@ -90,9 +90,13 @@ func (c *imageTestClock) followRealTime(from time.Time) {
 }
 
 // inImageBubble runs body in its own synctest bubble, where synctest.Wait returns only once the ctx callback and
-// deadline timer goroutines started in the bubble have returned or are durably blocked, whatever their code.
+// deadline timer goroutines started in the bubble have returned or are durably blocked, whatever their code. A bubble
+// that ends with a goroutine still blocked in it fails t without ending the test binary.
 func inImageBubble(body func(*testing.T)) func(*testing.T) {
-	return func(t *testing.T) { synctest.Test(t, body) }
+	return func(t *testing.T) {
+		defer func() { r := recover(); require(t, r == nil, "synctest bubble: %v", r) }()
+		synctest.Test(t, body)
+	}
 }
 
 // cancelOnRead makes the next read call cancel before it returns, leaving the clock.
@@ -120,11 +124,11 @@ func (c *imageTestClock) onReadFrom(suffix string, at func(time.Time) time.Time)
 	c.onNextRead(hook)
 }
 
-// applyImageEndRead returns a channel closed by the first later clock read made inside
-// applyImageEnd; the reads until then leave the clock unchanged.
-func (c *imageTestClock) applyImageEndRead() <-chan struct{} {
+// readFrom returns a channel closed by the first later clock read made inside a function whose name ends with
+// suffix; the reads until then leave the clock unchanged.
+func (c *imageTestClock) readFrom(suffix string) <-chan struct{} {
 	read := make(chan struct{})
-	c.onReadFrom(".(*Service).applyImageEnd", func(now time.Time) time.Time { close(read); return now })
+	c.onReadFrom(suffix, func(now time.Time) time.Time { close(read); return now })
 	return read
 }
 
@@ -342,9 +346,7 @@ func callWithin[T any](t *testing.T, label string, call func() T) T {
 	t.Helper()
 	done := make(chan T, 1)
 	go func() { done <- call() }()
-	v, ok := receiveWithin(done, lifecycleWatchdog)
-	require(t, ok, "%s did not return within %s", label, lifecycleWatchdog)
-	return v
+	return awaitImageResult(t, done, label)
 }
 
 var errImageNoResult = errors.New("request did not return within its bound")
@@ -378,10 +380,11 @@ func (f *imageTestFixture) goRequest(round *ImageRound, ctx context.Context, ses
 	return launch(round, ctx, f.ids[session], start, imageTestByteLimit)
 }
 
-func awaitImageResult(t *testing.T, done <-chan imageResult, label string) imageResult {
+// awaitImageResult returns what done delivers, failing the test when it delivers nothing within lifecycleWatchdog.
+func awaitImageResult[T any](t *testing.T, done <-chan T, label string) T {
 	t.Helper()
 	result, ok := receiveWithin(done, lifecycleWatchdog)
-	require(t, ok, "%s: Request did not return within %s", label, lifecycleWatchdog)
+	require(t, ok, "%s did not return within %s", label, lifecycleWatchdog)
 	return result
 }
 
@@ -645,9 +648,7 @@ func (f *imageTestFixture) holdWrite(t *testing.T, session int) (release func() 
 	return func() error {
 		t.Helper()
 		stall.release <- nil
-		err, ok := receiveWithin(done, lifecycleWatchdog)
-		require(t, ok, "holder write did not return within %s", lifecycleWatchdog)
-		return err
+		return awaitImageResult(t, done, "holder write")
 	}
 }
 
@@ -1052,7 +1053,7 @@ func testImageEndBeforeWrite(t *testing.T) {
 			release := f.holdWrite(t, 0)
 			var timerRead <-chan struct{}
 			if tc.callback {
-				timerRead = f.clock.applyImageEndRead()
+				timerRead = f.clock.readFrom(".(*Service).applyImageEnd")
 			}
 			pending := f.goRequest(round, ctx, 0, 1)
 			f.waitAdmitted(t, 0, 1, "parked request")
@@ -1089,7 +1090,7 @@ func testImageEndBeforeWrite(t *testing.T) {
 		release := f.holdWrite(t, 0)
 		// No ctx is done before the cancel, so the first clock read inside applyImageEnd is the deadline timer's; the
 		// cancel runs inside a clock read of the parked request's endBeforeWrite, which holds the requester mutex.
-		timerRead := f.clock.applyImageEndRead()
+		timerRead := f.clock.readFrom(".(*Service).applyImageEnd")
 		pending := f.goRequest(round, ctx, 0, 1)
 		f.waitAdmitted(t, 0, 1, "parked request")
 		_, returned := receiveWithin(pending, 200*time.Millisecond)
@@ -1750,7 +1751,7 @@ type imageBubble struct {
 
 // runImageBubble runs body on an imageBubble; with follow set, the controlled clock follows the bubble's fake clock from the admission on.
 func runImageBubble(t *testing.T, follow bool, body func(t *testing.T, b imageBubble)) {
-	synctest.Test(t, func(t *testing.T) {
+	inImageBubble(func(t *testing.T) {
 		f := newImageTestFixture(t, 1)
 		t0, limits := f.clock.Now(), imageTestLimits(100*time.Millisecond)
 		roundCtx, cancelRound := context.WithCancel(context.Background())
@@ -1763,7 +1764,7 @@ func runImageBubble(t *testing.T, follow bool, body func(t *testing.T, b imageBu
 		}
 		f.admitted(t, round, ctx, 0, 1, 1)
 		body(t, imageBubble{f, round, f.instance(1), t0, cancel, cancelRound})
-	})
+	})(t)
 }
 
 // expire moves the controlled clock 1 ns past D, then runs passTimer.
@@ -2613,9 +2614,7 @@ func (f *imageTestFixture) goRecovered(round *ImageRound, ctx context.Context, s
 // with, or nil when it returned, failing the test when it has not ended within lifecycleWatchdog.
 func (f *imageTestFixture) requestRecovered(t *testing.T, round *ImageRound, ctx context.Context, session int, start byte) any {
 	t.Helper()
-	recovered, ok := receiveWithin(f.goRecovered(round, ctx, session, start), lifecycleWatchdog)
-	require(t, ok, "unwinding request did not end within %s", lifecycleWatchdog)
-	return recovered
+	return awaitImageResult(t, f.goRecovered(round, ctx, session, start), "unwinding request")
 }
 
 // requestExited requests start on session with ctx on its own goroutine and reports whether that
@@ -2669,20 +2668,24 @@ func testImageUnwindWithWriteMu(t *testing.T, goexit bool) {
 }
 
 // testImageUnwindWaiting unwinds a request at a pre-write clock read after a failed TryLock of the
-// writeMu the test holds; the next request writes its frame only after the test releases it.
+// writeMu the test holds; the next request writes its frame only after the test releases it. The test
+// unlocks writeMu only after three pre-write clock reads of that request, the second of which follows
+// a failed TryLock made after the first, so the test still holds it; that request's ctx ends at cleanup.
 func testImageUnwindWaiting(t *testing.T) {
 	f := newImageTestFixture(t, 1)
 	round := f.round(t, imageUnwindLimits(), 0)
 	session := f.peers[0]
 	session.writeMu.Lock()
-	defer func() { _ = session.writeMu.TryLock(); session.writeMu.Unlock() }()
 	f.unwindAtPreWriteRead(func() { panic(imageUnwindSentinel) })
 	f.requireUnwound(t, round, context.Background(), false)
-	pending := f.goRequest(round, context.Background(), 0, 2)
+	pending := f.goRequest(round, t.Context(), 0, 2)
 	f.waitAdmitted(t, 0, 2, "request after the unwind")
 	_, returned := receiveWithin(pending, lifecycleSettle)
 	f.requireFrames(t, 0, "while the test holds writeMu")
 	require(t, !returned, "request after the unwind returned while the test held writeMu")
+	for range 3 {
+		requireChannelClosed(t, f.clock.readFrom(".(*ImageRound).endBeforeWrite"), "pre-write clock read of the request waiting for writeMu")
+	}
 	session.writeMu.Unlock()
 	requireImageResult(t, awaitImageResult(t, pending, "request after the unwind"), 2, 2, nil, "request after the unwind")
 	f.requireFrames(t, 0, "after the test released writeMu", expectedImageQuery(2, 2))
@@ -2704,7 +2707,7 @@ func testImageUnwindWrite(t *testing.T) {
 // its Request ctx or, with roundCtx set, its round ctx: the next two requests leave the usage of a
 // fresh Service, and, with roundCtx set, canceling the Request ctx Cr then changes nothing.
 func testImageUnwindArming(t *testing.T, goexit, roundCtx bool) {
-	synctest.Test(t, func(t *testing.T) {
+	inImageBubble(func(t *testing.T) {
 		c := newImageHookCtx()
 		c.onAfterFunc = imageUnwinder(goexit)
 		cr, cancelCr := context.WithCancel(context.Background())
@@ -2736,7 +2739,7 @@ func testImageUnwindArming(t *testing.T, goexit, roundCtx bool) {
 			require(t, !retired && end == nil, "instance of start 1 after Cr is canceled: retired=%v end=%v, want current", retired, end)
 		}
 		requireReturned(t, lifecycleClose(f.s), "Close")
-	})
+	})(t)
 }
 
 // testImageUnwindStop unwinds a retirement of the instance of start 1 on session 0 at the first stop call of the
@@ -2793,7 +2796,6 @@ func (f *imageTestFixture) unwindRetirement(t *testing.T, round *ImageRound, c *
 	f.waitAdmitted(t, 0, 1, "request waiting for writeMu")
 	inst := f.instance(1)
 	f.clock.set(end)
-	recovered, ok := receiveWithin(unwound, lifecycleWatchdog)
-	require(t, ok, "request waiting for writeMu did not end within %s", lifecycleWatchdog)
+	recovered := awaitImageResult(t, unwound, "request waiting for writeMu")
 	return inst, recovered, func() { _ = session.writeMu.TryLock(); session.writeMu.Unlock() }
 }
