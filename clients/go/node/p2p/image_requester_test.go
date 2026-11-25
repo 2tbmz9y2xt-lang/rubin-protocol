@@ -1904,16 +1904,19 @@ func testImageFailedWrite(t *testing.T) {
 			f.requireFault(t, 0, 1, errImageScriptedWrite.Error(), "after the failed write")
 		})
 	}
+	t.Run("a failed write with a second request held on the session", func(t *testing.T) { testImageUnwindFailedWrite(t, false, false, true, 0) })
 	t.Run("a frame refused by the message size cap before its first byte", func(t *testing.T) {
 		f := newImageTestFixture(t, 1)
 		f.s.cfg.PeerRuntimeConfig.MaxMessageSize = 119
 		round := f.round(t, imageTestLimits(), 0)
-		got := f.request(round, context.Background(), 0, 1)
-		require(t, got.q == expectedImageQuery(1, 1) && got.err != nil && got.err.Error() == "message exceeds cap", "cap refusal: q=%+v err=%v, want id 1 start 1 and the frame writer's cap refusal", got.q, got.err)
-		written, _ := f.conns[0].snapshot()
-		f.requireUsage(t, round, 0, imageUsage(0, 1, 1, 1, 0), imageUsage(0, 1, 1, 1, 0), "after the cap refusal")
-		require(t, len(written) == 0, "after the cap refusal: %d bytes written, want none", len(written))
-		f.requireFault(t, 0, 1, got.err.Error(), "after the cap refusal")
+		for id := uint64(1); id <= 2; id++ {
+			got := f.request(round, context.Background(), 0, byte(id))
+			require(t, got.q == expectedImageQuery(id, byte(id)) && got.err != nil && got.err.Error() == "message exceeds cap", "cap refusal: q=%+v err=%v, want id %d start %d and the frame writer's cap refusal", got.q, got.err, id, id)
+			written, _ := f.conns[0].snapshot()
+			f.requireUsage(t, round, 0, imageUsage(0, id, id, id, 0), imageUsage(0, id, id, id, 0), "after the cap refusal")
+			require(t, len(written) == 0, "after the cap refusal: %d bytes written, want none", len(written))
+			f.requireFault(t, 0, int(id), got.err.Error(), "after the cap refusal")
+		}
 	})
 	for _, end := range []string{"request ctx", "round ctx", "now after D"} {
 		for _, writeErr := range []error{nil, errImageScriptedWrite} {
@@ -1955,7 +1958,8 @@ func testImageFailedWrite(t *testing.T) {
 }
 
 func testImageStaleHandle(t *testing.T) {
-	t.Run("a ctx callback started before a pass retired its instance runs after the replacement", inImageBubble(testImageStaleCallback))
+	t.Run("a ctx callback started before a pass retired its instance runs after the replacement", inImageBubble(func(t *testing.T) { testImageStaleCallback(t, false) }))
+	t.Run("a round ctx callback started before a pass retired its instance runs after the replacement in a new round", inImageBubble(func(t *testing.T) { testImageStaleCallback(t, true) }))
 	t.Run("a ctx callback that loaded its instance before a retirement under the requester mutex", testImageCallbackAfterRetirement)
 	t.Run("write failure of an instance ended during the write", func(t *testing.T) {
 		f := newImageTestFixture(t, 3)
@@ -1998,22 +2002,29 @@ func waitImageMutexWaiter(t *testing.T, mu *sync.Mutex, start func()) {
 	imageSpin(t, func() bool { return atomic.LoadInt32(state)>>3 != 0 }, "Request ctx callback waiting for the requester mutex")
 }
 
-func testImageStaleCallback(t *testing.T) {
-	f, limits := newImageTestFixture(t, 3), imageTestLimits(math.MaxInt64, math.MaxInt64)
-	round, ctx := f.round(t, limits, 0, 1, 2), newImageHookCtx()
+func testImageStaleCallback(t *testing.T, roundCtx bool) {
+	f, limits, c := newImageTestFixture(t, 3), imageTestLimits(math.MaxInt64, math.MaxInt64), newImageHookCtx()
+	roundC, ctx := imageUnwindCtx(c, context.Background(), roundCtx)
+	round := f.roundCtx(t, roundC, limits, 0, 1, 2)
+	next := round
+	if roundCtx {
+		next = f.round(t, limits, 0, 1, 2)
+	}
 	stale := f.admitted(t, round, ctx, 0, 1, 1)
-	f.clock.cancelOnRead(func() { requireEqual(t, ctx.endAndRun(context.Canceled), 1, "stale ctx functions") })
+	f.clock.cancelOnRead(func() {
+		waitImageMutexWaiter(t, &f.s.imageRequester.mu, func() { requireEqual(t, c.endAndRun(context.Canceled), 1, "stale ctx functions") })
+	})
 	reads := f.clock.readCount()
-	f.admitted(t, round, context.Background(), 1, 1, 1)
+	f.admitted(t, next, context.Background(), 1, 1, 1)
 	synctest.Wait()
-	require(t, f.clock.readCount() == reads+2 && ctx.applierErrs == 0, "stale callback: clock reads %d->%d, its ctx Err calls %d, want only the replacement's 2 reads and none", reads, f.clock.readCount(), ctx.applierErrs)
-	f.refused(t, round, context.Background(), 2, 1, errImageAssignmentCurrent)
+	require(t, f.clock.readCount() == reads+2 && c.applierErrs == 0, "stale callback: clock reads %d->%d, its ctx Err calls %d, want only the replacement's 2 reads and none", reads, f.clock.readCount(), c.applierErrs)
+	f.refused(t, next, context.Background(), 2, 1, errImageAssignmentCurrent)
 	replacement := f.instance(1)
 	require(t, replacement != nil && replacement != stale && replacement.session == f.peers[1], "current instance after the stale callback: %p, want the replacement on session 1", replacement)
-	retired, _ := f.ended(replacement)
+	retired, replacementEnd := f.ended(replacement)
 	_, end := f.ended(stale)
-	require(t, !retired && end == context.Canceled, "replacement retired=%v, stale end=%v", retired, end) //nolint:errorlint // The stale instance keeps its ctx's Err() itself.
-	f.requireUsage(t, round, 0, imageUsage(0, 1, 1, 1, 0), imageUsage(1, 1, 2, 2, 0), "after the stale callback")
+	require(t, !retired && replacementEnd == nil && end == context.Canceled, "replacement retired=%v end=%v, stale end=%v", retired, replacementEnd, end) //nolint:errorlint // The stale instance keeps its ctx's Err() itself.
+	f.requireUsage(t, round, 0, imageUsage(0, 1, 1, 1, 0), map[bool]imageUnitVector{false: imageUsage(1, 1, 2, 2, 0), true: imageUsage(0, 1, 1, 1, 0)}[roundCtx], "after the stale callback")
 }
 
 func (f *imageTestFixture) requireRoundRefused(t *testing.T, ctx context.Context, config ImageRoundConfig, want error, label string) {
@@ -2514,11 +2525,11 @@ func testImageUnwind(t *testing.T) {
 	t.Run("a round ctx callback after a panic in the stop call of the pre-write retirement retires the instance", testImageUnwindStopRoundEnd)
 	stop("a panic in the request ctx stop call of another request's pass retiring the instance", false, false, true)
 	stop("a panic in the round ctx stop call of another request's pass retiring the instance", false, true, true)
-	t.Run("a panic in the request ctx stop call of the retirement after a failed write", func(t *testing.T) { testImageUnwindFailedWrite(t, false, false, -1) })
-	t.Run("runtime.Goexit in the request ctx stop call of the retirement after a failed write", func(t *testing.T) { testImageUnwindFailedWrite(t, true, false, -1) })
-	t.Run("a panic in the round ctx stop call of the retirement after a failed write", func(t *testing.T) { testImageUnwindFailedWrite(t, false, true, -1) })
-	t.Run("the same with a second request held on another session", func(t *testing.T) { testImageUnwindFailedWrite(t, false, false, 1) })
-	t.Run("the same with a second request held on the session", func(t *testing.T) { testImageUnwindFailedWrite(t, false, false, 0) })
+	t.Run("a panic in the request ctx stop call of the retirement after a failed write", func(t *testing.T) { testImageUnwindFailedWrite(t, false, false, false, -1) })
+	t.Run("runtime.Goexit in the request ctx stop call of the retirement after a failed write", func(t *testing.T) { testImageUnwindFailedWrite(t, true, false, false, -1) })
+	t.Run("a panic in the round ctx stop call of the retirement after a failed write", func(t *testing.T) { testImageUnwindFailedWrite(t, false, true, false, -1) })
+	t.Run("the same with a second request held on another session", func(t *testing.T) { testImageUnwindFailedWrite(t, false, false, false, 1) })
+	t.Run("the same with a second request held on the session", func(t *testing.T) { testImageUnwindFailedWrite(t, false, false, false, 0) })
 }
 
 func imageUnwindCtx(c *imageHookCtx, live context.Context, roundCtx bool) (context.Context, context.Context) {
@@ -2563,14 +2574,14 @@ func (f *imageTestFixture) requireCurrentAfterUnwind(t *testing.T, round *ImageR
 	require(t, inst != nil && f.instance(1) == inst && !retired && end == nil && got == current, "after the unwind: registered=%v retired=%v end=%v current assignments per peer and global %v, want registered, unretired, no end, %v", f.instance(1) == inst, retired, end, got, current)
 }
 
-func testImageUnwindFailedWrite(t *testing.T, goexit, roundCtx bool, holder int) {
+func testImageUnwindFailedWrite(t *testing.T, goexit, roundCtx, ordinary bool, holder int) {
 	f, limits := newImageTestFixture(t, 2), imageUnwindLimits(24*time.Hour, 48*time.Hour)
 	if holder >= 0 {
 		limits = imageTestLimits(24*time.Hour, 48*time.Hour)
 		limits.Global.PendingNetworkBytes = 240
 	}
 	c := newImageHookCtx()
-	c.onStop = imageUnwinder(goexit)
+	c.onStop = map[bool]func(){false: imageUnwinder(goexit)}[ordinary]
 	roundC, requestC := imageUnwindCtx(c, context.Background(), roundCtx)
 	round := f.roundCtx(t, roundC, limits, 0, 1)
 	stall := f.wires[0].armStallAfter(1)
@@ -2595,7 +2606,11 @@ func testImageUnwindFailedWrite(t *testing.T, goexit, roundCtx bool, holder int)
 	if holder == 0 {
 		requireImageResult(t, awaitImageResult(t, held, "second holder"), 2, 2, net.ErrClosed, "second holder")
 	}
-	f.requireUnwound(t, unwound, goexit)
+	if ordinary {
+		requireEqual(t, awaitImageResult(t, unwound, "failed write"), any(imageResult{expectedImageQuery(1, 1), errImageScriptedWrite}), "failed write result")
+	} else {
+		f.requireUnwound(t, unwound, goexit)
+	}
 	require(t, len(f.wires[0].bytes()) == wireHeaderSize, "after the unwind: %d bytes written, want the %d header bytes", len(f.wires[0].bytes()), wireHeaderSize)
 	requireEqual(t, pending, [2]uint64{map[int]uint64{0: 120}[holder], map[bool]uint64{true: 120}[holder >= 0]}, "pending request bytes per peer and global inside the close hook")
 	if holder == 1 {
@@ -2608,8 +2623,10 @@ func testImageUnwindFailedWrite(t *testing.T, goexit, roundCtx bool, holder int)
 		requireImageResult(t, awaitImageResult(t, next, "request at the global limit"), 2, 3, nil, "request at the global limit")
 	}
 	f.requireFault(t, 0, 1+map[int]int{0: 1}[holder], map[bool]string{true: net.ErrClosed.Error(), false: errImageScriptedWrite.Error()}[holder == 0], "at the end")
-	f.requireCurrentAfterUnwind(t, round, inst, [2]uint64{1, 1 + map[int]uint64{1: 2}[holder]})
-	f.refused(t, round, context.Background(), 1, 1, errImageAssignmentCurrent)
+	if !ordinary {
+		f.requireCurrentAfterUnwind(t, round, inst, [2]uint64{1, 1 + map[int]uint64{1: 2}[holder]})
+		f.refused(t, round, context.Background(), 1, 1, errImageAssignmentCurrent)
+	}
 	requireReturned(t, lifecycleClose(f.s), "Close")
 }
 
@@ -2659,8 +2676,8 @@ func testImageUnwindWithWriteMu(t *testing.T, goexit bool) {
 }
 
 func testImageUnwindWaiting(t *testing.T) {
-	f := newImageTestFixture(t, 1)
-	round := f.round(t, imageUnwindLimits(), 0)
+	f := newImageTestFixture(t, 2)
+	round := f.round(t, imageUnwindLimits(), 0, 1)
 	f.peers[0].writeMu.Lock()
 	f.unwindAtPreWriteRead(func() { panic(imageUnwindSentinel) })
 	f.requireUnwound(t, f.goRecovered(round, context.Background(), 0, 1), false)
@@ -2675,13 +2692,14 @@ func testImageUnwindWaiting(t *testing.T) {
 	f.peers[0].writeMu.Unlock()
 	requireImageResult(t, awaitImageResult(t, pending, "request after the unwind"), 2, 2, nil, "request after the unwind")
 	f.requireFrames(t, 0, "after the test released writeMu", expectedImageQuery(2, 2))
+	f.refused(t, round, context.Background(), 1, 1, errImageAssignmentCurrent)
 	requireReturned(t, lifecycleClose(f.s), "Close")
 }
 
 func testImageUnwindWrite(t *testing.T) {
 	for skip := range 2 {
-		f := newImageTestFixture(t, 1)
-		round := f.round(t, imageUnwindLimits(), 0)
+		f := newImageTestFixture(t, 2)
+		round := f.round(t, imageUnwindLimits(), 0, 1)
 		f.wires[0].mu.Lock()
 		f.wires[0].panicNext, f.wires[0].panicSkip = imageUnwindSentinel, skip
 		f.wires[0].mu.Unlock()
@@ -2689,6 +2707,7 @@ func testImageUnwindWrite(t *testing.T) {
 		requireEqual(t, len(f.wires[0].bytes()), skip*wireHeaderSize, "bytes written by the panicking frame write")
 		f.wires[0].drop(skip * wireHeaderSize)
 		f.requireNextAfterUnwind(t, round, 0, 2, 2)
+		f.refused(t, round, context.Background(), 1, 1, errImageAssignmentCurrent)
 		f.requireFault(t, 0, 0, "", "after the unwind")
 		requireReturned(t, lifecycleClose(f.s), "Close")
 	}
@@ -2701,6 +2720,7 @@ func testImageUnwindArming(t *testing.T, goexit, roundCtx, parked bool) {
 		round, leases, reads := f.roundCtx(t, roundC, imageUnwindLimits(), 0, 1), f.leases(), f.clock.readCount()
 		c.onAfterFunc = func() {
 			if roundCtx && parked {
+				f.clock.onReadFrom("p2p.applyImageEnd", func(now time.Time) time.Time { runtime.Goexit(); return now })
 				waitImageMutexWaiter(t, &f.s.imageRequester.mu, func() { go func() { ran <- cr.endAndRun(context.Canceled) }() })
 			}
 			imageUnwinder(goexit)()
@@ -2711,6 +2731,7 @@ func testImageUnwindArming(t *testing.T, goexit, roundCtx, parked bool) {
 			imageSpin(t, func() bool { return f.leases() == leases }, "Service lease release by the Request ctx callback")
 			require(t, f.clock.readCount() == reads+1 && cr.applierErrs == 0 && f.instance(1) == nil, "Request ctx callback waiting through the unwind: clock reads %d->%d, Err calls %d, registered %v, want only the admission read", reads, f.clock.readCount(), cr.applierErrs, f.instance(1) != nil)
 			f.requireUsage(t, round, 0, imageUnitVector{}, imageUnitVector{}, "after the Request ctx callback waiting through the unwind")
+			f.clock.onNextRead(nil)
 		}
 		f.requireUnwound(t, unwound, goexit)
 		f.requireNextAfterUnwind(t, round, 0, 1, 1)
