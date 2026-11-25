@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -2049,23 +2050,20 @@ func testImageStaleHandle(t *testing.T) {
 	})
 }
 
-// testImageCallbackAfterRetirement runs the Request ctx callback while the test holds the requester mutex, retires the instance once that callback waits for the mutex and checks
-// that after the unlock the callback reads neither the clock nor the ctx's Err and leaves the registry and usage unchanged.
+// testImageCallbackAfterRetirement retires the instance while its Request ctx callback waits for the requester mutex the
+// test holds; after the unlock the callback reads neither the clock nor the ctx's Err.
 func testImageCallbackAfterRetirement(t *testing.T) {
 	f := newImageTestFixture(t, 1)
 	round, ctx := f.round(t, imageTestLimits(math.MaxInt64, math.MaxInt64), 0), newImageHookCtx()
 	inst := f.admitted(t, round, ctx, 0, 1, 1)
 	req, ran := f.lockRequester(), make(chan int, 1)
+	// sync.Mutex starts with the internal/sync.Mutex state word: bit 0 locked, waiter count from bit 3.
+	state := (*int32)(unsafe.Pointer(&req.mu))
+	requireEqual(t, atomic.LoadInt32(state), int32(1), "requester mutex state held by the test alone")
 	go func() { ran <- ctx.endAndRun(context.Canceled) }()
-	waitUntil(t, func() bool {
-		buf := make([]byte, 1<<20)
-		for _, g := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
-			if strings.Contains(g, "p2p.applyImageEnd") && strings.Contains(g, "sync.(*Mutex).Lock") {
-				return true
-			}
-		}
-		return false
-	}, "Request ctx callback waiting for the requester mutex")
+	for deadline := time.Now().Add(lifecycleWatchdog); atomic.LoadInt32(state)>>3 == 0; runtime.Gosched() {
+		require(t, time.Now().Before(deadline), "Request ctx callback not waiting for the requester mutex within %s", lifecycleWatchdog)
+	}
 	req.retireLocked(inst, errImageExpired)
 	reads := f.clock.readCount()
 	req.mu.Unlock()
