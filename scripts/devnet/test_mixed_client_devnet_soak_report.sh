@@ -3,14 +3,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; GEN="${REPO_ROOT}/scripts/devnet/generate_mixed_client_devnet_soak_report.py"
 command -v python3 >/dev/null || { echo "python3 not found" >&2; exit 1; }; [[ -r "${GEN}" ]] || { echo "generator not readable: ${GEN}" >&2; exit 1; }
 TMP_PARENT="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)" || { echo "TMPDIR not canonicalizable: ${TMPDIR:-/tmp}" >&2; exit 1; }
-TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-soak-report-pr1.XXXXXX")" || { echo "mktemp failed" >&2; exit 1; }
+TMP_BASE="$(mktemp -d "${TMP_PARENT%/}/rubin-soak-report-pr1.XXXXXX")" || { echo "mktemp failed" >&2; exit 1; }
+TMP_ROOT="${TMP_BASE}/root"; mkdir -- "${TMP_ROOT}"
 LINK_PARENT="${TMP_ROOT}-parent-link"
 ALIAS_ROOT="${LINK_PARENT}/$(basename "${TMP_ROOT}")"
 SPACE_LINK_PARENT="${TMP_ROOT}-parent link"
 SPACE_ALIAS_ROOT="${SPACE_LINK_PARENT}/$(basename "${TMP_ROOT}")"
-trap 'rm -rf -- "${TMP_ROOT}" "${LINK_PARENT}" "${SPACE_LINK_PARENT}"' EXIT
+trap 'chmod -R u+w "${TMP_BASE}" || true; rm -rf -- "${TMP_BASE}"' EXIT
 python3 - "${TMP_ROOT}" <<'PY'
-import hashlib, json, os, sys; from pathlib import Path
+import hashlib, json, os, shlex, sys; from pathlib import Path
 root = Path(os.path.realpath(sys.argv[1])); root.mkdir(exist_ok=True)
 link_parent = root.parent / f"{root.name}-parent-link"; link_parent.symlink_to(root.parent, target_is_directory=True); alias_root = link_parent / root.name; space_link_parent = root.parent / f"{root.name}-parent link"; space_link_parent.symlink_to(root.parent, target_is_directory=True); space_alias_root = space_link_parent / root.name
 h = lambda ch: ch * 64
@@ -27,7 +28,7 @@ def merkle(items, leaf_tag, node_tag):
         level = nxt
     return level[0]
 def noncoinbase(nonce):
-    core = b"".join([(1).to_bytes(4, "little"), b"\x00", nonce.to_bytes(8, "little"), cs(1), sha3(f"prev-{nonce}".encode()), (0).to_bytes(4, "little"), cs(0), (0xffffffff).to_bytes(4, "little"), cs(1), (0).to_bytes(8, "little"), (0x0002).to_bytes(2, "little"), cs(32), sha3(f"anchor-{nonce}".encode()), (0).to_bytes(4, "little")])
+    core = b"".join([(1).to_bytes(4, "little"), b"\x00", nonce.to_bytes(8, "little"), cs(1), sha3(f"prev-{nonce}".encode()), (0).to_bytes(4, "little"), cs(0), (0).to_bytes(4, "little"), cs(1), (0).to_bytes(8, "little"), (0x0002).to_bytes(2, "little"), cs(32), sha3(f"anchor-{nonce}".encode()), (0).to_bytes(4, "little")])
     tx = core + cs(0) + cs(0)
     return tx, sha3(core), sha3(tx), core
 def coinbase(block_height, extra_wtxids=()):
@@ -45,14 +46,20 @@ go_binary = str(root / "rubin-node-go")
 rust_binary = str(root / "rubin-node-rust")
 go_argv = [go_binary, "--network", "devnet", "--datadir", str(root / "node-go"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"]
 rust_argv = [rust_binary, "--network", "devnet", "--datadir", str(root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", "localhost:5102"]
+create = ["--create-store"]
 for path in (root / "rubin-node-go", root / "rubin-node-rust"):
     path.write_text("#!/bin/sh\n", encoding="utf-8")
     path.chmod(0o755)
 (root / "rubin-node-not-exec").write_text("#!/bin/sh\n", encoding="utf-8")
 nodes = [
-  {"name":"node-go","implementation":"go","pid":101,"rpc_endpoint":"localhost:5101","p2p_endpoint":"localhost:5102","binary":go_binary,"command":" ".join(go_argv),"command_argv":go_argv,"started_at":"2026-05-12T10:00:00Z","process_comm":"rubin-node-go","process_alive":True,"rpc_endpoint_process_backed":True,"p2p_endpoint_process_backed":True},
-  {"name":"node-rust","implementation":"rust","pid":102,"rpc_endpoint":"rust-node:5201","p2p_endpoint":"rust-node:5202","binary":rust_binary,"command":" ".join(rust_argv),"command_argv":rust_argv,"started_at":"2026-05-12T10:00:03Z","process_comm":"rubin-node-rust","process_alive":True,"rpc_endpoint_process_backed":True,"p2p_endpoint_process_backed":True},
+  {"name":"node-go","implementation":"go","pid":101,"rpc_endpoint":"localhost:5101","p2p_endpoint":"localhost:5102","binary":go_binary,"command":shlex.join(go_argv),"command_argv":go_argv,"started_at":"2026-05-12T10:00:00Z","process_comm":"rubin-node-go","process_alive":True,"rpc_endpoint_process_backed":True,"p2p_endpoint_process_backed":True},
+  {"name":"node-rust","implementation":"rust","pid":102,"rpc_endpoint":"rust-node:5201","p2p_endpoint":"rust-node:5202","binary":rust_binary,"command":shlex.join(rust_argv + create),"command_argv":rust_argv + create,"started_at":"2026-05-12T10:00:03Z","process_comm":"rubin-node-rust","process_alive":True,"rpc_endpoint_process_backed":True,"p2p_endpoint_process_backed":True},
 ]
+def argv_nodes(go_cmd, rust_cmd):
+    out = json.loads(json.dumps(nodes))
+    for node, argv in zip(out, (go_cmd, rust_cmd)):
+        node["command_argv"], node["command"] = argv, shlex.join(argv)
+    return out
 def dump(name, obj):
     path = root / name
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -61,10 +68,18 @@ def rewrite_root_paths(value, target_root=None):
     target = str(alias_root if target_root is None else target_root)
     if isinstance(value, str): return value.replace(str(root), target)
     if isinstance(value, list): return [rewrite_root_paths(item, target_root) for item in value]
-    if isinstance(value, dict): return {key: rewrite_root_paths(item, target_root) for key, item in value.items()}
+    if isinstance(value, dict):
+        out = {key: rewrite_root_paths(item, target_root) for key, item in value.items()}
+        if command_quotes_argv(value): out["command"] = shlex.join(out["command_argv"])
+        return out
     return value
+def command_quotes_argv(node):
+    try:
+        return isinstance(node.get("command"), str) and shlex.split(node["command"]) == node.get("command_argv")
+    except ValueError:
+        return False
 def space_escaped_arg(arg):
-    return arg.replace("\\", "\\\\").replace(" ", "\\ ")
+    return "".join(c if c.isascii() and (c.isalnum() or c in "_./:=-") else "\\" + c for c in arg)
 def raw(prop=None, conv=None, txid=h("1"), block_hash=h("2"), height=9):
     def bucket(kind, direction):
         if direction is None:
@@ -85,7 +100,7 @@ def status(impl, txid): return {"implementation":impl,"request_path":f"/tx_statu
 def get_tx(impl, txid, tx_hex): return {"found":True,"implementation":impl,"raw_hex":tx_hex,"request_path":f"/get_tx?txid={txid}","rpc_endpoint":rpc[impl],"txid":txid}
 def tx_block(impl, block_hash, height, block_hex="aa"): return {"block_hex":block_hex,"canonical":True,"hash":block_hash,"height":height,"implementation":impl,"request_path":f"/get_block?height={height}","rpc_endpoint":rpc[impl]}
 def tx_tip(impl, block_hash, height): return {"best_known_height":height,"has_tip":True,"height":height,"implementation":impl,"in_ibd":False,"request_path":"/get_tip","rpc_endpoint":rpc[impl],"tip_hash":block_hash}
-def tx_mine_next(impl, block_hash, height, tx_count=2): return {"block_hash":block_hash,"height":height,"implementation":impl,"mined":True,"nonce":1777000001,"request_path":"/mine_next","rpc_endpoint":rpc[impl],"timestamp":1777000000,"tx_count":tx_count}
+def tx_mine_next(impl, block_hash, height, tx_count=2): return {"block_hash":block_hash,"height":height,"implementation":impl,"mined":True,"nonce":1777000001,"request_path":"/mine_next","rpc_endpoint":rpc[impl],"timestamp":1777000000,"tx_count":tx_count,**({"commit_state":"committed"} if impl == "go" else {})}
 def capture(prefix, impl, txid=h("1"), tx_hex="aa"):
     return {"get_tx_path":dump(f"{prefix}-get.json", get_tx(impl, txid, tx_hex)),"rpc_endpoint":rpc[impl],"tx_status_path":dump(f"{prefix}-status.json", status(impl, txid)),"txid":txid}
 def submit_obj(prefix, impl, txid=h("1"), tx_hex="aa"):
@@ -105,7 +120,7 @@ other_block_hex, other_block_hash = build_block(9, nonce=13, extra_txs=[other_tx
 wtxid_block_hex, wtxid_block_hash = build_block(9, nonce=14, extra_txs=[same_txid_other_wtxid])
 base = {"artifact_root":str(root),"nodes":nodes,"verdict":"PASS","peer_connectivity":{"go_to_rust":True,"rust_to_go":True,"bidirectional_observed":True,"counterpart_links":{"go_peer_snapshot_expected_addr":"rust-local:5300","rust_peer_snapshot_expected_addr":"localhost:5102","rust_outbound_local_addr":"rust-local:5300","rust_outbound_remote_addr":"localhost:5102","rust_outbound_pid":102},"go_peer_snapshot":{"count":1,"peers":[{"addr":"rust-local:5300","handshake_complete":True}]},"rust_peer_snapshot":{"count":1,"peers":[{"addr":"localhost:5102","handshake_complete":True}]}},"final_verification":{"producer_side":True,"process_identity_rechecked":True,"rust_outbound_link_rechecked":True,"peer_snapshots_rechecked":True,"rust_outbound_pid":102,"rust_outbound_local_addr":"rust-local:5300","rust_outbound_remote_addr":"localhost:5102"},"legacy_schema_compatibility":{"authoritative":False,"marker_path":str(root/"marker.json"),"purpose":"schema-valid legacy artifact only; not the mesh report verdict","reason":"existing mixed_client_evidence_v1 PASS requires tx_path; mesh process/connectivity PASS lives in this report"}}
 (root / "marker.json").write_text(json.dumps(marker("FAIL", failure_reason="schema v1 PASS requires tx_path; mesh PASS lives in sibling report"), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-dump("mesh.json", {**base,"scenario":"mixed_client_mesh","raw_samples":raw()})
+dump("mesh.json", {**base,"nodes":argv_nodes(go_argv + create, rust_argv + create),"scenario":"mixed_client_mesh","raw_samples":raw()})
 escaped_mesh = rewrite_root_paths(json.loads((root / "mesh.json").read_text()), space_alias_root)
 for node in escaped_mesh["nodes"]:
     node["command"] = " ".join(space_escaped_arg(arg) for arg in node["command_argv"])
@@ -120,26 +135,26 @@ for name in ("node-go", "node-rust"):
     (root / name).mkdir()
 dump("rust-pre-restart-tip.json", {"best_known_height":7,"has_tip":True,"height":7,"implementation":"rust","in_ibd":False,"request_path":"/get_tip","rpc_endpoint":"old-rust:5201","tip_hash":h("1")})
 dump("go-restart-target-tip.json", {"best_known_height":8,"has_tip":True,"height":8,"implementation":"go","in_ibd":False,"request_path":"/get_tip","rpc_endpoint":"localhost:5101","tip_hash":h("2")})
-dump("go-restart-mine-next.json", {"block_hash":h("2"),"height":8,"implementation":"go","mined":True,"nonce":1777000001,"request_path":"/mine_next","rpc_endpoint":"localhost:5101","timestamp":1777000000,"tx_count":1})
+dump("go-restart-mine-next.json", {"block_hash":h("2"),"height":8,"implementation":"go","mined":True,"nonce":1777000001,"request_path":"/mine_next","rpc_endpoint":"localhost:5101","timestamp":1777000000,"tx_count":1,"commit_state":"committed"})
 dump("rust-catch-up-tip.json", {"best_known_height":8,"has_tip":True,"height":8,"implementation":"rust","in_ibd":False,"request_path":"/get_tip","rpc_endpoint":"rust-node:5201","tip_hash":h("2")})
 restart_summary = {"stopped_node":"node-rust","pre_restart_height":7,"catch_up_height":8}
 dump("restart-marker.json", {"evidence_type":"mixed_client_process_soak","failure_reason":"mixed-client Rust restart PASS is recorded in sibling report; existing schema v1 PASS requires tx_path proof owned by RUB-22/RUB-23","participants":[{"endpoint":"localhost:5101","implementation":"go","name":"node-go","started_at":"2026-05-12T10:00:00Z"},{"endpoint":"rust-node:5201","implementation":"rust","name":"node-rust","started_at":"2026-05-12T10:00:03Z"}],"restart":restart_summary,"scenario":"mixed_client_mesh_schema_marker","schema_version":"rubin-mixed-client-devnet-evidence-v1","verdict":"FAIL"})
-restart = {**base,"artifact_root":str(root),"artifact_created_at_utc":"2026-05-12T10:00:02Z","run_id":root.name,"scenario":"mixed_client_rust_restart","legacy_schema_compatibility":{"authoritative":False,"marker_path":str(root/"restart-marker.json"),"purpose":"schema-valid legacy artifact only; not the Rust restart report verdict","reason":"existing mixed_client_evidence_v1 PASS requires tx_path; Rust restart PASS lives in this report"},"restart":restart_summary,"rust_restart":{"datadir":str(root/"node-rust"),"old_pid":201,"new_pid":102,"old_rpc_endpoint":"old-rust:5201","old_p2p_endpoint":"old-rust:5202","old_started_at":"2026-05-12T09:59:59Z","new_rpc_endpoint":"rust-node:5201","new_p2p_endpoint":"rust-node:5202","new_started_at":"2026-05-12T10:00:03Z","old_command_argv":rust_argv,"new_command_argv":rust_argv,"old_pid_stopped":True,"same_datadir":True,"peer_reconnect_observed":True,"pre_restart_has_tip":True,"go_target_has_tip":True,"catch_up_has_tip":True,"pre_restart_height":7,"pre_restart_tip":h("1"),"pre_restart_tip_path":str(root/"rust-pre-restart-tip.json"),"go_target_height":8,"go_target_tip":h("2"),"go_target_tx_count":1,"go_target_tip_path":str(root/"go-restart-target-tip.json"),"go_target_mine_next_path":str(root/"go-restart-mine-next.json"),"catch_up_height":8,"catch_up_tip":h("2"),"catch_up_tip_path":str(root/"rust-catch-up-tip.json")},"raw_samples":raw()}; dump("restart.json", restart)
+restart = {**base,"nodes":argv_nodes(go_argv, rust_argv),"artifact_root":str(root),"artifact_created_at_utc":"2026-05-12T10:00:02Z","run_id":root.name,"scenario":"mixed_client_rust_restart","legacy_schema_compatibility":{"authoritative":False,"marker_path":str(root/"restart-marker.json"),"purpose":"schema-valid legacy artifact only; not the Rust restart report verdict","reason":"existing mixed_client_evidence_v1 PASS requires tx_path; Rust restart PASS lives in this report"},"restart":restart_summary,"rust_restart":{"datadir":str(root/"node-rust"),"old_pid":201,"new_pid":102,"old_rpc_endpoint":"old-rust:5201","old_p2p_endpoint":"old-rust:5202","old_started_at":"2026-05-12T09:59:59Z","new_rpc_endpoint":"rust-node:5201","new_p2p_endpoint":"rust-node:5202","new_started_at":"2026-05-12T10:00:03Z","old_command_argv":rust_argv + create,"new_command_argv":rust_argv,"old_pid_stopped":True,"same_datadir":True,"peer_reconnect_observed":True,"pre_restart_has_tip":True,"go_target_has_tip":True,"catch_up_has_tip":True,"pre_restart_height":7,"pre_restart_tip":h("1"),"pre_restart_tip_path":str(root/"rust-pre-restart-tip.json"),"go_target_height":8,"go_target_tip":h("2"),"go_target_tx_count":1,"go_target_tip_path":str(root/"go-restart-target-tip.json"),"go_target_mine_next_path":str(root/"go-restart-mine-next.json"),"catch_up_height":8,"catch_up_tip":h("2"),"catch_up_tip_path":str(root/"rust-catch-up-tip.json")},"raw_samples":raw()}; dump("restart.json", restart)
 dump("restart_symlink_parent.json", rewrite_root_paths(restart))
-dump("rust-pre-restart-tip-zero.json", {"best_known_height":0,"has_tip":True,"height":0,"implementation":"rust","in_ibd":False,"request_path":"/get_tip","rpc_endpoint":"old-rust:5201","tip_hash":h("0")}); dump("go-restart-target-tip-one.json", {"best_known_height":1,"has_tip":True,"height":1,"implementation":"go","in_ibd":False,"request_path":"/get_tip","rpc_endpoint":"localhost:5101","tip_hash":h("3")}); dump("go-restart-mine-next-one.json", {"block_hash":h("3"),"height":1,"implementation":"go","mined":True,"nonce":1777000001,"request_path":"/mine_next","rpc_endpoint":"localhost:5101","timestamp":1777000000,"tx_count":1}); dump("rust-catch-up-tip-one.json", {"best_known_height":1,"has_tip":True,"height":1,"implementation":"rust","in_ibd":False,"request_path":"/get_tip","rpc_endpoint":"rust-node:5201","tip_hash":h("3")})
+dump("rust-pre-restart-tip-zero.json", {"best_known_height":0,"has_tip":True,"height":0,"implementation":"rust","in_ibd":False,"request_path":"/get_tip","rpc_endpoint":"old-rust:5201","tip_hash":h("0")}); dump("go-restart-target-tip-one.json", {"best_known_height":1,"has_tip":True,"height":1,"implementation":"go","in_ibd":False,"request_path":"/get_tip","rpc_endpoint":"localhost:5101","tip_hash":h("3")}); dump("go-restart-mine-next-one.json", {"block_hash":h("3"),"height":1,"implementation":"go","mined":True,"nonce":1777000001,"request_path":"/mine_next","rpc_endpoint":"localhost:5101","timestamp":1777000000,"tx_count":1,"commit_state":"committed"}); dump("rust-catch-up-tip-one.json", {"best_known_height":1,"has_tip":True,"height":1,"implementation":"rust","in_ibd":False,"request_path":"/get_tip","rpc_endpoint":"rust-node:5201","tip_hash":h("3")})
 zero_restart_summary = {"stopped_node":"node-rust","pre_restart_height":0,"catch_up_height":1}; dump("restart-marker-zero.json", {"evidence_type":"mixed_client_process_soak","failure_reason":"mixed-client Rust restart PASS is recorded in sibling report; existing schema v1 PASS requires tx_path proof owned by RUB-22/RUB-23","participants":[{"endpoint":"localhost:5101","implementation":"go","name":"node-go","started_at":"2026-05-12T10:00:00Z"},{"endpoint":"rust-node:5201","implementation":"rust","name":"node-rust","started_at":"2026-05-12T10:00:03Z"}],"restart":zero_restart_summary,"scenario":"mixed_client_mesh_schema_marker","schema_version":"rubin-mixed-client-devnet-evidence-v1","verdict":"FAIL"}); zero_restart = json.loads(json.dumps(restart)); zero_restart["restart"] = zero_restart_summary; zero_restart["legacy_schema_compatibility"]["marker_path"] = str(root/"restart-marker-zero.json"); zero_restart["rust_restart"].update({"pre_restart_height":0,"pre_restart_tip":h("0"),"pre_restart_tip_path":str(root/"rust-pre-restart-tip-zero.json"),"go_target_height":1,"go_target_tip":h("3"),"go_target_tip_path":str(root/"go-restart-target-tip-one.json"),"go_target_mine_next_path":str(root/"go-restart-mine-next-one.json"),"catch_up_height":1,"catch_up_tip":h("3"),"catch_up_tip_path":str(root/"rust-catch-up-tip-one.json")}); dump("restart_zero_height.json", zero_restart)
 def sidecar_block(impl, rpc, block_hex, block_hash, block_height):
     return {"block_hex":block_hex,"canonical":True,"hash":block_hash,"height":block_height,"implementation":impl,"request_path":f"/get_block?height={block_height}","rpc_endpoint":rpc}
 def sidecar_tip(impl, rpc, block_hash, block_height):
     return {"best_known_height":block_height,"has_tip":True,"height":block_height,"implementation":impl,"in_ibd":False,"request_path":"/get_tip","rpc_endpoint":rpc,"tip_hash":block_hash}
 def sidecar_mine(impl, rpc, block_hash, block_height):
-    return {"block_hash":block_hash,"height":block_height,"implementation":impl,"mined":True,"nonce":1,"request_path":"/mine_next","rpc_endpoint":rpc,"timestamp":1,"tx_count":1}
+    return {"block_hash":block_hash,"height":block_height,"implementation":impl,"mined":True,"nonce":1,"request_path":"/mine_next","rpc_endpoint":rpc,"timestamp":1,"tx_count":1,**({"commit_state":"committed"} if impl == "go" else {})}
 def peers(addr):
     items = [] if addr is None else [{"addr":addr,"handshake_complete":True}]
     return {"count":len(items),"peers":items}
 partition_proxy = "proxy.local:5300"; partition_go_peer = "rust-local:5300"; common_height = 8; fork_height = 9; rust_win_height = 10
 common_hex, common_hash = build_block(common_height, nonce=1); go_hex, go_hash = build_block(fork_height, common_hash, nonce=1); rust1_hex, rust1_hash = build_block(fork_height, common_hash, nonce=2); rust2_hex, rust2_hash = build_block(rust_win_height, rust1_hash, nonce=3)
-partition_nodes = json.loads(json.dumps(nodes)); partition_nodes[1]["command_argv"][-1] = partition_proxy; partition_nodes[1]["command"] = " ".join(partition_nodes[1]["command_argv"])
+partition_nodes = json.loads(json.dumps(nodes)); partition_nodes[1]["command_argv"][-2] = partition_proxy; partition_nodes[1]["command"] = shlex.join(partition_nodes[1]["command_argv"])
 for name, obj in {"pre-rust-peers.json":peers(partition_proxy),"pre-go-peers.json":peers(partition_go_peer),"partition-rust-peers.json":peers(None),"partition-go-peers.json":peers(None),"fork-rust-peers.json":peers(None),"fork-go-peers.json":peers(None),"heal-rust-peers.json":peers(partition_proxy),"heal-go-peers.json":peers(partition_go_peer)}.items(): dump(name, obj)
 for name, obj in {"common-go-mine.json":sidecar_mine("go", "localhost:5101", common_hash, common_height),"common-go-block.json":sidecar_block("go", "localhost:5101", common_hex, common_hash, common_height),"common-rust-tip.json":sidecar_tip("rust", "rust-node:5201", common_hash, common_height),"common-rust-block.json":sidecar_block("rust", "rust-node:5201", common_hex, common_hash, common_height),"go-mine.json":sidecar_mine("go", "localhost:5101", go_hash, fork_height),"go-tip.json":sidecar_tip("go", "localhost:5101", go_hash, fork_height),"go-block.json":sidecar_block("go", "localhost:5101", go_hex, go_hash, fork_height),"rust-mine-1.json":sidecar_mine("rust", "rust-node:5201", rust1_hash, fork_height),"rust-block-1.json":sidecar_block("rust", "rust-node:5201", rust1_hex, rust1_hash, fork_height),"rust-mine-2.json":sidecar_mine("rust", "rust-node:5201", rust2_hash, rust_win_height),"rust-tip.json":sidecar_tip("rust", "rust-node:5201", rust2_hash, rust_win_height),"rust-block-2.json":sidecar_block("rust", "rust-node:5201", rust2_hex, rust2_hash, rust_win_height),"final-go-tip.json":sidecar_tip("go", "localhost:5101", rust2_hash, rust_win_height),"final-rust-tip.json":sidecar_tip("rust", "rust-node:5201", rust2_hash, rust_win_height),"go-reorg-parent-block.json":sidecar_block("go", "localhost:5101", rust1_hex, rust1_hash, fork_height),"go-tip-block.json":sidecar_block("go", "localhost:5101", rust2_hex, rust2_hash, rust_win_height),"rust-tip-block.json":sidecar_block("rust", "rust-node:5201", rust2_hex, rust2_hash, rust_win_height)}.items(): dump(name, obj)
 (root / "partition-metrics.prom").write_text("rubin_node_reorg_total 1\nrubin_node_last_reorg_depth 0\n", encoding="utf-8")
@@ -209,6 +224,54 @@ bad = json.loads((root / "mesh.json").read_text()); bad["nodes"][1]["command_arg
 bad = json.loads((root / "mesh.json").read_text()); bad["nodes"][0]["started_at"] = "not-a-time"; dump("mesh_bad_started_at.json", bad)
 bad = json.loads((root / "mesh.json").read_text()); bad["nodes"][0]["pid"] = 0; dump("mesh_bad_pid_zero.json", bad)
 bad = json.loads((root / "mesh.json").read_text()); marker_bad = marker("FAIL", failure_reason="bad participant type"); marker_bad["participants"][0]["started_at"] = ["2026-05-12T10:00:00Z"]; bad["legacy_schema_compatibility"]["marker_path"] = dump("mesh-marker-bad-participant-type.json", marker_bad); dump("mesh_marker_bad_participant_type.json", bad)
+bad = json.loads((root / "mesh.json").read_text()); bad["nodes"] = argv_nodes(go_argv, rust_argv + create); dump("mesh_go_without_create.json", bad)
+bad = json.loads((root / "go_accept.json").read_text()); bad["nodes"] = argv_nodes(go_argv + create, rust_argv + create); dump("go_accept_go_with_create.json", bad)
+bad = json.loads((root / "go_accept.json").read_text()); bad["nodes"] = argv_nodes(go_argv, rust_argv); dump("go_accept_rust_without_create.json", bad)
+bad = json.loads(json.dumps(restart)); bad["rust_restart"]["old_command_argv"] = rust_argv; dump("restart_old_without_create.json", bad)
+bad = json.loads(json.dumps(restart)); bad["nodes"] = argv_nodes(go_argv, rust_argv + create); bad["rust_restart"]["new_command_argv"] = rust_argv + create; dump("restart_new_with_create.json", bad)
+bad = json.loads(json.dumps(part)); bad["nodes"][1]["command_argv"] = bad["nodes"][1]["command_argv"][:-1]; bad["nodes"][1]["command"] = shlex.join(bad["nodes"][1]["command_argv"]); dump("partition_rust_without_create.json", bad)
+def moved_path(report, dotted, target):
+    keys = dotted.split("."); obj = report
+    for key in keys[:-1]: obj = obj[key]
+    target.parent.mkdir(exist_ok=True); target.write_bytes(Path(obj[keys[-1]]).read_bytes()); obj[keys[-1]] = str(target)
+    return report
+load_report = lambda name: json.loads((root / name).read_text(encoding="utf-8"))
+tab_dir = root / "tab\tdir"
+for name, src, field, target in (("mesh_marker_tab_dir.json", "mesh.json", "legacy_schema_compatibility.marker_path", tab_dir / "marker.json"), ("go_accept_marker_tab_dir.json", "go_accept.json", "legacy_schema_compatibility.marker_path", tab_dir / "go-accept-marker.json"),
+        ("restart_marker_tab_dir.json", "restart.json", "legacy_schema_compatibility.marker_path", tab_dir / "restart-marker.json"), ("partition_marker_tab_dir.json", "partition.json", "legacy_schema_compatibility.marker_path", tab_dir / "partition-marker.json"),
+        ("go_accept_status_tab_dir.json", "go_accept.json", "go_submit.tx_status_path", tab_dir / "go-submit-status.json"), ("go_conv_mine_next_tab_dir.json", "go_conv.json", "rust_mine.mine_next_path", tab_dir / "go-conv-mine-next.json"),
+        ("restart_pre_tip_tab_dir.json", "restart.json", "rust_restart.pre_restart_tip_path", tab_dir / "rust-pre-restart-tip.json"), ("partition_metrics_tab_dir.json", "partition.json", "observations.reorg.go_metrics", tab_dir / "partition-metrics.prom"),
+        ("partition_metrics_tab_outside.json", "partition.json", "observations.reorg.go_metrics", root.parent / f"{root.name}-outside" / "tab\tmetrics.prom"),
+        ("mesh_marker_trailing_space.json", "mesh.json", "legacy_schema_compatibility.marker_path", root / "marker.json "), ("mesh_marker_unit_separator_dir.json", "mesh.json", "legacy_schema_compatibility.marker_path", root / "u\x1fdir" / "marker.json"),
+        ("mesh_marker_space_dir.json", "mesh.json", "legacy_schema_compatibility.marker_path", root / "s dir" / "marker.json")):
+    dump(name, moved_path(load_report(src), field, target))
+(root / "x\x01").mkdir()
+for index, name in ((0, "rubin-node-go"), (4, "node-go")):
+    bad = load_report("mesh.json"); bad["nodes"][0]["command_argv"][index] = str(root / "x\x01" / ".." / name); bad["nodes"][0]["command"] = shlex.join(bad["nodes"][0]["command_argv"]); dump(f"mesh_argv{index}_control.json", bad)
+(root / "node-go").mkdir(exist_ok=True)
+for spelling, path in (("double-leading", f"/{root}/node-go"), ("double-interior", f"{root}//node-go"),
+                       ("dot", f"{root}/./node-go"), ("parent", f"{root}/node-rust/../node-go"), ("trailing", f"{root}/node-go/")):
+    bad = load_report("mesh.json")
+    node = bad["nodes"][0]
+    node["command_argv"][4] = path
+    node["command"] = shlex.join(node["command_argv"])
+    dump(f"mesh-datadir-{spelling}.json", bad)
+for source in ("go_accept", "restart", "partition"):
+    bad = load_report(f"{source}.json")
+    node = bad["nodes"][0]
+    node["command_argv"][4] = f"{root}/./node-go"
+    node["command"] = shlex.join(node["command_argv"])
+    dump(f"{source}-datadir-dot.json", bad)
+for label in ("old", "new"):
+    bad = load_report("restart.json")
+    bad["rust_restart"][f"{label}_command_argv"][4] = f"{root}/./node-rust"
+    dump(f"restart-{label}-datadir-dot.json", bad)
+bad = load_report("restart.json"); bad["rust_restart"]["datadir"] = str(root / "x\x01" / ".." / "node-rust"); dump("restart_datadir_control.json", bad)
+tab_root = root / "tab\troot"; tab_root.mkdir(); tab_link = root / "tab-root-link"; tab_link.symlink_to(tab_root, target_is_directory=True)
+for name in ("rubin-node-go", "rubin-node-rust", "marker.json"):
+    (tab_root / name).write_bytes((root / name).read_bytes()); (tab_root / name).chmod((root / name).stat().st_mode)
+(tab_root / "mesh.json").write_text(json.dumps(rewrite_root_paths(load_report("mesh.json"), tab_link), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+(root / "cli\tdir").mkdir(); (root / "cli\tdir" / "mesh.json").write_bytes((root / "mesh.json").read_bytes())
 PY
 complete="${TMP_ROOT}/complete.json"; home_complete="${TMP_ROOT}/home-complete.json"; partial="${TMP_ROOT}/partial.json"; empty_input="${TMP_ROOT}/empty-input.json"; unbound_metrics="${TMP_ROOT}/unbound-metrics.json"; zero_height="${TMP_ROOT}/restart-zero-height-out.json"; symlink_parent="${TMP_ROOT}/restart-symlink-parent-out.json"; mesh_symlink_parent="${TMP_ROOT}/mesh-symlink-parent-out.json"; mesh_escaped_command="${TMP_ROOT}/mesh-escaped-command-out.json"; base_args=(--mesh-report "${TMP_ROOT}/mesh.json" --go-submit-rust-accept-report "${TMP_ROOT}/go_accept.json" --go-submit-rust-mine-go-converge-report "${TMP_ROOT}/go_conv.json" --rust-submit-go-mine-rust-converge-report "${TMP_ROOT}/rust_conv.json" --rust-restart-report "${TMP_ROOT}/restart.json" --partition-heal-reorg-report "${TMP_ROOT}/partition.json")
 tilde_partition="~""/partition.json"
@@ -308,4 +371,164 @@ for path in sys.argv[2:]:
     if any(section["status"] == "fail" for name, section in failed["sections"].items() if name != "partition_heal_reorg"):
         raise SystemExit(f"total-zero partition has competing failure: {path}")
 PY
+expect_fail_reason process_identity_missing_or_invalid --mesh-report "${TMP_ROOT}/mesh_go_without_create.json"
+expect_fail_reason process_identity_missing_or_invalid --go-submit-rust-accept-report "${TMP_ROOT}/go_accept_go_with_create.json"
+expect_fail_reason process_identity_missing_or_invalid --go-submit-rust-accept-report "${TMP_ROOT}/go_accept_rust_without_create.json"
+expect_fail_reason restart_source_binding_contradiction:argv_mismatch --rust-restart-report "${TMP_ROOT}/restart_old_without_create.json"
+expect_fail_reason restart_source_binding_contradiction:node_identity_invalid --rust-restart-report "${TMP_ROOT}/restart_new_with_create.json"
+expect_fail_reason partition_reorg_source_binding_contradiction:node_identity_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition_rust_without_create.json"
+expect_mesh_pass() { out="${TMP_ROOT}/mesh-pass-out.json"; rm -f -- "${out}"; python3 "${GEN}" --mesh-report "$1" --output "${out}" >/dev/null 2>"${TMP_ROOT}/err" || { cat "${TMP_ROOT}/err" >&2; exit 1; }; python3 -c 'import json, sys; r = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if r["sections"]["mesh"]["status"] == "pass" and ("mesh", "pass") in {(c["section"], c["token"]) for c in r["claim_inventory"]} else 1)' "${out}" || { echo "mesh report not accepted with claim token pass: $1" >&2; exit 1; }; }
+expect_fail_reason malformed_source_fields:legacy_schema_compatibility.marker_path --mesh-report "${TMP_ROOT}/mesh_marker_tab_dir.json"
+expect_fail_reason go_to_rust_accept_legacy_marker_invalid --go-submit-rust-accept-report "${TMP_ROOT}/go_accept_marker_tab_dir.json"
+expect_fail_reason restart_source_binding_contradiction:legacy_marker_invalid --rust-restart-report "${TMP_ROOT}/restart_marker_tab_dir.json"
+expect_fail_reason partition_reorg_source_binding_contradiction:legacy_marker_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition_marker_tab_dir.json"
+expect_fail_reason go_submit_sidecar_invalid --go-submit-rust-accept-report "${TMP_ROOT}/go_accept_status_tab_dir.json"
+expect_fail_reason convergence_sidecar_path_invalid --go-submit-rust-mine-go-converge-report "${TMP_ROOT}/go_conv_mine_next_tab_dir.json"
+expect_fail_reason restart_source_binding_contradiction:pre_restart_tip_sidecar_invalid --rust-restart-report "${TMP_ROOT}/restart_pre_tip_tab_dir.json"
+expect_fail_reason partition_reorg_source_binding_contradiction:sidecar_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition_metrics_tab_dir.json"
+expect_fail_reason partition_reorg_source_binding_contradiction:sidecar_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition_metrics_tab_outside.json"
+expect_fail_reason process_identity_missing_or_invalid --mesh-report "${TMP_ROOT}/mesh_argv0_control.json"
+expect_fail_reason process_identity_missing_or_invalid --mesh-report "${TMP_ROOT}/mesh_argv4_control.json"
+for spelling in double-leading double-interior dot parent trailing; do
+  expect_fail_reason "FAIL: mesh:process_identity_missing_or_invalid" --mesh-report "${TMP_ROOT}/mesh-datadir-${spelling}.json"
+done
+expect_fail_reason process_identity_missing_or_invalid --go-submit-rust-accept-report "${TMP_ROOT}/go_accept-datadir-dot.json"
+expect_fail_reason restart_source_binding_contradiction:node_identity_invalid --rust-restart-report "${TMP_ROOT}/restart-datadir-dot.json"
+expect_fail_reason partition_reorg_source_binding_contradiction:node_identity_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition-datadir-dot.json"
+for phase in old new; do expect_fail_reason restart_source_binding_contradiction:argv_mismatch --rust-restart-report "${TMP_ROOT}/restart-${phase}-datadir-dot.json"; done
+expect_mesh_pass "${TMP_ROOT}/tab-root-link/mesh.json"
+expect_fail_reason restart_source_binding_contradiction:datadir_not_bound --rust-restart-report "${TMP_ROOT}/restart_datadir_control.json"
+expect_fail_reason malformed_source_fields:legacy_schema_compatibility.marker_path --mesh-report "${TMP_ROOT}/mesh_marker_trailing_space.json"
+expect_mesh_pass "${TMP_ROOT}/cli"$'\t'"dir/mesh.json"
+expect_fail_reason malformed_source_fields:legacy_schema_compatibility.marker_path --mesh-report "${TMP_ROOT}/mesh_marker_unit_separator_dir.json"
+expect_mesh_pass "${TMP_ROOT}/mesh_marker_space_dir.json"
+sidecar_path="${TMP_ROOT}/mixed-client-mesh-store-neutrality.json"
+python3 - "${TMP_ROOT}" <<'PY'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+(root / "rubin-txgen").write_text("txgen\n", encoding="utf-8")
+(root / "sidecar-go-tip.json").write_text("{}\n", encoding="utf-8")
+(root / "sidecar-go-block.json").write_text("{}\n", encoding="utf-8")
+sidecar = {"genesis": {"go_block_path": str(root / "sidecar-go-block.json")}, "initial_convergence": {"go_tip_path": str(root / "sidecar-go-tip.json")}}
+(root / "mixed-client-mesh-store-neutrality.json").write_text(json.dumps(sidecar) + "\n", encoding="utf-8")
+PY
+expect_output_refused_unchanged() {
+  local target="$1" before rc=0
+  shift
+  before="$(cksum <"${target}")"
+  python3 "${GEN}" "$@" --output "${target}" >/dev/null 2>"${TMP_ROOT}/err" || rc=$?
+  [[ ${rc} -eq 1 && "$(cat -- "${TMP_ROOT}/err")" == "FAIL: output_overwrites_input" && "$(cksum <"${target}")" == "${before}" ]] || { echo "FAIL: output over ${target} with $1 exited ${rc}, not refused unchanged" >&2; cat -- "${TMP_ROOT}/err" >&2; exit 1; }
+}
+expect_mesh_output_pass() {
+  local out="$1" rc=0
+  rm -f -- "${out}"
+  python3 -c 'import subprocess, sys; sys.exit(subprocess.run(sys.argv[1:], timeout=30).returncode)' python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --output "${out}" >/dev/null 2>"${TMP_ROOT}/err" || rc=$?
+  if (( rc != 0 )) || grep -Eq 'output_overwrites_input|output_scan_failed' "${TMP_ROOT}/err" || ! python3 -c 'import json, sys; r = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if r["sections"]["mesh"]["status"] == "pass" and ("mesh", "pass") in {(c["section"], c["token"]) for c in r["claim_inventory"]} else 1)' "${out}"; then
+    echo "FAIL: mesh output ${out} exited ${rc} without mesh claim token pass" >&2; cat -- "${TMP_ROOT}/err" >&2; exit 1
+  fi
+}
+expect_fresh_output_written() {
+  mkdir -p -- "${TMP_ROOT}-outside"
+  expect_mesh_output_pass "${TMP_ROOT}-outside/soak-out.json"
+  expect_mesh_output_pass "${TMP_ROOT}/soak-fresh.json"
+  rm -f -- "${TMP_ROOT}/soak-fresh.json"
+}
+for pair in "--mesh-report mesh.json" "--go-submit-rust-accept-report go_accept.json" "--go-submit-rust-mine-go-converge-report go_conv.json" "--rust-submit-go-mine-rust-converge-report rust_conv.json" "--rust-restart-report restart.json" "--partition-heal-reorg-report partition.json"; do
+  read -r report_arg report_name <<<"${pair}"
+  expect_output_refused_unchanged "${sidecar_path}" "${report_arg}" "${TMP_ROOT}/${report_name}"
+done
+for target in "${TMP_ROOT}/rubin-txgen" "${TMP_ROOT}/sidecar-go-tip.json" "${TMP_ROOT}/sidecar-go-block.json"; do expect_output_refused_unchanged "${target}" --mesh-report "${TMP_ROOT}/mesh.json"; done
+python3 - "${GEN}" "${TMP_ROOT}" "${sidecar_path}" <<'PY'
+import io, json, os, runpy, stat, sys, tracemalloc
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+generator = runpy.run_path(sys.argv[1])
+root, sidecar = map(Path, sys.argv[2:])
+wide = {"p" * 20000: {str(i): {} for i in range(4000)}}
+tracemalloc.start()
+targets = generator["path_field_targets"](wide, root)
+_, peak = tracemalloc.get_traced_memory()
+tracemalloc.stop()
+assert targets == [], targets
+assert peak < 20 * 1024 * 1024, f"path traversal peak allocation: {peak} bytes"
+
+def run_mesh(out):
+    err = io.StringIO()
+    with redirect_stderr(err), redirect_stdout(io.StringIO()):
+        rc = generator["main"](["--mesh-report", str(root / "mesh.json"), "--output", str(out)])
+    return rc, err.getvalue()
+
+fresh, fixed = root / "descriptor-out.json", root / "rubin-txgen"
+sidecar.write_text(json.dumps({"initial_convergence": {"go_tip_path": str(fresh)}}), encoding="utf-8")
+refused = (1, "FAIL: output_overwrites_input\n")
+assert not fresh.exists(), fresh
+assert run_mesh(fresh) == refused and not fresh.exists(), "sidecar target was not refused"
+sidecar_info, original_fstat = sidecar.stat(), os.fstat
+def observe_mode(fd):
+    info = original_fstat(fd)
+    if (info.st_dev, info.st_ino) == (sidecar_info.st_dev, sidecar_info.st_ino):
+        return SimpleNamespace(st_mode=stat.S_IFDIR)
+    return info
+
+with patch.object(os, "fstat", observe_mode):
+    assert run_mesh(fresh) == (0, ""), "output was refused with an unreadable sidecar"
+    report = json.loads(fresh.read_bytes())
+    assert report["sections"]["mesh"]["status"] == "pass"
+    assert ("mesh", "pass") in {(claim["section"], claim["token"]) for claim in report["claim_inventory"]}
+    original = fixed.read_bytes()
+    assert run_mesh(fixed) == refused and fixed.read_bytes() == original, "fixed output target was not refused unchanged"
+PY
+for field in dotted argv scoped_dotted; do
+  target="${TMP_ROOT}/sidecar-go-block.json"
+  if [[ "${field}" == scoped_dotted ]]; then target="${TMP_ROOT}/scoped-fresh.json"; fi
+  python3 - "${sidecar_path}" "${field}" "${target}" <<'PY'
+import json, sys
+from pathlib import Path
+sidecar, field, target = sys.argv[1:]
+parent = "p" * 128
+dotted = {"observations": {"fork": {"go_block": target}}}
+value = {"dotted": dotted, "argv": {parent: {"go_command_argv": [target]}}, "scoped_dotted": {parent: dotted}}[field]
+Path(sidecar).write_text(json.dumps(value), encoding="utf-8")
+PY
+  if [[ "${field}" == scoped_dotted ]]; then
+    [[ ! -e "${target}" ]] || { echo "FAIL: output ${target} is already present" >&2; exit 1; }
+    expect_mesh_output_pass "${target}"
+  else
+    expect_output_refused_unchanged "${target}" --mesh-report "${TMP_ROOT}/mesh.json"
+  fi
+done
+expect_fresh_output_written
+printf '{' >"${sidecar_path}"
+expect_fresh_output_written
+expect_output_refused_unchanged "${sidecar_path}" --mesh-report "${TMP_ROOT}/mesh.json"
+python3 -c 'import json, sys; json.dump({"initial_convergence": {"go_tip_path": None}}, open(sys.argv[1], "w", encoding="utf-8"))' "${sidecar_path}"
+expect_fresh_output_written
+expect_output_refused_unchanged "${sidecar_path}" --mesh-report "${TMP_ROOT}/mesh.json"
+rm -f -- "${sidecar_path}"; mkfifo -- "${sidecar_path}"
+expect_fresh_output_written
+expect_output_refused_unchanged "${TMP_ROOT}/rubin-txgen" --mesh-report "${TMP_ROOT}/mesh.json"
+root_names_dir="${TMP_ROOT}/root-names"; mkdir -p -- "${root_names_dir}"
+python3 -c 'import json, sys; json.dump({"artifact_root": sys.argv[2]}, open(sys.argv[1], "w", encoding="utf-8"))' "${TMP_ROOT}/mesh_artifact_root_only.json" "${root_names_dir}"
+for name in mixed-client-mesh-store-neutrality.json rubin-node-go rubin-node-rust rubin-txgen node-go node-rust; do printf '%s\n' "${name}" >"${root_names_dir}/${name}"; done
+for name in mixed-client-mesh-store-neutrality.json rubin-node-go rubin-node-rust rubin-txgen node-go node-rust; do expect_output_refused_unchanged "${root_names_dir}/${name}" --mesh-report "${TMP_ROOT}/mesh_artifact_root_only.json"; done
+rm -f -- "${TMP_ROOT}/rubin-txgen"; ln -s "${TMP_ROOT}/txgen-absent-target" "${TMP_ROOT}/rubin-txgen"
+dangling_rc=0
+python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --output "${TMP_ROOT}/rubin-txgen" >/dev/null 2>"${TMP_ROOT}/err" || dangling_rc=$?
+if (( dangling_rc != 1 )) || [[ "$(cat -- "${TMP_ROOT}/err")" != "FAIL: output_overwrites_input" || -e "${TMP_ROOT}/txgen-absent-target" ]]; then
+  echo "FAIL: output through a dangling rubin-txgen link exited ${dangling_rc} or created its target" >&2; cat -- "${TMP_ROOT}/err" >&2; exit 1
+fi
+metrics_dir="${TMP_ROOT}/metrics-artifact-root"; mkdir -p -- "${metrics_dir}"
+python3 -c 'import json, sys; json.dump({"artifact_root": sys.argv[2], "unexpected": 1}, open(sys.argv[1], "w", encoding="utf-8"))' "${TMP_ROOT}/metrics_artifact_root.json" "${metrics_dir}"
+printf '{"unexpected": 1}' >"${TMP_ROOT}/metrics_unexpected_only.json"
+for metrics in metrics_artifact_root.json metrics_unexpected_only.json; do
+  metrics_rc=0; rm -f -- "${metrics_dir}/rubin-txgen"
+  python3 "${GEN}" --rust-reorg-metrics "${TMP_ROOT}/${metrics}" --output "${metrics_dir}/rubin-txgen" >/dev/null 2>"${TMP_ROOT}/err" || metrics_rc=$?
+  if (( metrics_rc != 1 )) || [[ "$(cat -- "${TMP_ROOT}/err")" != "FAIL: reorg_metrics:metrics_malformed" || ! -f "${metrics_dir}/rubin-txgen" ]]; then
+    echo "FAIL: ${metrics} with output in its artifact_root exited ${metrics_rc} without a written report" >&2; cat -- "${TMP_ROOT}/err" >&2; exit 1
+  fi
+done
 printf 'PASS: RUB-239 final source-bound report closeout covered\n'

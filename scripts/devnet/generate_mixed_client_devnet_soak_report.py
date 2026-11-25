@@ -2,6 +2,7 @@
 # ruff: noqa: E302,E305,E401,E701
 from __future__ import annotations
 import argparse, json, math, os, re, shlex, subprocess, sys, tempfile  # nosec B404
+import stat
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -18,6 +19,7 @@ PATH_FIELD_DOTTED_NAMES = {
     "observations.partition.go_peer_snapshot", "observations.partition.rust_peer_snapshot", "observations.fork.go_block", "observations.fork.go_mine", "observations.fork.go_peer_snapshot", "observations.fork.go_tip", "observations.fork.rust_block_1", "observations.fork.rust_block_2", "observations.fork.rust_mine_1", "observations.fork.rust_mine_2", "observations.fork.rust_peer_snapshot", "observations.fork.rust_tip",
     "observations.heal.go_peer_snapshot", "observations.heal.rust_peer_snapshot", "observations.reorg.go_metrics", "observations.reorg.go_reorg_parent_block", "observations.reorg.go_tip", "observations.reorg.go_tip_block", "observations.reorg.rust_tip", "observations.reorg.rust_tip_block",
 }
+MAX_DOTTED_PATH_LEN = max(map(len, PATH_FIELD_DOTTED_NAMES))
 TX_OBJECT_KEYS = {
     "go_submit": {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"},
     "rust_submit": {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"},
@@ -138,9 +140,18 @@ def section(name: str, status: str, reason: str | None = None, **kw: Any) -> dic
         if value is not None and value != []:
             out[key] = str(value) if isinstance(value, Path) else value
     return out
+def open_regular_read(path: str | bytes, flags: int) -> int:
+    fd = os.open(path, flags | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("descriptor is not a regular file")
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
 def load(path: Path) -> tuple[Any | None, str | None]:
     try:
-        with path.open("rb") as src: raw = src.read(MAX_JSON_BYTES + 1)
+        with open(path, "rb", opener=open_regular_read) as src: raw = src.read(MAX_JSON_BYTES + 1)
         if len(raw) > MAX_JSON_BYTES: return None, "json_too_large"  # noqa: E701
         return json.loads(raw.decode("utf-8"), object_pairs_hook=NO_DUPES, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"non_finite_json_constant:{c}"))), None
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
@@ -150,8 +161,10 @@ def regular_path(raw_path: str, reason: str) -> tuple[Path, str | None]: raw = P
 def regular_abs_path(raw_path: str, reason: str) -> tuple[Path, str | None]:
     raw = Path(os.path.expanduser(raw_path)); canon = Path(os.path.realpath(raw))  # noqa: E702
     return (canon, None) if raw.is_absolute() and raw.is_file() and not raw.is_symlink() else (canon, reason)
+def safe_path_str(value: Any) -> bool:
+    return isinstance(value, str) and value.strip() == value and bool(value) and value[0] not in "'\"" and value[-1] not in "'\"" and "\0" not in value and all(ord(c) >= 32 for c in value)
 def safe_abs_path(value: Any) -> Path | None:
-    if not isinstance(value, str) or value.strip() != value or not value or value[0] in "'\"" or value[-1] in "'\"" or "\0" in value or any(ord(c) < 32 for c in value):
+    if not safe_path_str(value):
         return None
     raw = Path(value)
     if not raw.is_absolute():
@@ -175,7 +188,20 @@ def same_arg_path(left: str, right: str) -> bool:
     except (OSError, ValueError):
         return False
 def argv_eq(actual: Any, expected: Any, path_indexes: set[int]) -> bool:
-    return str_list(actual) and str_list(expected) and len(actual) == len(expected) and all(same_arg_path(actual[i], expected[i]) if i in path_indexes else actual[i] == expected[i] for i in range(len(expected)))
+    if not str_list(actual) or not str_list(expected) or len(actual) != len(expected):
+        return False
+    for i, reference in enumerate(expected):
+        value = actual[i]
+        if i not in path_indexes:
+            if value != reference:
+                return False
+        elif (
+            not safe_path_str(value)
+            or (i == 4 and (not value.startswith("/") or any(part in {"", ".", ".."} for part in value[1:].split("/"))))
+            or not same_arg_path(value, reference)
+        ):
+            return False
+    return True
 def get(data: Any, dotted: str) -> tuple[Any, bool]:
     cur = data
     for part in dotted.split("."):
@@ -279,7 +305,7 @@ def marker_participants_bound(marker: dict[str, Any], by_impl: dict[str, dict[st
         return False
     expected = sorted((node["name"], impl, node["rpc_endpoint"], node["started_at"]) for impl, node in by_impl.items())
     return sorted((p["name"], p["implementation"], p["endpoint"], p["started_at"]) for p in participants) == expected
-def source_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path) -> str | None:
+def source_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path, name: str) -> str | None:
     for impl, expected_name, expected_comm in (("go", "node-go", "rubin-node-go"), ("rust", "node-rust", "rubin-node-rust")):
         node = by_impl[impl]
         if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not jint(node.get("pid"), 1) or not utc_z(node.get("started_at")) or not command_bound_to_argv(node):
@@ -291,7 +317,7 @@ def source_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path) -
             binary.relative_to(root)
         except ValueError:
             return "process_identity_missing_or_invalid"
-        expected_argv = [str(binary), "--network", "devnet", "--datadir", str(root / f"node-{impl}"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + (["--peer", by_impl["go"]["p2p_endpoint"]] if impl == "rust" else [])
+        expected_argv = [str(binary), "--network", "devnet", "--datadir", str(root / f"node-{impl}"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + (["--peer", by_impl["go"]["p2p_endpoint"], "--create-store"] if impl == "rust" else ["--create-store"] if name == "mesh" else [])
         if not argv_eq(node.get("command_argv"), expected_argv, {0, 4}):
             return "process_identity_missing_or_invalid"
     return None
@@ -313,6 +339,8 @@ def source_report_contract_error(name: str, data: dict[str, Any], path: Path) ->
         return f"{name}_legacy_marker_invalid"
     if legacy.get("purpose") != SOURCE_LEGACY_PURPOSE or legacy.get("reason") not in SOURCE_LEGACY_REASONS:
         return f"{name}_legacy_marker_invalid"
+    if not safe_path_str(marker_raw):
+        return f"{name}_legacy_marker_invalid"
     marker_path = str(Path(os.path.expanduser(marker_raw)) if Path(os.path.expanduser(marker_raw)).is_absolute() else path.parent / marker_raw)
     marker_canon, marker_err = regular_path(marker_path, "legacy_schema_marker_not_regular")
     try:
@@ -327,7 +355,7 @@ def source_report_contract_error(name: str, data: dict[str, Any], path: Path) ->
         return f"{name}_legacy_marker_invalid"
     if node_bad or by_impl is None:
         return node_bad
-    if bad := source_node_identity_error(by_impl, root):
+    if bad := source_node_identity_error(by_impl, root, name):
         return bad
     marker_keys = SOURCE_MESH_MARKER_KEYS if name == "mesh" else SOURCE_TX_MARKER_KEYS
     if set(marker) != marker_keys:
@@ -340,7 +368,7 @@ def source_report_contract_error(name: str, data: dict[str, Any], path: Path) ->
         return None if marker.get("verdict") == "FAIL" and isinstance(marker.get("failure_reason"), str) and marker["failure_reason"] else f"{name}_legacy_marker_invalid"
     return None if marker.get("verdict") == "PASS" and marker.get("tx_path") == data.get("tx_path") else f"{name}_legacy_marker_invalid"
 def source_artifact(path_value: Any, root: Path, reason: str) -> tuple[Path | None, str | None]:
-    p, err = regular_abs_path(path_value, reason) if isinstance(path_value, str) else (None, reason)
+    p, err = regular_abs_path(path_value, reason) if safe_path_str(path_value) else (None, reason)
     if err or p is None:
         return None, reason
     try:
@@ -474,6 +502,11 @@ def block_inclusion_error(block: dict[str, Any], txhex: str, txid: str, height: 
             reason = line[len(BLOCK_REASON_PREFIX):]
             return reason if SAFE_REASON.fullmatch(reason) else "convergence_block_parser_malformed_output"
     return "convergence_block_parser_failed"
+MINE_NEXT_KEYS = {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}
+def mine_next_keys_ok(mine: dict[str, Any], impl: str) -> bool:
+    if impl == "go":
+        return set(mine) == MINE_NEXT_KEYS | {"commit_state"} and mine.get("commit_state") == "committed"
+    return set(mine) == MINE_NEXT_KEYS
 def tx_converge_sidecar_error(mine: dict[str, Any], seen: dict[str, Any], mine_impl: str, seen_impl: str, by_impl: dict[str, dict[str, Any]], root: Path, txid: str, txhex: str) -> tuple[list[Path], str | None]:
     reason = "convergence_sidecar_invalid"
     mine_next, mine_next_path, err = source_load_json_detailed(mine.get("mine_next_path"), root, "convergence_sidecar_path_invalid", "convergence_sidecar_nonobject")
@@ -489,7 +522,7 @@ def tx_converge_sidecar_error(mine: dict[str, Any], seen: dict[str, Any], mine_i
     height, block_hash, tx_count = mine.get("height"), mine.get("block_hash"), mine.get("tx_count")
     if not jint(height) or not is_hex32(block_hash) or not jint(tx_count, 2):
         return [], reason
-    if set(mine_next) != {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"} or mine_next.get("implementation") != mine_impl or mine_next.get("rpc_endpoint") != by_impl[mine_impl]["rpc_endpoint"] or mine_next.get("request_path") != "/mine_next" or mine_next.get("mined") is not True or not jint(mine_next.get("height")) or mine_next.get("height") != height or mine_next.get("block_hash") != block_hash or not jint(mine_next.get("tx_count"), 2) or mine_next.get("tx_count") != tx_count or not ju64(mine_next.get("nonce")) or not ju64(mine_next.get("timestamp")):
+    if not mine_next_keys_ok(mine_next, mine_impl) or mine_next.get("implementation") != mine_impl or mine_next.get("rpc_endpoint") != by_impl[mine_impl]["rpc_endpoint"] or mine_next.get("request_path") != "/mine_next" or mine_next.get("mined") is not True or not jint(mine_next.get("height")) or mine_next.get("height") != height or mine_next.get("block_hash") != block_hash or not jint(mine_next.get("tx_count"), 2) or mine_next.get("tx_count") != tx_count or not ju64(mine_next.get("nonce")) or not ju64(mine_next.get("timestamp")):
         return [], reason
     block_keys = {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}
     for block, impl, endpoint in ((mine_block, mine_impl, by_impl[mine_impl]["rpc_endpoint"]), (seen_block, seen_impl, by_impl[seen_impl]["rpc_endpoint"])):
@@ -743,7 +776,7 @@ def restart_pass_contract_error(data: dict[str, Any], path: Path) -> str | None:
     if legacy.get("purpose") != "schema-valid legacy artifact only; not the Rust restart report verdict" or legacy.get("reason") != "existing mixed_client_evidence_v1 PASS requires tx_path; Rust restart PASS lives in this report":
         return "restart_source_binding_contradiction:legacy_marker_invalid"
     marker_path_raw = legacy.get("marker_path")
-    if not isinstance(marker_path_raw, str):
+    if not safe_path_str(marker_path_raw):
         return "restart_source_binding_contradiction:legacy_marker_invalid"
     marker_path, marker_err = regular_abs_path(marker_path_raw, "restart_source_binding_contradiction:legacy_marker_invalid")
     if marker_err:
@@ -810,7 +843,7 @@ def restart_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
         return "restart_source_binding_contradiction:artifact_root_invalid"
     if bad := restart_identity_binding_error(data):
         return bad
-    expected_old_argv = [by_impl["rust"].get("binary"), "--network", "devnet", "--datadir", str(root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", by_impl["go"]["p2p_endpoint"]]
+    expected_old_argv = [by_impl["rust"].get("binary"), "--network", "devnet", "--datadir", str(root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", by_impl["go"]["p2p_endpoint"], "--create-store"]
     if not argv_eq(rr.get("old_command_argv"), expected_old_argv, {0, 4}) or not argv_eq(rr.get("new_command_argv"), by_impl["rust"].get("command_argv"), {0, 4}):
         return "restart_source_binding_contradiction:argv_mismatch"
     try:
@@ -818,7 +851,7 @@ def restart_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     except ValueError:
         return "restart_source_binding_contradiction:report_outside_artifact_root"
     def artifact(field: str, reason: str) -> tuple[Path | None, str | None]:
-        if not isinstance(rr.get(field), str):
+        if not safe_path_str(rr.get(field)):
             return None, reason
         p, err = regular_abs_path(str(rr[field]), reason)
         if err:
@@ -854,8 +887,7 @@ def restart_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     mine, load_err = (None, err) if err else load(p)  # type: ignore[arg-type]
     if load_err or not isinstance(mine, dict):
         return "restart_source_binding_contradiction:go_target_mine_next_invalid"
-    keys = {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}
-    if set(mine) != keys or mine.get("implementation") != "go" or mine.get("rpc_endpoint") != by_impl["go"]["rpc_endpoint"] or mine.get("request_path") != "/mine_next":
+    if not mine_next_keys_ok(mine, "go") or mine.get("implementation") != "go" or mine.get("rpc_endpoint") != by_impl["go"]["rpc_endpoint"] or mine.get("request_path") != "/mine_next":
         return "restart_source_binding_contradiction:go_target_mine_next_invalid"
     mine_height = mine.get("height")
     mine_tx_count = mine.get("tx_count")
@@ -908,7 +940,7 @@ def partition_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path
         return "partition_reorg_source_binding_contradiction:node_identity_invalid"
     if partition_proxy in {node.get(field) for node in by_impl.values() for field in ("rpc_endpoint", "p2p_endpoint")}:
         return "partition_reorg_source_binding_contradiction:node_identity_invalid"
-    for impl, expected_name, expected_comm, extra in (("go", "node-go", "rubin-node-go", []), ("rust", "node-rust", "rubin-node-rust", ["--peer", partition_proxy])):
+    for impl, expected_name, expected_comm, extra in (("go", "node-go", "rubin-node-go", []), ("rust", "node-rust", "rubin-node-rust", ["--peer", partition_proxy, "--create-store"])):
         node = by_impl[impl]
         if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not command_bound_to_argv(node):
             return "partition_reorg_source_binding_contradiction:node_identity_invalid"
@@ -939,7 +971,7 @@ def partition_pass_contract_error(data: dict[str, Any], path: Path) -> str | Non
     if legacy.get("purpose") != PARTITION_LEGACY_PURPOSE or legacy.get("reason") != PARTITION_LEGACY_REASON:
         return "partition_reorg_source_binding_contradiction:legacy_marker_invalid"
     marker_raw = legacy.get("marker_path")
-    if not isinstance(marker_raw, str) or not marker_raw:
+    if not safe_path_str(marker_raw):
         return "partition_reorg_source_binding_contradiction:legacy_marker_invalid"
     marker_path, marker_err = regular_abs_path(marker_raw, "partition_reorg_source_binding_contradiction:legacy_marker_invalid")
     if marker_err:
@@ -1037,8 +1069,7 @@ def partition_mine_sidecar(path: Path, impl: str, rpc: str, minimum: int = 1) ->
     data, err = partition_load_sidecar(path, "partition_reorg_source_binding_contradiction:mine_sidecar_invalid")
     if err or data is None:
         return None, err
-    keys = {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}
-    if set(data) != keys or data.get("implementation") != impl or data.get("rpc_endpoint") != rpc or data.get("request_path") != "/mine_next":
+    if not mine_next_keys_ok(data, impl) or data.get("implementation") != impl or data.get("rpc_endpoint") != rpc or data.get("request_path") != "/mine_next":
         return None, "partition_reorg_source_binding_contradiction:mine_sidecar_invalid"
     if data.get("mined") is not True or not jint(data.get("height"), minimum) or not is_hex32(data.get("block_hash")) or not jint(data.get("tx_count"), 1) or not ju64(data.get("nonce")) or not ju64(data.get("timestamp")):
         return None, "partition_reorg_source_binding_contradiction:mine_sidecar_invalid"
@@ -1049,7 +1080,7 @@ def partition_obs_paths(data: dict[str, Any], root: Path) -> tuple[dict[str, Pat
         value, present = get(data, dotted)
         if not present:
             return None, "partition_reorg_source_binding_contradiction:malformed_source_fields"
-        sidecar, err = regular_abs_path(value, "partition_reorg_source_binding_contradiction:sidecar_invalid") if isinstance(value, str) else (None, "partition_reorg_source_binding_contradiction:sidecar_invalid")
+        sidecar, err = regular_abs_path(value, "partition_reorg_source_binding_contradiction:sidecar_invalid") if safe_path_str(value) else (None, "partition_reorg_source_binding_contradiction:sidecar_invalid")
         if err or sidecar is None:
             return None, err or "partition_reorg_source_binding_contradiction:sidecar_invalid"
         try:
@@ -1180,7 +1211,7 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
     if data.get("verdict") != "PASS" or bad_marker:
         return section(name, "fail", "source_verdict_not_pass" if data.get("verdict") != "PASS" else "pass_artifact_contains_failure_fields", source_artifact_path=path, scenario=got)
     missing = [f for f in fields if not get(data, f)[1]]
-    malformed = "legacy_schema_compatibility.marker_path" if name == "mesh" and get(data, "legacy_schema_compatibility.marker_path")[1] and (not isinstance((m := get(data, "legacy_schema_compatibility.marker_path")[0]), str) or not m or regular_path(str(Path(os.path.expanduser(m)) if Path(os.path.expanduser(m)).is_absolute() else path.parent / m), "legacy_schema_marker_not_regular")[1]) else "observations.reorg" if name == "partition_heal_reorg" and get(data, "observations.reorg")[1] and not isinstance(get(data, "observations.reorg")[0], dict) else None
+    malformed = "legacy_schema_compatibility.marker_path" if name == "mesh" and get(data, "legacy_schema_compatibility.marker_path")[1] and (not safe_path_str(m := get(data, "legacy_schema_compatibility.marker_path")[0]) or regular_path(str(Path(os.path.expanduser(m)) if Path(os.path.expanduser(m)).is_absolute() else path.parent / m), "legacy_schema_marker_not_regular")[1]) else "observations.reorg" if name == "partition_heal_reorg" and get(data, "observations.reorg")[1] and not isinstance(get(data, "observations.reorg")[0], dict) else None
     if malformed:
         return section(name, "fail", "malformed_source_fields:" + malformed, source_artifact_path=path, scenario=got)
     if name in {"rust_restart", "partition_heal_reorg"}:
@@ -1360,24 +1391,29 @@ def write_atomic(path: Path, data: dict[str, Any]) -> None:
             pass
         raise
 def path_field_targets(value: Any, base: Path) -> list[tuple[Path, bool]]:
-    out: list[tuple[Path, bool]] = []; stack: list[tuple[Any, str]] = [(value, "")]  # noqa: E702
+    out: list[tuple[Path, bool]] = []
+    stack: list[tuple[Any, str, str | None]] = [(value, "", "")]
     def add_path(text: str, directory: bool = False) -> None:
         raw = (_ for _ in ()).throw(ValueError("path_field_contains_nul")) if "\x00" in text else Path(os.path.expanduser(text)); out.append((Path(os.path.realpath(raw if raw.is_absolute() else base / raw)), directory))  # noqa: E702
     while stack:
-        item, prefix = stack.pop()
+        item, last_key, prefix = stack.pop()
         if isinstance(item, dict):
             for key, child in item.items():
-                dotted = f"{prefix}.{key}" if prefix else key; is_path = key in PATH_FIELD_NAMES or (key.endswith("_path") and key != "tx_path") or dotted in PATH_FIELD_DOTTED_NAMES  # noqa: E702
+                dotted = None
+                if prefix is not None and len(prefix) + bool(prefix) + len(key) <= MAX_DOTTED_PATH_LEN:
+                    dotted = f"{prefix}.{key}" if prefix else key
+                is_path = key in PATH_FIELD_NAMES or (key.endswith("_path") and key != "tx_path") or dotted in PATH_FIELD_DOTTED_NAMES
                 if is_path and not isinstance(child, str): raise ValueError("path_field_not_string")  # noqa: E701
                 if is_path: add_path(child, key in DIRECTORY_PATH_FIELD_NAMES)  # noqa: E701
-                else: stack.append((child, dotted))  # noqa: E701
+                else:
+                    stack.append((child, key, dotted))
         elif isinstance(item, list):
-            if prefix.endswith("command_argv"):
+            if last_key.endswith("command_argv"):
                 for child in item:
                     if isinstance(child, str):
                         for text in (child, child.split("=", 1)[1] if "=" in child else ""):
                             if text and (text.startswith(("~", "/", ".")) or os.sep in text): add_path(text)  # noqa: E701
-            stack.extend((child, prefix) for child in item)
+            stack.extend((child, last_key, prefix) for child in item)
     return out
 def same_path(left: Path, right: Path) -> bool:
     if left == right: return True  # noqa: E701
@@ -1392,6 +1428,20 @@ def path_contains(parent: Path, child: Path) -> bool:
 def scan_source_data(path: Path) -> dict[str, Any] | None:
     data, err = load(path)
     return data if err is None and isinstance(data, dict) else None
+CHECK_REPORT_ROOT_ENTRIES = ("mixed-client-mesh-store-neutrality.json", "rubin-node-go", "rubin-node-rust", "rubin-txgen", "node-go", "node-rust")
+def check_report_input_targets(data: dict[str, Any]) -> list[Path]:
+    root = safe_abs_path(data.get("artifact_root"))
+    if root is None:
+        return []
+    targets = [Path(os.path.realpath(root / name)) for name in CHECK_REPORT_ROOT_ENTRIES]
+    sidecar_path = root / CHECK_REPORT_ROOT_ENTRIES[0]
+    try:
+        sidecar = scan_source_data(sidecar_path) if sidecar_path.is_file() else None
+        if sidecar is not None:
+            targets.extend(target for target, _ in path_field_targets(sidecar, root))
+    except (OSError, ValueError):
+        pass
+    return targets
 def output_overwrites_input(args: argparse.Namespace, out_path: Path) -> str | None:
     for key, value in vars(args).items():
         if key == "output" or key.endswith("_no_data") or not value:
@@ -1410,6 +1460,8 @@ def output_overwrites_input(args: argparse.Namespace, out_path: Path) -> str | N
         try: targets = path_field_targets(data, source_path.parent)
         except ValueError as exc: return f"output_scan_failed:{exc}"  # noqa: E701
         if any(same_path(target, out_path) or (is_dir and path_contains(target, out_path)) for target, is_dir in targets):
+            return "output_overwrites_input"
+        if key != "rust_reorg_metrics" and any(same_path(target, out_path) for target in check_report_input_targets(data)):
             return "output_overwrites_input"
     return None
 def main(argv: list[str] | None = None) -> int:
