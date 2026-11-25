@@ -133,7 +133,7 @@ type imageStall struct {
 }
 
 func (w *imageWire) write(b []byte) (int, error) {
-	if w.isClosed() {
+	if isClosed(w.closed) {
 		return 0, net.ErrClosed
 	}
 	w.mu.Lock()
@@ -164,7 +164,7 @@ func (w *imageWire) write(b []byte) (int, error) {
 			}
 		case <-w.closed:
 		}
-		if w.isClosed() {
+		if isClosed(w.closed) {
 			return 0, net.ErrClosed
 		}
 	}
@@ -174,27 +174,12 @@ func (w *imageWire) write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func (w *imageWire) isClosed() bool {
-	select {
-	case <-w.closed:
-		return true
-	default:
-		return false
-	}
-}
-
 func (w *imageWire) armStallAfter(skip int) *imageStall {
 	stall := &imageStall{entered: make(chan struct{}), release: make(chan error, 1)}
 	w.mu.Lock()
 	w.stall, w.stallSkip = stall, skip
 	w.mu.Unlock()
 	return stall
-}
-
-func (w *imageWire) armPanic(value any, skip int) {
-	w.mu.Lock()
-	w.panicNext, w.panicSkip = value, skip
-	w.mu.Unlock()
 }
 
 func (w *imageWire) drop(n int)    { w.mu.Lock(); w.sent = w.sent[n:]; w.mu.Unlock() }
@@ -227,7 +212,14 @@ func newImageTestFixtureAt(t *testing.T, sessions int, start time.Time) *imageTe
 	t.Helper()
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	f := &imageTestFixture{t: t, h: h, s: h.service, clock: &imageTestClock{t: t, now: start}}
-	t.Cleanup(func() { requireReturned(t, lifecycleClose(f.s), "Close at cleanup") })
+	t.Cleanup(func() {
+		requireReturned(t, lifecycleClose(f.s), "Close at cleanup")
+		req := f.lockRequester()
+		defer req.mu.Unlock()
+		for _, inst := range req.current {
+			req.retireLocked(inst, context.Canceled)
+		}
+	})
 	f.s.cfg.Now = f.clock.Now
 	f.s.cfg.PeerRuntimeConfig.WriteDeadline = 0
 	for i := 0; i < sessions; i++ {
@@ -406,6 +398,7 @@ func (f *imageTestFixture) failedOnClosed(t *testing.T, round *ImageRound, sessi
 type imageOwners struct {
 	ids                       uint64
 	current, idKeys, peerKeys int
+	peerKey                   bool
 	perPeer, global           imageUnitVector
 	attempted, starts         int
 }
@@ -424,7 +417,7 @@ type imageSnapshot struct {
 
 func imageOneInstance(current int) imageOwners {
 	usage := imageUsage(uint64(current), 1, 1, 1, 0)
-	return imageOwners{ids: 1, current: current, idKeys: 1, peerKeys: 1, perPeer: usage, global: usage, attempted: 1, starts: 1}
+	return imageOwners{ids: 1, current: current, idKeys: 1, peerKeys: 1, peerKey: true, perPeer: usage, global: usage, attempted: 1, starts: 1}
 }
 
 func (f *imageTestFixture) lockRequester() *imageRequester {
@@ -470,7 +463,9 @@ func (f *imageTestFixture) owners(round *ImageRound, session int) imageOwners {
 		owners.ids += id
 	}
 	if round != nil {
-		owners.perPeer, owners.global, owners.attempted, owners.starts, owners.peerKeys = *round.usageFor(f.peers[session]), round.global, len(round.attempted), len(round.starts), len(round.perPeer)
+		usage, peerKey := round.perPeer[f.peers[session]]
+		owners.perPeer, owners.peerKey = *cmp.Or(usage, &imageUnitVector{}), peerKey
+		owners.global, owners.attempted, owners.starts, owners.peerKeys = round.global, len(round.attempted), len(round.starts), len(round.perPeer)
 	}
 	return owners
 }
@@ -527,9 +522,8 @@ func (f *imageTestFixture) setLastID(session int, id uint64) {
 }
 
 func (f *imageTestFixture) usage(round *ImageRound, session int) (imageUnitVector, imageUnitVector) {
-	req := f.lockRequester()
-	defer req.mu.Unlock()
-	return *round.usageFor(f.peers[session]), round.global
+	owners := f.owners(round, session)
+	return owners.perPeer, owners.global
 }
 
 func imageUsage(current, starts, attempts, admitted, pending uint64) imageUnitVector {
@@ -602,12 +596,7 @@ func (f *imageTestFixture) frames(t *testing.T, session int) []consensus.UTXOIma
 }
 
 func isImageRequestCommand(command string) bool {
-	if len(command) > len(imageRequestCommand) {
-		return false
-	}
-	var field [12]byte
-	copy(field[:], command)
-	return field == imageRequestCommand
+	return len(command) <= len(imageRequestCommand) && [12]byte([]byte(command+string(make([]byte, 12)))) == imageRequestCommand
 }
 
 func (f *imageTestFixture) requireFrames(t *testing.T, session int, label string, want ...consensus.UTXOImageQuery) {
@@ -1798,13 +1787,14 @@ func testImageRetirementStops(t *testing.T) {
 		end           error
 	}{
 		{"deadline timer after a request ctx end", imageBubble.endRequest, imageBubble.expire, context.Canceled}, {"round ctx callback after a request ctx end", imageBubble.endRequest, imageBubble.endRound, context.Canceled}, {"request ctx callback after a round ctx end", imageBubble.endRound, imageBubble.endRequest, context.Canceled},
+		{"request ctx callback after a deadline", imageBubble.expire, imageBubble.endRequest, errImageExpired}, {"round ctx callback after a deadline", imageBubble.expire, imageBubble.endRound, errImageExpired},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runImageBubble(t, false, func(t *testing.T, b imageBubble) {
 				tc.retire(b)
 				retired, reads, _, owners, end := b.state()
-				armed := b.inst.timer.Stop()
-				require(t, retired && end == tc.end && owners == imageOneInstance(0) && !armed, "first end: retired=%v end=%v owner state %+v timer armed=%v, want retired with %v and the timer stopped before D", retired, end, owners, armed, tc.end) //nolint:errorlint // The recorded end is the first end's ctx error itself.
+				armed, ctxArmed, roundArmed := b.inst.timer.Stop(), b.inst.stopCtx(), b.inst.stopRound()
+				require(t, retired && end == tc.end && owners == imageOneInstance(0) && !armed && !ctxArmed && !roundArmed, "first end: retired=%v end=%v owner state %+v timer, request ctx and round ctx armed=%v %v %v, want retired with %v and the three stopped", retired, end, owners, armed, ctxArmed, roundArmed, tc.end) //nolint:errorlint // The recorded end is the first end's ctx error itself.
 				tc.later(b)
 				_, after, _, _, end := b.state()
 				require(t, after == reads && end == tc.end, "callback or timer after retirement: clock reads %d->%d end %v, want no read and the end %v kept", reads, after, end, tc.end) //nolint:errorlint // The kept end is the first end's ctx error itself.
@@ -2483,7 +2473,7 @@ func (f *imageTestFixture) recordClosers(round *ImageRound, session int, inReque
 			p.stateMu.Unlock()
 			req := f.s.imageRequester
 			req.mu.Lock()
-			record.perPeer, record.global = *round.usageFor(p), round.global
+			record.perPeer, record.global = *cmp.Or(round.perPeer[p], &imageUnitVector{}), round.global
 			req.mu.Unlock()
 		}
 		mu.Lock()
@@ -2502,8 +2492,8 @@ const imageUnwindSentinel = "image requester test unwind"
 func testImageUnwind(t *testing.T) {
 	stop := func(name string, atRD, roundCtx, pass bool) {
 		var unreachable func() bool
-		ran := t.Run(name, func(t *testing.T) { unreachable = testImageUnwindStop(t, atRD, roundCtx, pass) })
-		require(t, !ran || unreachable(), "%s: Service reachable after Close and the retirement of its instances", name)
+		t.Run(name, func(t *testing.T) { unreachable = testImageUnwindStop(t, atRD, roundCtx, pass) })
+		require(t, unreachable == nil || unreachable(), "%s: Service reachable after Close and the retirement of its instances", name)
 	}
 	t.Run("a panic in the clock read of the pre-write decision made with writeMu acquired", func(t *testing.T) { testImageUnwindWithWriteMu(t, false) })
 	t.Run("runtime.Goexit in the clock read of the pre-write decision made with writeMu acquired", func(t *testing.T) { testImageUnwindWithWriteMu(t, true) })
@@ -2689,7 +2679,10 @@ func testImageUnwindWrite(t *testing.T) {
 	for skip := range 2 {
 		f := newImageTestFixture(t, 1)
 		round := f.round(t, imageUnwindLimits(), 0)
-		f.wires[0].armPanic(imageUnwindSentinel, skip)
+		w := f.wires[0]
+		w.mu.Lock()
+		w.panicNext, w.panicSkip = imageUnwindSentinel, skip
+		w.mu.Unlock()
 		f.requireUnwound(t, f.goRecovered(round, context.Background(), 0, 1), false)
 		requireEqual(t, len(f.wires[0].bytes()), skip*wireHeaderSize, "bytes written by the panicking frame write")
 		f.wires[0].drop(skip * wireHeaderSize)
@@ -2729,11 +2722,16 @@ func testImageUnwindArming(t *testing.T, goexit, roundCtx, parked bool) {
 		if roundCtx {
 			synctest.Wait()
 			req, leases, stacks := f.lockRequester(), f.leases(), make([]byte, 1<<20)
+			created := fmt.Appendf(nil, "created by context.(*afterFuncCtx).cancel in goroutine %s\n", bytes.Fields(stacks[:runtime.Stack(stacks, false)])[1])
 			func() {
 				defer req.mu.Unlock()
 				requireEqual(t, cr.endAndRun(errImageRequestEnd), 1, "Cr functions run after Cr ends")
-				for scans := 0; bytes.Contains(stacks[:runtime.Stack(stacks, true)], []byte("created by context.(*afterFuncCtx).cancel")); scans++ {
-					require(t, f.leases() == leases && scans < 1<<16, "Cr callback of the unwound call: Service leases %d->%d after %d stack scans, want no lease and its return", leases, f.leases(), scans)
+				for scans := 0; ; scans++ {
+					n := runtime.Stack(stacks, true)
+					require(t, n < len(stacks) && f.leases() == leases && scans < 1<<16, "Cr callback of the unwound call: stack dump of %d bytes, Service leases %d->%d after %d stack scans, want an untruncated dump, no lease and its return", n, leases, f.leases(), scans)
+					if !bytes.Contains(stacks[:n], created) {
+						break
+					}
 					runtime.Gosched()
 				}
 			}()
