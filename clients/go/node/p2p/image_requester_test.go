@@ -1977,8 +1977,8 @@ func testImageFailedWrite(t *testing.T) {
 			c.end(errors.New("ctx ended with its callback not run"))
 			stall.release <- errImageScriptedWrite
 			requireImageResult(t, awaitImageResult(t, pending, "failed write"), 1, 1, errImageScriptedWrite, "failed write with a done ctx")
-			_, end := f.ended(inst)
-			require(t, end == errImageScriptedWrite, "recorded end=%v, want %v", end, errImageScriptedWrite) //nolint:errorlint // The recorded end is the write error itself.
+			retired, _ := f.ended(inst)
+			require(t, retired, "instance after the failed write: retired=%v, want retired", retired)
 			f.requireOwners(t, round, 0, imageOneInstance(0), "after the failed write")
 			f.requireFault(t, 0, 1, errImageScriptedWrite.Error(), "after the failed write")
 		})
