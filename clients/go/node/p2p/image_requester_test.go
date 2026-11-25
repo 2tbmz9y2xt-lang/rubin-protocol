@@ -1786,8 +1786,11 @@ func testImageRetirementStops(t *testing.T) {
 		retire, later func(b imageBubble)
 		end           error
 	}{
-		{"deadline timer after a request ctx end", imageBubble.endRequest, imageBubble.expire, context.Canceled}, {"round ctx callback after a request ctx end", imageBubble.endRequest, imageBubble.endRound, context.Canceled}, {"request ctx callback after a round ctx end", imageBubble.endRound, imageBubble.endRequest, context.Canceled},
-		{"request ctx callback after a deadline", imageBubble.expire, imageBubble.endRequest, errImageExpired}, {"round ctx callback after a deadline", imageBubble.expire, imageBubble.endRound, errImageExpired},
+		{"deadline timer after a request ctx end", imageBubble.endRequest, imageBubble.expire, context.Canceled},
+		{"round ctx callback after a request ctx end", imageBubble.endRequest, imageBubble.endRound, context.Canceled},
+		{"request ctx callback after a round ctx end", imageBubble.endRound, imageBubble.endRequest, context.Canceled},
+		{"request ctx callback after a deadline", imageBubble.expire, imageBubble.endRequest, errImageExpired},
+		{"round ctx callback after a deadline", imageBubble.expire, imageBubble.endRound, errImageExpired},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runImageBubble(t, false, func(t *testing.T, b imageBubble) {
@@ -2679,10 +2682,9 @@ func testImageUnwindWrite(t *testing.T) {
 	for skip := range 2 {
 		f := newImageTestFixture(t, 1)
 		round := f.round(t, imageUnwindLimits(), 0)
-		w := f.wires[0]
-		w.mu.Lock()
-		w.panicNext, w.panicSkip = imageUnwindSentinel, skip
-		w.mu.Unlock()
+		f.wires[0].mu.Lock()
+		f.wires[0].panicNext, f.wires[0].panicSkip = imageUnwindSentinel, skip
+		f.wires[0].mu.Unlock()
 		f.requireUnwound(t, f.goRecovered(round, context.Background(), 0, 1), false)
 		requireEqual(t, len(f.wires[0].bytes()), skip*wireHeaderSize, "bytes written by the panicking frame write")
 		f.wires[0].drop(skip * wireHeaderSize)
