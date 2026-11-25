@@ -127,7 +127,7 @@ func tiAccountKept(t *testing.T, out tiOutcome) {
 		t.Fatalf("live sum %d, account before %+v after %+v", out.live, out.before, out.after)
 	}
 	if out.wantZero {
-		if out.account != (OperationAccount{}) || out.reuse != errOperationReservationInput || out.reuseLive != 0 {
+		if out.account != (OperationAccount{}) || any(out.reuse) != any(errOperationReservationInput) || out.reuseLive != 0 {
 			t.Fatalf("zeroed account %+v reuse returned %v with live sum %d", out.account, out.reuse, out.reuseLive)
 		}
 		return
