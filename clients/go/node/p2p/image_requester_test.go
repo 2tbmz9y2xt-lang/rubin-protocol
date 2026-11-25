@@ -2754,9 +2754,9 @@ func testImageUnwindStop(t *testing.T, atRD, roundCtx, pass bool) {
 	}
 	c := newImageHookCtx()
 	c.onStop = func() { panic(imageUnwindSentinel) }
-	roundC, requestC := imageUnwindCtx(c, roundCtx)
+	roundC, _ := imageUnwindCtx(c, roundCtx)
 	round := f.roundCtx(t, roundC, limits, 0, 1)
-	inst, recovered, release := f.unwindRetirement(t, round, requestC, end, pass)
+	inst, recovered, release := f.unwindRetirement(t, round, c, roundCtx, end, pass)
 	require(t, recovered == imageUnwindSentinel, "recovered %v, want %q", recovered, imageUnwindSentinel)
 	f.requireCurrentAfterUnwind(t, round, inst)
 	f.requireUsage(t, round, 0, imageUsage(1, 1, 1, 1, 0), imageUsage(1, 1, 1, 1, 0), "after the stop call unwound")
@@ -2776,12 +2776,13 @@ func testImageUnwindStop(t *testing.T, atRD, roundCtx, pass bool) {
 	f.requireNoFaultBeforeClose(t, 0)
 }
 
-// unwindRetirement makes a retirement of the instance of start 1 on session 0, admitted with ctx, run with now at end
-// and returns that instance, the value its unwinding caller panicked with and a func the test calls before Close:
-// with pass set the caller is a request for start 2 on session 1, whose pass runs at end; else it is the instance's
-// own request, waiting for the writeMu the test holds until that func runs.
-func (f *imageTestFixture) unwindRetirement(t *testing.T, round *ImageRound, ctx context.Context, end time.Time, pass bool) (*imageInstance, any, func()) {
+// unwindRetirement makes a retirement of the instance of start 1 on session 0, admitted with the Request ctx that
+// imageUnwindCtx gives for c, run with now at end and returns that instance, the value its unwinding caller panicked
+// with and a func the test calls before Close: with pass set the caller is a request for start 2 on session 1, whose
+// pass runs at end; else it is the instance's own request, waiting for the writeMu the test holds until that func runs.
+func (f *imageTestFixture) unwindRetirement(t *testing.T, round *ImageRound, c *imageHookCtx, roundCtx bool, end time.Time, pass bool) (*imageInstance, any, func()) {
 	t.Helper()
+	_, ctx := imageUnwindCtx(c, roundCtx)
 	if pass {
 		inst := f.admitted(t, round, ctx, 0, 1, 1)
 		f.clock.set(end)
