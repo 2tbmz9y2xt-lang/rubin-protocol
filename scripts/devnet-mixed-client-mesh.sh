@@ -2299,7 +2299,6 @@ wait_peer_snapshot() {
   tmp="${out}.tmp"
   while (( SECONDS < deadline )); do
     if rpc_json GET "${addr}" /peers >"${tmp}" 2>"${tmp}.err"; then
-      PEER_SNAPSHOT_REASON=""
       if python3 - "${tmp}" "${expected}" <<'PY' >/dev/null 2>&1
 import json, sys
 path = sys.argv[1]
@@ -2324,7 +2323,7 @@ if shape and has_expected_complete and count == 1:
 sys.exit(3 if shape and has_expected_complete else 5 if not shape else 6 if has_expected_incomplete else 7)
 PY
       then (( SECONDS < deadline )) || break; mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
-      else rc=$?; [[ ${rc} -eq 3 ]] && PEER_SNAPSHOT_REASON=unexpected_peer_snapshot_peer; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; [[ ${rc} -eq 5 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_invalid_shape; [[ ${rc} -eq 6 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_handshake_incomplete; [[ ${rc} -eq 7 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_expected_peer_absent; fi
+      else rc=$?; PEER_SNAPSHOT_REASON=""; [[ ${rc} -eq 3 ]] && PEER_SNAPSHOT_REASON=unexpected_peer_snapshot_peer; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; [[ ${rc} -eq 5 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_invalid_shape; [[ ${rc} -eq 6 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_handshake_incomplete; [[ ${rc} -eq 7 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_expected_peer_absent; fi
     else rc=$?; [[ ${rc} -eq 23 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json || PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; fi
     sleep 1
   done

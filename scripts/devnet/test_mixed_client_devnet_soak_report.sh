@@ -244,7 +244,9 @@ for name, src, field, target in (("mesh_marker_tab_dir.json", "mesh.json", "lega
         ("mesh_marker_trailing_space.json", "mesh.json", "legacy_schema_compatibility.marker_path", root / "marker.json "), ("mesh_marker_unit_separator_dir.json", "mesh.json", "legacy_schema_compatibility.marker_path", root / "u\x1fdir" / "marker.json"),
         ("mesh_marker_space_dir.json", "mesh.json", "legacy_schema_compatibility.marker_path", root / "s dir" / "marker.json")):
     dump(name, moved_path(load_report(src), field, target))
-(root / "x\x01").mkdir(); bad = load_report("mesh.json"); bad["nodes"][0]["command_argv"][0] = str(root / "x\x01" / ".." / "rubin-node-go"); bad["nodes"][0]["command"] = shlex.join(bad["nodes"][0]["command_argv"]); dump("mesh_argv0_control.json", bad)
+(root / "x\x01").mkdir()
+for index, name in ((0, "rubin-node-go"), (4, "node-go")):
+    bad = load_report("mesh.json"); bad["nodes"][0]["command_argv"][index] = str(root / "x\x01" / ".." / name); bad["nodes"][0]["command"] = shlex.join(bad["nodes"][0]["command_argv"]); dump(f"mesh_argv{index}_control.json", bad)
 bad = load_report("restart.json"); bad["rust_restart"]["datadir"] = str(root / "x\x01" / ".." / "node-rust"); dump("restart_datadir_control.json", bad)
 tab_root = root / "tab\troot"; tab_root.mkdir(); tab_link = root / "tab-root-link"; tab_link.symlink_to(tab_root, target_is_directory=True)
 for name in ("rubin-node-go", "rubin-node-rust", "marker.json"):
@@ -367,6 +369,7 @@ expect_fail_reason restart_source_binding_contradiction:pre_restart_tip_sidecar_
 expect_fail_reason partition_reorg_source_binding_contradiction:sidecar_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition_metrics_tab_dir.json"
 expect_fail_reason partition_reorg_source_binding_contradiction:sidecar_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition_metrics_tab_outside.json"
 expect_fail_reason process_identity_missing_or_invalid --mesh-report "${TMP_ROOT}/mesh_argv0_control.json"
+expect_fail_reason process_identity_missing_or_invalid --mesh-report "${TMP_ROOT}/mesh_argv4_control.json"
 expect_mesh_pass "${TMP_ROOT}/tab-root-link/mesh.json"
 expect_fail_reason restart_source_binding_contradiction:datadir_not_bound --rust-restart-report "${TMP_ROOT}/restart_datadir_control.json"
 expect_fail_reason malformed_source_fields:legacy_schema_compatibility.marker_path --mesh-report "${TMP_ROOT}/mesh_marker_trailing_space.json"
