@@ -1399,6 +1399,19 @@ def path_contains(parent: Path, child: Path) -> bool:
 def scan_source_data(path: Path) -> dict[str, Any] | None:
     data, err = load(path)
     return data if err is None and isinstance(data, dict) else None
+CHECK_REPORT_ROOT_ENTRIES = ("mixed-client-mesh-store-neutrality.json", "rubin-node-go", "rubin-node-rust", "rubin-txgen", "node-go", "node-rust")
+def check_report_input_targets(data: dict[str, Any]) -> list[Path]:
+    root = safe_abs_path(data.get("artifact_root"))
+    if root is None:
+        return []
+    targets = [root / name for name in CHECK_REPORT_ROOT_ENTRIES]
+    try:
+        sidecar = scan_source_data(targets[0]) if targets[0].is_file() else None
+        if sidecar is not None:
+            targets.extend(target for target, _ in path_field_targets(sidecar, targets[0].parent))
+    except (OSError, ValueError):
+        pass
+    return targets
 def output_overwrites_input(args: argparse.Namespace, out_path: Path) -> str | None:
     for key, value in vars(args).items():
         if key == "output" or key.endswith("_no_data") or not value:
@@ -1417,6 +1430,8 @@ def output_overwrites_input(args: argparse.Namespace, out_path: Path) -> str | N
         try: targets = path_field_targets(data, source_path.parent)
         except ValueError as exc: return f"output_scan_failed:{exc}"  # noqa: E701
         if any(same_path(target, out_path) or (is_dir and path_contains(target, out_path)) for target, is_dir in targets):
+            return "output_overwrites_input"
+        if any(same_path(target, out_path) for target in check_report_input_targets(data)):
             return "output_overwrites_input"
     return None
 def main(argv: list[str] | None = None) -> int:

@@ -62,6 +62,7 @@ def eventually(fn, message: str) -> None:
         if fn() and (not live or time.monotonic() < deadline): return
         if not live or time.monotonic() >= deadline: fail(message)
         time.sleep(1)
+        if time.monotonic() >= deadline: fail(message)
 def safe_path_str(value: object) -> bool:
     return isinstance(value, str) and value.strip() == value and bool(value) and value[0] not in "'\"" and value[-1] not in "'\"" and "\0" not in value and all(ord(c) >= 32 for c in value)
 def checked_path(label: str, value: object) -> Path:

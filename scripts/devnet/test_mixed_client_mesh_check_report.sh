@@ -435,7 +435,7 @@ printf '{"best_known_height":103,"has_tip":true,"height":103,"in_ibd":false,"tip
 printf '[]\n' >"${probe_root}/array.json"
 printf '{"count":1,"peers":[{"addr":"%s","handshake_complete":true}]}\n' "${PEER}" >"${probe_root}/peer.json"
 printf '{"count":1,"peers":[{"addr":"%s","handshake_complete":false}]}\n' "${PEER}" >"${probe_root}/peer-incomplete.json"
-printf '{"count":1,"peers":[{"addr":"%s","best_height":%s,"handshake_complete":true}]}\n' "${PEER}" "$(printf '9%.0s' {1..5000})" >"${probe_root}/peer-long-height.json"
+printf '{"count":2,"peers":[{"addr":"%s","best_height":%s%s,"handshake_complete":true},{"addr":"127.0.0.1:\xc2\xb2","handshake_complete":true}]}\n' "${PEER}" "$(printf '[%.0s' {1..5000})" "$(printf ']%.0s' {1..5000})" >"${probe_root}/peer-long-height.json"
 # The stubs append the request path to the capture log; the last capture of an attempt sleeps CAPTURE_SLEEP before it answers.
 capture_tx_rpc_sidecar() {
   local raw=",\"raw_hex\":\"${TX_HEX}\""
@@ -590,6 +590,30 @@ expect_wait PEER_SNAPSHOT_REASON ok wait_peer_snapshot_state node-rust "${RUST_R
 require_log captures /peers "wait_peer_snapshot_state"; require_log peers.json "${peers_norm}" "wait_peer_snapshot_state"
 output="$(eventually_run 10 0)" || { echo "FAIL: eventually refused a predicate answered in time" >&2; exit 1; }
 [[ "${output}" == "returned after 1 call" ]] || { echo "FAIL: eventually output: ${output}" >&2; exit 1; }
+# The clock stub starts at 1000; the first predicate call moves it to $1 and the sleep stub to $2.
+eventually_clock_run() { python3 - "${eventually_py}" "$@" 2>&1 <<'PY'
+import sys, time
+def fail(message: str) -> None: print(f"FAIL: {message}", file=sys.stderr); sys.exit(1)
+live, LIVE_TIMEOUT, clock, calls = True, 10, [1000.0], []
+exec(open(sys.argv[1], encoding="utf-8").read())
+time.monotonic = lambda: clock[0]
+def sleep(_: float) -> None:
+    clock[0] = float(sys.argv[3])
+time.sleep = sleep
+def predicate() -> bool:
+    calls.append(1)
+    if len(calls) == 1:
+        clock[0] = float(sys.argv[2]); return False
+    if clock[0] >= 1010.0: fail("predicate called at the deadline")
+    return True
+try: eventually(predicate, "eventually deadline passed")
+finally: print(f"predicate calls {len(calls)}", file=sys.stderr)
+PY
+}
+if output="$(eventually_clock_run 1000 1010)"; then echo "FAIL: eventually returned after a sleep that reached its deadline: ${output}" >&2; exit 1; fi
+[[ "${output}" == $'FAIL: eventually deadline passed\npredicate calls 1' ]] || { echo "FAIL: eventually output after a sleep that reached its deadline: ${output}" >&2; exit 1; }
+output="$(eventually_clock_run 1009 1009)" || { echo "FAIL: eventually refused a second call started before its deadline: ${output}" >&2; exit 1; }
+[[ "${output}" == "predicate calls 2" ]] || { echo "FAIL: eventually output for a second call before its deadline: ${output}" >&2; exit 1; }
 
 export MESH_TIMEOUT=1 CAPTURE_SLEEP=2
 GET_TX_FOUND=false
