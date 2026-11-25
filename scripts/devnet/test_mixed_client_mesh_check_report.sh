@@ -704,7 +704,7 @@ check_startup_waits_for_rust_identity() {
 # and a failed read still lets build_go_node run.
 check_commit_read_before_builds() {
   local lib="${TMP_ROOT}/build-read-lib.sh" log="${TMP_ROOT}/build-read.log" modes fail out
-  extract_slices "${lib}" "repo_git()" "# Writes mixed-client-mesh-store-neutrality.json" "# HEAD and clients status before the first build" "start_go_node || finish_no_data"
+  extract_slices "${lib}" "repo_git()" "# Writes mixed-client-mesh-store-neutrality.json" "for tool in lsof perl ps sed sort" "start_go_node || finish_no_data"
   for modes in "1 0 0" "0 1 0" "0 0 1" "0 0 0"; do
     for fail in "" rev-parse; do
       rm -f -- "${log}"
@@ -757,7 +757,7 @@ check_store_neutrality_producer_reasons() {
   mkdir -p -- "${probe_root}/cap" "${probe_root}/out"
   extract_slices "${lib}" "sidecar_derivations_py()" '[[ "${MESH_TIMEOUT}"' "chain_mode()" "capture_go_reorg_metrics()"
   extract_slices "${main}" "write_store_neutrality_sidecar ||" "if (( PARTITION_HEAL_REORG_MODE == 1 )); then"
-  extract_slices "${first}" "# HEAD and clients status before the first build" "build_go_node ||"
+  extract_slices "${first}" "for tool in lsof perl ps sed sort" "build_go_node ||"
   python3 - "${probe_root}" <<'PY'
 import hashlib, json, sys
 root = sys.argv[1]
@@ -872,7 +872,11 @@ FIRST_STATUS=" M clients/go/node/miner.go" GIT_STATUS="" expect_end store_neutra
 FIRST_HEAD="${GIT_HEAD}" GIT_HEAD="${head_b}" TXGEN_BIN="${p}/missing" expect_end store_neutrality_binary_hash_failed
 FIRST_HEAD="${GIT_HEAD}" GIT_HEAD="${head_b}" INITIAL_GO_TIP_JSON="${p}/array.json" expect_end store_neutrality_commit_unavailable
 FIRST_FAIL_GIT=rev-parse TXGEN_BIN="${p}/missing" expect_end store_neutrality_binary_hash_failed
-FIRST_FAIL_GIT=status expect_end store_neutrality_commit_unavailable
+for git_fail in :rev-parse :status rev-parse: status:; do
+  rm -f -- "${STORE_NEUTRALITY_JSON}"
+  FIRST_FAIL_GIT="${git_fail%%:*}" FAIL_GIT="${git_fail#*:}" expect_end store_neutrality_commit_unavailable
+  [[ ! -e "${STORE_NEUTRALITY_JSON}" ]] || { echo "FAIL: sidecar written with failing git read (build read:git step) ${git_fail}" >&2; exit 1; }
+done
 BAD_CAPTURE="go /chain_identity" BAD_SRC="${p}/empty-object.json" FAIL_GIT=rev-parse expect_end store_neutrality_chain_identity_capture_failed
 BAD_CAPTURE="go /chain_identity" BAD_SRC="${p}/empty-object.json" FAIL_CAPTURE="go /get_block?height=0" expect_end store_neutrality_chain_identity_capture_failed
 BAD_CAPTURE="go /get_block?height=0" BAD_SRC="${p}/bad-block-no-block_hex.json" GO_NODE_BIN="${p}/bin-dir" expect_end store_neutrality_genesis_capture_failed
