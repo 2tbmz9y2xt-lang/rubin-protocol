@@ -88,10 +88,7 @@ func inImageBubble(body func(*testing.T)) func(*testing.T) {
 func (c *imageTestClock) cancelOnRead(cancel func()) { c.jumpOnRead(time.Time{}, cancel) }
 
 func (c *imageTestClock) jumpOnRead(now time.Time, cancel func()) {
-	c.onNextRead(func(at time.Time) time.Time {
-		cancel()
-		return cmp.Or(now, at)
-	})
+	c.onNextRead(func(at time.Time) time.Time { cancel(); return cmp.Or(now, at) })
 }
 
 func (c *imageTestClock) onReadFrom(suffix string, at func(time.Time) time.Time) {
@@ -236,8 +233,7 @@ func newImageTestFixtureAt(t *testing.T, sessions int, start time.Time) *imageTe
 
 func (f *imageTestFixture) addSession(t *testing.T, addr, endpoint string) int {
 	t.Helper()
-	p := daRelayTestPeer(f.h, addr, endpoint)
-	conn := newBlockRetryConn(&scriptedConn{remote: stubAddr(endpoint)})
+	p, conn := daRelayTestPeer(f.h, addr, endpoint), newBlockRetryConn(&scriptedConn{remote: stubAddr(endpoint)})
 	wire := &imageWire{closed: conn.closed}
 	conn.writeHook = wire.write
 	p.conn = conn
@@ -620,15 +616,10 @@ func (f *imageTestFixture) closes(session int) int {
 
 func (f *imageTestFixture) holdWrite(t *testing.T, session int) (release func() error) {
 	t.Helper()
-	stall := f.wires[session].armStallAfter(0)
-	done := make(chan error, 1)
+	stall, done := f.wires[session].armStallAfter(0), make(chan error, 1)
 	go func() { done <- f.peers[session].send(messagePing, make([]byte, 8)) }()
 	requireChannelClosed(t, stall.entered, "holder write")
-	return func() error {
-		t.Helper()
-		stall.release <- nil
-		return awaitImageResult(t, done, "holder write")
-	}
+	return func() error { t.Helper(); stall.release <- nil; return awaitImageResult(t, done, "holder write") }
 }
 
 func (f *imageTestFixture) stalledRequest(t *testing.T, round *ImageRound, ctx context.Context, session int, start byte) (*imageStall, <-chan imageResult) {
@@ -707,8 +698,7 @@ func testImageIDMaximum(t *testing.T) {
 }
 
 func testImageOneCurrent(t *testing.T) {
-	f := newImageTestFixture(t, 3)
-	limits := imageTestLimits(50 * time.Millisecond)
+	f, limits := newImageTestFixture(t, 3), imageTestLimits(50*time.Millisecond)
 	first := f.round(t, limits, 0, 1, 2)
 	second := f.round(t, limits, 0, 1, 2)
 	reads := f.clock.readCount()
@@ -780,8 +770,7 @@ func testImageCountLimits(t *testing.T) {
 	} {
 		for _, global := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s global=%v", tc.name, global), inImageBubble(func(t *testing.T) {
-				f := newImageTestFixture(t, 2)
-				limits := imageTestLimits()
+				f, limits := newImageTestFixture(t, 2), imageTestLimits()
 				*tc.field(map[bool]*ImageUnits{false: &limits.PerPeer, true: &limits.Global}[global]) = 2
 				round := f.round(t, limits, 0, 1)
 				ctx, cancel := context.WithCancel(context.Background())
@@ -897,8 +886,7 @@ func testImagePendingReleaseSites(t *testing.T) {
 
 func testImagePendingAtMaximum(t *testing.T) {
 	for _, global := range []bool{false, true} {
-		f := newImageTestFixture(t, 1)
-		limits := imageTestLimits()
+		f, limits := newImageTestFixture(t, 1), imageTestLimits()
 		map[bool]*ImageUnits{false: &limits.PerPeer, true: &limits.Global}[global].PendingNetworkBytes = math.MaxUint64
 		round := f.round(t, limits, 0)
 		round.perPeer[f.peers[0]] = &imageUnitVector{}
@@ -911,8 +899,7 @@ func testImagePendingAtMaximum(t *testing.T) {
 }
 
 func testImageDistinctStarts(t *testing.T) {
-	f := newImageTestFixture(t, 2)
-	limits := imageTestLimits()
+	f, limits := newImageTestFixture(t, 2), imageTestLimits()
 	limits.Global.DistinctStarts, limits.AttemptLifetime = 1, 50*time.Millisecond
 	round := f.round(t, limits, 0, 1)
 	f.admitTimerSpent(t, round, context.Background(), 0, 0x81, 1)
@@ -926,8 +913,7 @@ func testImageDistinctStarts(t *testing.T) {
 
 func testImagePerRoundUsage(t *testing.T) {
 	t.Run("another round's usage does not count", func(t *testing.T) {
-		f := newImageTestFixture(t, 1)
-		limits := imageTestLimits()
+		f, limits := newImageTestFixture(t, 1), imageTestLimits()
 		for _, scope := range []*ImageUnits{&limits.PerPeer, &limits.Global} {
 			scope.CurrentAssignments, scope.DistinctStarts, scope.SourceAttempts, scope.AdmittedRequests, scope.PendingNetworkBytes = 1, 1, 1, 1, 120
 		}
@@ -942,8 +928,7 @@ func testImagePerRoundUsage(t *testing.T) {
 		f.requireFrames(t, 0, "both rounds", expectedImageQuery(1, 1), expectedImageQuery(2, 2))
 	})
 	t.Run("a retirement releases its own round", inImageBubble(func(t *testing.T) {
-		f := newImageTestFixture(t, 1)
-		limits := imageTestLimits(time.Second + 50*time.Millisecond)
+		f, limits := newImageTestFixture(t, 1), imageTestLimits(time.Second+50*time.Millisecond)
 		limits.PerPeer.CurrentAssignments, limits.Global.CurrentAssignments = 1, 1
 		r1, r2 := f.round(t, limits, 0), f.round(t, limits, 0)
 		ended := f.admitTimerSpent(t, r1, context.Background(), 0, 1, 1)
@@ -954,8 +939,7 @@ func testImagePerRoundUsage(t *testing.T) {
 		f.admitted(t, r1, context.Background(), 0, 4, 3)
 	}))
 	t.Run("a value copy of a round is that round", func(t *testing.T) {
-		f := newImageTestFixture(t, 2)
-		limits := imageTestLimits()
+		f, limits := newImageTestFixture(t, 2), imageTestLimits()
 		limits.Global.AdmittedRequests = 1
 		round := f.round(t, limits, 0, 1)
 		copied := *round
@@ -1030,8 +1014,7 @@ func testImagePreWriteAtDeadline(t *testing.T) {
 	}{{"now at D writes the frame", 0}, {"now one tick past D writes no frame", time.Nanosecond}} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newImageTestFixture(t, 1)
-			t0 := f.clock.Now()
-			round := f.round(t, imageTestLimits(), 0)
+			t0, round := f.clock.Now(), f.round(t, imageTestLimits(), 0)
 			release := f.holdWrite(t, 0)
 			pending := f.goRequest(round, context.Background(), 0, 1)
 			f.waitAdmitted(t, 0, 1, "parked request")
@@ -1121,8 +1104,7 @@ func testImageEndBeforeWrite(t *testing.T) {
 		}))
 	}
 	t.Run("frozen now keeps the wait parked for 200 ms of wall time until the ctx ends", func(t *testing.T) {
-		f := newImageTestFixture(t, 1)
-		limits := imageTestLimits(50 * time.Millisecond)
+		f, limits := newImageTestFixture(t, 1), imageTestLimits(50*time.Millisecond)
 		round := f.round(t, limits, 0)
 		ctx, cancel := context.WithCancel(context.Background())
 		release := f.holdWrite(t, 0)
@@ -1145,8 +1127,7 @@ func testImageEndBeforeWrite(t *testing.T) {
 
 func testImageEndSeenUnderWriteMu(t *testing.T) {
 	f := newImageTestFixture(t, 1)
-	t0 := f.clock.Now()
-	round := f.round(t, imageTestLimits(), 0)
+	t0, round := f.clock.Now(), f.round(t, imageTestLimits(), 0)
 	session := f.peers[0]
 	// Reads with writeMu free leave the clock; the first read with writeMu held moves now past D.
 	var endUnderWriteMu func(time.Time) time.Time
@@ -1295,8 +1276,7 @@ func testImageDoneAtAdmissionRead(t *testing.T) {
 
 func testImageRequestRetiresEnded(t *testing.T) {
 	t.Run("same round", inImageBubble(func(t *testing.T) {
-		f := newImageTestFixture(t, 2)
-		limits := imageTestLimits(50 * time.Millisecond)
+		f, limits := newImageTestFixture(t, 2), imageTestLimits(50*time.Millisecond)
 		round := f.round(t, limits, 0, 1)
 		ctx, cancel := context.WithCancel(context.Background())
 		inst := f.admitTimerSpent(t, round, ctx, 0, 0x81, 1)
@@ -1680,12 +1660,7 @@ func (c *imageHookCtx) Err() error {
 	return err
 }
 
-func (c *imageHookCtx) end(err error) {
-	c.mu.Lock()
-	c.err = err
-	close(c.done)
-	c.mu.Unlock()
-}
+func (c *imageHookCtx) end(err error) { c.mu.Lock(); c.err = err; close(c.done); c.mu.Unlock() }
 
 func (c *imageHookCtx) endAndRun(err error) int {
 	c.end(err)
@@ -1772,10 +1747,7 @@ func (b imageBubble) expire() {
 	b.passTimer()
 }
 
-func (b imageBubble) passTimer() {
-	time.Sleep(time.Second)
-	synctest.Wait()
-}
+func (b imageBubble) passTimer() { time.Sleep(time.Second); synctest.Wait() }
 
 func (b imageBubble) state() (bool, int, time.Time, imageOwners, error) {
 	retired, end := b.f.ended(b.inst)
@@ -1842,15 +1814,9 @@ func testImageRetirementStops(t *testing.T) {
 	}
 }
 
-func (b imageBubble) endRequest() {
-	b.cancelRequest()
-	synctest.Wait()
-}
+func (b imageBubble) endRequest() { b.cancelRequest(); synctest.Wait() }
 
-func (b imageBubble) endRound() {
-	b.cancelRound()
-	synctest.Wait()
-}
+func (b imageBubble) endRound() { b.cancelRound(); synctest.Wait() }
 
 func testImageSaturatedTimer(t *testing.T) {
 	f := newImageTestFixture(t, 1)
@@ -1999,8 +1965,7 @@ func testImageStaleHandle(t *testing.T) {
 	t.Run("a ctx callback that loaded its instance before a retirement under the requester mutex", testImageCallbackAfterRetirement)
 	t.Run("write failure of an instance ended during the write", func(t *testing.T) {
 		f := newImageTestFixture(t, 3)
-		t0 := f.clock.Now()
-		round := f.round(t, imageTestLimits(), 0, 1, 2)
+		t0, round := f.clock.Now(), f.round(t, imageTestLimits(), 0, 1, 2)
 		stall, pending := f.stalledRequest(t, round, context.Background(), 0, 1)
 		f.clock.set(t0.Add(10*time.Second + time.Nanosecond))
 		replacement := f.admitted(t, round, context.Background(), 1, 1, 1)
@@ -2040,8 +2005,7 @@ func testImageCallbackAfterRetirement(t *testing.T) {
 }
 
 func testImageStaleCallback(t *testing.T) {
-	f := newImageTestFixture(t, 3)
-	limits := imageTestLimits(math.MaxInt64, math.MaxInt64)
+	f, limits := newImageTestFixture(t, 3), imageTestLimits(math.MaxInt64, math.MaxInt64)
 	round, ctx := f.round(t, limits, 0, 1, 2), newImageHookCtx()
 	stale := f.admitted(t, round, ctx, 0, 1, 1)
 	f.clock.cancelOnRead(func() { requireEqual(t, ctx.endAndRun(context.Canceled), 1, "stale ctx functions") })
@@ -2353,8 +2317,7 @@ func testImageServiceClose(t *testing.T) {
 	})
 	t.Run("request waiting for writeMu", func(t *testing.T) {
 		f := newImageTestFixture(t, 1)
-		t0 := f.clock.Now()
-		round := f.round(t, imageTestLimits(), 0)
+		t0, round := f.clock.Now(), f.round(t, imageTestLimits(), 0)
 		release := f.holdWrite(t, 0)
 		pending := f.goRequest(round, context.Background(), 0, 1)
 		f.waitAdmitted(t, 0, 1, "parked request")
@@ -2415,12 +2378,7 @@ func testImageServiceClose(t *testing.T) {
 
 func (f *imageTestFixture) blockNextRead(at func(time.Time) time.Time, onRelease func()) (entered <-chan struct{}, release func()) {
 	in, out := make(chan struct{}), make(chan struct{})
-	f.clock.onNextRead(func(now time.Time) time.Time {
-		close(in)
-		<-out
-		onRelease()
-		return at(now)
-	})
+	f.clock.onNextRead(func(now time.Time) time.Time { close(in); <-out; onRelease(); return at(now) })
 	return in, func() { close(out) }
 }
 
@@ -2532,11 +2490,7 @@ func (f *imageTestFixture) recordClosers(round *ImageRound, session int, inReque
 		}
 	}
 	conn.mu.Unlock()
-	return func() []imageCloser {
-		mu.Lock()
-		defer mu.Unlock()
-		return slices.Clone(records)
-	}
+	return func() []imageCloser { mu.Lock(); defer mu.Unlock(); return slices.Clone(records) }
 }
 
 const imageUnwindSentinel = "image requester test unwind"
@@ -2783,8 +2737,7 @@ func testImageUnwindArming(t *testing.T, goexit, roundCtx bool) {
 
 func testImageUnwindStop(t *testing.T, atRD, roundCtx, pass bool) {
 	f := newImageTestFixture(t, 2)
-	t0 := f.clock.Now()
-	limits := imageUnwindLimits(24*time.Hour, 48*time.Hour)
+	t0, limits := f.clock.Now(), imageUnwindLimits(24*time.Hour, 48*time.Hour)
 	end := t0.Add(24*time.Hour + time.Nanosecond)
 	if atRD {
 		limits.RoundLifetime, end = 24*time.Hour, t0.Add(24*time.Hour)
