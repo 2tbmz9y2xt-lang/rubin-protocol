@@ -913,15 +913,21 @@ source "$1"
 source "$2"
 p="$3"
 RUBIN_PROCESS_ARTIFACT_ROOT="${p}"; PASS_REPORT_JSON="${p}/pass-report.json"; REPORT_JSON="${p}/report.json"
-check_report() { printf '%s\n' "$@" >"${p}/check-args"; echo "FAIL: store_neutrality_sidecar_invalid: clients_tree_clean is not true" >&2; return 1; }
+CHECK_RC=1; ERR="${p}/pass-report-live-validation.err"; FAIL_LINE="FAIL: store_neutrality_sidecar_invalid: clients_tree_clean is not true"
+check_report() { printf '%s\n' "$@" >"${p}/check-args"; (( CHECK_RC == 0 )) || echo "${FAIL_LINE}" >&2; return "${CHECK_RC}"; }
 finish_no_data() { printf '%s\n' "$1"; exit 0; }
 # Sets TX_PATH_MODE, RUST_RESTART_MODE and PARTITION_HEAL_REORG_MODE from $1-$3; the rest is
 # the mode argument check_report is expected to receive after the report path and live.
 expect_refused() {
   local got
   TX_PATH_MODE="$1"; RUST_RESTART_MODE="$2"; PARTITION_HEAL_REORG_MODE="$3"; shift 3
-  printf '{"verdict":"PASS"}\n' >"${PASS_REPORT_JSON}"; rm -f -- "${REPORT_JSON}" "${p}/check-args"
+  printf '{"verdict":"PASS"}\n' >"${PASS_REPORT_JSON}"; rm -f -- "${REPORT_JSON}" "${p}/check-args" "${ERR}"
   got="$(publish_pass_report; printf 'completed\n')"
+  if (( RUST_RESTART_MODE == 1 || PARTITION_HEAL_REORG_MODE == 1 )); then
+    [[ -f "${ERR}" && "$(cat -- "${ERR}")" == "${FAIL_LINE}" ]] || { echo "FAIL: pass-report-live-validation.err missing or wrong in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE}" >&2; exit 1; }
+  else
+    [[ ! -e "${ERR}" ]] || { echo "FAIL: pass-report-live-validation.err written in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE}" >&2; exit 1; }
+  fi
   [[ "${got}" == pass_report_live_validation_store_neutrality_sidecar_invalid ]] || { echo "FAIL: publication in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE} ended with ${got}" >&2; exit 1; }
   [[ -s "${p}/check-args" && "$(cat -- "${p}/check-args")" == "$(printf '%s\n' "${PASS_REPORT_JSON}" live "$@")" ]] || { echo "FAIL: check_report arguments in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE}: $(cat -- "${p}/check-args" 2>&1)" >&2; exit 1; }
   [[ ! -e "${REPORT_JSON}" && ! -e "${PASS_REPORT_JSON}" ]] || { echo "FAIL: refused PASS report kept in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE}" >&2; exit 1; }
@@ -930,6 +936,23 @@ expect_refused 1 0 0 producer-tx
 expect_refused 0 1 0 rust-restart
 expect_refused 0 0 1 partition-heal-reorg
 expect_refused 0 0 0
+# Same mode arguments as expect_refused; check_report accepts, so the PASS bytes move to REPORT_JSON.
+expect_published() {
+  local got pass='{"verdict":"PASS","row":"published"}'
+  TX_PATH_MODE="$1"; RUST_RESTART_MODE="$2"; PARTITION_HEAL_REORG_MODE="$3"; shift 3
+  printf '%s\n' "${pass}" >"${PASS_REPORT_JSON}"; rm -f -- "${REPORT_JSON}" "${p}/check-args" "${ERR}"
+  got="$(CHECK_RC=0; publish_pass_report; printf 'completed\n')"
+  [[ "${got}" == completed ]] || { echo "FAIL: accepted publication in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE} ended with ${got}" >&2; exit 1; }
+  [[ -f "${REPORT_JSON}" && "$(cat -- "${REPORT_JSON}")" == "${pass}" && ! -e "${PASS_REPORT_JSON}" ]] || { echo "FAIL: PASS report not moved to REPORT_JSON in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE}" >&2; exit 1; }
+  [[ "$(cat -- "${p}/check-args")" == "$(printf '%s\n' "${PASS_REPORT_JSON}" live "$@")" ]] || { echo "FAIL: accepted check_report arguments in modes ${TX_PATH_MODE} ${RUST_RESTART_MODE} ${PARTITION_HEAL_REORG_MODE}: $(cat -- "${p}/check-args" 2>&1)" >&2; exit 1; }
+}
+expect_published 1 0 0 producer-tx
+expect_published 0 1 0 rust-restart
+expect_published 0 0 1 partition-heal-reorg
+expect_published 0 0 0
+printf '{"verdict":"PASS"}\n' >"${PASS_REPORT_JSON}"
+got="$(CHECK_RC=0; TX_PATH_MODE=0; RUST_RESTART_MODE=0; PARTITION_HEAL_REORG_MODE=0; REPORT_JSON="${p}/missing/report.json"; publish_pass_report 2>/dev/null; printf 'completed\n')"
+[[ "${got}" == pass_report_publish_failed ]] || { echo "FAIL: failed move ended with ${got}" >&2; exit 1; }
 SH
   bash "${probe}" "${CHECK_REPORT_LIB}" "${lib}" "${probe_root}"
 }
