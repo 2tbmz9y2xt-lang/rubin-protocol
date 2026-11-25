@@ -68,8 +68,8 @@ type Service struct {
 	peerQuotaLocks   map[string]*peerQuotaLock
 	// closed is set to true by Close. A Service instance is single-use: once
 	// Close has returned, Start refuses to restart the same Service and the
-	// accept/reconnect loops must not be revived. Guarded by peersMu.
-	closed bool
+	// accept/reconnect loops must not be revived. Close stores it under peersMu.
+	closed atomic.Bool
 	// closeDone is published by the Close that owns the teardown and closed
 	// when that teardown completes; every later Close waits on it instead of
 	// tearing down again. closed==true with a nil closeDone means the flag
@@ -297,7 +297,7 @@ func (s *Service) acquireWork() bool {
 	}
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
-	if s.closed {
+	if s.closed.Load() {
 		return false
 	}
 	s.loopWG.Add(1)
@@ -340,9 +340,7 @@ func (s *Service) workAuthorized() bool {
 	if s == nil {
 		return true
 	}
-	s.peersMu.RLock()
-	defer s.peersMu.RUnlock()
-	return !s.closed
+	return !s.closed.Load()
 }
 
 // AnnounceBlock parses a locally accepted block and announces it to the

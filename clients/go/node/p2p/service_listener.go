@@ -105,7 +105,7 @@ func (s *Service) registerStart() error {
 	// dormant/started check, under the same peersMu that guards closed.
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
-	if s.closed {
+	if s.closed.Load() {
 		return errors.New("service already closed")
 	}
 	if s.listener != nil {
@@ -118,7 +118,7 @@ func (s *Service) registerStart() error {
 func (s *Service) publishListener(ctx context.Context, listener net.Listener) error {
 	newCtx, cancel := context.WithCancel(ctx)
 	s.peersMu.Lock()
-	if s.closed {
+	if s.closed.Load() {
 		s.peersMu.Unlock()
 		cancel()
 		_ = listener.Close()
@@ -197,7 +197,7 @@ func (s *Service) Close() error {
 		<-joined
 		return nil
 	}
-	s.closed = true
+	s.closed.Store(true)
 	closeDone := make(chan struct{})
 	s.closeDone = closeDone
 	s.peersMu.Unlock()
