@@ -5231,17 +5231,27 @@ func treeOpenAuthority(txn *C.MDBX_txn, dbis [9]C.MDBX_dbi, cfg ConfigV1, id [32
 	if !bytes.Equal(identity, id[:]) {
 		return treeIntegrity(operationOpen, nil)
 	}
-	value, present, err := treeNativeGet(txn, dbis[0], []byte{2}, operationOpen)
+	_, _, err = treeAuthorityRead(txn, dbis, cfg, id, operationOpen)
+	return err
+}
+
+// treeAuthorityRead reads meta key 0x02 on txn. A present key that decodes
+// returns that authority, true and nil; an absent key returns the zero
+// authority, false and the result of the bounded census. Every failure carries
+// op and returns the zero authority and false.
+func treeAuthorityRead(txn *C.MDBX_txn, dbis [9]C.MDBX_dbi, cfg ConfigV1, id [32]byte, op engineOperation) (TreeAuthorityV1, bool, error) {
+	value, present, err := treeNativeGet(txn, dbis[0], []byte{2}, op)
 	if err != nil {
-		return err
+		return TreeAuthorityV1{}, false, err
 	}
 	if !present {
-		return treeEmptyCensus(txn, dbis, cfg, id, operationOpen)
+		return TreeAuthorityV1{}, false, treeEmptyCensus(txn, dbis, cfg, id, op)
 	}
-	if _, err = DecodeTreeAuthorityV1(value); err != nil {
-		return treeIntegrity(operationOpen, err)
+	authority, err := DecodeTreeAuthorityV1(value)
+	if err != nil {
+		return TreeAuthorityV1{}, false, treeIntegrity(op, err)
 	}
-	return nil
+	return authority, true, nil
 }
 
 func treeOpenConfig(env *C.MDBX_env, txn *C.MDBX_txn, meta C.MDBX_dbi, cfg ConfigV1) error {
@@ -5299,19 +5309,8 @@ func (r *Reader) ReadTreeAuthorityV1() (TreeAuthorityV1, bool, error) {
 	if err := r.treeContext(); err != nil {
 		return TreeAuthorityV1{}, false, err
 	}
-	value, present, err := treeNativeGet(r.txn, r.dbis[0], []byte{2}, operationGet)
-	if err != nil {
-		return TreeAuthorityV1{}, false, r.treeRecord(err)
-	}
-	if !present {
-		err = treeEmptyCensus(r.txn, r.dbis, r.treeConfig, r.databaseID, operationGet)
-		return TreeAuthorityV1{}, false, r.treeRecord(err)
-	}
-	authority, err := DecodeTreeAuthorityV1(value)
-	if err != nil {
-		return TreeAuthorityV1{}, false, r.treeRecord(treeIntegrity(operationGet, err))
-	}
-	return authority, true, nil
+	authority, present, err := treeAuthorityRead(r.txn, r.dbis, r.treeConfig, r.databaseID, operationGet)
+	return authority, present, r.treeRecord(err)
 }
 
 // ReadTreeRootBindingV1 observes only the requested generation and checks its

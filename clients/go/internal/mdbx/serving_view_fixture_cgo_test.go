@@ -486,6 +486,13 @@ func servingFixtureTerminalEntriesV1(t *testing.T) {
 				if truth != 1 || stage != 1 || index != -1 || !sameError(result, terminal) {
 					t.Fatal("serving mark replaced terminal tree tuple")
 				}
+				truth, stage, index, result = s.UpdateImageV1(a, func(*Reader) (TreeImagePublicationV1, error) {
+					t.Fatal("terminal image planner")
+					return TreeImagePublicationV1{}, nil
+				})
+				if truth != 1 || stage != 1 || index != -1 || !sameError(result, terminal) {
+					t.Fatal("terminal Store image tuple or error differs from the cached terminal")
+				}
 				return nil
 			}))
 			if !sameError(s.Close(), terminal) {

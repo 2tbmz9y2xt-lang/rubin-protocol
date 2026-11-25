@@ -277,9 +277,9 @@ func servingExpiryV1(t *testing.T) {
 	}
 }
 
-// servingPriorityV1 covers all three published optional native entry owners.
+// servingPriorityV1 covers the Update, UpdateTreeV1, UpdateImageV1 and Close optional native entry owners.
 func servingPriorityV1(t *testing.T) {
-	for _, route := range []string{"update", "tree", "close"} {
+	for _, route := range []string{"update", "tree", "image", "close"} {
 		t.Run(route, func(t *testing.T) { servingPriorityRouteV1(t, route) })
 	}
 	t.Run("first binding", servingFirstBindingV1)
@@ -287,7 +287,7 @@ func servingPriorityV1(t *testing.T) {
 
 // servingFirstBindingV1 exercises actual holders that began before owner binding.
 func servingFirstBindingV1(t *testing.T) {
-	for _, route := range []string{"view", "update", "tree"} {
+	for _, route := range []string{"view", "update", "tree", "image"} {
 		for _, late := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/late=%v", route, late), func(t *testing.T) {
 				servingNativeWakeV1(t, route, late)
@@ -410,6 +410,17 @@ func servingNativeHoldCallV1(route string, s *Store, reservations *OperationRese
 		}
 		return err
 	}
+	if route == "image" {
+		return reservations.WithOperation(LaneOperation, func(imageHoldAccount *OperationAccount) error {
+			imageHoldTruth, imageHoldStage, imageHoldIndex, imageHoldErr := s.UpdateImageV1(imageHoldAccount, func(imageHoldReader *Reader) (TreeImagePublicationV1, error) {
+				return TreeImagePublicationV1{}, use(imageHoldReader)
+			})
+			if imageHoldTruth != 1 || imageHoldStage != 1 || imageHoldIndex != -1 {
+				return fmt.Errorf("holder Image tuple %d/%d/%d", imageHoldTruth, imageHoldStage, imageHoldIndex)
+			}
+			return imageHoldErr
+		})
+	}
 	return reservations.WithOperation(LaneOperation, func(a *OperationAccount) error {
 		truth, stage, index, err := s.UpdateTreeV1(a, func(r *Reader) (TreeOperationV1, error) { return TreeOperationV1{}, use(r) })
 		if truth != 1 || stage != 1 || index != -1 {
@@ -419,10 +430,15 @@ func servingNativeHoldCallV1(route string, s *Store, reservations *OperationRese
 	})
 }
 
+// servingTypedRouteV1 reports whether typedRouteName is "tree" or "image"; callers run those routes on a tsNew format-3 Store.
+func servingTypedRouteV1(typedRouteName string) bool {
+	return typedRouteName == "tree" || typedRouteName == "image"
+}
+
 // servingNativeWakeV1 completes the actual holder before the captured wait selects.
 func servingNativeWakeV1(t *testing.T, route string, late bool) {
 	s, o, reservations := servingSetupV1(t)
-	if route == "tree" {
+	if servingTypedRouteV1(route) {
 		s, _, reservations = tsNew(t)
 	}
 	if !late {
@@ -470,6 +486,15 @@ func servingNativeBusyV1(t *testing.T, route string, s *Store, a *OperationAccou
 			t.Fatalf("tree tuple %d/%d/%d", truth, stage, index)
 		}
 		servingWantBusyV1(t, err, "update")
+	case "image":
+		imageBusyTruth, imageBusyStage, imageBusyIndex, imageBusyErr := s.UpdateImageV1(a, func(*Reader) (TreeImagePublicationV1, error) {
+			called++
+			return TreeImagePublicationV1{}, nil
+		})
+		if imageBusyTruth != 1 || imageBusyStage != 1 || imageBusyIndex != -1 {
+			t.Fatalf("image tuple %d/%d/%d", imageBusyTruth, imageBusyStage, imageBusyIndex)
+		}
+		servingWantBusyV1(t, imageBusyErr, "update")
 	case "close":
 		servingWantBusyV1(t, s.Close(), "close")
 	}
@@ -500,6 +525,14 @@ func servingNativeRetryV1(t *testing.T, route string, s *Store, a *OperationAcco
 		if truth != 1 || stage != 1 || index != -1 || !sameError(err, app) {
 			t.Fatalf("retry tree %d/%d/%d/%v", truth, stage, index, err)
 		}
+	case "image":
+		imageRetryTruth, imageRetryStage, imageRetryIndex, imageRetryErr := s.UpdateImageV1(a, func(*Reader) (TreeImagePublicationV1, error) {
+			called++
+			return TreeImagePublicationV1{}, app
+		})
+		if imageRetryTruth != 1 || imageRetryStage != 1 || imageRetryIndex != -1 || !sameError(imageRetryErr, app) {
+			t.Fatalf("retry image %d/%d/%d/%v", imageRetryTruth, imageRetryStage, imageRetryIndex, imageRetryErr)
+		}
 	case "close":
 		mustEnvironment(t, s.Close())
 		if s.state != storeCLOSED || s.env != nil || s.txn != nil {
@@ -515,7 +548,7 @@ func servingNativeRetryV1(t *testing.T, route string, s *Store, a *OperationAcco
 // servingPriorityRouteV1 proves optional busy retires without a phantom retry.
 func servingPriorityRouteV1(t *testing.T, route string) {
 	s, o, reservations := servingSetupV1(t)
-	if route == "tree" {
+	if servingTypedRouteV1(route) {
 		s, _, reservations = tsNew(t)
 	}
 	out, err := servingCallV1(t, o, s, reservations, func(r *Reader, e *ServingEpochV1, a *OperationAccount) error {
@@ -661,7 +694,7 @@ func servingSpanV1(t *testing.T) {
 
 // servingSpanOperationV1 checks cancellation against real native preflight contention.
 func servingSpanOperationV1(t *testing.T) {
-	for _, route := range []string{"view", "update", "tree", "closed"} {
+	for _, route := range []string{"view", "update", "tree", "image", "closed"} {
 		t.Run(route, func(t *testing.T) { servingNativeCancelV1(t, route) })
 	}
 	t.Run("canceled entry states", servingCanceledEntriesV1)
@@ -670,7 +703,7 @@ func servingSpanOperationV1(t *testing.T) {
 // servingNativeCancelV1 makes cancellation and completion ready before wait resumption.
 func servingNativeCancelV1(t *testing.T, route string) {
 	s, o, reservations := servingSetupV1(t)
-	if route == "tree" {
+	if servingTypedRouteV1(route) {
 		s, _, reservations = tsNew(t)
 	}
 	holderRoute := route
@@ -899,7 +932,7 @@ func servingSpanOldViewV1(t *testing.T) {
 
 // servingOptionalV1 crosses original native state/format with owner exclusion flags.
 func servingOptionalV1(t *testing.T) {
-	for _, route := range []string{"update", "tree", "close"} {
+	for _, route := range []string{"update", "tree", "image", "close"} {
 		for _, state := range []string{"active", "expired", "priority", "span"} {
 			t.Run(route+"/"+state, func(t *testing.T) { servingOptionalRouteV1(t, route, state) })
 		}
@@ -912,7 +945,7 @@ func servingOptionalV1(t *testing.T) {
 // servingOptionalPendingRouteV1 admits the original native callback while another scope waits.
 func servingOptionalPendingRouteV1(t *testing.T, route string) {
 	s, o, reservations := servingSetupV1(t)
-	if route == "tree" {
+	if servingTypedRouteV1(route) {
 		s, _, reservations = tsNew(t)
 	}
 	open, view := servingEpochHolderV1(t, o, s, reservations)
@@ -944,6 +977,8 @@ func servingOptionalPendingRouteV1(t *testing.T, route string) {
 // serving epoch is active, with independent native input diagnostics.
 func servingNativeInputsV1(t *testing.T) {
 	s, o, reservations := servingSetupV1(t)
+	var closed *OperationAccount
+	mustEnvironment(t, reservations.WithOperation(LaneOperation, func(a *OperationAccount) error { closed = a; return nil }))
 	_, err := servingCallV1(t, o, s, reservations, func(_ *Reader, e *ServingEpochV1, _ *OperationAccount) error {
 		truth, stage, result := s.Update(nil)
 		if truth != 1 || stage != 1 {
@@ -972,6 +1007,31 @@ func servingNativeInputsV1(t *testing.T) {
 		if e.closing {
 			t.Fatal("refused static input changed serving priority")
 		}
+		truth, stage, index, result = s.UpdateImageV1(nil, nil)
+		if truth != 1 || stage != 1 || index != -1 {
+			t.Fatal("nil image planner tuple")
+		}
+		treeNativeError(t, result, engineOperation("update"), EngineClass("InvalidInput"), 22, "nil UpdateImageV1 callback", nil)
+		if e.closing {
+			t.Fatal("refused nil image planner changed serving priority")
+		}
+		imgPlanner := func(*Reader) (TreeImagePublicationV1, error) {
+			t.Fatal("invalid account executed image planner")
+			return TreeImagePublicationV1{}, nil
+		}
+		for _, row := range []struct {
+			account *OperationAccount
+			text    string
+		}{{nil, "nil operation account"}, {closed, "closed operation account"}, {&OperationAccount{}, "closed operation account"}} {
+			truth, stage, index, result = s.UpdateImageV1(row.account, imgPlanner)
+			if truth != 1 || stage != 1 || index != -1 {
+				t.Fatal("image static account tuple")
+			}
+			treeNativeError(t, result, engineOperation("update"), EngineClass("InvalidInput"), 22, row.text, nil)
+			if e.closing {
+				t.Fatalf("refused %q image input changed serving priority", row.text)
+			}
+		}
 		return e.CheckV1()
 	})
 	mustEnvironment(t, err)
@@ -981,7 +1041,7 @@ func servingNativeInputsV1(t *testing.T) {
 // servingOptionalRouteV1 demonstrates closure adds neither wait nor refusal.
 func servingOptionalRouteV1(t *testing.T, route, state string) {
 	s, o, reservations := servingSetupV1(t)
-	if route == "tree" {
+	if servingTypedRouteV1(route) {
 		s, _, reservations = tsNew(t)
 	}
 	if state == "expired" {
@@ -1075,6 +1135,14 @@ func servingFormatV1(t *testing.T) {
 			})
 			if truth != 1 || stage != 1 || index != -1 {
 				t.Fatal("legacy tree format refusal changed")
+			}
+			treeNativeError(t, got, engineOperation("update"), EngineClass("StateMismatch"), -30779, "typed tree operation requires tree store", nil)
+			truth, stage, index, got = s.UpdateImageV1(a, func(*Reader) (TreeImagePublicationV1, error) {
+				t.Fatal("format-2 Store ran the image planner")
+				return TreeImagePublicationV1{}, nil
+			})
+			if truth != 1 || stage != 1 || index != -1 {
+				t.Fatal("legacy image format refusal changed")
 			}
 			treeNativeError(t, got, engineOperation("update"), EngineClass("StateMismatch"), -30779, "typed tree operation requires tree store", nil)
 			return nil
