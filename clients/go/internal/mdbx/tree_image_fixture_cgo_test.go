@@ -360,7 +360,7 @@ func tiPublicationCase(t *testing.T, s *Store, o *OperationReservationOwner, row
 		fault, key = row.fault, row.faultKey
 	}
 	tiReleaseRetained(t, s)
-	native := tiNative(t, s, o, fault, rank, key, row.gets, func() { out = tiCallAccount(s, o, kind, bind) })
+	native := tiNative(t, s, o, fault, rank, key, row.gets, func() { out = tiCallAccount(s, o, kind, 1, bind) })
 	check(out)
 	if p.calls != 1 || replays != 0 || reservationLive(o) != 0 {
 		t.Fatalf("planner %d replay %d live %d", p.calls, replays, reservationLive(o))
@@ -557,8 +557,8 @@ func tiPlannerEnd(t *testing.T, s *Store, outcome string, mode uint32, out tiOut
 			t.Fatalf("panic value %v", out.recovered)
 		}
 	case "panic-nil":
-		if _, ok := out.recovered.(*runtime.PanicNilError); !ok {
-			t.Fatalf("nil panic resumed as %T", out.recovered)
+		if panicNil, ok := out.recovered.(*runtime.PanicNilError); !ok || panicNil == nil {
+			t.Fatalf("nil panic resumed as %T %v", out.recovered, out.recovered)
 		}
 	case "goexit":
 		if out.recovered != nil {

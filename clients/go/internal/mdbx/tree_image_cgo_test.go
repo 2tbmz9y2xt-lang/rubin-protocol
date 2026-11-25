@@ -11,8 +11,9 @@ import (
 
 // tiOutcome is how one UpdateImageV1 call ended: returned with r, or unwound
 // with the recovered panic value (nil for Goexit). The rest is observed on the
-// caller's own account value a inside WithOperation while the caller holds a
-// one-byte a.WithReservation, after the call returns or while it unwinds:
+// caller's own account value a inside WithOperation, while the caller holds a
+// hold-byte a.WithReservation when hold is 1 and on the fresh account when hold
+// is 0, after the call returns or while it unwinds:
 // original and account are *a before and after the call, before and after the
 // state that original names, live the live sum, and reuse and reuseLive the
 // result and live sum of a further one-byte a.WithReservation.
@@ -27,6 +28,7 @@ type tiOutcome struct {
 	reuse             error
 	reuseLive         uint64
 	wantZero          bool
+	hold              uint64
 }
 
 // tiPlanner counts calls and keeps the last Reader. From its second call on it
@@ -65,33 +67,41 @@ func tiInvoke(s *Store, a *OperationAccount, planner func(*Reader) (TreeImagePub
 	return r
 }
 
-// tiCall runs one UpdateImageV1 on a fresh goroutine inside WithOperation(kind).
+// tiCall runs one UpdateImageV1 on a fresh goroutine inside WithOperation(kind) while the
+// caller holds one byte on the account.
 func tiCall(s *Store, o *OperationReservationOwner, kind OperationKind, planner func(*Reader) (TreeImagePublicationV1, error)) tiOutcome {
-	return tiCallAccount(s, o, kind, func(*OperationAccount) func(*Reader) (TreeImagePublicationV1, error) { return planner })
+	return tiCallAccount(s, o, kind, 1, func(*OperationAccount) func(*Reader) (TreeImagePublicationV1, error) { return planner })
 }
 
-// tiCallAccount is tiCall with the planner that bind returns for the account WithOperation passes.
-func tiCallAccount(s *Store, o *OperationReservationOwner, kind OperationKind, bind func(*OperationAccount) func(*Reader) (TreeImagePublicationV1, error)) tiOutcome {
-	var out tiOutcome
+// tiCallAccount is tiCall with a caller hold of hold bytes (0 or 1) and the planner that bind
+// returns for the account WithOperation passes.
+func tiCallAccount(s *Store, o *OperationReservationOwner, kind OperationKind, hold uint64, bind func(*OperationAccount) func(*Reader) (TreeImagePublicationV1, error)) tiOutcome {
+	out := tiOutcome{hold: hold}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer func() { out.recovered = recover() }()
 		_ = o.WithOperation(kind, func(a *OperationAccount) error {
-			return a.WithReservation(1, func() error {
-				out.original, out.before = *a, *a.shared
-				defer func() {
-					out.account, out.after, out.live = *a, *out.original.shared, reservationLive(o)
-					out.reuse = a.WithReservation(1, func() error { out.reuseLive = reservationLive(o); return nil })
-				}()
-				out.r = tiInvoke(s, a, bind(a))
-				out.returned = true
+			if hold == 0 {
+				tiObserve(s, o, a, bind, &out)
 				return nil
-			})
+			}
+			return a.WithReservation(hold, func() error { tiObserve(s, o, a, bind, &out); return nil })
 		})
 	}()
 	<-done
 	return out
+}
+
+// tiObserve runs one UpdateImageV1 on a and records the account observations into out.
+func tiObserve(s *Store, o *OperationReservationOwner, a *OperationAccount, bind func(*OperationAccount) func(*Reader) (TreeImagePublicationV1, error), out *tiOutcome) {
+	out.original, out.before = *a, *a.shared
+	defer func() {
+		out.account, out.after, out.live = *a, *out.original.shared, reservationLive(o)
+		out.reuse = a.WithReservation(1, func() error { out.reuseLive = reservationLive(o); return nil })
+	}()
+	out.r = tiInvoke(s, a, bind(a))
+	out.returned = true
 }
 
 // tiPublication is Tag 1, RecordLimit 6, the tsEntry meta key 0x02 envelope and
@@ -132,14 +142,18 @@ func tiReturnedAt(t *testing.T, out tiOutcome, truth CommitTruth) error {
 	return out.r.err
 }
 
-// tiAccountKept requires the caller's one-byte hold as the live sum after the call, the state of
-// the caller's account unchanged by the call, and the caller's account value either unchanged
-// with a further one-byte WithReservation admitted at live sum 2, or, for wantZero, the zero
-// value refused as invalid input.
+// tiAccountKept requires the caller's account state before the call to hold exactly the
+// caller's hold (zero for a fresh account), that state and the live sum unchanged by
+// the call, and the caller's account value either unchanged with a further one-byte
+// WithReservation admitted at live sum hold+1, or, for wantZero, the zero value refused as
+// invalid input.
 func tiAccountKept(t *testing.T, out tiOutcome) {
 	t.Helper()
-	if out.live != 1 || out.after != out.before || out.before.held != 1 || !out.before.everPositive || out.before.closed {
-		t.Fatalf("live sum %d, account before %+v after %+v", out.live, out.before, out.after)
+	if out.before.held != out.hold || out.before.everPositive != (out.hold != 0) || out.before.closed {
+		t.Fatalf("account before the call %+v, want caller hold %d", out.before, out.hold)
+	}
+	if out.live != out.hold || out.after != out.before {
+		t.Fatalf("live sum %d, want %d; account before %+v after %+v", out.live, out.hold, out.before, out.after)
 	}
 	if out.wantZero {
 		if out.account != (OperationAccount{}) || any(out.reuse) != any(errOperationReservationInput) || out.reuseLive != 0 {
@@ -147,7 +161,7 @@ func tiAccountKept(t *testing.T, out tiOutcome) {
 		}
 		return
 	}
-	if out.account != out.original || out.reuse != nil || out.reuseLive != 2 {
+	if out.account != out.original || out.reuse != nil || out.reuseLive != out.hold+1 {
 		t.Fatalf("account %+v, want %+v; reuse returned %v with live sum %d", out.account, out.original, out.reuse, out.reuseLive)
 	}
 }
@@ -166,7 +180,7 @@ func tiMeta02(t *testing.T, s *Store) ([]byte, bool) {
 }
 
 // tiOpenNext requires the Store OPEN, repeats the call with the same planner
-// under check, then requires a View that runs view when non-nil and an
+// on a fresh account under check, then requires a View that runs view when non-nil and an
 // UpdateTreeV1 that returns its callback error once.
 func tiOpenNext(t *testing.T, s *Store, o *OperationReservationOwner, kind OperationKind, p *tiPlanner, check func(tiOutcome), view func(*Reader)) {
 	t.Helper()
@@ -174,7 +188,7 @@ func tiOpenNext(t *testing.T, s *Store, o *OperationReservationOwner, kind Opera
 		t.Fatalf("Store %s terminal %v, want OPEN", s.state, s.terminal)
 	}
 	calls := p.calls
-	check(tiCall(s, o, kind, p.imagePlan))
+	check(tiCallAccount(s, o, kind, 0, func(*OperationAccount) func(*Reader) (TreeImagePublicationV1, error) { return p.imagePlan }))
 	if p.calls != calls+1 || *p.replays != 0 {
 		t.Fatalf("repeated planner calls %d, want %d, Replay calls %d", p.calls, calls+1, *p.replays)
 	}
