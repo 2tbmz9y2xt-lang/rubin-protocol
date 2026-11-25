@@ -25,7 +25,6 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-// imageTestClock is a counting ServiceConfig.Now; onRead runs once on the next read and sets the time.
 type imageTestClock struct {
 	t              *testing.T
 	mu             sync.Mutex
@@ -75,7 +74,6 @@ func (c *imageTestClock) followRealTime(from time.Time) {
 	c.mu.Unlock()
 }
 
-// inImageBubble runs body in its own synctest bubble and fails t when the bubble ends with a goroutine blocked in it.
 func inImageBubble(body func(*testing.T)) func(*testing.T) {
 	return func(t *testing.T) {
 		defer func() { r := recover(); require(t, r == nil, "synctest bubble: %v", r) }()
@@ -83,7 +81,6 @@ func inImageBubble(body func(*testing.T)) func(*testing.T) {
 	}
 }
 
-// imageSpin yields until cond holds and fails t after 1<<24 yields, a bound that does not use a bubble clock.
 func imageSpin(t *testing.T, cond func() bool, label string) {
 	t.Helper()
 	for yields := 0; !cond(); yields++ {
@@ -243,7 +240,6 @@ func imageTestUnits(value uint64) ImageUnits {
 	return ImageUnits{value, value, value, value, value, value, value, value, value, value, value, value}
 }
 
-// imageTestLimits has large limits, Backoff 1 s, and AttemptLifetime and RoundLifetime, by default 10 s and 1 hour.
 func imageTestLimits(lifetimes ...time.Duration) ImageLimits {
 	d := [2]time.Duration{10 * time.Second, time.Hour}
 	copy(d[:], lifetimes)
@@ -292,7 +288,6 @@ func (f *imageTestFixture) round(t *testing.T, limits ImageLimits, sources ...in
 	return f.roundCtx(t, context.Background(), limits, sources...)
 }
 
-// imageStart is the start key with b in its first byte below 0x80, else in its last byte.
 func imageStart(b byte) (start [36]byte) { start[b>>7*35] = b; return start }
 
 func expectedImageQuery(id uint64, start byte) consensus.UTXOImageQuery {
@@ -322,9 +317,8 @@ func callWithin[T any](t *testing.T, label string, call func() T) T {
 }
 
 var (
-	errImageNoResult      = errors.New("request did not return within its bound")
-	errImageScriptedWrite = errors.New("scripted write failure")
-	// errImageWritePanic released into a stall makes that write panic with imageUnwindSentinel.
+	errImageNoResult                     = errors.New("request did not return within its bound")
+	errImageScriptedWrite                = errors.New("scripted write failure")
 	errImageWritePanic                   = errors.New("image test write panic")
 	errImageRequestEnd, errImageRoundEnd = errors.New("request ctx ended"), errors.New("round ctx ended")
 	imageNilCtx                          context.Context
@@ -480,7 +474,6 @@ func (f *imageTestFixture) snapshot(round *ImageRound, session int) imageSnapsho
 	return imageSnapshot{f.owners(round, session), f.fault(session), len(f.wires[session].bytes())}
 }
 
-// imageDrop is the current assignments a refused request's pass releases: on its session, in its round, in the Service.
 type imageDrop struct {
 	perPeer, global uint64
 	current         int
@@ -824,7 +817,6 @@ func testImagePendingBytes(t *testing.T) {
 	}
 }
 
-// testImagePendingReleaseSites: A releases 120 bytes while B holds 120 of a 240 limit; C fits (240), D refuses (360).
 func testImagePendingReleaseSites(t *testing.T) {
 	type site struct {
 		name                string
@@ -1102,8 +1094,6 @@ func testImageEndBeforeWrite(t *testing.T) {
 		round := f.round(t, limits, 0)
 		ctx, cancel := context.WithCancel(context.Background())
 		release := f.holdWrite(t, 0)
-		// No ctx is done before the cancel, so the first clock read inside applyImageEnd is the deadline timer's; the
-		// cancel runs inside a clock read of the parked request's endBeforeWrite, which holds the requester mutex.
 		timerRead := f.clock.readFrom("p2p.applyImageEnd")
 		pending := f.goRequest(round, ctx, 0, 1)
 		f.waitAdmitted(t, 0, 1, "parked request")
@@ -1123,7 +1113,6 @@ func testImageEndSeenUnderWriteMu(t *testing.T) {
 	f := newImageTestFixture(t, 1)
 	t0, round := f.clock.Now(), f.round(t, imageTestLimits(), 0)
 	session := f.peers[0]
-	// Reads with writeMu free leave the clock; the first read with writeMu held moves now past D.
 	var endUnderWriteMu func(time.Time) time.Time
 	endUnderWriteMu = func(now time.Time) time.Time {
 		if session.writeMu.TryLock() {
@@ -1619,8 +1608,6 @@ func testImageTimerShortOfD(t *testing.T) {
 	}
 }
 
-// imageHookCtx is a Context that is live until end. onAfterFunc and onStop replace the first AfterFunc and stop;
-// onSecondErr runs inside the second Err call.
 type imageHookCtx struct {
 	mu                               sync.Mutex
 	once                             sync.Once
@@ -1813,7 +1800,6 @@ func testImageSaturatedTimer(t *testing.T) {
 	inst := f.admitted(t, f.round(t, limits, 0), context.Background(), 0, 1, 1)
 	require(t, inst.deadline.Sub(t0) == math.MaxInt64, "D-now=%v, want the largest Duration", inst.deadline.Sub(t0))
 	require(t, imageTimerDuration(math.MaxInt64) == math.MaxInt64 && imageTimerDuration(math.MaxInt64-1) == math.MaxInt64 && imageTimerDuration(0) == 1, "timer durations for D-now of the largest Duration, one less and 0: %v %v %v, want the largest Duration twice and 1ns", imageTimerDuration(math.MaxInt64), imageTimerDuration(math.MaxInt64-1), imageTimerDuration(0))
-	// A timer duration past the runtime's largest instant fires at that instant.
 	reads := f.clock.readCount()
 	time.Sleep(time.Duration(math.MaxInt64 - time.Now().UnixNano() - 1))
 	synctest.Wait()
@@ -1864,7 +1850,6 @@ func testImageFailedWrite(t *testing.T) {
 	t.Run("connection closed after the instance retires", func(t *testing.T) {
 		f, round := newImageRound(t, 2, 0, 1)
 		var inHook imageResult
-		// The hook runs inside the failed request, whose own bound is lifecycleWatchdog.
 		f.onClose(0, func() {
 			inHook = requestWithin(lifecycleWatchdog/2, round, context.Background(), f.ids[1], 1, imageTestByteLimit)
 		})
@@ -1884,11 +1869,9 @@ func testImageFailedWrite(t *testing.T) {
 		t.Run(fmt.Sprintf("a request on the same session in the close hook of a write failed after %d header bytes", skip*wireHeaderSize), func(t *testing.T) {
 			f, round := newImageRound(t, 1, 0)
 			inHook := imageResult{err: errImageNoResult}
-			// The hook runs inside the failed request, whose own bound is lifecycleWatchdog.
 			f.onClose(0, func() {
 				inHook = requestWithin(lifecycleWatchdog/2, round, context.Background(), f.ids[0], 2, imageTestByteLimit)
 			})
-			// The first stop call of the failed write's retirement, in its post-write section, reads whether writeMu is free.
 			c, free := newImageHookCtx(), false
 			c.onStop = func() {
 				if free = f.peers[0].writeMu.TryLock(); free {
@@ -1995,7 +1978,6 @@ func testImageCallbackAfterRetirement(t *testing.T) {
 
 func waitImageMutexWaiter(t *testing.T, mu *sync.Mutex, start func()) {
 	t.Helper()
-	// sync.Mutex starts with the internal/sync.Mutex state word: bit 0 locked, waiter count from bit 3.
 	state := (*int32)(unsafe.Pointer(mu))
 	requireEqual(t, atomic.LoadInt32(state), int32(1), "requester mutex state locked with no waiter")
 	start()
@@ -2555,7 +2537,6 @@ func (f *imageTestFixture) requireUnwound(t *testing.T, done <-chan any, goexit 
 	f.requireRequesterFree(t)
 }
 
-// sync.WaitGroup starts with its state word, the counter in the high 32 bits: the Service leases held.
 func (f *imageTestFixture) leases() uint64 {
 	return (*atomic.Uint64)(unsafe.Pointer(&f.s.loopWG)).Load() >> 32
 }
@@ -2594,7 +2575,6 @@ func testImageUnwindFailedWrite(t *testing.T, goexit, roundCtx, ordinary bool, h
 		f.waitAdmitted(t, holder, uint64(2-holder), "second holder")
 	}
 	pending := [2]uint64{math.MaxUint64, math.MaxUint64}
-	// A close made under the requester mutex blocks this hook past the request's lifecycleWatchdog bound.
 	f.onClose(0, func() {
 		if stallB != nil {
 			<-stallB.entered
@@ -2614,7 +2594,6 @@ func testImageUnwindFailedWrite(t *testing.T, goexit, roundCtx, ordinary bool, h
 	require(t, len(f.wires[0].bytes()) == wireHeaderSize, "after the unwind: %d bytes written, want the %d header bytes", len(f.wires[0].bytes()), wireHeaderSize)
 	requireEqual(t, pending, [2]uint64{map[int]uint64{0: 120}[holder], map[bool]uint64{true: 120}[holder >= 0]}, "pending request bytes per peer and global inside the close hook")
 	if holder == 1 {
-		// Start 3 brings the global pending bytes from 120 to 240 and fits; start 4 would bring them to 360 and refuses.
 		next := f.goRequest(round, context.Background(), 1, 3)
 		f.waitAdmitted(t, 1, 2, "request at the global limit")
 		f.refused(t, round, context.Background(), 1, 4, errImageLimit)
