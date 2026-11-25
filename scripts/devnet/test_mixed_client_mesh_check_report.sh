@@ -148,6 +148,11 @@ dst.write_text("\n".join(out) + "\n", encoding="utf-8")
 PY
 }
 
+# Removes the host tool check line from an extracted slice, so the slice runs on stubs only.
+drop_tool_check() {
+  grep -v '^for tool in lsof perl ps sed sort;' "$1" >"$1.tmp" && mv -- "$1.tmp" "$1"
+}
+
 prepare_tx_probe_preamble() {
   cat <<'SH'
 #!/usr/bin/env bash
@@ -705,6 +710,7 @@ check_startup_waits_for_rust_identity() {
 check_commit_read_before_builds() {
   local lib="${TMP_ROOT}/build-read-lib.sh" log="${TMP_ROOT}/build-read.log" modes fail out
   extract_slices "${lib}" "repo_git()" "# Writes mixed-client-mesh-store-neutrality.json" "for tool in lsof perl ps sed sort" "start_go_node || finish_no_data"
+  drop_tool_check "${lib}"
   for modes in "1 0 0" "0 1 0" "0 0 1" "0 0 0"; do
     for fail in "" rev-parse; do
       rm -f -- "${log}"
@@ -758,6 +764,7 @@ check_store_neutrality_producer_reasons() {
   extract_slices "${lib}" "sidecar_derivations_py()" '[[ "${MESH_TIMEOUT}"' "chain_mode()" "capture_go_reorg_metrics()"
   extract_slices "${main}" "write_store_neutrality_sidecar ||" "if (( PARTITION_HEAL_REORG_MODE == 1 )); then"
   extract_slices "${first}" "for tool in lsof perl ps sed sort" "build_go_node ||"
+  drop_tool_check "${first}"
   python3 - "${probe_root}" <<'PY'
 import hashlib, json, sys
 root = sys.argv[1]
@@ -2143,7 +2150,7 @@ for report_path in sorted(root.rglob("*.json")):
     try:
         report_text = report_path.read_text(encoding="utf-8")
         report_obj = json.loads(report_text)
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         continue
     if isinstance(report_obj, dict) and report_obj.get("artifact_root") == old_root and report_obj.get("scenario") in SCENARIO_ROOTS:
         mode_root = root / SCENARIO_ROOTS[report_obj["scenario"]] / "artifact-root"
@@ -2467,6 +2474,14 @@ sn_variant("tx-accept-tip-trailing-slash", "tx-accept", lambda s, r: s["initial_
 sn_variant("tx-accept-block-through-missing", "tx-accept", lambda s, r: s["genesis"].update(rust_block_path=sn_through_missing(r, RUST_BLOCK)))
 sn_variant("tx-accept-datadir-through-missing", "tx-accept", lambda s, r: s["datadirs"].update(rust=sn_through_missing(r, "node-rust")))
 sn_variant("mesh-binary-through-missing", "mesh", lambda s, r: None, lambda report: sn_set_binary(report, "go", sn_through_missing(Path(report["artifact_root"]), "rubin-node-go")))
+def sn_one_binary_field_through_missing(report: dict, field: str) -> None:
+    node_obj = next(node_obj for node_obj in report["nodes"] if node_obj["implementation"] == "go")
+    moved = sn_through_missing(Path(node_obj["binary"]).parent, Path(node_obj["binary"]).name)
+    if field == "binary": node_obj["binary"] = moved
+    else: node_obj["command_argv"][0] = moved
+    node_obj["command"] = shlex.join(node_obj["command_argv"])
+sn_variant("mesh-binary-field-through-missing", "mesh", lambda s, r: None, lambda report: sn_one_binary_field_through_missing(report, "binary"))
+sn_variant("mesh-argv0-through-missing", "mesh", lambda s, r: None, lambda report: sn_one_binary_field_through_missing(report, "argv0"))
 sn_variant("mesh-marker-through-missing", "mesh", lambda s, r: None, lambda report: report["legacy_schema_compatibility"].update(marker_path=sn_through_missing(Path(report["legacy_schema_compatibility"]["marker_path"]).parent, Path(report["legacy_schema_compatibility"]["marker_path"]).name)))
 sn_variant("restart-report-datadir-through-missing", "restart", lambda s, r: None, lambda report: report["rust_restart"].update(datadir=sn_through_missing(Path(report["artifact_root"]), "node-rust")))
 def sn_move_marker(report: dict, subdir: str, suffix: str = "") -> None:
@@ -3078,6 +3093,8 @@ sn_check "sidecar tip path with a trailing slash" "${SN_INVALID}" "initial_conve
 sn_check "sidecar block path through a missing directory" "${SN_INVALID}" "genesis.rust_block_path file is missing" tx tx-accept-block-through-missing
 sn_check "sidecar datadir through a missing directory" "${SN_INVALID}" "datadirs.rust does not resolve to an existing directory" tx tx-accept-datadir-through-missing
 sidecar_value_check "node binary through a missing directory" "node-go command/binary is not bound to executable rubin-node-go" unknown public "${TMP_ROOT}/sn-mesh-binary-through-missing-report.json"
+sidecar_value_check "node binary field alone through a missing directory" "node-go command/binary is not bound to executable rubin-node-go" unknown public "${TMP_ROOT}/sn-mesh-binary-field-through-missing-report.json"
+sidecar_value_check "node command_argv[0] alone through a missing directory" "node-go command/binary is not bound to executable rubin-node-go" unknown public "${TMP_ROOT}/sn-mesh-argv0-through-missing-report.json"
 sidecar_value_check "legacy marker through a missing directory" "legacy marker is not a regular file" legacy_marker_invalid public "${TMP_ROOT}/sn-mesh-marker-through-missing-report.json"
 sidecar_value_check "restart datadir through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-report-datadir-through-missing-report.json"
 sidecar_value_check "restart datadir through a control character" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-report-datadir-control-report.json"
