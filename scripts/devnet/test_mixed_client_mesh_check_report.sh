@@ -324,12 +324,11 @@ expect_polled_timeout() {
   expect_reason initial_convergence_timeout "$1" "$2"
   [[ -s "${probe_root}/captures-rust" ]] || { echo "FAIL: initial convergence timed out before a Rust tip capture for $1 $2" >&2; exit 1; }
 }
-# Runs expect_match on fresh capture logs, then requires $1 Go tip captures and, unless
-# $2 is empty, $2 Rust tip captures.
+# Runs expect_match on fresh capture logs, then requires $1 Go tip captures and $2 Rust tip captures.
 expect_match_after() {
   rm -f -- "${probe_root}/captures-go" "${probe_root}/captures-rust"
   MESH_TIMEOUT=10 expect_match "$3" "$4"
-  [[ "$(wc -l <"${probe_root}/captures-go")" -eq "$1" ]] && [[ -z "$2" || "$(wc -l <"${probe_root}/captures-rust")" -eq "$2" ]] || { echo "FAIL: Go tip captures $(wc -l <"${probe_root}/captures-go"), Rust tip captures $(wc -l <"${probe_root}/captures-rust"), want $1 and ${2:-unchecked}" >&2; exit 1; }
+  [[ "$(wc -l <"${probe_root}/captures-go")" -eq "$1" && "$(wc -l <"${probe_root}/captures-rust")" -eq "$2" ]] || { echo "FAIL: Go tip captures $(wc -l <"${probe_root}/captures-go"), Rust tip captures $(wc -l <"${probe_root}/captures-rust"), want $1 and $2" >&2; exit 1; }
 }
 TX_PATH_MODE=3
 expect_match "${go101}" "${rust101}"
@@ -345,8 +344,8 @@ TX_PATH_MODE=0
 expect_match "${absent}" "${absent}"
 RUST_CAPTURE_FAILS=1 expect_match_after 2 2 "${absent}" "${absent}"
 RUST_FIRST_TIP="${rust_zero}" expect_match_after 2 2 "${absent}" "${absent}"
-GO_CAPTURE_FAILS=1 expect_match_after 2 "" "${absent}" "${absent}"
-GO_FIRST_TIP="${go101}" expect_match_after 2 "" "${absent}" "${absent}"
+GO_CAPTURE_FAILS=1 expect_match_after 2 2 "${absent}" "${absent}"
+GO_FIRST_TIP="${go101}" expect_match_after 2 2 "${absent}" "${absent}"
 expect_reason initial_convergence_timeout "${absent}" "${rust_zero}"
 expect_reason initial_convergence_timeout "${go101}" "${absent}"
 expect_reason initial_convergence_timeout "${absent}" "${probe_root}/absent-no-height.json"

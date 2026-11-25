@@ -2672,10 +2672,12 @@ sys.exit(0 if all(tip_absent(load_json_or_none(path)) for path in sys.argv[1:]) 
 PY
 }
 wait_initial_tips_absent() {
-  local deadline
+  local deadline go_status rust_status
   deadline=$((SECONDS + MESH_TIMEOUT)); PARTITION_REASON=""
   while :; do
-    if capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /get_tip "${INITIAL_GO_TIP_JSON}" && capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" /get_tip "${INITIAL_RUST_TIP_JSON}" && tips_absent "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}"; then
+    go_status=0; capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /get_tip "${INITIAL_GO_TIP_JSON}" || go_status=$?
+    rust_status=0; capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" /get_tip "${INITIAL_RUST_TIP_JSON}" || rust_status=$?
+    if (( go_status == 0 && rust_status == 0 )) && tips_absent "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}"; then
       return 0
     fi
     sleep 1
