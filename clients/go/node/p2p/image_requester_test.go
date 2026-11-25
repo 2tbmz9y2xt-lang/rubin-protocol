@@ -864,11 +864,13 @@ func testImagePendingReleaseSites(t *testing.T) {
 		stall.release <- errImageWritePanic
 	}
 	for _, tc := range []site{
-		{"post-write global", false, written}, {"post-write per-peer", true, written},
+		{"post-write global", false, written},
+		{"post-write per-peer", true, written},
 		{"post-write after an end during the write global", false, endedInWrite},
 		{"post-write after an end during the write per-peer", true, endedInWrite},
 		{"failed write global", false, failed},
-		{"send unwind global", false, unwound}, {"send unwind per-peer", true, unwound},
+		{"send unwind global", false, unwound},
+		{"send unwind per-peer", true, unwound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, limits, other := newImageTestFixture(t, 2), imageTestLimits(), 1
