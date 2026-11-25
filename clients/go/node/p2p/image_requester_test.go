@@ -2484,7 +2484,7 @@ func testImageUnwind(t *testing.T) {
 	t.Run("a panic in the round ctx stop call of the retirement after a failed write", func(t *testing.T) { testImageUnwindFailedWrite(t, false, true) })
 }
 
-// imageUnwindCtx returns the round ctx and the Request ctx of an unwind cell: the imageHookCtx C as
+// imageUnwindCtx returns the round ctx and the Request ctx of an unwind test: the imageHookCtx C as
 // the Request ctx, or, with roundCtx set, as the round ctx with the Request ctx live.
 func imageUnwindCtx(c *imageHookCtx, roundCtx bool) (context.Context, context.Context) {
 	if roundCtx {
