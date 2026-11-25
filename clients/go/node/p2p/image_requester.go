@@ -286,25 +286,32 @@ func positiveDurations(durations ...time.Duration) bool {
 	return true
 }
 
-// resolveImageSources resolves every source ID through Service.peers in one read section; more IDs than
-// Service.peers entries refuse before any table is allocated, and two IDs naming the same connection refuse.
+// resolveImageSources copies Service.peers in one read section that decides nothing and, after that section,
+// resolves the source IDs against the copy with imageSources (RUBIN_L1_P2P_AUX.md Section 5).
 func (s *Service) resolveImageSources(ids []string) (map[string]*peer, error) {
 	if len(ids) == 0 {
 		return nil, errImageSourceSet
 	}
 	s.peersMu.RLock()
-	defer s.peersMu.RUnlock()
-	if len(ids) > len(s.peers) {
+	peers := make(map[string]*peer, len(s.peers))
+	for id, session := range s.peers {
+		peers[id] = session
+	}
+	s.peersMu.RUnlock()
+	return imageSources(ids, peers)
+}
+
+// imageSources resolves every source ID through peers into a new map of those IDs: more IDs than peers entries
+// refuse before any table is allocated; an ID with no entry or naming an already resolved connection refuses too.
+func imageSources(ids []string, peers map[string]*peer) (map[string]*peer, error) {
+	if len(ids) > len(peers) {
 		return nil, errImageSourceSet
 	}
 	sources := make(map[string]*peer, len(ids))
 	seen := make(map[*peer]struct{}, len(ids))
 	for _, id := range ids {
-		session := s.peers[id]
-		if session == nil {
-			return nil, errImageSourceSet
-		}
-		if _, dup := seen[session]; dup {
+		session := peers[id]
+		if _, dup := seen[session]; session == nil || dup {
 			return nil, errImageSourceSet
 		}
 		seen[session] = struct{}{}
