@@ -9,15 +9,12 @@ import (
 	"testing"
 )
 
-// tiOutcome is how one UpdateImageV1 call ended: returned with r, or unwound
-// with the recovered panic value (nil for Goexit). The rest is observed on the
-// caller's own account value a inside WithOperation, while the caller holds a
-// hold-byte a.WithReservation when hold is 1 and on the fresh account when hold
-// is 0, after the call returns or while it unwinds:
-// original and account are *a before and after the call, before and after the
-// state that original names, live the live sum, and reuse and reuseLive the
-// result and live sum of a further one-byte a.WithReservation.
-// wantZero is set by a row whose planner replaces *a with the zero value.
+// tiOutcome is how one UpdateImageV1 call ended: returned with r, or unwound with the
+// recovered panic value (nil for Goexit). The rest is observed on the caller's account a
+// inside WithOperation, holding hold bytes (0 or 1), after the call returns or unwinds:
+// original and account are *a before and after the call, before and after the state that
+// original names, live the live sum, and reuse and reuseLive the result and live sum of a
+// further one-byte a.WithReservation. wantZero marks a planner that zeroes *a.
 type tiOutcome struct {
 	r                 tsResult
 	live              uint64
