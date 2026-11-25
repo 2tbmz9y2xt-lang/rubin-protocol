@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -166,7 +168,8 @@ func newImageRequester() *imageRequester {
 // imageInstance is one admitted assignment. round is its own value copy of the admitting round, through which its end
 // appliers and its write path reach that round. published, retired, end, pendingHeld and the stop handles are guarded
 // by imageRequester.mu; published reports that admission charged, allocated and registered it, end is the error of
-// the end that retired it and pendingHeld reports that its pending request bytes are still charged.
+// the end that retired it and pendingHeld reports that its pending request bytes are still charged. ref is the only
+// way its end appliers reach it; retirement clears ref once its stop calls have returned.
 type imageInstance struct {
 	round       ImageRound
 	session     *peer
@@ -180,6 +183,7 @@ type imageInstance struct {
 	timer       *time.Timer
 	pendingHeld bool
 	published   bool
+	ref         *atomic.Pointer[imageInstance]
 }
 
 // endAt returns, without reading whether inst is retired, its ctx error, else its round ctx
@@ -312,7 +316,7 @@ func (s *Service) resolveImageSources(ids []string) (map[string]*peer, error) {
 	return imageSources(ids, peers)
 }
 
-// imageSources resolves every source ID through peers into a new map of those IDs: more IDs than peers entries
+// imageSources resolves every source ID through peers into a new map keyed by copies of those IDs: more IDs than peers entries
 // refuse before any table is allocated; an ID with no entry or naming an already resolved connection refuses too.
 func imageSources(ids []string, peers map[string]*peer) (map[string]*peer, error) {
 	if len(ids) > len(peers) {
@@ -326,7 +330,7 @@ func imageSources(ids []string, peers map[string]*peer) (map[string]*peer, error
 			return nil, errImageSourceSet
 		}
 		seen[session] = struct{}{}
-		sources[id] = session
+		sources[strings.Clone(id)] = session
 	}
 	return sources, nil
 }
@@ -471,17 +475,20 @@ func (r *ImageRound) usageFor(session *peer) *imageUnitVector {
 	return &imageUnitVector{}
 }
 
-// commitLocked arms the instance's ctx callback, its round ctx callback and its deadline timer, in that order, and
+// commitLocked arms the instance's ctx callback, its round ctx callback and its deadline timer, each holding only
+// inst.ref, in that order, and
 // only then charges, allocates the ID, registers the instance and marks the start attempted and admitted, in one
 // linearization with the checks of prepareLocked. When arming unwinds, nothing is charged, allocated, registered or
 // marked, and a callback already armed finds the instance unpublished and changes nothing.
 func (r *ImageRound) commitLocked(inst *imageInstance, now time.Time) {
-	s := r.service
-	onCtx := func() { s.applyImageEnd(inst, false) }
+	ref := new(atomic.Pointer[imageInstance])
+	ref.Store(inst)
+	inst.ref = ref
+	onCtx := func() { applyImageEnd(ref, false) }
 	inst.stopCtx = context.AfterFunc(inst.ctx, onCtx)
 	inst.stopRound = context.AfterFunc(r.ctx, onCtx)
-	inst.timer = time.AfterFunc(imageTimerDuration(inst.deadline.Sub(now)), func() { s.applyImageEnd(inst, true) })
-	req := s.imageRequester
+	inst.timer = time.AfterFunc(imageTimerDuration(inst.deadline.Sub(now)), func() { applyImageEnd(ref, true) })
+	req := r.service.imageRequester
 	start := inst.query.StartKey
 	perPeer, global := r.admissionDelta(start)
 	usage := r.usageFor(inst.session)
@@ -505,11 +512,16 @@ func imageTimerDuration(untilDeadline time.Duration) time.Duration {
 }
 
 // applyImageEnd is the body of the Request-ctx callback, the round-ctx callback (byTimer false) and the deadline
-// timer (byTimer true) of one instance. With a Service lease, under the requester mutex and with one now read, it
-// retires a published, not yet retired instance whose ctx or round ctx is done or whose D is before now, once,
-// recording endAt(now). The timer does nothing when now is not after D and is not re-armed. A refused lease or an
-// unpublished instance changes nothing and reads no clock.
-func (s *Service) applyImageEnd(inst *imageInstance, byTimer bool) {
+// timer (byTimer true) of the instance ref holds. A cleared ref returns at once. Else, with a Service lease, under the
+// requester mutex and with one now read, it retires a published, not yet retired instance whose ctx or round ctx is
+// done or whose D is before now, once, recording endAt(now). The timer does nothing when now is not after D and is
+// not re-armed. A refused lease, a retired or an unpublished instance changes nothing and reads no clock or ctx.
+func applyImageEnd(ref *atomic.Pointer[imageInstance], byTimer bool) {
+	inst := ref.Load()
+	if inst == nil {
+		return
+	}
+	s := inst.round.service
 	if !s.acquireWork() {
 		return
 	}
@@ -517,7 +529,7 @@ func (s *Service) applyImageEnd(inst *imageInstance, byTimer bool) {
 	req := s.imageRequester
 	req.mu.Lock()
 	defer req.mu.Unlock()
-	if !inst.published {
+	if inst.retired || !inst.published {
 		return
 	}
 	now := s.cfg.Now()
@@ -650,8 +662,9 @@ func (req *imageRequester) retireIfEndedLocked(inst *imageInstance, now time.Tim
 
 // retireLocked retires exactly that instance once: it stops its ctx callback, its round ctx
 // callback and its deadline timer, then records end, deletes its registry entry and releases its
-// current assignment in its own round. When a stop call unwinds, the instance stays unretired,
-// registered and charged, with no end recorded; a later call has no effect once it is retired.
+// current assignment in its own round, and last clears inst.ref. When a stop call unwinds, the instance stays
+// unretired, registered, charged and reachable by its end appliers, with no end recorded; a later call has no effect
+// once it is retired.
 func (req *imageRequester) retireLocked(inst *imageInstance, end error) {
 	if inst.retired {
 		return
@@ -662,4 +675,5 @@ func (req *imageRequester) retireLocked(inst *imageInstance, end error) {
 	inst.retired, inst.end = true, end
 	delete(req.current, imageKey{inst.round.anchor, inst.query.StartKey})
 	inst.round.release(inst.session, unitCurrentAssignments, 1)
+	inst.ref.Store(nil)
 }
