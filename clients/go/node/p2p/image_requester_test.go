@@ -2723,26 +2723,26 @@ func testImageUnwindArming(t *testing.T, goexit, roundCtx, parked bool) {
 		f.requireUsage(t, round, 0, wantPerPeer, wantGlobal, "after the next requests")
 		if roundCtx {
 			synctest.Wait()
-			req, leases, stacks := f.lockRequester(), f.leases(), make([]byte, 1<<20)
-			created := fmt.Appendf(nil, "created by context.(*afterFuncCtx).cancel in goroutine %s\n", bytes.Fields(stacks[:runtime.Stack(stacks, false)])[1])
+			req, leases, stacks, probe := f.lockRequester(), f.leases(), make([]byte, 1<<20), make(chan struct{}, 1<<16)
+			created := fmt.Appendf(nil, "created by context.(*afterFuncCtx).cancel.func1 in goroutine %s\n", bytes.Fields(stacks[:runtime.Stack(stacks, false)])[1])
 			func() {
 				defer req.mu.Unlock()
 				requireEqual(t, cr.endAndRun(errImageRequestEnd), 1, "Cr functions run after Cr ends")
-				for scans := 0; ; scans++ {
+				probeCtx, cancelProbe := context.WithCancel(context.Background())
+				context.AfterFunc(probeCtx, func() { <-probe })
+				cancelProbe()
+				for scans, seen := 0, true; seen; scans++ {
 					n := runtime.Stack(stacks, true)
-					require(t, n < len(stacks) && f.leases() == leases && scans < 1<<16, "Cr callback of the unwound call: stack dump of %d bytes, Service leases %d->%d after %d stack scans, want an untruncated dump, no lease and its return", n, leases, f.leases(), scans)
-					if !bytes.Contains(stacks[:n], created) {
-						break
-					}
+					seen = bytes.Contains(stacks[:n], created)
+					require(t, n < len(stacks) && f.leases() == leases && scans < 1<<16 && (seen || scans > 0), "Cr callback of the unwound call: stack dump of %d bytes, Service leases %d->%d after %d stack scans, seen %v, want an untruncated dump, the AfterFunc goroutines in the first scan, no lease and its return", n, leases, f.leases(), scans, seen)
+					probe <- struct{}{}
 					runtime.Gosched()
 				}
 			}()
 			synctest.Wait()
 			f.requireUsage(t, round, 0, wantPerPeer, wantGlobal, "after Cr is canceled")
 			f.refused(t, round, context.Background(), 1, 1, errImageAssignmentCurrent)
-			inst := f.instance(1)
-			require(t, inst != nil, "no current instance of start 1 after Cr is canceled")
-			f.requireEnd(t, inst, nil, "instance of start 1 after Cr is canceled")
+			f.requireEnd(t, f.instance(1), nil, "instance of start 1 after Cr is canceled")
 		}
 		requireReturned(t, lifecycleClose(f.s), "Close")
 	})(t)
