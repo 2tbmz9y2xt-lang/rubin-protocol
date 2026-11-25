@@ -211,7 +211,9 @@ func (inst *imageInstance) preWriteEnd(now time.Time) error {
 // retires the assignment and returns the admitted query and its error (RUBIN_L1_P2P_AUX.md Section 7.5), then, with no
 // mutex held, sets it as the session's last error and closes the connection once (RUBIN_L1_P2P_AUX.md Section 2.1). An
 // unwind after admission releases writeMu and the pending request bytes once each, retires nothing and propagates
-// (RUBIN_L1_P2P_AUX.md Section 5).
+// (RUBIN_L1_P2P_AUX.md Section 5); an unwind of the retirement after a failed write still sets that write error as the
+// session's last error and closes the connection once (RUBIN_L1_P2P_AUX.md Section 2.1). An anchor and start have at
+// most one current assignment across the Service (RUBIN_L1_P2P_AUX.md Section 7.5).
 type ImageRound struct {
 	service       *Service
 	ctx           context.Context
@@ -466,11 +468,16 @@ func (r *ImageRound) usageFor(session *peer) *imageUnitVector {
 }
 
 // commitLocked arms the ctx callbacks and the timer, each holding only inst.ref, then charges, allocates, registers and
-// marks; an unwind while arming leaves no effect and the armed callbacks find the instance unpublished.
+// marks; an unwind while arming leaves no effect and clears inst.ref, so the armed callbacks find no instance.
 func (r *ImageRound) commitLocked(inst *imageInstance, now time.Time) {
 	ref := new(atomic.Pointer[imageInstance])
 	ref.Store(inst)
 	inst.ref = ref
+	defer func() {
+		if !inst.published {
+			ref.Store(nil)
+		}
+	}()
 	onCtx := func() { applyImageEnd(ref, false) }
 	inst.stopCtx = context.AfterFunc(inst.ctx, onCtx)
 	inst.stopRound = context.AfterFunc(r.ctx, onCtx)
