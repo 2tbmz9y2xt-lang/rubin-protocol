@@ -1404,11 +1404,12 @@ def check_report_input_targets(data: dict[str, Any]) -> list[Path]:
     root = safe_abs_path(data.get("artifact_root"))
     if root is None:
         return []
-    targets = [root / name for name in CHECK_REPORT_ROOT_ENTRIES]
+    targets = [Path(os.path.realpath(root / name)) for name in CHECK_REPORT_ROOT_ENTRIES]
+    sidecar_path = root / CHECK_REPORT_ROOT_ENTRIES[0]
     try:
-        sidecar = scan_source_data(targets[0]) if targets[0].is_file() else None
+        sidecar = scan_source_data(sidecar_path) if sidecar_path.is_file() else None
         if sidecar is not None:
-            targets.extend(target for target, _ in path_field_targets(sidecar, targets[0].parent))
+            targets.extend(target for target, _ in path_field_targets(sidecar, root))
     except (OSError, ValueError):
         pass
     return targets
@@ -1431,7 +1432,7 @@ def output_overwrites_input(args: argparse.Namespace, out_path: Path) -> str | N
         except ValueError as exc: return f"output_scan_failed:{exc}"  # noqa: E701
         if any(same_path(target, out_path) or (is_dir and path_contains(target, out_path)) for target, is_dir in targets):
             return "output_overwrites_input"
-        if any(same_path(target, out_path) for target in check_report_input_targets(data)):
+        if key != "rust_reorg_metrics" and any(same_path(target, out_path) for target in check_report_input_targets(data)):
             return "output_overwrites_input"
     return None
 def main(argv: list[str] | None = None) -> int:

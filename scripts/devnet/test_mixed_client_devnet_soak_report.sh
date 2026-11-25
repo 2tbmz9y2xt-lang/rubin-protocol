@@ -376,35 +376,61 @@ expect_fail_reason malformed_source_fields:legacy_schema_compatibility.marker_pa
 expect_mesh_pass "${TMP_ROOT}/cli"$'\t'"dir/mesh.json"
 expect_fail_reason malformed_source_fields:legacy_schema_compatibility.marker_path --mesh-report "${TMP_ROOT}/mesh_marker_unit_separator_dir.json"
 expect_mesh_pass "${TMP_ROOT}/mesh_marker_space_dir.json"
-r29_sidecar="${TMP_ROOT}/mixed-client-mesh-store-neutrality.json"
+sidecar_path="${TMP_ROOT}/mixed-client-mesh-store-neutrality.json"
 python3 - "${TMP_ROOT}" <<'PY'
 import json, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 (root / "rubin-txgen").write_text("txgen\n", encoding="utf-8")
-(root / "r29-go-tip.json").write_text("{}\n", encoding="utf-8")
-(root / "r29-go-block.json").write_text("{}\n", encoding="utf-8")
-sidecar = {"genesis": {"go_block_path": str(root / "r29-go-block.json")}, "initial_convergence": {"go_tip_path": str(root / "r29-go-tip.json")}}
+(root / "sidecar-go-tip.json").write_text("{}\n", encoding="utf-8")
+(root / "sidecar-go-block.json").write_text("{}\n", encoding="utf-8")
+sidecar = {"genesis": {"go_block_path": str(root / "sidecar-go-block.json")}, "initial_convergence": {"go_tip_path": str(root / "sidecar-go-tip.json")}}
 (root / "mixed-client-mesh-store-neutrality.json").write_text(json.dumps(sidecar) + "\n", encoding="utf-8")
 PY
 expect_output_refused_unchanged() {
-  local before
-  before="$(cksum <"$1")"
-  if python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --output "$1" >/dev/null 2>"${TMP_ROOT}/err"; then echo "FAIL: output over $1 accepted" >&2; exit 1; fi
-  [[ "$(cat -- "${TMP_ROOT}/err")" == "FAIL: output_overwrites_input" && "$(cksum <"$1")" == "${before}" ]] || { echo "FAIL: output over $1 not refused unchanged" >&2; cat -- "${TMP_ROOT}/err" >&2; exit 1; }
+  local target="$1" before rc=0
+  shift
+  before="$(cksum <"${target}")"
+  python3 "${GEN}" "$@" --output "${target}" >/dev/null 2>"${TMP_ROOT}/err" || rc=$?
+  [[ ${rc} -eq 1 && "$(cat -- "${TMP_ROOT}/err")" == "FAIL: output_overwrites_input" && "$(cksum <"${target}")" == "${before}" ]] || { echo "FAIL: output over ${target} with $1 exited ${rc}, not refused unchanged" >&2; cat -- "${TMP_ROOT}/err" >&2; exit 1; }
 }
-expect_fresh_output_written() {
-  local fresh="${TMP_ROOT}/soak-fresh.json" rc_in=0 rc_out=0
-  rm -f -- "${fresh}"; mkdir -p -- "${TMP_ROOT}-outside"
-  python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --output "${fresh}" >/dev/null 2>"${TMP_ROOT}/err" || rc_in=$?
-  python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --output "${TMP_ROOT}-outside/soak-out.json" >/dev/null 2>/dev/null || rc_out=$?
-  if grep -Eq 'output_overwrites_input|output_scan_failed' "${TMP_ROOT}/err" || [[ ! -f "${fresh}" ]] || (( rc_in != rc_out )); then
-    echo "FAIL: $1: fresh output in the artifact root rc ${rc_in}, outside rc ${rc_out}" >&2; cat -- "${TMP_ROOT}/err" >&2; exit 1
+expect_mesh_output_pass() {
+  local out="$1" rc=0
+  rm -f -- "${out}"
+  python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --output "${out}" >/dev/null 2>"${TMP_ROOT}/err" || rc=$?
+  if (( rc != 0 )) || grep -Eq 'output_overwrites_input|output_scan_failed' "${TMP_ROOT}/err" || ! python3 -c 'import json, sys; r = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if r["sections"]["mesh"]["status"] == "pass" and ("mesh", "pass") in {(c["section"], c["token"]) for c in r["claim_inventory"]} else 1)' "${out}"; then
+    echo "FAIL: mesh output ${out} exited ${rc} without mesh claim token pass" >&2; cat -- "${TMP_ROOT}/err" >&2; exit 1
   fi
 }
-for target in "${r29_sidecar}" "${TMP_ROOT}/rubin-txgen" "${TMP_ROOT}/r29-go-tip.json" "${TMP_ROOT}/r29-go-block.json"; do expect_output_refused_unchanged "${target}"; done
-expect_fresh_output_written "sidecar object"
-printf '{' >"${r29_sidecar}"
-expect_fresh_output_written "sidecar not an object"
-expect_output_refused_unchanged "${r29_sidecar}"
+expect_fresh_output_written() {
+  mkdir -p -- "${TMP_ROOT}-outside"
+  expect_mesh_output_pass "${TMP_ROOT}-outside/soak-out.json"
+  expect_mesh_output_pass "${TMP_ROOT}/soak-fresh.json"
+  rm -f -- "${TMP_ROOT}/soak-fresh.json"
+}
+for pair in "--mesh-report mesh.json" "--go-submit-rust-accept-report go_accept.json" "--go-submit-rust-mine-go-converge-report go_conv.json" "--rust-submit-go-mine-rust-converge-report rust_conv.json" "--rust-restart-report restart.json" "--partition-heal-reorg-report partition.json"; do
+  read -r report_arg report_name <<<"${pair}"
+  expect_output_refused_unchanged "${sidecar_path}" "${report_arg}" "${TMP_ROOT}/${report_name}"
+done
+for target in "${TMP_ROOT}/rubin-txgen" "${TMP_ROOT}/sidecar-go-tip.json" "${TMP_ROOT}/sidecar-go-block.json"; do expect_output_refused_unchanged "${target}" --mesh-report "${TMP_ROOT}/mesh.json"; done
+expect_fresh_output_written
+printf '{' >"${sidecar_path}"
+expect_fresh_output_written
+expect_output_refused_unchanged "${sidecar_path}" --mesh-report "${TMP_ROOT}/mesh.json"
+rm -f -- "${TMP_ROOT}/rubin-txgen"; ln -s "${TMP_ROOT}/txgen-absent-target" "${TMP_ROOT}/rubin-txgen"
+dangling_rc=0
+python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --output "${TMP_ROOT}/rubin-txgen" >/dev/null 2>"${TMP_ROOT}/err" || dangling_rc=$?
+if (( dangling_rc != 1 )) || [[ "$(cat -- "${TMP_ROOT}/err")" != "FAIL: output_overwrites_input" || -e "${TMP_ROOT}/txgen-absent-target" ]]; then
+  echo "FAIL: output through a dangling rubin-txgen link exited ${dangling_rc} or created its target" >&2; cat -- "${TMP_ROOT}/err" >&2; exit 1
+fi
+metrics_dir="${TMP_ROOT}/metrics-artifact-root"; mkdir -p -- "${metrics_dir}"
+python3 -c 'import json, sys; json.dump({"artifact_root": sys.argv[2], "unexpected": 1}, open(sys.argv[1], "w", encoding="utf-8"))' "${TMP_ROOT}/metrics_artifact_root.json" "${metrics_dir}"
+printf '{"unexpected": 1}' >"${TMP_ROOT}/metrics_unexpected_only.json"
+for metrics in metrics_artifact_root.json metrics_unexpected_only.json; do
+  metrics_rc=0; rm -f -- "${metrics_dir}/rubin-txgen"
+  python3 "${GEN}" --rust-reorg-metrics "${TMP_ROOT}/${metrics}" --output "${metrics_dir}/rubin-txgen" >/dev/null 2>"${TMP_ROOT}/err" || metrics_rc=$?
+  if (( metrics_rc != 1 )) || [[ "$(cat -- "${TMP_ROOT}/err")" != "FAIL: reorg_metrics:metrics_malformed" || ! -f "${metrics_dir}/rubin-txgen" ]]; then
+    echo "FAIL: ${metrics} with output in its artifact_root exited ${metrics_rc} without a written report" >&2; cat -- "${TMP_ROOT}/err" >&2; exit 1
+  fi
+done
 printf 'PASS: RUB-239 final source-bound report closeout covered\n'

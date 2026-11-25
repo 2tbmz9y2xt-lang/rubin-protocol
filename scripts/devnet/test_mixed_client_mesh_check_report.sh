@@ -417,7 +417,7 @@ check_wait_receipt_deadlines() {
   local probe="${TMP_ROOT}/receipt-deadline.sh" probe_root="${TMP_ROOT}/receipt-deadline" lib="${TMP_ROOT}/receipt-deadline-lib.sh" eventually_py="${TMP_ROOT}/receipt-deadline-eventually.py"
   mkdir -p -- "${probe_root}"
   extract_slices "${lib}" "sidecar_derivations_py()" '[[ "${MESH_TIMEOUT}"' "tx_capture_reason()" "txgen_datadir_guard()" "wait_rust_accept()" "write_block_check_go()" "tip_matches()" "write_outputs()" "wait_peer_snapshot()" "wait_rust_to_go_link()" "parse_restart_tip_sidecar()" "go_restart_mine_target()" "wait_rust_restart_catch_up()" "write_partition_proxy()" "wait_peer_snapshot_state()" "parse_partition_mine_result()" "partition_capture_tip()" "partition_mine()" "wait_tip_to_match()" "store_neutrality_step()"
-  extract_slices "${eventually_py}" "def eventually(" "def safe_path_str("
+  extract_slices "${eventually_py}" "def fail(" "def safe_path_str("
   cat >"${probe}" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -484,9 +484,9 @@ require_absent() { [[ ! -e "$1" ]] || { echo "FAIL: $2 wrote $1" >&2; exit 1; };
 tx_log="/tx_status?txid=${TX_ID}"$'\n'"/get_tx?txid=${TX_ID}"
 peers_norm="{\"count\": 1, \"peers\": [{\"addr\": \"${PEER}\", \"handshake_complete\": true}]}"
 eventually_run() { python3 - "${eventually_py}" "$@" <<'PY'
-import sys, time
-def fail(message: str) -> None: print(f"FAIL: {message}", file=sys.stderr); sys.exit(1)
-live, LIVE_TIMEOUT, delay, calls = True, int(sys.argv[2]), int(sys.argv[3]), []
+import os, sys, time
+os.environ["MESH_TIMEOUT"] = sys.argv[2]
+live, delay, calls = True, int(sys.argv[3]), []
 exec(open(sys.argv[1], encoding="utf-8").read())
 def predicate() -> bool:
     calls.append(1); time.sleep(delay); return True
@@ -546,10 +546,11 @@ deadline_boundary_rows() {
   ANSWER="${probe_root}/tip-absent.json"; TX_PATH_MODE=0
   expect_wait PARTITION_REASON initial_convergence_timeout wait_initial_convergence
   expect_late_answers_refused
-  if output="$(python3 - "${eventually_py}" 2>&1 <<'PY'
-import sys, time
-def fail(message: str) -> None: print(f"FAIL: {message}", file=sys.stderr); sys.exit(1)
-live, LIVE_TIMEOUT, clock = True, 10, [1000.0]
+  local rc=0
+  output="$(python3 - "${eventually_py}" 2>&1 <<'PY'
+import os, sys, time
+os.environ["MESH_TIMEOUT"] = "10"
+live, clock = True, [1000.0]
 exec(open(sys.argv[1], encoding="utf-8").read())
 time.monotonic = lambda: clock[0]
 def predicate() -> bool:
@@ -557,15 +558,15 @@ def predicate() -> bool:
 eventually(predicate, "predicate answered at the deadline")
 print("returned at the deadline")
 PY
-)"; then echo "FAIL: eventually returned on a predicate answered at its deadline: ${output}" >&2; exit 1; fi
-  [[ "${output}" == "FAIL: predicate answered at the deadline" ]] || { echo "FAIL: eventually output at its deadline: ${output}" >&2; exit 1; }
+)" || rc=$?
+  [[ ${rc} -eq 1 && "${output}" == "FAIL: predicate answered at the deadline" ]] || { echo "FAIL: eventually exited ${rc} at its deadline: ${output}" >&2; exit 1; }
 }
 [[ "${boundary_only}" != 1 ]] || { deadline_boundary_rows; exit 0; }
 
 export MESH_TIMEOUT=1 CAPTURE_SLEEP=2
 expect_late_answers_refused
-if output="$(eventually_run 1 2 2>&1)"; then echo "FAIL: eventually returned on a late predicate: ${output}" >&2; exit 1; fi
-[[ "${output}" == "FAIL: predicate answered after the deadline" ]] || { echo "FAIL: late eventually output: ${output}" >&2; exit 1; }
+rc=0; output="$(eventually_run 1 2 2>&1)" || rc=$?
+[[ ${rc} -eq 1 && "${output}" == "FAIL: predicate answered after the deadline" ]] || { echo "FAIL: eventually exited ${rc} on a late predicate: ${output}" >&2; exit 1; }
 
 export MESH_TIMEOUT=10 CAPTURE_SLEEP=0
 expect_wait TX_REASON ok wait_rust_accept
@@ -592,9 +593,9 @@ output="$(eventually_run 10 0)" || { echo "FAIL: eventually refused a predicate 
 [[ "${output}" == "returned after 1 call" ]] || { echo "FAIL: eventually output: ${output}" >&2; exit 1; }
 # The clock stub starts at 1000; the first predicate call moves it to $1 and the sleep stub to $2.
 eventually_clock_run() { python3 - "${eventually_py}" "$@" 2>&1 <<'PY'
-import sys, time
-def fail(message: str) -> None: print(f"FAIL: {message}", file=sys.stderr); sys.exit(1)
-live, LIVE_TIMEOUT, clock, calls = True, 10, [1000.0], []
+import os, sys, time
+os.environ["MESH_TIMEOUT"] = "10"
+live, clock, calls = True, [1000.0], []
 exec(open(sys.argv[1], encoding="utf-8").read())
 time.monotonic = lambda: clock[0]
 def sleep(_: float) -> None:
@@ -610,8 +611,8 @@ try: eventually(predicate, "eventually deadline passed")
 finally: print(f"predicate calls {len(calls)}", file=sys.stderr)
 PY
 }
-if output="$(eventually_clock_run 1000 1010)"; then echo "FAIL: eventually returned after a sleep that reached its deadline: ${output}" >&2; exit 1; fi
-[[ "${output}" == $'FAIL: eventually deadline passed\npredicate calls 1' ]] || { echo "FAIL: eventually output after a sleep that reached its deadline: ${output}" >&2; exit 1; }
+rc=0; output="$(eventually_clock_run 1000 1010)" || rc=$?
+[[ ${rc} -eq 1 && "${output}" == $'FAIL: eventually deadline passed\npredicate calls 1' ]] || { echo "FAIL: eventually exited ${rc} after a sleep that reached its deadline: ${output}" >&2; exit 1; }
 output="$(eventually_clock_run 1009 1009)" || { echo "FAIL: eventually refused a second call started before its deadline: ${output}" >&2; exit 1; }
 [[ "${output}" == "predicate calls 2" ]] || { echo "FAIL: eventually output for a second call before its deadline: ${output}" >&2; exit 1; }
 
@@ -650,10 +651,51 @@ FIRST_ANSWER="${probe_root}/peer-long-height.json" expect_wait PEER_SNAPSHOT_REA
 require_log captures $'/peers\n/peers' "wait_peer_snapshot after an unparsable snapshot"; require_absent "${PEER_OUT}" "wait_peer_snapshot after an unparsable snapshot"
 FIRST_ANSWER="${probe_root}/peer-incomplete.json" FIRST_STDERR="peer capture warning" expect_wait PEER_SNAPSHOT_REASON peer_snapshot_rpc_failed wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${PEER_OUT}" 3 "${PEER}"
 require_log captures $'/peers\n/peers' "wait_peer_snapshot after a capture with stderr"; require_absent "${PEER_OUT}" "wait_peer_snapshot after a capture with stderr"
+# python3 -m json.tool runs only after an unaccepted capture that leaves no reason and an empty stderr file.
+python3() { [[ "${1:-}" != -m || "${2:-}" != json.tool ]] || printf 'json.tool\n' >>"${probe_root}/json-tool"; command python3 "$@"; }
+expect_json_tool_calls() { local want="$1"; shift; rm -f -- "${probe_root}/json-tool"; "$@"; require_log json-tool "${want}" "json.tool calls for $*"; }
+ANSWER="${probe_root}/peer-incomplete.json"
+CAPTURE_SLEEP=0 expect_json_tool_calls "" expect_wait PEER_SNAPSHOT_REASON peer_snapshot_handshake_incomplete wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${PEER_OUT}" 2 "${PEER}"
+ANSWER="${probe_root}/peer.json"
+FIRST_ANSWER="${probe_root}/peer-long-height.json" expect_json_tool_calls json.tool expect_wait PEER_SNAPSHOT_REASON peer_snapshot_malformed_json wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${PEER_OUT}" 3 "${PEER}"
+FIRST_ANSWER="${probe_root}/peer-long-height.json" FIRST_STDERR="peer capture warning" expect_json_tool_calls "" expect_wait PEER_SNAPSHOT_REASON peer_snapshot_rpc_failed wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${PEER_OUT}" 3 "${PEER}"
+unset -f python3
 
 deadline_boundary_rows
 SH
   bash "${probe}" "${lib}" "${probe_root}" "${eventually_py}" "${BOUNDARY_ONLY}"
+}
+
+# Runs the top-level startup lines up to the sidecar write with stubbed steps in the four listed mode settings:
+# a failed Rust process identity check ends the run before the initial convergence wait, and on
+# success that wait runs once, after the Rust identity check.
+check_startup_waits_for_rust_identity() {
+  local lib="${TMP_ROOT}/startup-order-lib.sh" log="${TMP_ROOT}/startup-order.log" modes out variant fn
+  extract_slices "${lib}" "start_go_node || finish_no_data" "write_store_neutrality_sidecar || finish_no_data"
+  for modes in "1 0 0" "0 1 0" "0 0 1" "0 0 0"; do
+    for variant in identity-fails all-succeed; do
+      rm -f -- "${log}"
+      out="$(
+        read -r TX_PATH_MODE RUST_RESTART_MODE PARTITION_HEAL_REORG_MODE <<<"${modes}"
+        GO_PID=101 GO_RPC_ADDR=127.0.0.1:1 GO_P2P_ADDR=127.0.0.1:2 RUST_PID=102 RUST_RPC_ADDR=127.0.0.1:3 RUST_P2P_ADDR=127.0.0.1:4
+        for fn in start_go_node start_partition_proxy start_rust_node wait_initial_convergence; do eval "${fn}() { printf '%s %s\n' ${fn} \"\${1:-}\" >>\"${log}\"; }"; done
+        verify_process_identity() {
+          printf 'verify_process_identity %s\n' "$1" >>"${log}"
+          [[ "$1" == node-rust && "${variant}" == identity-fails ]] || return 0
+          PROCESS_IDENTITY_REASON=rust_process_identity_comm_mismatch; return 1
+        }
+        finish_no_data() { printf '%s\n' "$1"; exit 0; }
+        # shellcheck source=/dev/null
+        source "${lib}"
+        printf 'reached sidecar write\n'
+      )"
+      if [[ "${variant}" == identity-fails ]]; then
+        [[ "${out}" == rust_process_identity_comm_mismatch ]] && ! grep -q '^wait_initial_convergence' "${log}" || { echo "FAIL: startup (${modes}) after a failed Rust identity check: ${out}; $(tr '\n' ',' <"${log}")" >&2; exit 1; }
+      else
+        [[ "${out}" == "reached sidecar write" && "$(grep -c '^wait_initial_convergence' "${log}")" == 1 && "$(grep -E '^(verify_process_identity node-rust|wait_initial_convergence)' "${log}" | tr '\n' ,)" == "verify_process_identity node-rust,wait_initial_convergence ," ]] || { echo "FAIL: startup (${modes}) order: ${out}; $(tr '\n' ',' <"${log}")" >&2; exit 1; }
+      fi
+    done
+  done
 }
 
 check_repo_git_reads_repo_root() {
@@ -2539,6 +2581,7 @@ check_rust_datadir_guard
 check_argv_cmd_round_trip
 check_txgen_datadir_guard
 check_initial_convergence_wait
+check_startup_waits_for_rust_identity
 check_wait_receipt_deadlines
 check_repo_git_reads_repo_root
 check_store_neutrality_producer_reasons

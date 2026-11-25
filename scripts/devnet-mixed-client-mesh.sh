@@ -2328,7 +2328,7 @@ PY
     else rc=$?; [[ ${rc} -eq 23 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json || PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; fi
     # The end reason reads the files as the last unaccepted capture left them.
     last_err=""; [[ ! -s "${tmp}.err" ]] || last_err=1
-    last_bad=""; [[ ! -s "${tmp}" ]] || python3 -m json.tool "${tmp}" >/dev/null 2>&1 || last_bad=1
+    last_bad=""; [[ -n "${PEER_SNAPSHOT_REASON:-}" || -n "${last_err}" || ! -s "${tmp}" ]] || python3 -m json.tool "${tmp}" >/dev/null 2>&1 || last_bad=1
     sleep 1
   done
   if [[ "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_rpc_failed || -n "${last_err}" ]]; then PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; elif [[ "${PEER_SNAPSHOT_REASON:-}" == unexpected_peer_snapshot_peer || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_malformed_json || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_invalid_shape || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_handshake_incomplete || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_expected_peer_absent ]]; then :; elif [[ -n "${last_bad}" ]]; then PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; else PEER_SNAPSHOT_REASON="${label}_peer_snapshot_missing_endpoint"; fi
