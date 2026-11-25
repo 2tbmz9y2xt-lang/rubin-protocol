@@ -38,7 +38,7 @@ validate_deterministic_tx_fee() {
 run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"; }
 check_report() { local report="${1:-}" mode="${2:-offline}" expected_mode="${3:-public}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
-  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" "${expected_mode}" "${DEV_ENV}" "${GO_MODULE_ROOT}" <<'PY'
+  { sidecar_derivations_py; cat <<'PY'; } | RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" "${expected_mode}" "${DEV_ENV}" "${GO_MODULE_ROOT}"
 import datetime as dt, json, math, os, re, socket, struct, subprocess, sys, tempfile, time, urllib.error, urllib.request
 from pathlib import Path
 path = Path(sys.argv[1]); live = sys.argv[3] == "live"; expected_mode = sys.argv[4]; dev_env = sys.argv[5]; go_module_root = sys.argv[6]
@@ -59,13 +59,21 @@ def req(ok: bool, message: str) -> None:
 def eventually(fn, message: str) -> None:
     deadline = time.monotonic() + LIVE_TIMEOUT
     while True:
-        if fn(): return
+        if fn() and (not live or time.monotonic() < deadline): return
         if not live or time.monotonic() >= deadline: fail(message)
         time.sleep(1)
-def checked_path(label: str, value: object) -> Path:
-    req(isinstance(value, str) and value.strip() == value and value and value[0] not in "'\"" and value[-1] not in "'\"" and "\0" not in value and all(ord(c) >= 32 for c in value), f"{label} is not a safe unquoted path string")
-    try: p = Path(value); req(p.is_absolute(), f"{label} is not absolute"); return p.resolve()
-    except (OSError, ValueError) as exc: fail(f"{label} path is invalid: {exc}")
+        if time.monotonic() >= deadline: fail(message)
+def safe_path_str(value: object) -> bool:
+    return isinstance(value, str) and value.strip() == value and bool(value) and value[0] not in "'\"" and value[-1] not in "'\"" and "\0" not in value and all(ord(c) >= 32 for c in value)
+def checked_path(label: str, value: object, *, clean_datadir: bool = False) -> Path:
+    req(safe_path_str(value), f"{label} is not a safe unquoted path string")
+    try:
+        p = Path(value)
+        req(p.is_absolute(), f"{label} is not absolute")
+        if clean_datadir:
+            req(not any(part in {"", ".", ".."} for part in value[1:].split("/")), f"{label} is not a lexically clean path")
+        return Path(os.path.realpath(p))
+    except (OSError, RuntimeError, ValueError) as exc: fail(f"{label} path is invalid: {exc}")
 def ep(value: object) -> bool:
     if not isinstance(value, str): return False
     host, sep, port = value.partition(":")
@@ -75,6 +83,13 @@ def exact_object(data: object, keys: set[str], label: str) -> dict:
     req(isinstance(data, dict), f"{label} is not an object")
     req(set(data) == keys, f"{label} keys mismatch: {sorted(data)}")
     return data
+def unique_members(pairs: list) -> dict:
+    data = {}
+    for key, value in pairs:
+        if key in data: raise ValueError(f"repeated member {key!r}")
+        data[key] = value
+    return data
+def no_constant(name: str) -> object: raise ValueError(f"non-finite constant {name}")
 def load_bounded_json(label: str, p: Path) -> object:
     try:
         req(p.is_file(), f"{label} is not a regular file")
@@ -85,7 +100,7 @@ def load_bounded_json(label: str, p: Path) -> object:
     req(raw != b"", f"{label} is empty")
     req(len(raw) <= MAX_JSON_BYTES, f"{label} is too large")
     try:
-        return json.loads(raw.decode("utf-8"))
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_members, parse_constant=no_constant)
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         fail(f"{label} malformed JSON: {exc}")
 def load_json_file(label: str, p: Path) -> dict:
@@ -98,19 +113,28 @@ def is_json_int(value: object, minimum: int = 0) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= 1_000_000_000
 def is_json_u64(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 18_446_744_073_709_551_615
+TIP_SIDECAR_KEYS = {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}
+BLOCK_SIDECAR_KEYS = {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}
 def tip_obj(value: object, label: str) -> dict:
     req(isinstance(value, dict) and set(value) == {"height", "hash"}, f"{label} keys mismatch")
     req(is_json_int(value.get("height")) and hex32(value.get("hash")), f"{label} malformed")
     return value
-def tip_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str) -> None:
+def tip_capture(label: str, p: Path, impl: str, endpoint: str) -> dict:
     tip = load_json_file(label, p)
-    req(set(tip) == {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}, f"{label} keys mismatch: {sorted(tip)}")
+    req(set(tip) == TIP_SIDECAR_KEYS, f"{label} keys mismatch: {sorted(tip)}")
     req(tip.get("implementation") == impl and tip.get("rpc_endpoint") == endpoint and tip.get("request_path") == "/get_tip", f"{label} sidecar identity mismatch")
-    req(tip.get("has_tip") is True and is_json_int(tip.get("height")) and tip.get("height") == height and tip.get("tip_hash") == block_hash and is_json_int(tip.get("best_known_height")) and tip["best_known_height"] >= height and isinstance(tip.get("in_ibd"), bool), f"{label} does not match expected tip")
-def block_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str, expected_prev_hash=None) -> None:
+    return tip
+def tip_sidecar_ok(tip: dict, height: int, block_hash: str) -> bool:
+    return tip_at(tip, height, block_hash) and is_json_int(tip.get("height")) and is_json_int(tip.get("best_known_height")) and tip["best_known_height"] >= height and isinstance(tip.get("in_ibd"), bool)
+def tip_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str) -> None:
+    req(tip_sidecar_ok(tip_capture(label, p, impl, endpoint), height, block_hash), f"{label} does not match expected tip")
+def block_capture(label: str, p: Path, impl: str, endpoint: str, height: int) -> dict:
     block = load_json_file(label, p)
-    req(set(block) == {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}, f"{label} keys mismatch: {sorted(block)}")
+    req(set(block) == BLOCK_SIDECAR_KEYS, f"{label} keys mismatch: {sorted(block)}")
     req(block.get("implementation") == impl and block.get("rpc_endpoint") == endpoint and block.get("request_path") == f"/get_block?height={height}", f"{label} sidecar identity mismatch")
+    return block
+def block_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str, expected_prev_hash=None) -> None:
+    block = block_capture(label, p, impl, endpoint, height)
     req(block.get("canonical") is True and block.get("height") == height and block.get("hash") == block_hash and isinstance(block.get("block_hex"), str) and re.fullmatch(r"[0-9a-f]+", block["block_hex"] or "") is not None, f"{label} does not match expected block")
     request_obj = {"op": "block_basic_check", "block_hex": block["block_hex"], "height": height}
     if expected_prev_hash is not None:
@@ -136,11 +160,21 @@ def block_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, bl
         detail = parsed.get("err")
         fail(f"{label} block payload check failed: {detail if isinstance(detail, str) else 'block_basic_check rejected block'}")
     req(parsed.get("block_hash") == block_hash, f"{label} parsed block hash mismatch")
+MINE_NEXT_KEYS = {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}
+def mine_next_keys_ok(mine: dict, impl: str) -> bool:
+    if impl == "go" and "commit_state" in mine:
+        return set(mine) == MINE_NEXT_KEYS | {"commit_state"} and mine["commit_state"] == "committed"
+    return set(mine) == MINE_NEXT_KEYS
+def mine_next_commit_state_ok(mine: dict, impl: str) -> bool:
+    return impl != "go" or "commit_state" in mine
+def mine_result_ok(mine: dict, min_height: int = 1) -> bool:
+    return mine.get("mined") is True and is_json_int(mine.get("height"), min_height) and hex32(mine.get("block_hash")) and is_json_int(mine.get("tx_count"), 1) and is_json_u64(mine.get("nonce")) and is_json_u64(mine.get("timestamp"))
 def mine_sidecar(label: str, p: Path, impl: str, endpoint: str, min_height: int = 1) -> dict:
     mine = load_json_file(label, p)
-    req(set(mine) == {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}, f"{label} keys mismatch: {sorted(mine)}")
+    req(mine_next_keys_ok(mine, impl), f"{label} keys mismatch: {sorted(mine)}")
     req(mine.get("implementation") == impl and mine.get("rpc_endpoint") == endpoint and mine.get("request_path") == "/mine_next", f"{label} sidecar identity mismatch")
-    req(mine.get("mined") is True and is_json_int(mine.get("height"), min_height) and hex32(mine.get("block_hash")) and is_json_int(mine.get("tx_count"), 1) and is_json_u64(mine.get("nonce")) and is_json_u64(mine.get("timestamp")), f"{label} malformed mine result")
+    req(mine_next_commit_state_ok(mine, impl), f"{label} keys mismatch: {sorted(mine)}")
+    req(mine_result_ok(mine, min_height), f"{label} malformed mine result")
     return mine
 def metrics_sidecar(label: str, p: Path) -> dict:
     try:
@@ -180,11 +214,13 @@ def peer_snapshot(label: str, p: Path, expected, want_connected: bool) -> None:
         req(expected is not None and complete == [expected] and len(peers) == 1, f"{label} does not prove expected connected peer")
     else:
         req(expected is None and complete == [] and len(peers) == 0, f"{label} does not prove partitioned peer state")
+# Both the recorded string and its realpath must name a regular file: realpath drops a
+# missing component that precedes "..", and a trailing slash, before the test.
 def artifact_file(label: str, value: object, root: Path) -> Path:
     p = checked_path(label, value)
     try: p.relative_to(root)
     except ValueError: fail(f"{label} is outside artifact_root")
-    req(p.is_file(), f"{label} file is missing")
+    req(regular_file(p) and regular_file(value), f"{label} file is missing")
     return p
 def tx_sidecars(status: dict, got: dict, txid: str, txhex: str, label: str, impl: str, endpoint: str, status_path: str, get_path: str) -> None:
     req(set(status) == {"implementation", "request_path", "rpc_endpoint", "status", "txid"}, f"{label}.tx_status keys mismatch: {sorted(status)}")
@@ -201,7 +237,7 @@ def tx_rpc(addr: str, path_suffix: str, label: str, impl: str) -> dict:
         with urllib.request.urlopen(f"http://{addr}{path_suffix}", timeout=5) as resp: raw = resp.read(1000001)
     except (urllib.error.URLError, TimeoutError, socket.timeout) as exc: fail(f"{label} rpc failed: {exc}")
     req(len(raw) <= 1000000, f"{label} rpc response too large")
-    try: data = json.loads(raw.decode("utf-8"))
+    try: data = json.loads(raw.decode("utf-8"), parse_constant=no_constant)
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc: fail(f"{label} rpc malformed JSON: {exc}")
     req(isinstance(data, dict), f"{label} rpc root is not an object")
     data.update({"implementation": impl, "rpc_endpoint": addr, "request_path": path_suffix})
@@ -228,10 +264,8 @@ def parse_txid_from_hex(txhex: str) -> str:
     req(parsed.get("ok") is True and isinstance(txid, str) and re.fullmatch(r"[0-9a-f]{64}", txid), "tx parser did not produce txid")
     req(parsed.get("consumed") == len(txhex) // 2, "tx parser consumed mismatch")
     return txid
-def verify_block_inclusion_sidecar(label: str, p: Path, txhex: str, txid: str, height: int, block_hash: str, tx_count: int, impl: str, endpoint: str, request_path: str) -> None:
-    block = load_json_file(label, p)
-    req(set(block) == {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}, f"{label} keys mismatch: {sorted(block)}")
-    req(block.get("implementation") == impl and block.get("rpc_endpoint") == endpoint and block.get("request_path") == request_path, f"{label} sidecar identity mismatch")
+def verify_block_inclusion_sidecar(label: str, p: Path, txhex: str, txid: str, height: int, block_hash: str, tx_count: int, impl: str, endpoint: str) -> None:
+    block = block_capture(label, p, impl, endpoint, height)
     req(block.get("canonical") is True and block.get("height") == height and block.get("hash") == block_hash, f"{label} sidecar height/hash/canonical mismatch")
     req(isinstance(block.get("block_hex"), str) and block["block_hex"], f"{label} block_hex is missing")
     source = r'''
@@ -323,7 +357,7 @@ def pid_argv(pid: int) -> list[str]:
         if j < 0: break
         args.append(raw[i:j].decode("utf-8", "surrogateescape")); i = j + 1
     return args
-def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live argv", expected_label: str = "report command_argv") -> bool:
+def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live argv", expected_label: str = "report command_argv", *, expected_raw_datadir: bool = True) -> bool:
     if len(actual) != len(expected) or not actual:
         return False
     if checked_path(f"{actual_label}[0]", actual[0]) != checked_path(f"{expected_label}[0]", expected[0]):
@@ -334,7 +368,7 @@ def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live ar
         if expected[i] in path_flags:
             if i + 1 >= len(expected):
                 return False
-            if actual[i] != expected[i] or checked_path(f"{actual_label}[{i + 1}]", actual[i + 1]) != checked_path(f"{expected_label}[{i + 1}]", expected[i + 1]):
+            if actual[i] != expected[i] or checked_path(f"{actual_label}[{i + 1}]", actual[i + 1], clean_datadir=True) != checked_path(f"{expected_label}[{i + 1}]", expected[i + 1], clean_datadir=expected_raw_datadir):
                 return False
             i += 2
             continue
@@ -345,7 +379,7 @@ def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live ar
 def report_node_argv_eq(node: dict, datadir_name: str, extra: list[str]) -> bool:
     argv = node.get("command_argv")
     expected = [node["binary"], "--network", "devnet", "--datadir", str(Path(artifact_root_arg) / datadir_name), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + extra
-    return isinstance(argv, list) and len(argv) == len(expected) and argv_eq(argv, expected, "report command_argv", "expected command_argv")
+    return isinstance(argv, list) and len(argv) == len(expected) and argv_eq(argv, expected, "report command_argv", "expected command_argv", expected_raw_datadir=False)
 def lsof_lines(pid: int, state: str) -> list[str]:
     try:
         p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
@@ -363,7 +397,7 @@ def peers(addr: str) -> dict:
         return None
     req(len(raw) <= MAX_JSON_BYTES, f"live peer snapshot too large for {addr}")
     try:
-        data = json.loads(raw.decode("utf-8"))
+        data = json.loads(raw.decode("utf-8"), parse_constant=no_constant)
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         fail(f"live peer snapshot malformed JSON for {addr}: {exc}")
     req(isinstance(data, dict), f"live peer snapshot malformed JSON for {addr}")
@@ -484,6 +518,9 @@ elif partition_mode:
     allowed_keys |= {"artifact_created_at_utc", "observations", "proof", "run_id"}
 req(set(data) == allowed_keys, f"report top-level keys mismatch: {sorted(data)}")
 artifact_root_arg = data.get("artifact_root"); artifact_root = checked_path("artifact_root", artifact_root_arg)
+# artifact_root/<name> spelled on the recorded artifact_root string, on which existence is
+# decided: the realpath of that string drops a missing component that precedes "..".
+def root_entry(name: str) -> str: return os.path.join(artifact_root_arg, name)
 legacy_schema = data.get("legacy_schema_compatibility")
 req(isinstance(legacy_schema, dict) and set(legacy_schema) == {"authoritative", "marker_path", "purpose", "reason"} and legacy_schema.get("authoritative") is False and nonempty_str(legacy_schema.get("marker_path")), "legacy_schema_compatibility missing marker_path")
 if restart_mode:
@@ -495,6 +532,7 @@ if partition_mode:
 marker_path = checked_path("legacy_schema_compatibility.marker_path", legacy_schema.get("marker_path"))
 try: marker_path.relative_to(artifact_root)
 except ValueError: fail("legacy marker is outside artifact_root")
+req(regular_file(legacy_schema["marker_path"]), "legacy marker is not a regular file")
 marker = load_json_file("legacy marker", marker_path)
 req(isinstance(marker, dict) and marker.get("scenario") == "mixed_client_mesh_schema_marker" and marker.get("evidence_type") == "mixed_client_process_soak", "legacy marker has wrong schema marker shape")
 if tx_mode:
@@ -523,7 +561,7 @@ for node in nodes:
     try: binary_path.relative_to(artifact_root)
     except ValueError: fail(f"{name} binary is outside artifact_root")
     req(node.get("process_comm") == expected_bin, f"{name} process_comm does not prove {impl} identity")
-    req(nonempty_str(command) and isinstance(command_argv, list) and all(isinstance(arg, str) for arg in command_argv) and command_argv and checked_path(f"{name}.command_argv[0]", command_argv[0]) == binary_path and binary_path.name == expected_bin and binary_path.is_file() and os.access(binary_path, os.X_OK), f"{name} command/binary is not bound to executable {expected_bin}")
+    req(nonempty_str(command) and isinstance(command_argv, list) and all(isinstance(arg, str) for arg in command_argv) and command_argv and checked_path(f"{name}.command_argv[0]", command_argv[0]) == binary_path and binary_path.name == expected_bin and regular_file(binary_path) and regular_file(binary) and regular_file(command_argv[0]) and os.access(binary_path, os.X_OK), f"{name} command/binary is not bound to executable {expected_bin}")
     req(ep(node.get("rpc_endpoint")) and ep(node.get("p2p_endpoint")) and ts(node.get("started_at")), f"{name} has malformed endpoint or timestamp")
     req(isinstance(node.get("pid"), int) and not isinstance(node.get("pid"), bool) and node["pid"] > 0, f"{name} pid is not a positive integer")
     if live:
@@ -538,8 +576,9 @@ if partition_mode:
     proof_for_argv = data.get("proof")
     req(isinstance(proof_for_argv, dict) and ep(proof_for_argv.get("partition_proxy_endpoint")), "partition proxy endpoint is malformed")
     rust_expected_peer = proof_for_argv["partition_proxy_endpoint"]
-create_flag = [] if (tx_mode or restart_mode or partition_mode) else ["--create-store"]
-req(report_node_argv_eq(nodes_by_impl["go"], "node-go", create_flag) and report_node_argv_eq(nodes_by_impl["rust"], "node-rust", ["--peer", rust_expected_peer] + create_flag), "node command_argv does not match exact launched argv")
+go_create_flag = [] if (tx_mode or restart_mode or partition_mode) else ["--create-store"]
+rust_create_flag = [] if restart_mode else ["--create-store"]
+req(report_node_argv_eq(nodes_by_impl["go"], "node-go", go_create_flag) and report_node_argv_eq(nodes_by_impl["rust"], "node-rust", ["--peer", rust_expected_peer] + rust_create_flag), "node command_argv does not match exact launched argv")
 req(nodes_by_impl["go"]["pid"] != nodes_by_impl["rust"]["pid"], "go/rust process evidence uses the same pid")
 req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"] and nodes_by_impl["go"].get("command_argv") != nodes_by_impl["rust"].get("command_argv"), "go/rust process evidence is not implementation-distinct")
 req(len({nodes_by_impl[i][f] for i in ("go", "rust") for f in ("rpc_endpoint", "p2p_endpoint")}) == 4, "node rpc/p2p endpoints are not pairwise distinct")
@@ -570,9 +609,9 @@ if restart_mode:
     root_datadir = artifact_root / "node-rust"
     try:
         datadir_path = Path(datadir_raw).resolve() if isinstance(datadir_raw, str) and Path(datadir_raw).is_absolute() else None
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         datadir_path = None
-    req(isinstance(datadir_raw, str) and Path(datadir_raw).name == "node-rust" and datadir_path == root_datadir and root_datadir.is_dir() and not root_datadir.is_symlink(), "rust_restart datadir is not bound to artifact root")
+    req(safe_path_str(datadir_raw) and Path(datadir_raw).name == "node-rust" and datadir_path == root_datadir and os.path.isdir(root_entry("node-rust")) and not root_datadir.is_symlink() and os.path.isdir(datadir_raw), "rust_restart datadir is not bound to artifact root")
     pre_restart_height = json_int(restart_info.get("pre_restart_height"), "rust_restart.pre_restart_height")
     req(pre_restart_height == restart["pre_restart_height"], "rust_restart pre_restart_height mismatch")
     go_target_height = json_int(restart_info.get("go_target_height"), "rust_restart.go_target_height")
@@ -595,32 +634,33 @@ if restart_mode:
     def restart_tip_sidecar(path_field, impl, endpoint, height, tip):
         sidecar_path = artifact_file(f"rust_restart.{path_field}", restart_info.get(path_field), artifact_root)
         sidecar = load_json_file(f"rust_restart.{path_field}", sidecar_path)
-        req(set(sidecar) == {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}, f"rust_restart.{path_field} keys mismatch: {sorted(sidecar)}")
+        req(set(sidecar) == TIP_SIDECAR_KEYS, f"rust_restart.{path_field} keys mismatch: {sorted(sidecar)}")
         sidecar_height = json_int(sidecar.get("height"), f"rust_restart.{path_field}.height", 0)
         sidecar_best_known_height = json_int(sidecar.get("best_known_height"), f"rust_restart.{path_field}.best_known_height", 0)
-        sidecar_has_tip = json_bool(sidecar.get("has_tip"), f"rust_restart.{path_field}.has_tip")
+        json_bool(sidecar.get("has_tip"), f"rust_restart.{path_field}.has_tip")
         json_bool(sidecar.get("in_ibd"), f"rust_restart.{path_field}.in_ibd")
-        sidecar_tip = json_hex32(sidecar.get("tip_hash"), f"rust_restart.{path_field}.tip_hash")
+        json_hex32(sidecar.get("tip_hash"), f"rust_restart.{path_field}.tip_hash")
         req(sidecar_best_known_height >= sidecar_height, f"rust_restart.{path_field}.best_known_height below height")
         req(sidecar.get("implementation") == impl and sidecar.get("rpc_endpoint") == endpoint and sidecar.get("request_path") == "/get_tip", f"rust_restart.{path_field} identity mismatch")
-        req(sidecar_has_tip is True and sidecar_height == height and sidecar_tip == tip, f"rust_restart.{path_field} does not match report")
+        req(tip_sidecar_ok(sidecar, height, tip), f"rust_restart.{path_field} does not match report")
     restart_tip_sidecar("pre_restart_tip_path", "rust", restart_info["old_rpc_endpoint"], pre_restart_height, restart_info["pre_restart_tip"])
     restart_tip_sidecar("go_target_tip_path", "go", nodes_by_impl["go"]["rpc_endpoint"], go_target_height, restart_info["go_target_tip"])
     restart_tip_sidecar("catch_up_tip_path", "rust", nodes_by_impl["rust"]["rpc_endpoint"], catch_up_height, restart_info["catch_up_tip"])
     mine_next_path = artifact_file("rust_restart.go_target_mine_next_path", restart_info.get("go_target_mine_next_path"), artifact_root)
     mine_next = load_json_file("rust_restart.go_target_mine_next_path", mine_next_path)
-    req(set(mine_next) == {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}, f"rust_restart.go_target_mine_next_path keys mismatch: {sorted(mine_next)}")
+    req(mine_next_keys_ok(mine_next, "go"), f"rust_restart.go_target_mine_next_path keys mismatch: {sorted(mine_next)}")
     mine_height = json_int(mine_next.get("height"), "rust_restart.go_target_mine_next_path.height", 0)
     mine_hash = json_hex32(mine_next.get("block_hash"), "rust_restart.go_target_mine_next_path.block_hash")
     mine_tx_count = json_int(mine_next.get("tx_count"), "rust_restart.go_target_mine_next_path.tx_count", 1)
     json_int(mine_next.get("nonce"), "rust_restart.go_target_mine_next_path.nonce", 0)
     json_int(mine_next.get("timestamp"), "rust_restart.go_target_mine_next_path.timestamp", 0)
     req(mine_next.get("implementation") == "go" and mine_next.get("rpc_endpoint") == nodes_by_impl["go"]["rpc_endpoint"] and mine_next.get("request_path") == "/mine_next", "rust_restart go target mine_next sidecar identity mismatch")
-    req(mine_next.get("mined") is True and mine_height == go_target_height and mine_hash == restart_info["go_target_tip"] and mine_tx_count == restart_info["go_target_tx_count"], "rust_restart go target mine_next sidecar does not match report")
-    expected_old_rust_argv = [nodes_by_impl["rust"]["binary"], "--network", "devnet", "--datadir", str(artifact_root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", nodes_by_impl["go"]["p2p_endpoint"]]
+    req(mine_next_commit_state_ok(mine_next, "go"), f"rust_restart.go_target_mine_next_path keys mismatch: {sorted(mine_next)}")
+    req(mine_result_ok(mine_next) and mine_height == go_target_height and mine_hash == restart_info["go_target_tip"] and mine_tx_count == restart_info["go_target_tx_count"], "rust_restart go target mine_next sidecar does not match report")
+    expected_old_rust_argv = [nodes_by_impl["rust"]["binary"], "--network", "devnet", "--datadir", str(artifact_root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", nodes_by_impl["go"]["p2p_endpoint"], "--create-store"]
     old_argv = restart_info.get("old_command_argv")
     new_argv = restart_info.get("new_command_argv")
-    req(isinstance(old_argv, list) and all(isinstance(arg, str) for arg in old_argv) and argv_eq(old_argv, expected_old_rust_argv, "rust_restart.old_command_argv", "expected old rust argv"), "rust_restart old argv mismatch")
+    req(isinstance(old_argv, list) and all(isinstance(arg, str) for arg in old_argv) and argv_eq(old_argv, expected_old_rust_argv, "rust_restart.old_command_argv", "expected old rust argv", expected_raw_datadir=False), "rust_restart old argv mismatch")
     req(isinstance(new_argv, list) and new_argv == nodes_by_impl["rust"]["command_argv"], "rust_restart new argv mismatch")
 if partition_mode:
     req(nonempty_str(data.get("run_id")), "partition report run_id missing")
@@ -747,15 +787,14 @@ if tx_mode:
         converge_block_path = artifact_file(f"{converge_label}.block_path", converge.get("block_path"), artifact_root)
         req(len({mine_next_path, mine_block_path, converge_tip_path, converge_block_path}) == 4, "converge sidecar paths are not pairwise distinct")
         mine_next = load_json_file(f"{mine_label}.mine_next", mine_next_path)
-        req(set(mine_next) == {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}, f"{mine_label}.mine_next keys mismatch: {sorted(mine_next)}")
+        req(mine_next_keys_ok(mine_next, mine_impl), f"{mine_label}.mine_next keys mismatch: {sorted(mine_next)}")
         req(mine_next.get("implementation") == mine_impl and mine_next.get("rpc_endpoint") == nodes_by_impl[mine_impl]["rpc_endpoint"] and mine_next.get("request_path") == "/mine_next", f"{mine_label} mine_next sidecar identity mismatch")
-        req(mine_next.get("mined") is True and mine_next.get("height") == height and mine_next.get("block_hash") == block_hash and mine_next.get("tx_count") == mine["tx_count"], f"{mine_label} mine_next sidecar does not match report")
-        verify_block_inclusion_sidecar(f"{mine_label}.block_path", mine_block_path, txhex, txid, height, block_hash, mine["tx_count"], mine_impl, nodes_by_impl[mine_impl]["rpc_endpoint"], f"/get_block?height={height}")
-        verify_block_inclusion_sidecar(f"{converge_label}.block_path", converge_block_path, txhex, txid, height, block_hash, mine["tx_count"], converge_impl, nodes_by_impl[converge_impl]["rpc_endpoint"], f"/get_block?height={height}")
-        tip = load_json_file(f"{converge_label}.tip", converge_tip_path)
-        req(set(tip) == {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}, f"{converge_label}.tip keys mismatch: {sorted(tip)}")
-        req(tip.get("implementation") == converge_impl and tip.get("rpc_endpoint") == nodes_by_impl[converge_impl]["rpc_endpoint"] and tip.get("request_path") == "/get_tip", f"{converge_label} tip sidecar identity mismatch")
-        req(tip.get("has_tip") is True and tip.get("height") == height and tip.get("tip_hash") == block_hash, f"{converge_label} tip sidecar does not match {mine_label} block")
+        req(mine_next_commit_state_ok(mine_next, mine_impl), f"{mine_label}.mine_next keys mismatch: {sorted(mine_next)}")
+        req(mine_result_ok(mine_next) and mine_next.get("height") == height and mine_next.get("block_hash") == block_hash and mine_next.get("tx_count") == mine["tx_count"], f"{mine_label} mine_next sidecar does not match report")
+        verify_block_inclusion_sidecar(f"{mine_label}.block_path", mine_block_path, txhex, txid, height, block_hash, mine["tx_count"], mine_impl, nodes_by_impl[mine_impl]["rpc_endpoint"])
+        verify_block_inclusion_sidecar(f"{converge_label}.block_path", converge_block_path, txhex, txid, height, block_hash, mine["tx_count"], converge_impl, nodes_by_impl[converge_impl]["rpc_endpoint"])
+        tip = tip_capture(f"{converge_label}.tip", converge_tip_path, converge_impl, nodes_by_impl[converge_impl]["rpc_endpoint"])
+        req(tip_sidecar_ok(tip, height, block_hash), f"{converge_label} tip sidecar does not match {mine_label} block")
     validate_raw_samples(data, tx_mode, go_submit_mode, converge_mode, txid, block_hash if converge_mode else None, height if converge_mode else None)
 else:
     validate_raw_samples(data, tx_mode, go_submit_mode, converge_mode)
@@ -778,7 +817,133 @@ if not partition_mode:
         if live:
             endpoint = nodes_by_impl["go" if field.startswith("go_") else "rust"]["rpc_endpoint"]
             eventually(lambda endpoint=endpoint, stored=stored, expected_addr=expected_addr: (fresh := peers(endpoint)) is not None and stored == snapshot_norm(fresh, expected_addr, False), f"{field} differs from live exact peer set")
+SN_INVALID, SN_GENESIS, SN_GRAMMAR = "store_neutrality_sidecar_invalid", "store_neutrality_genesis_mismatch", "store_neutrality_header_grammar_mismatch"
+def sn_req(ok: bool, detail: str, token: str = SN_INVALID) -> None:
+    if not ok: fail(f"{token}: {detail}")
+def sn_file(label: str, value: object) -> tuple:
+    sn_label = f"{SN_INVALID}: {label}"
+    return sn_label, artifact_file(sn_label, value, artifact_root)
+def sn_dir(label: str, value: object) -> Path:
+    p = checked_path(f"{SN_INVALID}: {label}", value)
+    sn_req(os.path.isdir(p) and os.path.isdir(value), f"{label} does not resolve to an existing directory")
+    return p
+def distinct_files(a: Path, b: Path) -> bool:
+    try: sa, sb = os.stat(a), os.stat(b)
+    except (OSError, ValueError): return False
+    return (sa.st_dev, sa.st_ino) != (sb.st_dev, sb.st_ino)
+def sn_tip(impl: str, endpoint: str, conv: dict, chain: bool) -> None:
+    label, p = sn_file(f"initial_convergence.{impl}_tip_path", conv[f"{impl}_tip_path"])
+    if chain:
+        tip_sidecar(label, p, impl, endpoint, conv["height"], conv[f"{impl}_tip_hash"])
+        return
+    req(tip_absent(tip_capture(label, p, impl, endpoint)), f"{label} does not report an absent tip")
+def sn_block(impl: str, endpoint: str, genesis: dict) -> dict:
+    label, p = sn_file(f"genesis.{impl}_block_path", genesis[f"{impl}_block_path"])
+    block = block_capture(label, p, impl, endpoint, 0)
+    req(is_json_int(block["height"]) and block["height"] == 0 and block["canonical"] is True and isinstance(block["block_hex"], str) and re.fullmatch(r"(?:[0-9a-f]{2})+", block["block_hex"]) is not None, f"{label} is not the {impl} genesis block capture")
+    return block
+def store_neutrality_checks() -> None:
+    chain = scenario != SCENARIO_MESH
+    sidecar = load_json_file(*sn_file("store-neutrality sidecar", root_entry("mixed-client-mesh-store-neutrality.json")))
+    sn_req(set(sidecar) == {"evidence_domain", "protocol_commit", "clients_tree_clean", "binaries", "chain_identity", "genesis", "header_bytes", "datadirs", "initial_convergence"}, f"sidecar keys mismatch: {sorted(sidecar)}")
+    sn_req(sidecar["evidence_domain"] == "pre_switch_store_neutrality", "evidence_domain mismatch")
+    sn_req(isinstance(sidecar["protocol_commit"], str) and re.fullmatch(r"[0-9a-f]{40}", sidecar["protocol_commit"]) is not None, "protocol_commit is not 40 lowercase hex")
+    sn_req(sidecar["clients_tree_clean"] is True, "clients_tree_clean is not true")
+    binaries = sidecar["binaries"]
+    sn_req(isinstance(binaries, dict) and set(binaries) == {"go_node_sha256", "rust_node_sha256", "txgen_sha256"}, "binaries keys mismatch")
+    for key, name, impl in (("go_node_sha256", "rubin-node-go", "go"), ("rust_node_sha256", "rubin-node-rust", "rust"), ("txgen_sha256", "rubin-txgen", None)):
+        if key == "txgen_sha256" and not chain:
+            sn_req(binaries[key] is None, "binaries.txgen_sha256 is not null")
+        else:
+            sn_req(regular_file(root_entry(name)), f"artifact_root/{name} is not a regular file")
+            sn_req(hex32(binaries[key]) and binaries[key] == file_sha256(artifact_root / name), f"binaries.{key} does not match artifact_root/{name}")
+            sn_req(impl is None or os.path.realpath(nodes_by_impl[impl]["binary"]) == os.path.realpath(artifact_root / name), f"the {impl} node binary does not resolve to artifact_root/{name}")
+    ident = sidecar["chain_identity"]
+    sn_req(isinstance(ident, dict) and set(ident) == {"network", "chain_id_hex", "genesis_hash_hex"} and ident["network"] == "devnet" and hex32(ident["chain_id_hex"]) and hex32(ident["genesis_hash_hex"]), "chain_identity malformed")
+    dirs = sidecar["datadirs"]
+    sn_req(isinstance(dirs, dict) and set(dirs) == {"go", "rust", "rust_exact_empty_before_first_start"}, "datadirs mismatch")
+    sn_req(sn_dir("datadirs.go", dirs["go"]) == sn_dir("artifact_root/node-go", root_entry("node-go")) and sn_dir("datadirs.rust", dirs["rust"]) == sn_dir("artifact_root/node-rust", root_entry("node-rust")) and dirs["rust_exact_empty_before_first_start"] is True, "datadirs mismatch")
+    sn_req(distinct_files(artifact_root / "node-go", artifact_root / "node-rust"), "artifact_root/node-go and artifact_root/node-rust resolve to one directory")
+    conv = sidecar["initial_convergence"]
+    sn_req(isinstance(conv, dict) and set(conv) == {"go_has_tip", "rust_has_tip", "height", "go_tip_hash", "rust_tip_hash", "go_tip_path", "rust_tip_path"}, "initial_convergence keys mismatch")
+    if chain:
+        sn_req(conv["go_has_tip"] is True and conv["rust_has_tip"] is True and is_json_int(conv["height"], 101) and hex32(conv["go_tip_hash"]) and conv["go_tip_hash"] == conv["rust_tip_hash"], "initial_convergence does not prove equal tips at height 101 or above")
+    else:
+        sn_req(conv["go_has_tip"] is False and conv["rust_has_tip"] is False and conv["height"] is None and conv["go_tip_hash"] is None and conv["rust_tip_hash"] is None, "initial_convergence does not prove two absent tips")
+    go_rpc = nodes_by_impl["go"]["rpc_endpoint"]
+    rust_rpc = restart_info["old_rpc_endpoint"] if restart_mode else nodes_by_impl["rust"]["rpc_endpoint"]
+    sn_tip("go", go_rpc, conv, chain)
+    sn_tip("rust", rust_rpc, conv, chain)
+    genesis, heights = sidecar["genesis"], sidecar["header_bytes"]
+    if not chain:
+        sn_req(genesis is None and heights is None, "genesis and header_bytes are not null")
+        return
+    sn_req(isinstance(genesis, dict) and set(genesis) == {"go_hash", "rust_hash", "go_block_path", "rust_block_path"} and hex32(genesis["go_hash"]) and hex32(genesis["rust_hash"]), "genesis malformed")
+    blocks = {"go": sn_block("go", go_rpc, genesis), "rust": sn_block("rust", rust_rpc, genesis)}
+    sn_req(isinstance(heights, dict) and set(heights) == {"go", "rust"} and all(isinstance(v, int) and not isinstance(v, bool) for v in heights.values()), "header_bytes malformed")
+    if partition_mode:
+        sn_req(common_mine["height"] > conv["height"], "partition common block height is not above initial_convergence.height")
+    if converge_mode:
+        sn_req(height > conv["height"], f"{mine_label}.height is not above initial_convergence.height")
+    if restart_mode:
+        sn_req(pre_restart_height >= conv["height"], "rust_restart.pre_restart_height is below initial_convergence.height")
+        sn_req(pre_restart_height > conv["height"] or restart_info["pre_restart_tip"] == conv["rust_tip_hash"], "rust_restart.pre_restart_tip differs from initial_convergence.rust_tip_hash at the same height")
+    sn_req(genesis["go_hash"] == genesis["rust_hash"] == ident["genesis_hash_hex"], "go_hash, rust_hash and chain_identity.genesis_hash_hex are not all equal", SN_GENESIS)
+    for impl in ("go", "rust"):
+        sn_req(blocks[impl]["hash"] == genesis[f"{impl}_hash"], f"genesis.{impl}_block_path hash differs from genesis.{impl}_hash", SN_GENESIS)
+    for impl in ("go", "rust"):
+        sn_req(heights[impl] in (116, 148), f"header_bytes.{impl} is not 116 or 148", SN_GRAMMAR)
+    sn_req(heights["go"] == heights["rust"], "header_bytes.go differs from header_bytes.rust", SN_GRAMMAR)
+    for impl in ("go", "rust"):
+        sn_req(header_length(blocks[impl]["block_hex"], blocks[impl]["hash"]) == heights[impl], f"header_bytes.{impl} is not the unique header length hashing to the genesis hash", SN_GRAMMAR)
+store_neutrality_checks()
 print(f"PASS: {scenario} report {'accepted' if live else 'structurally accepted'} {path}" + ("" if live else "; live proof not checked"))
+PY
+}
+# Prints the Python derivations shared by the producer side and check_report:
+# regular_file is true for a path resolving to a regular file; file_sha256 is the sha256
+# hex of such a file (None for any other path, not opened, or when unreadable); header_length is the
+# unique n in {116, 148} whose SHA3-256 over the first n block bytes equals
+# block_hash, else 0; load_json_or_none is the parsed JSON of a file (None when
+# unreadable or malformed); tip_absent is true for a /get_tip object whose has_tip is
+# false and whose height and tip_hash are present and null; tip_at is true for a
+# /get_tip object whose has_tip is true and whose height and tip_hash equal the given ones.
+sidecar_derivations_py() { cat <<'PY'
+import hashlib, json, os, stat
+from typing import Union
+def regular_file(path: object) -> bool:
+    try: return stat.S_ISREG(os.stat(path).st_mode)
+    except (OSError, ValueError): return False
+def open_regular_read(path: Union[str, bytes], flags: int) -> int:
+    fd = os.open(path, flags | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("descriptor is not a regular file")
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+def file_sha256(path: object) -> object:
+    if not regular_file(path): return None
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb", opener=open_regular_read) as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""): digest.update(chunk)
+        return digest.hexdigest()
+    except OSError: return None
+def header_length(block_hex: object, block_hash: object) -> int:
+    try: raw = bytes.fromhex(block_hex)
+    except ValueError: return 0
+    found = [n for n in (116, 148) if len(raw) >= n and hashlib.sha3_256(raw[:n]).hexdigest() == block_hash]
+    return found[0] if len(found) == 1 else 0
+def load_json_or_none(path: object) -> object:
+    try:
+        with open(path, encoding="utf-8", opener=open_regular_read) as f: return json.load(f)
+    except (OSError, ValueError, RecursionError): return None
+def tip_absent(tip: object) -> bool:
+    return isinstance(tip, dict) and tip.get("has_tip") is False and "height" in tip and tip["height"] is None and "tip_hash" in tip and tip["tip_hash"] is None
+def tip_at(tip: object, height: object, block_hash: object) -> bool:
+    return isinstance(tip, dict) and tip.get("has_tip") is True and tip.get("height") == height and tip.get("tip_hash") == block_hash
 PY
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
@@ -790,9 +955,8 @@ source "${HELPER}"
 rubin_process_init mixed-client-mesh
 GO_NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"; RUST_NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-rust"
 GO_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-go"; RUST_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-rust"
-# A datadir is initialized once, by whoever constructs it first: the prepare_*
-# mine, or the first node start in plain mode. Every later start/restart, and
-# the Rust datadir once it is a byte-copy of the Go one, is a reopen.
+# A datadir is initialized once, by its own client: the prepare_* mine for Go,
+# or the first node start. Every later start/restart is a reopen.
 GO_STORE_READY=0; RUST_STORE_READY=0
 GO_LOG="node-go.log"; RUST_LOG="node-rust.log"; RUST_RESTART_LOG="node-rust-restart.log"; PARTITION_PROXY_LOG="partition-proxy.log"; REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-report.json"; LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-legacy-schema-marker.json"
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
@@ -806,13 +970,15 @@ PARTITION_PROXY_SCRIPT="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-proxy.py"; PART
 PARTITION_PRE_GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-pre-go-peers.json"; PARTITION_PRE_RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-pre-rust-peers.json"; PARTITION_COMMON_GO_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-common-go-mine.json"; PARTITION_COMMON_GO_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-common-go-block.json"; PARTITION_COMMON_RUST_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-common-rust-tip.json"; PARTITION_COMMON_RUST_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-common-rust-block.json"
 PARTITION_DROP_GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-drop-go-peers.json"; PARTITION_DROP_RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-drop-rust-peers.json"; PARTITION_FORK_GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-fork-go-peers.json"; PARTITION_FORK_RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-fork-rust-peers.json"; PARTITION_GO_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-mine.json"; PARTITION_GO_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-tip.json"; PARTITION_GO_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-block.json"
 PARTITION_RUST_MINE1_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-mine-1.json"; PARTITION_RUST_MINE2_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-mine-2.json"; PARTITION_RUST_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-tip.json"; PARTITION_RUST_BLOCK1_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-block-1.json"; PARTITION_RUST_BLOCK2_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-block-2.json"; PARTITION_HEAL_GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-heal-go-peers.json"; PARTITION_HEAL_RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-heal-rust-peers.json"
+INITIAL_GO_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/initial-convergence-go-tip.json"; INITIAL_RUST_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/initial-convergence-rust-tip.json"
+STORE_NEUTRALITY_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-store-neutrality.json"; CHAIN_IDENTITY_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-chain-identity.json"; GENESIS_GO_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/genesis-go-block.json"; GENESIS_RUST_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/genesis-rust-block.json"; RUST_EXACT_EMPTY_BEFORE_FIRST_START=false; SIDECAR_REASON=""
 PARTITION_FINAL_GO_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-go-tip.json"; PARTITION_FINAL_RUST_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-rust-tip.json"; PARTITION_GO_REORG_PARENT_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-reorg-parent-block.json"; PARTITION_FINAL_GO_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-go-block.json"; PARTITION_FINAL_RUST_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-rust-block.json"; PARTITION_GO_METRICS_PROM="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-metrics.prom"
 GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" TX_FROM_KEY_FILE="" TX_FROM_KEY_DIR="" TX_TO_KEY="" RUST_MINE_HEIGHT="" RUST_MINE_HASH="" RUST_MINE_TX_COUNT="" GO_MINE_HEIGHT="" GO_MINE_HASH="" GO_MINE_TX_COUNT="" PROPAGATION_SAMPLE_START_SECONDS="" PROPAGATION_SAMPLE_SECONDS="" CONVERGENCE_SAMPLE_SECONDS="" RUST_RESTART_REASON="" RUST_RESTART_TIP_TSV="" OLD_RUST_PID="" OLD_RUST_RPC_ADDR="" OLD_RUST_P2P_ADDR="" OLD_RUST_STARTED_AT_UTC="" OLD_RUST_ARGV_JSON="" PRE_RESTART_RUST_HEIGHT="" PRE_RESTART_RUST_TIP="" PRE_RESTART_RUST_HAS_TIP="" GO_RESTART_TARGET_HEIGHT="" GO_RESTART_TARGET_TIP="" GO_RESTART_TARGET_HAS_TIP="" GO_RESTART_TARGET_TX_COUNT="" POST_RESTART_RUST_HEIGHT="" POST_RESTART_RUST_TIP="" POST_RESTART_RUST_HAS_TIP="" OLD_RUST_PID_STOPPED="" RUST_RESTART_SAME_DATADIR="" RUST_RESTART_PEER_RECONNECTED="" PARTITION_PROXY_PID="" PARTITION_PROXY_ADDR="" PARTITION_PRE_GO_PEER_ADDR="" PARTITION_HEAL_GO_PEER_ADDR="" PARTITION_COMMON_HEIGHT="" PARTITION_COMMON_HASH="" PARTITION_GO_FORK_HEIGHT="" PARTITION_GO_FORK_HASH="" PARTITION_RUST_WIN_HEIGHT="" PARTITION_RUST_WIN_HASH="" PARTITION_FINAL_GO_HEIGHT="" PARTITION_FINAL_GO_HASH="" PARTITION_FINAL_RUST_HEIGHT="" PARTITION_FINAL_RUST_HASH="" PARTITION_REORG_TOTAL="" PARTITION_REORG_DEPTH="" PARTITION_REASON=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
 bounded() { perl -e 'alarm shift @ARGV; exec @ARGV; die "exec failed: $!\n"' 5 "$@"; }
 bounded_mesh() { perl -e 'alarm shift @ARGV; exec @ARGV; die "exec failed: $!\n"' "${MESH_TIMEOUT}" "$@"; }
-argv_cmd() { local out="" arg q; for arg; do printf -v q "%q" "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "${out}"; }; argv_json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
+argv_cmd() { python3 -c 'import shlex,sys; print(shlex.join(sys.argv[1:]))' "$@"; }; argv_json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
 loopback_endpoint() { local endpoint="${1:-}" port; [[ "${endpoint}" =~ ^127[.]0[.]0[.]1:([0-9]{1,5})$ ]] || return 1; port="${BASH_REMATCH[1]}"; (( 10#${port} >= 1 && 10#${port} <= 65535 )); }
 disable_xtrace_for_secret() { case "$-" in *x*) set +x; return 0 ;; *) return 1 ;; esac; }
 restore_xtrace_after_secret() { [[ "${1:-0}" == "1" ]] && set -x; return 0; }
@@ -836,9 +1002,10 @@ trap rubin_process_exit_trap_with_tx_secret_cleanup EXIT
 check_report_reason_token() {
   local msg
   msg="$(cat)"
-  python3 - "${msg}" <<'PY'
+  { fail_detail_token_py; cat <<'PY'; } | python3 - 3<<<"${msg}"
 import sys
-msg = " ".join(x[5:].strip() for x in sys.argv[1].splitlines() if x.startswith("FAIL:"))
+text = open(3, encoding="utf-8", errors="surrogateescape").read()
+msg = " ".join(x[5:].strip() for x in text.splitlines() if x.startswith("FAIL:"))
 rules = [
     ("partition-heal-reorg validation requires", "partition_reorg_scenario_required"),
     ("public partition-heal-reorg check-report-live is unsupported", "public_partition_check_report_live_unsupported"),
@@ -961,15 +1128,19 @@ rules = [
     ("raw_samples.convergence", "convergence_samples_invalid"),
     ("root is not an object", "report_root_invalid"),
 ]
-print(next((token for pattern, token in rules if pattern in msg), "unknown"))
+print(fail_detail_token(text) or next((token for pattern, token in rules if pattern in msg), "unknown"))
 PY
 }
 tx_report_reason_token() {
   local msg
   msg="$(cat)"
-  python3 - "${msg}" <<'PY'
+  { fail_detail_token_py; cat <<'PY'; } | python3 - 3<<<"${msg}"
 import re, sys
-msg = "\n".join(line[5:].strip() if line.startswith("FAIL:") else line for line in sys.argv[1].splitlines())
+text = open(3, encoding="utf-8", errors="surrogateescape").read()
+msg = "\n".join(line[5:].strip() if line.startswith("FAIL:") else line for line in text.splitlines())
+if (sn_token := fail_detail_token(text)) is not None:
+    print(sn_token)
+    sys.exit(0)
 rules = [("raw_samples.propagation", "propagation_samples_invalid"), ("raw_samples.convergence", "convergence_samples_invalid"), ("rust_mine is not node-rust mined_included", "rust_mine_class_invalid"), ("go_mine is not node-go mined_included", "go_mine_class_invalid"), ("go_converge is not node-go canonical_block_found", "go_converge_class_invalid"), ("rust_converge is not node-rust canonical_block_found", "rust_converge_class_invalid"), ("mined/converged RPC endpoints are not bound", "converge_rpc_endpoint_mismatch"), ("rust_mine.height is malformed", "rust_mine_height_invalid"), ("go_mine.height is malformed", "go_mine_height_invalid"), ("rust_mine.block_hash is malformed", "rust_mine_hash_invalid"), ("go_mine.block_hash is malformed", "go_mine_hash_invalid"), ("sidecar identity mismatch", "converge_sidecar_identity_mismatch"), ("converge sidecar paths are not pairwise distinct", "converge_sidecar_paths_not_distinct"), ("submitted txid missing from parsed block txids", "block_missing_submitted_txid"), ("parse block_hex failed", "block_hex_parse_failed"), ("parsed block hash mismatch", "block_hash_mismatch"), ("parsed block tx_count mismatch", "block_tx_count_mismatch"), ("basic block validation failed", "block_basic_validation_failed"), ("inclusion check timeout", "block_inclusion_timeout"), ("inclusion check failed", "block_inclusion_failed"), ("mined/converged tx identity differs", "converged_tx_identity_mismatch"), ("go_converge does not match rust_mine", "go_converge_height_hash_mismatch"), ("rust_converge does not match go_mine", "rust_converge_height_hash_mismatch"), ("rust_mine.tx_count", "rust_mine_tx_count_invalid"), ("go_mine.tx_count", "go_mine_tx_count_invalid"), ("mine_next sidecar does not match", "mine_sidecar_invalid"), ("sidecar height/hash/canonical mismatch", "block_sidecar_invalid"), ("block_hex is missing", "block_sidecar_invalid"), ("tip sidecar does not match", "converge_tip_invalid"), ("tx parser consumed mismatch", "tx_parser_consumed_mismatch"), ("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "tx_capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
 for needle, token in rules:
     if needle in msg:
@@ -1004,6 +1175,14 @@ combined_report_reason_token() {
   token="$(tx_report_reason_token <<<"${msg}")"
   if [[ "${token}" == "unclassified" ]]; then token="$(check_report_reason_token <<<"${msg}")"; fi
   [[ "${token}" == "unknown" || "${token}" == "unclassified" ]] && token=tx_report_validation_failed; printf '%s\n' "${token}"
+}
+# Prints Python defining fail_detail_token(text): the store-neutrality refusal token that,
+# followed by a colon, begins the detail of a FAIL line of text, else None.
+fail_detail_token_py() { cat <<'PY'
+def fail_detail_token(text):
+    tokens = ("store_neutrality_sidecar_invalid", "store_neutrality_genesis_mismatch", "store_neutrality_header_grammar_mismatch")
+    return next((token for line in text.splitlines() if line.startswith("FAIL:") for token in tokens if line[5:].strip().startswith(token + ":")), None)
+PY
 }
 rpc_json() {
   local method="$1" addr="$2" path="$3"
@@ -1282,8 +1461,6 @@ PY
   echo "Mining mature chainstate for mixed-client evidence" >&2
   bounded_mesh "${GO_NODE_BIN}" --network devnet --create-store --datadir "${GO_DIR}" --mine-address "${mine_address}" --mine-blocks 101 --mine-exit >"$(_rubin_process_resolve_log "${MINE_LOG}")" 2>&1 || { status=$?; cleanup_tx_from_key_file || true; [[ ${status} -eq 142 ]] && TX_REASON=go_submit_mine_timeout || TX_REASON=go_submit_mine_failed; return 1; }
   GO_STORE_READY=1
-  cp -R -- "${GO_DIR}/." "${RUST_DIR}/" || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_chainstate_copy_failed; return 1; }
-  RUST_STORE_READY=1
 }
 prepare_restart_chainstate() {
   TX_REASON=""
@@ -1296,7 +1473,6 @@ rust_restart_prepare_reason() {
     "") printf '%s\n' rust_restart_chainstate_prepare_failed ;;
     go_submit_keygen_*) printf 'rust_restart_keygen_%s\n' "${1#go_submit_keygen_}" ;;
     go_submit_mine_*) printf 'rust_restart_chainstate_mine_%s\n' "${1#go_submit_mine_}" ;;
-    go_submit_chainstate_copy_failed) printf '%s\n' rust_restart_chainstate_copy_failed ;;
     go_submit_*) printf 'rust_restart_chainstate_%s\n' "${1#go_submit_}" ;;
     *) printf 'rust_restart_%s\n' "${1}" ;;
   esac
@@ -1306,7 +1482,6 @@ partition_prepare_reason() {
     "") printf '%s\n' partition_chainstate_prepare_failed ;;
     go_submit_keygen_*) printf 'partition_keygen_%s\n' "${1#go_submit_keygen_}" ;;
     go_submit_mine_*) printf 'partition_chainstate_mine_%s\n' "${1#go_submit_mine_}" ;;
-    go_submit_chainstate_copy_failed) printf '%s\n' partition_chainstate_copy_failed ;;
     go_submit_*) printf 'partition_chainstate_%s\n' "${1#go_submit_}" ;;
     *) printf 'partition_%s\n' "${1}" ;;
   esac
@@ -1434,11 +1609,18 @@ if got.get("raw_hex") != txhex:
     fail(16, "get_tx_raw_hex_mismatch")
 PY
 }
+txgen_datadir_guard() {
+  local datadir=""
+  while (( $# )); do [[ "$1" == --datadir && $# -ge 2 ]] && datadir="$2"; shift; done
+  [[ "${datadir}" == /* && "${datadir}/" != *//* && "${datadir}/" != */./* && "${datadir}/" != */../* &&
+     -d "${datadir}" && -d "${RUST_DIR}" && ! "${datadir}" -ef "${RUST_DIR}" ]] || { TX_REASON=cross_client_datadir_argv; return 1; }
+}
 submit_go_tx() {
   local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key-file "${TX_FROM_KEY_FILE}" --to-key "${TX_TO_KEY}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}" --submit-to "${GO_RPC_ADDR}")
   local status=0 cleanup_status=0 rc=0
   TX_REASON=""
   [[ -n "${TX_FROM_KEY_FILE}" && -f "${TX_FROM_KEY_FILE}" && -n "${TX_TO_KEY}" ]] || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_keygen_material_malformed; return 1; }
+  txgen_datadir_guard "${argv[@]}" || { cleanup_tx_from_key_file || true; return 1; }
   TX_HEX="$(bounded_mesh "${argv[@]}")" || status=$?
   PROPAGATION_SAMPLE_START_SECONDS="${SECONDS}"
   cleanup_tx_from_key_file || cleanup_status=$?
@@ -1451,10 +1633,11 @@ submit_go_tx() {
   verify_tx_sidecars go_submit go "${GO_RPC_ADDR}" "${TX_ID}" "${TX_HEX}" "/tx_status?txid=${TX_ID}" "/get_tx?txid=${TX_ID}" "${GO_SUBMIT_STATUS_JSON}" "${GO_SUBMIT_GET_TX_JSON}" || { rc=$?; TX_REASON="$(tx_sidecar_reason go_submit "${rc}")"; return 1; }
 }
 submit_rust_tx() {
-  local -a argv=("${TXGEN_BIN}" --datadir "${RUST_DIR}" --from-key-file "${TX_FROM_KEY_FILE}" --to-key "${TX_TO_KEY}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}" --submit-to "${RUST_RPC_ADDR}")
+  local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key-file "${TX_FROM_KEY_FILE}" --to-key "${TX_TO_KEY}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}" --submit-to "${RUST_RPC_ADDR}")
   local status=0 cleanup_status=0 rc=0
   TX_REASON=""
   [[ -n "${TX_FROM_KEY_FILE}" && -f "${TX_FROM_KEY_FILE}" && -n "${TX_TO_KEY}" ]] || { cleanup_tx_from_key_file || true; TX_REASON=rust_submit_keygen_material_malformed; return 1; }
+  txgen_datadir_guard "${argv[@]}" || { cleanup_tx_from_key_file || true; return 1; }
   TX_HEX="$(bounded_mesh "${argv[@]}")" || status=$?
   PROPAGATION_SAMPLE_START_SECONDS="${SECONDS}"
   cleanup_tx_from_key_file || cleanup_status=$?
@@ -1474,6 +1657,7 @@ wait_rust_accept() {
     if capture_tx_rpc_sidecar rust "${RUST_RPC_ADDR}" "/tx_status?txid=${TX_ID}" "${RUST_STATUS_JSON}"; then
       if capture_tx_rpc_sidecar rust "${RUST_RPC_ADDR}" "/get_tx?txid=${TX_ID}" "${RUST_GET_TX_JSON}"; then
         if verify_tx_sidecars rust_accept rust "${RUST_RPC_ADDR}" "${TX_ID}" "${TX_HEX}" "/tx_status?txid=${TX_ID}" "/get_tx?txid=${TX_ID}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" >/dev/null 2>&1; then
+          (( SECONDS < deadline )) || break
           PROPAGATION_SAMPLE_SECONDS=$((SECONDS - start_seconds))
           return 0
         else
@@ -1500,6 +1684,7 @@ wait_go_accept() {
     if capture_tx_rpc_sidecar go "${GO_RPC_ADDR}" "/tx_status?txid=${TX_ID}" "${GO_ACCEPT_STATUS_JSON}"; then
       if capture_tx_rpc_sidecar go "${GO_RPC_ADDR}" "/get_tx?txid=${TX_ID}" "${GO_ACCEPT_GET_TX_JSON}"; then
         if verify_tx_sidecars go_accept go "${GO_RPC_ADDR}" "${TX_ID}" "${TX_HEX}" "/tx_status?txid=${TX_ID}" "/get_tx?txid=${TX_ID}" "${GO_ACCEPT_STATUS_JSON}" "${GO_ACCEPT_GET_TX_JSON}" >/dev/null 2>&1; then
+          (( SECONDS < deadline )) || break
           PROPAGATION_SAMPLE_SECONDS=$((SECONDS - start_seconds))
           return 0
         else
@@ -1707,18 +1892,15 @@ go_mine_including_tx() {
   verify_block_inclusion go_mine "${GO_MINE_BLOCK_JSON}" "${GO_MINE_HEIGHT}" "${GO_MINE_HASH}" "${GO_MINE_TX_COUNT}"
 }
 tip_matches() {
-  python3 - "$1" "$2" "$3" <<'PY'
-import json, sys
+  { sidecar_derivations_py; cat <<'PY'; } | python3 - "$1" "$2" "$3"
+import sys
 path, height_raw, block_hash = sys.argv[1:4]
-try:
-    height = int(height_raw)
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
-    sys.exit(2)
+try: height = int(height_raw)
+except ValueError: sys.exit(2)
+data = load_json_or_none(path)
 if not isinstance(data, dict):
     sys.exit(2)
-sys.exit(0 if data.get("has_tip") is True and data.get("height") == height and data.get("tip_hash") == block_hash else 1)
+sys.exit(0 if tip_at(data, height, block_hash) else 1)
 PY
 }
 wait_go_converge_to_rust_mined_block() {
@@ -1728,6 +1910,7 @@ wait_go_converge_to_rust_mined_block() {
   while (( SECONDS < deadline )); do
     if capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /get_tip "${tmp}"; then
       if tip_matches "${tmp}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}"; then
+        (( SECONDS < deadline )) || break
         CONVERGENCE_SAMPLE_SECONDS=$((SECONDS - start_seconds))
         mv -- "${tmp}" "${GO_CONVERGE_TIP_JSON}" || { TX_REASON=go_converge_artifact_write_failed; return 1; }
         capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=${RUST_MINE_HEIGHT}" "${GO_CONVERGE_BLOCK_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason go_converge_get_block "${rc}")"; return 1; }
@@ -1756,6 +1939,7 @@ wait_rust_converge_to_go_mined_block() {
   while (( SECONDS < deadline )); do
     if capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" /get_tip "${tmp}"; then
       if tip_matches "${tmp}" "${GO_MINE_HEIGHT}" "${GO_MINE_HASH}"; then
+        (( SECONDS < deadline )) || break
         CONVERGENCE_SAMPLE_SECONDS=$((SECONDS - start_seconds))
         mv -- "${tmp}" "${RUST_CONVERGE_TIP_JSON}" || { TX_REASON=rust_converge_artifact_write_failed; return 1; }
         capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" "/get_block?height=${GO_MINE_HEIGHT}" "${RUST_CONVERGE_BLOCK_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason rust_converge_get_block "${rc}")"; return 1; }
@@ -2127,12 +2311,11 @@ finish_no_data() {
   exit 1
 }
 wait_peer_snapshot() {
-  local label="$1" addr="$2" out="$3" timeout="$4" expected="$5" deadline tmp
+  local label="$1" addr="$2" out="$3" timeout="$4" expected="$5" deadline tmp last_err="" last_bad=""
   deadline=$((SECONDS + timeout)); PEER_SNAPSHOT_REASON=""
   tmp="${out}.tmp"
   while (( SECONDS < deadline )); do
     if rpc_json GET "${addr}" /peers >"${tmp}" 2>"${tmp}.err"; then
-      PEER_SNAPSHOT_REASON=""
       if python3 - "${tmp}" "${expected}" <<'PY' >/dev/null 2>&1
 import json, sys
 path = sys.argv[1]
@@ -2156,12 +2339,15 @@ if shape and has_expected_complete and count == 1:
     sys.exit(0)
 sys.exit(3 if shape and has_expected_complete else 5 if not shape else 6 if has_expected_incomplete else 7)
 PY
-      then mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
-      else rc=$?; [[ ${rc} -eq 3 ]] && PEER_SNAPSHOT_REASON=unexpected_peer_snapshot_peer; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; [[ ${rc} -eq 5 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_invalid_shape; [[ ${rc} -eq 6 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_handshake_incomplete; [[ ${rc} -eq 7 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_expected_peer_absent; fi
+      then (( SECONDS < deadline )) || break; mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
+      else rc=$?; PEER_SNAPSHOT_REASON=""; [[ ${rc} -eq 3 ]] && PEER_SNAPSHOT_REASON=unexpected_peer_snapshot_peer; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; [[ ${rc} -eq 5 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_invalid_shape; [[ ${rc} -eq 6 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_handshake_incomplete; [[ ${rc} -eq 7 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_expected_peer_absent; fi
     else rc=$?; [[ ${rc} -eq 23 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json || PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; fi
+    # The end reason reads the files as the last unaccepted capture left them.
+    last_err=""; [[ ! -s "${tmp}.err" ]] || last_err=1
+    last_bad=""; [[ -n "${PEER_SNAPSHOT_REASON:-}" || -n "${last_err}" || ! -s "${tmp}" ]] || python3 -m json.tool "${tmp}" >/dev/null 2>&1 || last_bad=1
     sleep 1
   done
-  if [[ "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_rpc_failed || -s "${tmp}.err" ]]; then PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; elif [[ "${PEER_SNAPSHOT_REASON:-}" == unexpected_peer_snapshot_peer || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_malformed_json || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_invalid_shape || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_handshake_incomplete || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_expected_peer_absent ]]; then :; elif [[ -s "${tmp}" ]] && ! python3 -m json.tool "${tmp}" >/dev/null 2>&1; then PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; else PEER_SNAPSHOT_REASON="${label}_peer_snapshot_missing_endpoint"; fi
+  if [[ "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_rpc_failed || -n "${last_err}" ]]; then PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; elif [[ "${PEER_SNAPSHOT_REASON:-}" == unexpected_peer_snapshot_peer || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_malformed_json || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_invalid_shape || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_handshake_incomplete || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_expected_peer_absent ]]; then :; elif [[ -n "${last_bad}" ]]; then PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; else PEER_SNAPSHOT_REASON="${label}_peer_snapshot_missing_endpoint"; fi
   rm -f -- "${tmp}" "${tmp}.err"
   echo "timeout waiting for ${label} /peers completed handshake: ${PEER_SNAPSHOT_REASON}" >&2
   return 1
@@ -2295,6 +2481,7 @@ wait_rust_restart_catch_up() {
         rm -f -- "${tmp}"
         return 1
       else
+        (( SECONDS < deadline )) || break
         mv -- "${tmp}" "${RUST_CATCH_UP_TIP_JSON}" || { RUST_RESTART_REASON=rust_restart_catch_up_artifact_write_failed; rm -f -- "${tmp}"; return 1; }
         POST_RESTART_RUST_HEIGHT="${height}"
         POST_RESTART_RUST_TIP="${tip}"
@@ -2311,7 +2498,7 @@ wait_rust_restart_catch_up() {
 write_partition_proxy() {
   cat >"${PARTITION_PROXY_SCRIPT}" <<'PY'
 #!/usr/bin/env python3
-import os, select, socket, sys, threading, time
+import select, socket, sys, threading, time
 
 state_path = sys.argv[1]
 active = set()
@@ -2462,7 +2649,7 @@ with open(path, "w", encoding="utf-8") as dst:
     json.dump({"count": count, "peers": [{"addr": p["addr"], "handshake_complete": p["handshake_complete"]} for p in peers]}, dst, sort_keys=True)
     dst.write("\n")
 PY
-      then mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
+      then (( SECONDS < deadline )) || break; mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
       else rc=$?; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; [[ ${rc} -eq 5 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_invalid_shape; [[ ${rc} -eq 6 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_not_empty; [[ ${rc} -eq 7 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_expected_peer_absent; fi
     else rc=$?; [[ ${rc} -eq 23 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json || PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; fi
     sleep 1
@@ -2490,18 +2677,152 @@ partition_mine() {
 wait_tip_to_match() {
   local label="$1" impl="$2" addr="$3" height="$4" block_hash="$5" out="$6" deadline tmp
   deadline=$((SECONDS + MESH_TIMEOUT)); tmp="${out}.tmp"; PARTITION_REASON=""
-  while (( SECONDS < deadline )); do
-    if partition_capture_tip "${label}" "${impl}" "${addr}" "${tmp}" >/dev/null; then
+  while :; do
+    if partition_capture_tip "${label}" "${impl}" "${addr}" "${tmp}" >/dev/null && (( SECONDS < deadline )); then
       if tip_matches "${tmp}" "${height}" "${block_hash}"; then
         mv -- "${tmp}" "${out}" || { PARTITION_REASON="${label}_artifact_write_failed"; rm -f -- "${tmp}"; return 1; }
         return 0
       fi
     fi
     sleep 1
+    (( SECONDS < deadline )) || break
   done
   rm -f -- "${tmp}"
   PARTITION_REASON="${label}_timeout"
   return 1
+}
+tips_absent() {
+  { sidecar_derivations_py; cat <<'PY'; } | python3 - "$@"
+import sys
+sys.exit(0 if all(tip_absent(load_json_or_none(path)) for path in sys.argv[1:]) else 1)
+PY
+}
+wait_initial_tips_absent() {
+  local deadline go_status rust_status
+  deadline=$((SECONDS + MESH_TIMEOUT)); PARTITION_REASON=""
+  while :; do
+    go_status=0; capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /get_tip "${INITIAL_GO_TIP_JSON}" || go_status=$?
+    rust_status=0; capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" /get_tip "${INITIAL_RUST_TIP_JSON}" || rust_status=$?
+    if (( go_status == 0 && rust_status == 0 && SECONDS < deadline )) && tips_absent "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}"; then
+      return 0
+    fi
+    sleep 1
+    (( SECONDS < deadline )) || break
+  done
+  PARTITION_REASON=initial_convergence_timeout
+  return 1
+}
+# True in the modes that mine a chain before the first Rust start.
+chain_mode() { (( TX_PATH_MODE || RUST_RESTART_MODE || PARTITION_HEAL_REORG_MODE )); }
+wait_initial_convergence() {
+  local parsed height tip_hash
+  chain_mode || { wait_initial_tips_absent; return; }
+  PARTITION_REASON=""
+  parsed="$(partition_capture_tip initial_convergence_go_tip go "${GO_RPC_ADDR}" "${INITIAL_GO_TIP_JSON}" || { printf '%s\n' "${PARTITION_REASON}"; exit 1; })" || { PARTITION_REASON="${parsed}"; return 1; }
+  IFS='|' read -r height tip_hash _ <<<"${parsed}"
+  wait_tip_to_match initial_convergence rust "${RUST_RPC_ADDR}" "${height}" "${tip_hash}" "${INITIAL_RUST_TIP_JSON}"
+}
+# Runs one store-neutrality producer step over its arguments. identity, genesis and
+# binaries print one JSON object: identity and genesis the members of the captured
+# /chain_identity and /get_block?height=0 answers (genesis also derives each header
+# length), binaries the hashes of the binary files. write prints nothing and writes
+# the sidecar file named by its first argument. A step exits non-zero when it fails.
+store_neutrality_step() { { sidecar_derivations_py; cat <<'PY'; } | python3 - "$@"; }
+import os, sys
+step, args = sys.argv[1], sys.argv[2:]
+def members(path, keys):
+    data = load_json_or_none(path)
+    if not isinstance(data, dict) or not all(isinstance(data.get(key), str) for key in keys): sys.exit(1)
+    return {key: data[key] for key in keys}
+def sha256(path):
+    digest = file_sha256(path)
+    if digest is None: sys.exit(1)
+    return digest
+if step == "identity":
+    print(json.dumps(members(args[0], ("network", "chain_id_hex", "genesis_hash_hex"))))
+elif step == "genesis":
+    go_block, rust_block = members(args[0], ("hash", "block_hex")), members(args[1], ("hash", "block_hex"))
+    print(json.dumps({
+        # hash of each client's /get_block?height=0 answer and the path of that capture.
+        "genesis": {"go_hash": go_block["hash"], "rust_hash": rust_block["hash"], "go_block_path": args[0], "rust_block_path": args[1]},
+        # Per client, the n in {116, 148} whose SHA3-256 over the first n genesis block
+        # bytes equals the genesis hash; 0 when no unique n matches.
+        "header_bytes": {impl: header_length(block["block_hex"], block["hash"]) for impl, block in (("go", go_block), ("rust", rust_block))},
+    }))
+elif step == "binaries":
+    chain, go_bin, rust_bin, txgen_bin = args
+    # sha256 of artifact_root/rubin-node-go, rubin-node-rust and rubin-txgen.
+    print(json.dumps({"go_node_sha256": sha256(go_bin), "rust_node_sha256": sha256(rust_bin), "txgen_sha256": sha256(txgen_bin) if chain == "1" else None}))
+else:
+    out, ident, genesis, binaries, commit, dirty, go_dir, rust_dir, rust_empty, go_tip_path, rust_tip_path = args
+    go_tip, rust_tip = load_json_or_none(go_tip_path), load_json_or_none(rust_tip_path)
+    if not isinstance(go_tip, dict) or not isinstance(rust_tip, dict): sys.exit(1)
+    sidecar = {
+        # Constant tag: store neutrality observed on the header grammar both binaries share.
+        "evidence_domain": "pre_switch_store_neutrality",
+        # git rev-parse HEAD.
+        "protocol_commit": commit,
+        # True when clients_tree_status prints nothing.
+        "clients_tree_clean": dirty == "",
+        # go_node_sha256, rust_node_sha256 and txgen_sha256: sha256 of artifact_root/rubin-node-go,
+        # rubin-node-rust and rubin-txgen; txgen_sha256 is null in the default mode.
+        "binaries": json.loads(binaries),
+        # network, chain_id_hex and genesis_hash_hex copied from Go /chain_identity.
+        "chain_identity": json.loads(ident),
+        # genesis: go_hash and rust_hash, the hash of each client's /get_block?height=0 answer,
+        # and go_block_path and rust_block_path of those captures. header_bytes: go and rust, the
+        # n in {116, 148} whose SHA3-256 over the first n genesis block bytes equals that hash,
+        # 0 when no unique n matches. Both are null in the default mode, which captures no genesis block.
+        **(json.loads(genesis) if genesis else {"genesis": None, "header_bytes": None}),
+        # Both datadir paths; true when the Rust datadir held no entry before its first start.
+        "datadirs": {"go": go_dir, "rust": rust_dir, "rust_exact_empty_before_first_start": rust_empty == "true"},
+        # has_tip and tip_hash of the Go and Rust /get_tip answers the convergence wait
+        # accepted, the Go tip height, and the paths of those two captures.
+        "initial_convergence": {"go_has_tip": go_tip.get("has_tip"), "rust_has_tip": rust_tip.get("has_tip"), "height": go_tip.get("height"), "go_tip_hash": go_tip.get("tip_hash"), "rust_tip_hash": rust_tip.get("tip_hash"), "go_tip_path": go_tip_path, "rust_tip_path": rust_tip_path},
+    }
+    try:
+        with open(out + ".tmp", "w", encoding="utf-8") as f: json.dump(sidecar, f, indent=2, sort_keys=True); f.write("\n")
+        os.replace(out + ".tmp", out)
+    except OSError: sys.exit(1)
+PY
+# Runs git -C REPO_ROOT with the repository-local git variables of the caller (the names
+# git rev-parse --local-env-vars prints, such as GIT_DIR and GIT_WORK_TREE) unset.
+repo_git() (
+  local vars name
+  vars="$(command git rev-parse --local-env-vars)" || exit 1
+  while IFS= read -r name; do unset "${name}"; done <<<"${vars}"
+  git -C "${REPO_ROOT}" "$@"
+)
+# Prints git status --porcelain -- clients with untracked files listed, no user excludes
+# file and submodules compared, whatever the git configuration sets for these.
+clients_tree_status() { repo_git -c core.excludesFile=/dev/null status --porcelain --untracked-files=normal --ignore-submodules=none -- clients; }
+# Writes mixed-client-mesh-store-neutrality.json from the public captures and the
+# local build, one step after another: /chain_identity, genesis blocks (chain modes
+# only), binary hashes, git state (HEAD and clients status equal to the read before the
+# first build), sidecar write. SIDECAR_REASON names the failed step.
+# With chain 0 (the default mode) no genesis block is captured, so genesis and header_bytes
+# are null; binaries.txgen_sha256 is the sha256 of TXGEN_BIN when chain is 1 and null when
+# chain is 0.
+write_store_neutrality_sidecar() {
+  local chain=0 ident genesis="" binaries commit tree
+  chain_mode && chain=1
+  SIDECAR_REASON=store_neutrality_chain_identity_capture_failed
+  capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /chain_identity "${CHAIN_IDENTITY_JSON}" || return 1
+  ident="$(store_neutrality_step identity "${CHAIN_IDENTITY_JSON}")" || return 1
+  if (( chain )); then
+    SIDECAR_REASON=store_neutrality_genesis_capture_failed
+    capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=0" "${GENESIS_GO_BLOCK_JSON}" || return 1
+    capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" "/get_block?height=0" "${GENESIS_RUST_BLOCK_JSON}" || return 1
+    genesis="$(store_neutrality_step genesis "${GENESIS_GO_BLOCK_JSON}" "${GENESIS_RUST_BLOCK_JSON}")" || return 1
+  fi
+  SIDECAR_REASON=store_neutrality_binary_hash_failed
+  binaries="$(store_neutrality_step binaries "${chain}" "${GO_NODE_BIN}" "${RUST_NODE_BIN}" "${TXGEN_BIN}")" || return 1
+  SIDECAR_REASON=store_neutrality_commit_unavailable
+  commit="$(repo_git rev-parse HEAD)" && tree="$(clients_tree_status)" || return 1
+  [[ "${BUILD_COMMIT_READ:-0}" == 1 && "${commit}" == "${BUILD_HEAD}" && "${tree}" == "${BUILD_CLIENTS_STATUS}" ]] || return 1
+  SIDECAR_REASON=store_neutrality_sidecar_write_failed
+  store_neutrality_step write "${STORE_NEUTRALITY_JSON}" "${ident}" "${genesis}" "${binaries}" "${commit}" "${tree:+dirty}" "${GO_DIR}" "${RUST_DIR}" "${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}" || return 1
+  SIDECAR_REASON=""
 }
 capture_go_reorg_metrics() {
   local parsed
@@ -2589,12 +2910,16 @@ run_partition_heal_reorg_scenario() {
   FINAL_PROCESS_IDENTITY_RECHECKED=true
   FINAL_PEER_SNAPSHOTS_RECHECKED=true
 }
+require_rust_datadir_exact_empty() {
+  [[ -d "${RUST_DIR}" ]] && find -H "${RUST_DIR}" -mindepth 1 -maxdepth 1 -exec false {} + || { START_REASON=rust_datadir_not_exact_empty; return 1; }
+  RUST_EXACT_EMPTY_BEFORE_FIRST_START=true
+}
 start_rust_node_with_log() {
   local rust_log="$1"
   local peer_addr="${RUST_BOOTSTRAP_PEER_ADDR:-${GO_P2P_ADDR}}"
   local -a argv=("${RUST_NODE_BIN}" --network devnet --datadir "${RUST_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${peer_addr}")
-  (( RUST_STORE_READY )) || { argv+=(--create-store); RUST_STORE_READY=1; }
   START_REASON=""
+  (( RUST_STORE_READY )) || { require_rust_datadir_exact_empty || return 1; argv+=(--create-store); RUST_STORE_READY=1; }
   RUST_CMD="$(argv_cmd "${argv[@]}")"; RUST_ARGV_JSON="$(argv_json "${argv[@]}")"
   rubin_process_start "${rust_log}" "${argv[@]}" || { START_REASON=rust_launch_failed; return 1; }; RUST_PID="${RUBIN_PROCESS_LAST_PID}"
   rubin_process_wait_for_log "${rust_log}" "p2p: listening=" 60 "${RUST_PID}" || { START_REASON=rust_p2p_log_wait_failed; return 1; }
@@ -2674,7 +2999,34 @@ start_go_node() {
   GO_P2P_ADDR="$(p2p_addr_for_pid "${GO_PID}" "${GO_RPC_ADDR}" 30)" || { rc=$?; [[ ${rc} -eq 42 ]] && finish_no_data "lsof_failed"; [[ ${rc} -eq 43 ]] && finish_no_data "lsof_timeout"; [[ ${rc} -eq 44 ]] && finish_no_data "go_p2p_addr_ambiguous"; [[ ${rc} -eq 45 ]] && finish_no_data "go_p2p_addr_timeout"; return 1; }; loopback_endpoint "${GO_P2P_ADDR}" || finish_no_data "go_p2p_addr_malformed"
   rubin_process_wait_for_rpc_ready "${GO_RPC_ADDR}" 30 || { START_REASON=go_rpc_ready_timeout; return 1; }; GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
+# Runs the live check_report of the run's mode over the PASS report at PASS_REPORT_JSON and
+# moves it to REPORT_JSON; a refusal removes it and ends the run through finish_no_data.
+publish_pass_report() {
+  local check_err
+  if (( TX_PATH_MODE >= 1 )); then
+    if ! check_err="$(check_report "${PASS_REPORT_JSON}" live producer-tx 2>&1)"; then
+      rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(combined_report_reason_token <<<"${check_err}")"
+    fi
+  elif (( RUST_RESTART_MODE == 1 )); then
+    if ! check_err="$(check_report "${PASS_REPORT_JSON}" live rust-restart 2>&1)"; then
+      printf '%s\n' "${check_err}" >"${RUBIN_PROCESS_ARTIFACT_ROOT}/pass-report-live-validation.err" || true
+      rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
+    fi
+  elif (( PARTITION_HEAL_REORG_MODE == 1 )); then
+    if ! check_err="$(check_report "${PASS_REPORT_JSON}" live partition-heal-reorg 2>&1)"; then
+      printf '%s\n' "${check_err}" >"${RUBIN_PROCESS_ARTIFACT_ROOT}/pass-report-live-validation.err" || true
+      rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
+    fi
+  else
+    if ! check_err="$(check_report "${PASS_REPORT_JSON}" live 2>&1)"; then
+      rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
+    fi
+  fi
+  mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}" || finish_no_data "pass_report_publish_failed"
+}
 for tool in lsof perl ps sed sort; do command -v "${tool}" >/dev/null 2>&1 || finish_no_data "${tool}_unavailable"; done
+# HEAD and clients status before the first build; the sidecar git step requires both unchanged.
+BUILD_HEAD="$(repo_git rev-parse HEAD)" && BUILD_CLIENTS_STATUS="$(clients_tree_status)" && BUILD_COMMIT_READ=1 || BUILD_COMMIT_READ=0
 build_go_node || finish_no_data "${BUILD_REASON:-go_build_failed}"
 build_rust_node || finish_no_data "${BUILD_REASON:-rust_build_failed}"
 if (( TX_PATH_MODE >= 1 )); then
@@ -2691,6 +3043,8 @@ if (( PARTITION_HEAL_REORG_MODE == 1 )); then
 fi
 start_rust_node || finish_no_data "${START_REASON:-rust_process_not_ready}"
 verify_process_identity node-rust rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust rust_process_identity || finish_no_data "${PROCESS_IDENTITY_REASON:-rust_process_identity_unverified}"
+wait_initial_convergence || finish_no_data "${PARTITION_REASON:-initial_convergence_timeout}"
+write_store_neutrality_sidecar || finish_no_data "${SIDECAR_REASON:-store_neutrality_sidecar_write_failed}"
 if (( PARTITION_HEAL_REORG_MODE == 1 )); then
   run_partition_heal_reorg_scenario || finish_no_data "${PARTITION_REASON:-partition_heal_reorg_failed}"
 else
@@ -2727,25 +3081,6 @@ write_outputs "PASS" || { REPORT_JSON="${FINAL_REPORT_JSON}"; finish_no_data "pa
 if ! run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2; then
   rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "legacy_schema_marker_validation_failed"
 fi
-if (( TX_PATH_MODE >= 1 )); then
-  if ! check_err="$(check_report "${PASS_REPORT_JSON}" live producer-tx 2>&1)"; then
-    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(combined_report_reason_token <<<"${check_err}")"
-  fi
-elif (( RUST_RESTART_MODE == 1 )); then
-  if ! check_err="$(check_report "${PASS_REPORT_JSON}" live rust-restart 2>&1)"; then
-    printf '%s\n' "${check_err}" >"${RUBIN_PROCESS_ARTIFACT_ROOT}/pass-report-live-validation.err" || true
-    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
-  fi
-elif (( PARTITION_HEAL_REORG_MODE == 1 )); then
-  if ! check_err="$(check_report "${PASS_REPORT_JSON}" live partition-heal-reorg 2>&1)"; then
-    printf '%s\n' "${check_err}" >"${RUBIN_PROCESS_ARTIFACT_ROOT}/pass-report-live-validation.err" || true
-    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
-  fi
-else
-  if ! check_err="$(check_report "${PASS_REPORT_JSON}" live 2>&1)"; then
-    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
-  fi
-fi
-mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}" || finish_no_data "pass_report_publish_failed"
+publish_pass_report
 PASS_SCENARIO="mixed-client mesh connected"; (( RUST_RESTART_MODE == 1 )) && PASS_SCENARIO="Rust restart/reconnect/catch-up path observed"; (( PARTITION_HEAL_REORG_MODE == 1 )) && PASS_SCENARIO="Partition/heal/reorg source-bound path observed"; (( TX_PATH_MODE == 1 )) && PASS_SCENARIO="Go-submit/Rust-accept path observed"; (( TX_PATH_MODE == 2 )) && PASS_SCENARIO="Go-submit/Rust-mine/Go-converge path observed"; (( TX_PATH_MODE == 3 )) && PASS_SCENARIO="Rust-submit/Go-mine/Rust-converge path observed"
 [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]] && echo "PASS: ${PASS_SCENARIO} go_pid=${GO_PID} rust_pid=${RUST_PID}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" || echo "PASS: ${PASS_SCENARIO} go_pid=${GO_PID} rust_pid=${RUST_PID}; set KEEP_TMP=1 to retain report"
