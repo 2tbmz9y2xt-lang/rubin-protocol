@@ -43,9 +43,9 @@ type ImageAnchor struct {
 // ImageUnits holds one finite positive limit per requester IMAGE unit (RUBIN_L1_P2P_AUX.md Section 7.5 and
 // RUBIN_L1_P2P_AUX.md Section 7.8). Retirement releases an assignment's current-assignment unit, and its Request
 // releases its pending request bytes once: at the pre-write refusal, after the write or on an unwind. Its request ID
-// and its distinct-start, source-attempt and admitted-request units are never released; a session's request IDs start
-// at 1 and strictly increase across the rounds of the Service, with no reuse or wrap
-// (RUBIN_L1_P2P_AUX.md Section 6.1).
+// and its distinct-start, source-attempt and admitted-request units are never released
+// (RUBIN_L1_P2P_AUX.md Section 6.1); a session's request IDs start at 1 and strictly increase across the rounds of
+// the Service, with no reuse or wrap (RUBIN_L1_P2P_AUX.md Section 7.5).
 type ImageUnits struct {
 	CurrentAssignments  uint64
 	DistinctStarts      uint64
@@ -209,14 +209,14 @@ func (inst *imageInstance) preWriteEnd(now time.Time) error {
 	return nil
 }
 
-// ImageRound is one admitted acquisition round; a value copy is that round. A Request's last currency decision, under
+// ImageRound is one admitted acquisition round, shared by its value copies. A Request's last currency decision, under
 // the session's writeMu right before the write, is the frame's last check: an ended assignment, or now at RD
-// (errImageRoundDeadline), gets no frame and the admitted query with the end's error; an end applied during the write
-// does not stop it and leaves the admitted query and nil, otherwise a failed write returns the admitted query and its
-// error and retires the assignment; once that outcome is fixed, with no mutex held, Request sets a failed write's
-// error as the session's last error and closes its connection once. An unwind of Request after admission releases the
-// writeMu and pending request bytes it holds, once each, retires nothing and propagates unchanged; after a failed
-// write it also sets the last error and closes once (RUBIN_L1_P2P_AUX.md Section 7.5).
+// (errImageRoundDeadline), gets no frame and the admitted query with its end; an end applied during the write does
+// not stop it and leaves the admitted query and nil; else a failed write retires the assignment and returns the
+// admitted query and its error (RUBIN_L1_P2P_AUX.md Section 7.5); then, with no mutex held, Request sets a failed
+// write's error as the session's last error and closes its connection once (RUBIN_L1_P2P_AUX.md Section 2.1). An
+// unwind of Request after admission releases its writeMu and pending request bytes once each, retires nothing and
+// propagates; after a failed write it still sets the last error and closes once (RUBIN_L1_P2P_AUX.md Section 5).
 type ImageRound struct {
 	service       *Service
 	ctx           context.Context
