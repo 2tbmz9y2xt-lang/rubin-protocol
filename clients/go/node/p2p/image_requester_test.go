@@ -236,11 +236,13 @@ func newImageTestFixture(t *testing.T, sessions int) *imageTestFixture {
 	return newImageTestFixtureAt(t, sessions, time.Unix(1_800_000_000, 0))
 }
 
-// newImageTestFixtureAt starts the controlled clock at start, which also fixes its clock domain.
+// newImageTestFixtureAt starts the controlled clock at start, which also fixes its clock domain. Its cleanup closes the
+// Service, which closes the session connections, ending a stalled write, and waits for the calls that hold a lease.
 func newImageTestFixtureAt(t *testing.T, sessions int, start time.Time) *imageTestFixture {
 	t.Helper()
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	f := &imageTestFixture{t: t, h: h, s: h.service, clock: &imageTestClock{t: t, now: start}}
+	t.Cleanup(func() { requireReturned(t, lifecycleClose(f.s), "Close at cleanup") })
 	f.s.cfg.Now = f.clock.Now
 	f.s.cfg.PeerRuntimeConfig.WriteDeadline = 0
 	for i := 0; i < sessions; i++ {
@@ -2713,7 +2715,6 @@ func testImageUnwindArming(t *testing.T, goexit, roundCtx bool) {
 			roundC, requestC = c, cr
 		}
 		f := newImageTestFixture(t, 2)
-		t.Cleanup(func() { _ = f.s.Close() })
 		round := f.roundCtx(t, roundC, imageUnwindLimits(), 0, 1)
 		f.requireUnwound(t, round, requestC, goexit)
 		f.requireNextAfterUnwind(t, round, 0, 1, 1)
@@ -2794,5 +2795,5 @@ func (f *imageTestFixture) unwindRetirement(t *testing.T, round *ImageRound, c *
 	f.clock.set(end)
 	recovered, ok := receiveWithin(unwound, lifecycleWatchdog)
 	require(t, ok, "request waiting for writeMu did not end within %s", lifecycleWatchdog)
-	return inst, recovered, session.writeMu.Unlock
+	return inst, recovered, func() { _ = session.writeMu.TryLock(); session.writeMu.Unlock() }
 }
