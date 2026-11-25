@@ -2505,6 +2505,7 @@ def sn_one_binary_field_through_missing(report: dict, field: str) -> None:
     node_obj["command"] = shlex.join(node_obj["command_argv"])
 sn_variant("mesh-binary-field-through-missing", "mesh", lambda s, r: None, lambda report: sn_one_binary_field_through_missing(report, "binary"))
 sn_variant("mesh-argv0-through-missing", "mesh", lambda s, r: None, lambda report: sn_one_binary_field_through_missing(report, "argv0"))
+sn_variant("mesh-binary-not-executable", "mesh", lambda s, r: None, lambda report: Path(next(n for n in report["nodes"] if n["implementation"] == "go")["binary"]).chmod(0o644))
 sn_variant("mesh-marker-through-missing", "mesh", lambda s, r: None, lambda report: report["legacy_schema_compatibility"].update(marker_path=sn_through_missing(Path(report["legacy_schema_compatibility"]["marker_path"]).parent, Path(report["legacy_schema_compatibility"]["marker_path"]).name)))
 sn_variant("restart-report-datadir-through-missing", "restart", lambda s, r: None, lambda report: report["rust_restart"].update(datadir=sn_through_missing(Path(report["artifact_root"]), "node-rust")))
 def sn_move_marker(report: dict, subdir: str, suffix: str = "") -> None:
@@ -3118,6 +3119,7 @@ sn_check "sidecar datadir through a missing directory" "${SN_INVALID}" "datadirs
 sidecar_value_check "node binary through a missing directory" "node-go command/binary is not bound to executable rubin-node-go" unknown public "${TMP_ROOT}/sn-mesh-binary-through-missing-report.json"
 sidecar_value_check "node binary field alone through a missing directory" "node-go command/binary is not bound to executable rubin-node-go" unknown public "${TMP_ROOT}/sn-mesh-binary-field-through-missing-report.json"
 sidecar_value_check "node command_argv[0] alone through a missing directory" "node-go command/binary is not bound to executable rubin-node-go" unknown public "${TMP_ROOT}/sn-mesh-argv0-through-missing-report.json"
+sidecar_value_check "node binary not executable" "node-go command/binary is not bound to executable rubin-node-go" unknown public "${TMP_ROOT}/sn-mesh-binary-not-executable-report.json"
 sidecar_value_check "legacy marker through a missing directory" "legacy marker is not a regular file" legacy_marker_invalid public "${TMP_ROOT}/sn-mesh-marker-through-missing-report.json"
 sidecar_value_check "restart datadir through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-report-datadir-through-missing-report.json"
 sidecar_value_check "restart datadir through a control character" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-report-datadir-control-report.json"
