@@ -3,12 +3,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; GEN="${REPO_ROOT}/scripts/devnet/generate_mixed_client_devnet_soak_report.py"
 command -v python3 >/dev/null || { echo "python3 not found" >&2; exit 1; }; [[ -r "${GEN}" ]] || { echo "generator not readable: ${GEN}" >&2; exit 1; }
 TMP_PARENT="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)" || { echo "TMPDIR not canonicalizable: ${TMPDIR:-/tmp}" >&2; exit 1; }
-TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-soak-report-pr1.XXXXXX")" || { echo "mktemp failed" >&2; exit 1; }
+TMP_BASE="$(mktemp -d "${TMP_PARENT%/}/rubin-soak-report-pr1.XXXXXX")" || { echo "mktemp failed" >&2; exit 1; }
+TMP_ROOT="${TMP_BASE}/root"; mkdir -- "${TMP_ROOT}"
 LINK_PARENT="${TMP_ROOT}-parent-link"
 ALIAS_ROOT="${LINK_PARENT}/$(basename "${TMP_ROOT}")"
 SPACE_LINK_PARENT="${TMP_ROOT}-parent link"
 SPACE_ALIAS_ROOT="${SPACE_LINK_PARENT}/$(basename "${TMP_ROOT}")"
-trap 'chmod -R u+w "${TMP_ROOT}" || true; rm -rf -- "${TMP_ROOT}" "${LINK_PARENT}" "${SPACE_LINK_PARENT}" "${TMP_ROOT}-outside"' EXIT
+trap 'chmod -R u+w "${TMP_BASE}" || true; rm -rf -- "${TMP_BASE}"' EXIT
 python3 - "${TMP_ROOT}" <<'PY'
 import hashlib, json, os, shlex, sys; from pathlib import Path
 root = Path(os.path.realpath(sys.argv[1])); root.mkdir(exist_ok=True)
@@ -358,7 +359,7 @@ expect_fail_reason process_identity_missing_or_invalid --go-submit-rust-accept-r
 expect_fail_reason restart_source_binding_contradiction:argv_mismatch --rust-restart-report "${TMP_ROOT}/restart_old_without_create.json"
 expect_fail_reason restart_source_binding_contradiction:node_identity_invalid --rust-restart-report "${TMP_ROOT}/restart_new_with_create.json"
 expect_fail_reason partition_reorg_source_binding_contradiction:node_identity_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition_rust_without_create.json"
-expect_mesh_pass() { out="${TMP_ROOT}/mesh-pass-out.json"; python3 "${GEN}" --mesh-report "$1" --output "${out}" >/dev/null 2>"${TMP_ROOT}/err" || { cat "${TMP_ROOT}/err" >&2; exit 1; }; python3 -c 'import json, sys; r = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if r["sections"]["mesh"]["status"] == "pass" and ("mesh", "pass") in {(c["section"], c["token"]) for c in r["claim_inventory"]} else 1)' "${out}" || { echo "mesh report not accepted with claim token pass: $1" >&2; exit 1; }; }
+expect_mesh_pass() { out="${TMP_ROOT}/mesh-pass-out.json"; rm -f -- "${out}"; python3 "${GEN}" --mesh-report "$1" --output "${out}" >/dev/null 2>"${TMP_ROOT}/err" || { cat "${TMP_ROOT}/err" >&2; exit 1; }; python3 -c 'import json, sys; r = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if r["sections"]["mesh"]["status"] == "pass" and ("mesh", "pass") in {(c["section"], c["token"]) for c in r["claim_inventory"]} else 1)' "${out}" || { echo "mesh report not accepted with claim token pass: $1" >&2; exit 1; }; }
 expect_fail_reason malformed_source_fields:legacy_schema_compatibility.marker_path --mesh-report "${TMP_ROOT}/mesh_marker_tab_dir.json"
 expect_fail_reason go_to_rust_accept_legacy_marker_invalid --go-submit-rust-accept-report "${TMP_ROOT}/go_accept_marker_tab_dir.json"
 expect_fail_reason restart_source_binding_contradiction:legacy_marker_invalid --rust-restart-report "${TMP_ROOT}/restart_marker_tab_dir.json"
@@ -397,7 +398,7 @@ expect_output_refused_unchanged() {
 expect_mesh_output_pass() {
   local out="$1" rc=0
   rm -f -- "${out}"
-  python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --output "${out}" >/dev/null 2>"${TMP_ROOT}/err" || rc=$?
+  python3 -c 'import subprocess, sys; sys.exit(subprocess.run(sys.argv[1:], timeout=30).returncode)' python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --output "${out}" >/dev/null 2>"${TMP_ROOT}/err" || rc=$?
   if (( rc != 0 )) || grep -Eq 'output_overwrites_input|output_scan_failed' "${TMP_ROOT}/err" || ! python3 -c 'import json, sys; r = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if r["sections"]["mesh"]["status"] == "pass" and ("mesh", "pass") in {(c["section"], c["token"]) for c in r["claim_inventory"]} else 1)' "${out}"; then
     echo "FAIL: mesh output ${out} exited ${rc} without mesh claim token pass" >&2; cat -- "${TMP_ROOT}/err" >&2; exit 1
   fi
@@ -417,6 +418,16 @@ expect_fresh_output_written
 printf '{' >"${sidecar_path}"
 expect_fresh_output_written
 expect_output_refused_unchanged "${sidecar_path}" --mesh-report "${TMP_ROOT}/mesh.json"
+python3 -c 'import json, sys; json.dump({"initial_convergence": {"go_tip_path": None}}, open(sys.argv[1], "w", encoding="utf-8"))' "${sidecar_path}"
+expect_fresh_output_written
+expect_output_refused_unchanged "${sidecar_path}" --mesh-report "${TMP_ROOT}/mesh.json"
+rm -f -- "${sidecar_path}"; mkfifo -- "${sidecar_path}"
+expect_fresh_output_written
+expect_output_refused_unchanged "${TMP_ROOT}/rubin-txgen" --mesh-report "${TMP_ROOT}/mesh.json"
+root_names_dir="${TMP_ROOT}/root-names"; mkdir -p -- "${root_names_dir}"
+python3 -c 'import json, sys; json.dump({"artifact_root": sys.argv[2]}, open(sys.argv[1], "w", encoding="utf-8"))' "${TMP_ROOT}/mesh_artifact_root_only.json" "${root_names_dir}"
+for name in mixed-client-mesh-store-neutrality.json rubin-node-go rubin-node-rust rubin-txgen node-go node-rust; do printf '%s\n' "${name}" >"${root_names_dir}/${name}"; done
+for name in mixed-client-mesh-store-neutrality.json rubin-node-go rubin-node-rust rubin-txgen node-go node-rust; do expect_output_refused_unchanged "${root_names_dir}/${name}" --mesh-report "${TMP_ROOT}/mesh_artifact_root_only.json"; done
 rm -f -- "${TMP_ROOT}/rubin-txgen"; ln -s "${TMP_ROOT}/txgen-absent-target" "${TMP_ROOT}/rubin-txgen"
 dangling_rc=0
 python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --output "${TMP_ROOT}/rubin-txgen" >/dev/null 2>"${TMP_ROOT}/err" || dangling_rc=$?

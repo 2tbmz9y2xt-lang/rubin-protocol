@@ -2782,7 +2782,8 @@ repo_git() (
 clients_tree_status() { repo_git -c core.excludesFile=/dev/null status --porcelain --untracked-files=normal --ignore-submodules=none -- clients; }
 # Writes mixed-client-mesh-store-neutrality.json from the public captures and the
 # local build, one step after another: /chain_identity, genesis blocks (chain modes
-# only), binary hashes, git state, sidecar write. SIDECAR_REASON names the failed step.
+# only), binary hashes, git state (HEAD and clients status equal to the read before the
+# first build), sidecar write. SIDECAR_REASON names the failed step.
 # With chain 0 (the default mode) no genesis block is captured, so genesis and header_bytes
 # are null; binaries.txgen_sha256 is the sha256 of TXGEN_BIN when chain is 1 and null when
 # chain is 0.
@@ -2802,6 +2803,7 @@ write_store_neutrality_sidecar() {
   binaries="$(store_neutrality_step binaries "${chain}" "${GO_NODE_BIN}" "${RUST_NODE_BIN}" "${TXGEN_BIN}")" || return 1
   SIDECAR_REASON=store_neutrality_commit_unavailable
   commit="$(repo_git rev-parse HEAD)" && tree="$(clients_tree_status)" || return 1
+  [[ "${BUILD_COMMIT_READ:-0}" == 1 && "${commit}" == "${BUILD_HEAD}" && "${tree}" == "${BUILD_CLIENTS_STATUS}" ]] || return 1
   SIDECAR_REASON=store_neutrality_sidecar_write_failed
   store_neutrality_step write "${STORE_NEUTRALITY_JSON}" "${ident}" "${genesis}" "${binaries}" "${commit}" "${tree:+dirty}" "${GO_DIR}" "${RUST_DIR}" "${RUST_EXACT_EMPTY_BEFORE_FIRST_START}" "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}" || return 1
   SIDECAR_REASON=""
@@ -3007,6 +3009,8 @@ publish_pass_report() {
   mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}" || finish_no_data "pass_report_publish_failed"
 }
 for tool in lsof perl ps sed sort; do command -v "${tool}" >/dev/null 2>&1 || finish_no_data "${tool}_unavailable"; done
+# HEAD and clients status before the first build; the sidecar git step requires both unchanged.
+BUILD_HEAD="$(repo_git rev-parse HEAD)" && BUILD_CLIENTS_STATUS="$(clients_tree_status)" && BUILD_COMMIT_READ=1 || BUILD_COMMIT_READ=0
 build_go_node || finish_no_data "${BUILD_REASON:-go_build_failed}"
 build_rust_node || finish_no_data "${BUILD_REASON:-rust_build_failed}"
 if (( TX_PATH_MODE >= 1 )); then

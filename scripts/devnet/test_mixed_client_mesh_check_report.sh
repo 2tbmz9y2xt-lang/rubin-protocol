@@ -678,7 +678,7 @@ check_startup_waits_for_rust_identity() {
       out="$(
         read -r TX_PATH_MODE RUST_RESTART_MODE PARTITION_HEAL_REORG_MODE <<<"${modes}"
         GO_PID=101 GO_RPC_ADDR=127.0.0.1:1 GO_P2P_ADDR=127.0.0.1:2 RUST_PID=102 RUST_RPC_ADDR=127.0.0.1:3 RUST_P2P_ADDR=127.0.0.1:4
-        for fn in start_go_node start_partition_proxy start_rust_node wait_initial_convergence; do eval "${fn}() { printf '%s %s\n' ${fn} \"\${1:-}\" >>\"${log}\"; }"; done
+        for fn in start_go_node start_partition_proxy start_rust_node wait_initial_convergence; do eval "${fn}() { printf '%s %s\n' ${fn} \"\${1:-}\" >>\"\${log}\"; }"; done
         verify_process_identity() {
           printf 'verify_process_identity %s\n' "$1" >>"${log}"
           [[ "$1" == node-rust && "${variant}" == identity-fails ]] || return 0
@@ -693,6 +693,44 @@ check_startup_waits_for_rust_identity() {
         [[ "${out}" == rust_process_identity_comm_mismatch ]] && ! grep -q '^wait_initial_convergence' "${log}" || { echo "FAIL: startup (${modes}) after a failed Rust identity check: ${out}; $(tr '\n' ',' <"${log}")" >&2; exit 1; }
       else
         [[ "${out}" == "reached sidecar write" && "$(grep -c '^wait_initial_convergence' "${log}")" == 1 && "$(grep -E '^(verify_process_identity node-rust|wait_initial_convergence)' "${log}" | tr '\n' ,)" == "verify_process_identity node-rust,wait_initial_convergence ," ]] || { echo "FAIL: startup (${modes}) order: ${out}; $(tr '\n' ',' <"${log}")" >&2; exit 1; }
+      fi
+    done
+  done
+}
+
+# Runs the top-level lines from the HEAD read before the first build up to the Go node start
+# in the four listed mode settings, with the builds and the mode's prepare function stubbed
+# to advance the stubbed HEAD: the read comes before build_go_node and keeps the first HEAD,
+# and a failed read still lets build_go_node run.
+check_commit_read_before_builds() {
+  local lib="${TMP_ROOT}/build-read-lib.sh" log="${TMP_ROOT}/build-read.log" modes fail out
+  extract_slices "${lib}" "repo_git()" "# Writes mixed-client-mesh-store-neutrality.json" 'BUILD_HEAD="$(repo_git rev-parse HEAD)"' "start_go_node || finish_no_data"
+  for modes in "1 0 0" "0 1 0" "0 0 1" "0 0 0"; do
+    for fail in "" rev-parse; do
+      rm -f -- "${log}"
+      out="$(
+        read -r TX_PATH_MODE RUST_RESTART_MODE PARTITION_HEAL_REORG_MODE <<<"${modes}"
+        REPO_ROOT="${TMP_ROOT}"; head=0
+        git() {
+          case "$*" in
+            ("-C ${REPO_ROOT} rev-parse HEAD") printf 'git rev-parse\n' >>"${log}"; [[ -z "${fail}" ]] || return 128; printf 'head-%s\n' "${head}" ;;
+            ("-C ${REPO_ROOT} -c core.excludesFile=/dev/null status --porcelain --untracked-files=normal --ignore-submodules=none -- clients") printf 'git status\n' >>"${log}" ;;
+            (*) return 99 ;;
+          esac
+        }
+        build_go_node() { printf 'build_go_node\n' >>"${log}"; head=$((head + 1)); fail=""; }
+        build_rust_node() { printf 'build_rust_node\n' >>"${log}"; head=$((head + 1)); }
+        prepare_tx_chainstate() { printf 'prepare_tx_chainstate\n' >>"${log}"; head=$((head + 1)); }
+        prepare_restart_chainstate() { printf 'prepare_restart_chainstate\n' >>"${log}"; head=$((head + 1)); }
+        finish_no_data() { printf '%s\n' "$1"; exit 0; }
+        # shellcheck source=/dev/null
+        source "${lib}"
+        printf '%s %s %s\n' "${BUILD_COMMIT_READ}" "${BUILD_HEAD}" "${BUILD_CLIENTS_STATUS:-}"
+      )"
+      if [[ -z "${fail}" ]]; then
+        [[ "${out}" == "1 head-0 " && "$(head -n 3 "${log}" | tr '\n' ,)" == "git rev-parse,git status,build_go_node," ]] || { echo "FAIL: build read (${modes}): ${out}; $(tr '\n' ',' <"${log}")" >&2; exit 1; }
+      else
+        [[ "${out}" == 0* && "$(head -n 2 "${log}" | tr '\n' ,)" == "git rev-parse,build_go_node," ]] || { echo "FAIL: failed build read (${modes}): ${out}; $(tr '\n' ',' <"${log}")" >&2; exit 1; }
       fi
     done
   done
@@ -715,10 +753,11 @@ check_repo_git_reads_repo_root() {
 }
 
 check_store_neutrality_producer_reasons() {
-  local probe="${TMP_ROOT}/sn-producer.sh" probe_root="${TMP_ROOT}/sn-producer" lib="${TMP_ROOT}/sn-producer-lib.sh" main="${TMP_ROOT}/sn-producer-main.sh"
+  local probe="${TMP_ROOT}/sn-producer.sh" probe_root="${TMP_ROOT}/sn-producer" lib="${TMP_ROOT}/sn-producer-lib.sh" main="${TMP_ROOT}/sn-producer-main.sh" first="${TMP_ROOT}/sn-producer-first.sh"
   mkdir -p -- "${probe_root}/cap" "${probe_root}/out"
   extract_slices "${lib}" "sidecar_derivations_py()" '[[ "${MESH_TIMEOUT}"' "chain_mode()" "capture_go_reorg_metrics()"
   extract_slices "${main}" "write_store_neutrality_sidecar ||" "if (( PARTITION_HEAL_REORG_MODE == 1 )); then"
+  extract_slices "${first}" 'BUILD_HEAD="$(repo_git rev-parse HEAD)"' "build_go_node ||"
   python3 - "${probe_root}" <<'PY'
 import hashlib, json, sys
 root = sys.argv[1]
@@ -752,7 +791,7 @@ PY
 #!/usr/bin/env bash
 set -euo pipefail
 source "$1"
-main="$2"; p="$3"
+main="$2"; p="$3"; first="$4"
 TX_PATH_MODE=3; RUST_RESTART_MODE=0; PARTITION_HEAL_REORG_MODE=0; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"; REPO_ROOT="${p}"
 GO_NODE_BIN="${p}/bin-go"; RUST_NODE_BIN="${p}/bin-rust"; TXGEN_BIN="${p}/bin-txgen"; GO_DIR="${p}/node-go"; RUST_DIR="${p}/node-rust"; RUST_EXACT_EMPTY_BEFORE_FIRST_START=true
 CHAIN_IDENTITY_JSON="${p}/cap/ident.json"; GENESIS_GO_BLOCK_JSON="${p}/cap/go.json"; GENESIS_RUST_BLOCK_JSON="${p}/cap/rust.json"; INITIAL_GO_TIP_JSON="${p}/tip-go.json"; INITIAL_RUST_TIP_JSON="${p}/tip-rust.json"
@@ -776,7 +815,7 @@ finish_no_data() { printf '%s\n' "$1"; exit 0; }
 expect_end() {
   local got
   rm -f -- "${p}/captures.log"
-  got="$(source "${main}"; printf 'completed\n')"
+  got="$(h="${GIT_HEAD}" s="${GIT_STATUS}" f="${FAIL_GIT}"; GIT_HEAD="${FIRST_HEAD-$h}" GIT_STATUS="${FIRST_STATUS-$s}" FAIL_GIT="${FIRST_FAIL_GIT-$f}"; source "${first}"; GIT_HEAD="$h" GIT_STATUS="$s" FAIL_GIT="$f"; source "${main}"; printf 'completed\n')"
   [[ "${got}" == "$1" ]] || { echo "FAIL: sidecar producer ended with ${got}, want $1" >&2; exit 1; }
 }
 expect_sidecar() {
@@ -825,6 +864,15 @@ RUST_NODE_BIN="${p}/bin-dir" expect_end store_neutrality_binary_hash_failed
 TXGEN_BIN="${p}/bin-device" expect_end store_neutrality_binary_hash_failed
 TXGEN_BIN="${p}/missing" FAIL_GIT=rev-parse expect_end store_neutrality_binary_hash_failed
 FAIL_GIT=rev-parse INITIAL_GO_TIP_JSON="${p}/array.json" expect_end store_neutrality_commit_unavailable
+head_b=89abcdef0123456789abcdef0123456789abcdef
+rm -f -- "${STORE_NEUTRALITY_JSON}"; FIRST_HEAD="${GIT_HEAD}" GIT_HEAD="${head_b}" expect_end store_neutrality_commit_unavailable
+[[ ! -e "${STORE_NEUTRALITY_JSON}" ]] || { echo "FAIL: sidecar written after HEAD changed between the build read and the git step" >&2; exit 1; }
+FIRST_STATUS="" GIT_STATUS=" M clients/go/node/miner.go" expect_end store_neutrality_commit_unavailable
+FIRST_STATUS=" M clients/go/node/miner.go" GIT_STATUS="" expect_end store_neutrality_commit_unavailable
+FIRST_HEAD="${GIT_HEAD}" GIT_HEAD="${head_b}" TXGEN_BIN="${p}/missing" expect_end store_neutrality_binary_hash_failed
+FIRST_HEAD="${GIT_HEAD}" GIT_HEAD="${head_b}" INITIAL_GO_TIP_JSON="${p}/array.json" expect_end store_neutrality_commit_unavailable
+FIRST_FAIL_GIT=rev-parse TXGEN_BIN="${p}/missing" expect_end store_neutrality_binary_hash_failed
+FIRST_FAIL_GIT=status expect_end store_neutrality_commit_unavailable
 BAD_CAPTURE="go /chain_identity" BAD_SRC="${p}/empty-object.json" FAIL_GIT=rev-parse expect_end store_neutrality_chain_identity_capture_failed
 BAD_CAPTURE="go /chain_identity" BAD_SRC="${p}/empty-object.json" FAIL_CAPTURE="go /get_block?height=0" expect_end store_neutrality_chain_identity_capture_failed
 BAD_CAPTURE="go /get_block?height=0" BAD_SRC="${p}/bad-block-no-block_hex.json" GO_NODE_BIN="${p}/bin-dir" expect_end store_neutrality_genesis_capture_failed
@@ -839,7 +887,7 @@ rm -f -- "${GENESIS_GO_BLOCK_JSON}" "${GENESIS_RUST_BLOCK_JSON}"
 )
 SH
   start_fifo_watchdog "${probe_root}/bin-fifo"
-  bash "${probe}" "${lib}" "${main}" "${probe_root}"
+  bash "${probe}" "${lib}" "${main}" "${probe_root}" "${first}"
   stop_fifo_watchdog
 }
 
@@ -926,10 +974,7 @@ check_clients_tree_status() {
     [[ -z "${ctl}" ]] || { echo "FAIL: ${key} ${value} does not hide clients/u from git status" >&2; exit 1; }
     got="$(bash -c 'source "$1"; REPO_ROOT="$2"; clients_tree_status' _ "${lib}" "${repo}")" || { echo "FAIL: clients_tree_status failed under ${key} ${value}" >&2; exit 1; }
     [[ "${got}" == "?? clients/" ]] || { echo "FAIL: clients_tree_status under ${key} ${value} printed '${got}'" >&2; exit 1; }
-  done <<EOF
-status.showUntrackedFiles no
-core.excludesFile ${ignore}
-EOF
+  done < <(printf '%s %s\n' status.showUntrackedFiles no core.excludesFile "${ignore}")
 }
 
 check_proxy_go_local_addr_reason() {
@@ -2582,6 +2627,7 @@ check_argv_cmd_round_trip
 check_txgen_datadir_guard
 check_initial_convergence_wait
 check_startup_waits_for_rust_identity
+check_commit_read_before_builds
 check_wait_receipt_deadlines
 check_repo_git_reads_repo_root
 check_store_neutrality_producer_reasons
