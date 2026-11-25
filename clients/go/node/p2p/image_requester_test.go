@@ -48,6 +48,7 @@ func (c *imageTestClock) Now() time.Time {
 	}
 	return c.now
 }
+
 func (c *imageTestClock) moveLocked(next time.Time) {
 	if next.Before(c.now) {
 		c.t.Errorf("controlled clock moved back from %v to %v", c.now, next)
@@ -172,6 +173,7 @@ func (w *imageWire) write(b []byte) (int, error) {
 	w.mu.Unlock()
 	return len(b), nil
 }
+
 func (w *imageWire) isClosed() bool {
 	select {
 	case <-w.closed:
@@ -252,6 +254,7 @@ func (f *imageTestFixture) addSession(t *testing.T, addr, endpoint string) int {
 	f.peers, f.conns, f.wires, f.ids = append(f.peers, p), append(f.conns, conn), append(f.wires, wire), append(f.ids, addr)
 	return len(f.peers) - 1
 }
+
 func imageTestUnits(value uint64) ImageUnits {
 	return ImageUnits{value, value, value, value, value, value, value, value, value, value, value, value}
 }
@@ -265,6 +268,7 @@ func imageTestLimits(lifetimes ...time.Duration) ImageLimits {
 		AttemptLifetime: d[0], RoundLifetime: d[1], Backoff: time.Second,
 	}
 }
+
 func (f *imageTestFixture) config(limits ImageLimits, sources ...int) ImageRoundConfig {
 	config := ImageRoundConfig{Anchor: imageTestAnchor, Limits: limits}
 	for _, index := range sources {
@@ -287,6 +291,7 @@ func (f *imageTestFixture) begin(ctx context.Context, config ImageRoundConfig) (
 	})
 	return got.round, got.err
 }
+
 func (f *imageTestFixture) roundCtx(t *testing.T, ctx context.Context, limits ImageLimits, sources ...int) *ImageRound {
 	t.Helper()
 	round, err := f.begin(ctx, f.config(limits, sources...))
@@ -299,6 +304,7 @@ func newImageRound(t *testing.T, n int, sources ...int) (*imageTestFixture, *Ima
 	f := newImageTestFixture(t, n)
 	return f, f.round(t, imageTestLimits(), sources...)
 }
+
 func (f *imageTestFixture) round(t *testing.T, limits ImageLimits, sources ...int) *ImageRound {
 	t.Helper()
 	return f.roundCtx(t, context.Background(), limits, sources...)
@@ -360,9 +366,11 @@ func requestWithin(bound time.Duration, round *ImageRound, ctx context.Context, 
 	}
 	return result
 }
+
 func (f *imageTestFixture) request(round *ImageRound, ctx context.Context, session int, start byte) imageResult {
 	return requestWithin(lifecycleWatchdog, round, ctx, f.ids[session], start, imageTestByteLimit)
 }
+
 func (f *imageTestFixture) goRequest(round *ImageRound, ctx context.Context, session int, start byte) <-chan imageResult {
 	return launch(round, ctx, f.ids[session], start, imageTestByteLimit)
 }
@@ -434,8 +442,7 @@ type imageSnapshot struct {
 	wire int
 }
 
-// imageOneInstance is the owner state of a single-source round, read on that source, after one admission whose
-// frame was written or failed, with current 1 while that instance is current and 0 once it is retired.
+// imageOneInstance is the owner state of a single-source round, read on that source, after one admission whose frame was written or failed, with current 1 while that instance is current and 0 once it is retired.
 func imageOneInstance(current int) imageOwners {
 	usage := imageUsage(uint64(current), 1, 1, 1, 0)
 	return imageOwners{ids: 1, current: current, idKeys: 1, peerKeys: 1, perPeer: usage, global: usage, attempted: 1, starts: 1}
@@ -494,11 +501,13 @@ func (f *imageTestFixture) owners(round *ImageRound, session int) imageOwners {
 	}
 	return owners
 }
+
 func (f *imageTestFixture) requireOwners(t *testing.T, round *ImageRound, session int, want imageOwners, label string) {
 	t.Helper()
 	got := f.owners(round, session)
 	require(t, got == want, "%s: owner state %+v, want %+v", label, got, want)
 }
+
 func (f *imageTestFixture) snapshot(round *ImageRound, session int) imageSnapshot {
 	return imageSnapshot{f.owners(round, session), f.fault(session), len(f.wires[session].bytes())}
 }
@@ -514,6 +523,7 @@ func (f *imageTestFixture) refusedAfterPass(t *testing.T, round *ImageRound, ses
 	t.Helper()
 	f.refusedDropping(t, round, context.Background(), f.ids[session], session, start, imageTestByteLimit, want, drop)
 }
+
 func (f *imageTestFixture) refusedDropping(t *testing.T, round *ImageRound, ctx context.Context, sourceID string, session int, start byte, byteLimit uint32, want error, drop imageDrop) {
 	t.Helper()
 	wantAfter, faults := f.snapshot(round, session), f.faults()
@@ -526,20 +536,24 @@ func (f *imageTestFixture) refusedDropping(t *testing.T, round *ImageRound, ctx 
 	require(t, after == wantAfter, "start %d: state after the refusal %+v, want %+v", start, after, wantAfter)
 	f.requireFaultsKept(t, faults, fmt.Sprintf("start %d", start))
 }
+
 func (f *imageTestFixture) refused(t *testing.T, round *ImageRound, ctx context.Context, session int, start byte, want error) {
 	t.Helper()
 	f.refusedDropping(t, round, ctx, f.ids[session], session, start, imageTestByteLimit, want, imageDrop{})
 }
+
 func (f *imageTestFixture) lastID(session int) uint64 {
 	req := f.lockRequester()
 	defer req.mu.Unlock()
 	return req.lastID[f.peers[session]]
 }
+
 func (f *imageTestFixture) setLastID(session int, id uint64) {
 	req := f.lockRequester()
 	req.lastID[f.peers[session]] = id
 	req.mu.Unlock()
 }
+
 func (f *imageTestFixture) usage(round *ImageRound, session int) (imageUnitVector, imageUnitVector) {
 	req := f.lockRequester()
 	defer req.mu.Unlock()
@@ -596,6 +610,7 @@ func (f *imageTestFixture) waitRetired(t *testing.T, inst *imageInstance, want e
 	synctest.Wait()
 	f.requireEnd(t, inst, want, label)
 }
+
 func (f *imageTestFixture) waitAdmitted(t *testing.T, session int, id uint64, label string) {
 	t.Helper()
 	waitUntil(t, func() bool { return f.lastID(session) == id }, fmt.Sprintf("%s: allocation of id %d", label, id))
@@ -638,6 +653,7 @@ func (f *imageTestFixture) requireFrames(t *testing.T, session int, label string
 	got := f.frames(t, session)
 	require(t, slices.Equal(got, want), "%s: session %d getutxoimg queries=%+v, want %+v", label, session, got, want)
 }
+
 func (f *imageTestFixture) closes(session int) int {
 	_, closes := f.conns[session].snapshot()
 	return closes
@@ -665,6 +681,7 @@ func (f *imageTestFixture) stalledRequest(t *testing.T, round *ImageRound, ctx c
 	requireChannelClosed(t, stall.entered, fmt.Sprintf("stalled write of start %d on session %d", start, session))
 	return stall, pending
 }
+
 func TestImageRequesterRound(t *testing.T) {
 	t.Run("ids start at one and increase across rounds, expiry, cancellation and a failed write", inImageBubble(testImageIDsIncrease))
 	t.Run("the maximum id is issued once and later requests on that session refuse without wrap", testImageIDMaximum)
@@ -694,6 +711,7 @@ func TestImageRequesterRound(t *testing.T) {
 	t.Run("service close", testImageServiceClose)
 	t.Run("an unwind after admission", testImageUnwind)
 }
+
 func testImageIDsIncrease(t *testing.T) {
 	f := newImageTestFixture(t, 2)
 	first := f.round(t, imageTestLimits(), 0, 1)
@@ -716,6 +734,7 @@ func testImageIDsIncrease(t *testing.T) {
 	renewed := f.addSession(t, f.ids[0], "192.0.2.80:9")
 	f.admitted(t, f.round(t, imageTestLimits(), renewed), context.Background(), renewed, 6, 1)
 }
+
 func testImageIDMaximum(t *testing.T) {
 	f := newImageTestFixture(t, 2)
 	f.setLastID(0, 18446744073709551614)
@@ -727,6 +746,7 @@ func testImageIDMaximum(t *testing.T) {
 	f.requireFrames(t, 0, "after refusal", expectedImageQuery(18446744073709551615, 1))
 	f.admitted(t, round, context.Background(), 1, 2, 1)
 }
+
 func testImageOneCurrent(t *testing.T) {
 	f := newImageTestFixture(t, 3)
 	limits := imageTestLimits(50 * time.Millisecond)
@@ -788,13 +808,16 @@ func testImageOneCurrentRace(t *testing.T) {
 	f.requireFaultsKept(t, make([]imageFault, len(f.ids)), "after the concurrent requests")
 	f.requireOwners(t, round, admitted[0], imageOneInstance(1), "after the concurrent requests")
 }
+
 func testImageCountLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		field    func(*ImageUnits) *uint64
 		released bool
 	}{
-		{"current assignments", func(u *ImageUnits) *uint64 { return &u.CurrentAssignments }, true}, {"distinct starts", func(u *ImageUnits) *uint64 { return &u.DistinctStarts }, false}, {"source attempts", func(u *ImageUnits) *uint64 { return &u.SourceAttempts }, false},
+		{"current assignments", func(u *ImageUnits) *uint64 { return &u.CurrentAssignments }, true},
+		{"distinct starts", func(u *ImageUnits) *uint64 { return &u.DistinctStarts }, false},
+		{"source attempts", func(u *ImageUnits) *uint64 { return &u.SourceAttempts }, false},
 		{"admitted requests", func(u *ImageUnits) *uint64 { return &u.AdmittedRequests }, false},
 	} {
 		for _, global := range []bool{false, true} {
@@ -860,8 +883,7 @@ func testImagePendingBytes(t *testing.T) {
 	}
 }
 
-// testImagePendingAtMaximum presets the round's pending request bytes under a uint64 maximum limit: per peer or
-// globally, maximum minus 119 refuses the 120-byte request and maximum minus 120 admits it.
+// testImagePendingAtMaximum presets the round's pending request bytes under a uint64 maximum limit: per peer or globally, maximum minus 119 refuses the 120-byte request and maximum minus 120 admits it.
 func testImagePendingAtMaximum(t *testing.T) {
 	for _, global := range []bool{false, true} {
 		f := newImageTestFixture(t, 1)
@@ -876,6 +898,7 @@ func testImagePendingAtMaximum(t *testing.T) {
 		f.admitted(t, round, context.Background(), 0, 1, 1)
 	}
 }
+
 func testImageDistinctStarts(t *testing.T) {
 	f := newImageTestFixture(t, 2)
 	limits := imageTestLimits()
@@ -889,6 +912,7 @@ func testImageDistinctStarts(t *testing.T) {
 	f.refusedAfterPass(t, round, 0, 0x82, errImageLimit, imageDrop{0, 1, 1})
 	f.requireUsage(t, round, 0, imageUsage(0, 1, 1, 1, 0), imageUsage(0, 1, 2, 2, 0), "after the refusal")
 }
+
 func testImagePerRoundUsage(t *testing.T) {
 	t.Run("another round's usage does not count", func(t *testing.T) {
 		f := newImageTestFixture(t, 1)
@@ -953,6 +977,7 @@ func testImagePerRoundUsage(t *testing.T) {
 		f.requireUsage(t, &variable, 0, imageUsage(1, 1, 1, 1, 0), imageUsage(1, 1, 1, 1, 0), "round the variable holds")
 	}))
 }
+
 func testImageDeadlines(t *testing.T) {
 	f := newImageTestFixture(t, 5)
 	t0, limits := f.clock.Now(), imageTestLimits(10*time.Second, 60*time.Second)
@@ -986,6 +1011,7 @@ func testImageDeadlines(t *testing.T) {
 	f.clock.set(t0.Add(60*time.Second + time.Nanosecond))
 	f.refusedAfterPass(t, round, 0, 4, errImageRoundDeadline, imageDrop{0, 2, 2})
 }
+
 func testImagePreWriteAtDeadline(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1037,7 +1063,8 @@ func imageEndCases() []imageEndCase {
 		{name: "now after D", apply: func(f *imageTestFixture, t0 time.Time, _, _ func()) {
 			f.clock.set(t0.Add(10*time.Second + time.Nanosecond))
 		}, want: errImageExpired, notWant: []error{errImageNilContext, errImagePolicy, errImageSourceSet, errImageUnknownSource, errImageRoundDeadline, errImageAssignmentCurrent, errImageAttempted, errImageLimit, errImageIDExhausted, errImageRequestDomain, errServiceClosed, context.Canceled, context.DeadlineExceeded, os.ErrDeadlineExceeded}},
-		{name: "now at RD with D equal to RD", lifetime: time.Hour, apply: func(f *imageTestFixture, t0 time.Time, _, _ func()) { f.clock.set(t0.Add(time.Hour)) }, want: errImageRoundDeadline, notWant: []error{errImageExpired}, newRound: true}, {name: "round ctx canceled", lifetime: 50 * time.Millisecond, apply: func(f *imageTestFixture, _ time.Time, _, cancelRound func()) { f.clock.cancelOnRead(cancelRound) }, want: errImageRoundEnd, newRound: true, callback: true},
+		{name: "now at RD with D equal to RD", lifetime: time.Hour, apply: func(f *imageTestFixture, t0 time.Time, _, _ func()) { f.clock.set(t0.Add(time.Hour)) }, want: errImageRoundDeadline, notWant: []error{errImageExpired}, newRound: true},
+		{name: "round ctx canceled", lifetime: 50 * time.Millisecond, apply: func(f *imageTestFixture, _ time.Time, _, cancelRound func()) { f.clock.cancelOnRead(cancelRound) }, want: errImageRoundEnd, newRound: true, callback: true},
 		{name: "round ctx canceled at the read that moves now after D", lifetime: 50 * time.Millisecond, apply: func(f *imageTestFixture, t0 time.Time, _, cancelRound func()) {
 			f.clock.jumpOnRead(t0.Add(50*time.Millisecond+time.Nanosecond), cancelRound)
 		}, want: errImageRoundEnd, newRound: true, callback: true},
@@ -1047,6 +1074,7 @@ func imageEndCases() []imageEndCase {
 		}, want: errImageRequestEnd, callback: true},
 	}
 }
+
 func testImageEndBeforeWrite(t *testing.T) {
 	for _, tc := range imageEndCases() {
 		t.Run(tc.name, inImageBubble(func(t *testing.T) {
@@ -1111,6 +1139,7 @@ func testImageEndBeforeWrite(t *testing.T) {
 		f.requireUsage(t, round, 0, imageUsage(0, 1, 1, 1, 0), imageUsage(0, 1, 1, 1, 0), "canceled wait")
 	})
 }
+
 func testImageEndSeenUnderWriteMu(t *testing.T) {
 	f := newImageTestFixture(t, 1)
 	t0 := f.clock.Now()
@@ -1204,6 +1233,7 @@ func testImageRecordedEndKept(t *testing.T) {
 		}))
 	}
 }
+
 func testImageDoneContexts(t *testing.T) {
 	f := newImageTestFixture(t, 1)
 	canceled, cancel := context.WithCancel(context.Background())
@@ -1230,7 +1260,9 @@ func testImageDoneAtAdmissionRead(t *testing.T) {
 		requestCtx func() (context.Context, context.CancelFunc)
 		want       error
 	}{
-		{"request ctx", "request", endCtx, errImageRequestEnd}, {"request ctx from context.WithCancel", "request", cancelCtx, context.Canceled}, {"round ctx", "round", endCtx, errImageRoundEnd},
+		{"request ctx", "request", endCtx, errImageRequestEnd},
+		{"request ctx from context.WithCancel", "request", cancelCtx, context.Canceled},
+		{"round ctx", "round", endCtx, errImageRoundEnd},
 		{"request ctx and round ctx", "both", endCtx, errImageRequestEnd},
 	} {
 		t.Run(tc.name, inImageBubble(func(t *testing.T) {
@@ -1266,6 +1298,7 @@ func testImageDoneAtAdmissionRead(t *testing.T) {
 		}))
 	}
 }
+
 func testImageRequestRetiresEnded(t *testing.T) {
 	t.Run("same round", inImageBubble(func(t *testing.T) {
 		f := newImageTestFixture(t, 2)
@@ -1330,8 +1363,11 @@ func testImagePassEndOrder(t *testing.T) {
 		after          time.Duration
 		want           error
 	}{
-		{"request ctx done with now short of D", true, false, 0, errImageRequestEnd}, {"round ctx done with now short of D", false, true, 0, errImageRoundEnd}, {"request ctx done with now after D", true, false, 10*time.Second + time.Nanosecond, errImageRequestEnd},
-		{"round ctx done with now after D", false, true, 10*time.Second + time.Nanosecond, errImageRoundEnd}, {"request ctx and round ctx done with now after D", true, true, 10*time.Second + time.Nanosecond, errImageRequestEnd},
+		{"request ctx done with now short of D", true, false, 0, errImageRequestEnd},
+		{"round ctx done with now short of D", false, true, 0, errImageRoundEnd},
+		{"request ctx done with now after D", true, false, 10*time.Second + time.Nanosecond, errImageRequestEnd},
+		{"round ctx done with now after D", false, true, 10*time.Second + time.Nanosecond, errImageRoundEnd},
+		{"request ctx and round ctx done with now after D", true, true, 10*time.Second + time.Nanosecond, errImageRequestEnd},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newImageTestFixture(t, 2)
@@ -1381,8 +1417,11 @@ func testImageEarlyRefusalRetiresNothing(t *testing.T) {
 		byteLimit uint32
 		want      error
 	}{
-		{round, imageNilCtx, 0, imageTestByteLimit, errImageNilContext}, {round, canceled, 0, imageTestByteLimit, context.Canceled}, {doneRound, context.Background(), 0, imageTestByteLimit, context.Canceled},
-		{round, context.Background(), 1, imageTestByteLimit, errImageUnknownSource}, {round, context.Background(), 0, 150904, errImageRequestDomain},
+		{round, imageNilCtx, 0, imageTestByteLimit, errImageNilContext},
+		{round, canceled, 0, imageTestByteLimit, context.Canceled},
+		{doneRound, context.Background(), 0, imageTestByteLimit, context.Canceled},
+		{round, context.Background(), 1, imageTestByteLimit, errImageUnknownSource},
+		{round, context.Background(), 0, 150904, errImageRequestDomain},
 	} {
 		f.refusedDropping(t, tc.round, tc.ctx, f.ids[tc.session], tc.session, 2, tc.byteLimit, tc.want, imageDrop{})
 		f.requireEnd(t, inst, nil, fmt.Sprintf("refusal %d before the pass", i))
@@ -1471,7 +1510,9 @@ func testImageEndDuringWrite(t *testing.T) {
 		pass     bool
 		writeErr error
 	}{
-		{"request ctx, write succeeds", false, nil}, {"request ctx, write fails", false, errImageScriptedWrite}, {"expiry by another session's pass, write succeeds", true, nil},
+		{"request ctx, write succeeds", false, nil},
+		{"request ctx, write fails", false, errImageScriptedWrite},
+		{"expiry by another session's pass, write succeeds", true, nil},
 		{"expiry by another session's pass, write fails", true, errImageScriptedWrite},
 	} {
 		t.Run(tc.name, inImageBubble(func(t *testing.T) {
@@ -2044,12 +2085,24 @@ func testImageRoundRefusals(t *testing.T) {
 		want   error
 	}
 	cases := []refusal{
-		{"anchor height above the request domain", func(c *ImageRoundConfig) { c.Anchor.Height = 0x100000000 }, errImageRequestDomain}, {"anchor height at the uint64 maximum", func(c *ImageRoundConfig) { c.Anchor.Height = math.MaxUint64 }, errImageRequestDomain}, {"zero attempt lifetime", func(c *ImageRoundConfig) { c.Limits.AttemptLifetime = 0 }, errImagePolicy},
-		{"negative attempt lifetime", func(c *ImageRoundConfig) { c.Limits.AttemptLifetime = -time.Nanosecond }, errImagePolicy}, {"zero round lifetime", func(c *ImageRoundConfig) { c.Limits.RoundLifetime = 0 }, errImagePolicy}, {"negative round lifetime", func(c *ImageRoundConfig) { c.Limits.RoundLifetime = -time.Second }, errImagePolicy},
-		{"zero backoff", func(c *ImageRoundConfig) { c.Limits.Backoff = 0 }, errImagePolicy}, {"negative backoff", func(c *ImageRoundConfig) { c.Limits.Backoff = -time.Nanosecond }, errImagePolicy}, {"nil source list", func(c *ImageRoundConfig) { c.SourceIDs = nil }, errImageSourceSet},
-		{"empty non-nil source list", func(c *ImageRoundConfig) { c.SourceIDs = []string{} }, errImageSourceSet}, {"source with no service entry", func(c *ImageRoundConfig) { c.SourceIDs = []string{"absent:1"} }, errImageSourceSet}, {"source with no service entry after a resolved source", func(c *ImageRoundConfig) { c.SourceIDs = []string{f.ids[0], "absent:1"} }, errImageSourceSet},
-		{"same source twice", func(c *ImageRoundConfig) { c.SourceIDs = []string{f.ids[0], f.ids[0]} }, errImageSourceSet}, {"logical address and its alias", func(c *ImageRoundConfig) { c.SourceIDs = []string{f.ids[0], "192.0.2.40:9"} }, errImageSourceSet}, {"alias and its logical address", func(c *ImageRoundConfig) { c.SourceIDs = []string{"192.0.2.40:9", f.ids[0]} }, errImageSourceSet},
-		{"nil ctx with height above the domain", func(c *ImageRoundConfig) { c.Anchor.Height = 0x100000000 }, errImageNilContext}, {"height above the domain with zero backoff", func(c *ImageRoundConfig) { c.Anchor.Height, c.Limits.Backoff = 0x100000000, 0 }, errImageRequestDomain}, {"zero backoff with empty sources", func(c *ImageRoundConfig) { c.Limits.Backoff, c.SourceIDs = 0, nil }, errImagePolicy},
+		{"anchor height above the request domain", func(c *ImageRoundConfig) { c.Anchor.Height = 0x100000000 }, errImageRequestDomain},
+		{"anchor height at the uint64 maximum", func(c *ImageRoundConfig) { c.Anchor.Height = math.MaxUint64 }, errImageRequestDomain},
+		{"zero attempt lifetime", func(c *ImageRoundConfig) { c.Limits.AttemptLifetime = 0 }, errImagePolicy},
+		{"negative attempt lifetime", func(c *ImageRoundConfig) { c.Limits.AttemptLifetime = -time.Nanosecond }, errImagePolicy},
+		{"zero round lifetime", func(c *ImageRoundConfig) { c.Limits.RoundLifetime = 0 }, errImagePolicy},
+		{"negative round lifetime", func(c *ImageRoundConfig) { c.Limits.RoundLifetime = -time.Second }, errImagePolicy},
+		{"zero backoff", func(c *ImageRoundConfig) { c.Limits.Backoff = 0 }, errImagePolicy},
+		{"negative backoff", func(c *ImageRoundConfig) { c.Limits.Backoff = -time.Nanosecond }, errImagePolicy},
+		{"nil source list", func(c *ImageRoundConfig) { c.SourceIDs = nil }, errImageSourceSet},
+		{"empty non-nil source list", func(c *ImageRoundConfig) { c.SourceIDs = []string{} }, errImageSourceSet},
+		{"source with no service entry", func(c *ImageRoundConfig) { c.SourceIDs = []string{"absent:1"} }, errImageSourceSet},
+		{"source with no service entry after a resolved source", func(c *ImageRoundConfig) { c.SourceIDs = []string{f.ids[0], "absent:1"} }, errImageSourceSet},
+		{"same source twice", func(c *ImageRoundConfig) { c.SourceIDs = []string{f.ids[0], f.ids[0]} }, errImageSourceSet},
+		{"logical address and its alias", func(c *ImageRoundConfig) { c.SourceIDs = []string{f.ids[0], "192.0.2.40:9"} }, errImageSourceSet},
+		{"alias and its logical address", func(c *ImageRoundConfig) { c.SourceIDs = []string{"192.0.2.40:9", f.ids[0]} }, errImageSourceSet},
+		{"nil ctx with height above the domain", func(c *ImageRoundConfig) { c.Anchor.Height = 0x100000000 }, errImageNilContext},
+		{"height above the domain with zero backoff", func(c *ImageRoundConfig) { c.Anchor.Height, c.Limits.Backoff = 0x100000000, 0 }, errImageRequestDomain},
+		{"zero backoff with empty sources", func(c *ImageRoundConfig) { c.Limits.Backoff, c.SourceIDs = 0, nil }, errImagePolicy},
 	}
 	fields := reflect.TypeFor[ImageUnits]()
 	for i := range fields.NumField() {
@@ -2075,8 +2128,7 @@ func testImageRoundRefusals(t *testing.T) {
 	late.requireRoundRefused(t, context.Background(), unknown, errImageSourceSet, "unknown source with an unrepresentable RD")
 }
 
-// testImageSourceBound compares the bytes BeginImageRound allocates for 1048576 unregistered source ids with the
-// backing array of that list and with one byte per id, which one table sized by the list reaches.
+// testImageSourceBound compares the bytes BeginImageRound allocates for 1048576 unregistered source ids with the backing array of that list and with one byte per id, which one table sized by the list reaches.
 func testImageSourceBound(t *testing.T) {
 	f := newImageTestFixture(t, 2)
 	config := f.config(imageTestLimits())
@@ -2432,16 +2484,14 @@ func testImageDrainRound(t *testing.T, inexact bool) {
 	f.requireFaultsKept(t, []imageFault{{closes: 1}}, "round after Close started")
 }
 
-// imageCloser is one Close of a session connection: whether it ran inside a Request call, and,
-// for one that did, the session's last error and the round's usage at that Close.
+// imageCloser is one Close of a session connection: whether it ran inside a Request call, and, for one that did, the session's last error and the round's usage at that Close.
 type imageCloser struct {
 	request         bool
 	lastError       string
 	perPeer, global imageUnitVector
 }
 
-// recordClosers records every later Close of session's connection, runs inRequest after recording
-// a Close made inside a Request call and returns the records so far.
+// recordClosers records every later Close of session's connection, runs inRequest after recording a Close made inside a Request call and returns the records so far.
 func (f *imageTestFixture) recordClosers(round *ImageRound, session int, inRequest func()) func() []imageCloser {
 	var mu sync.Mutex
 	var records []imageCloser
@@ -2495,8 +2545,7 @@ func testImageUnwind(t *testing.T) {
 	t.Run("a panic in the round ctx stop call of the retirement after a failed write", func(t *testing.T) { testImageUnwindFailedWrite(t, false, true) })
 }
 
-// imageUnwindCtx returns the round ctx and the Request ctx of a test with the imageHookCtx C: C as
-// the Request ctx, or, with roundCtx set, as the round ctx with the Request ctx live; the other ctx is live.
+// imageUnwindCtx returns the round ctx and the Request ctx of a test with the imageHookCtx C: C as the Request ctx, or, with roundCtx set, as the round ctx with the Request ctx live; the other ctx is live.
 func imageUnwindCtx(c *imageHookCtx, live context.Context, roundCtx bool) (context.Context, context.Context) {
 	if roundCtx {
 		return c, live
@@ -2514,8 +2563,7 @@ func imageUnwinder(goexit bool) func() {
 	}
 }
 
-// requireUnwound runs the request for start 1 on session 0 with ctx and checks that it ended by
-// runtime.Goexit, with goexit set, or else by a panic with imageUnwindSentinel.
+// requireUnwound runs the request for start 1 on session 0 with ctx and checks that it ended by runtime.Goexit, with goexit set, or else by a panic with imageUnwindSentinel.
 func (f *imageTestFixture) requireUnwound(t *testing.T, round *ImageRound, ctx context.Context, goexit bool) {
 	t.Helper()
 	if goexit {
@@ -2534,8 +2582,7 @@ func (f *imageTestFixture) requireRequesterFree(t *testing.T) {
 	f.s.imageRequester.mu.Unlock()
 }
 
-// requireCurrentAfterUnwind checks that inst is the registered instance of start 1, unretired with
-// no end, and that round's current-assignment usage on session 0 and in total is 1.
+// requireCurrentAfterUnwind checks that inst is the registered instance of start 1, unretired with no end, and that round's current-assignment usage on session 0 and in total is 1.
 func (f *imageTestFixture) requireCurrentAfterUnwind(t *testing.T, round *ImageRound, inst *imageInstance) {
 	t.Helper()
 	retired, end := f.ended(inst)
@@ -2578,14 +2625,12 @@ func imageUnwindLimits(lifetimes ...time.Duration) ImageLimits {
 	return limits
 }
 
-// unwindAtPreWriteRead makes the first later clock read made by a pre-write decision call unwind;
-// the reads before it leave the clock unchanged.
+// unwindAtPreWriteRead makes the first later clock read made by a pre-write decision call unwind; the reads before it leave the clock unchanged.
 func (f *imageTestFixture) unwindAtPreWriteRead(unwind func()) {
 	f.clock.onReadFrom(".(*ImageRound).endBeforeWrite", func(now time.Time) time.Time { unwind(); return now })
 }
 
-// goRecovered requests start on session with ctx on its own goroutine and delivers the value the
-// call panicked with, or nil when it returned.
+// goRecovered requests start on session with ctx on its own goroutine and delivers the value the call panicked with, or nil when it returned.
 func (f *imageTestFixture) goRecovered(round *ImageRound, ctx context.Context, session int, start byte) <-chan any {
 	done := make(chan any, 1)
 	go func() {
@@ -2595,8 +2640,7 @@ func (f *imageTestFixture) goRecovered(round *ImageRound, ctx context.Context, s
 	return done
 }
 
-// requestExited requests start on session with ctx on its own goroutine and reports whether that
-// goroutine ended without the call returning.
+// requestExited requests start on session with ctx on its own goroutine and reports whether that goroutine ended without the call returning.
 func (f *imageTestFixture) requestExited(t *testing.T, round *ImageRound, ctx context.Context, session int, start byte) bool {
 	t.Helper()
 	returned, ended := false, make(chan struct{})
@@ -2609,8 +2653,7 @@ func (f *imageTestFixture) requestExited(t *testing.T, round *ImageRound, ctx co
 	return !returned
 }
 
-// requireNextAfterUnwind requests start on session and checks the query with wantID and nil and one
-// frame for it; the request's ctx is canceled at cleanup.
+// requireNextAfterUnwind requests start on session and checks the query with wantID and nil and one frame for it; the request's ctx is canceled at cleanup.
 func (f *imageTestFixture) requireNextAfterUnwind(t *testing.T, round *ImageRound, session int, start byte, wantID uint64) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2623,8 +2666,7 @@ func (f *imageTestFixture) requireNextAfterUnwind(t *testing.T, round *ImageRoun
 	require(t, returned, "request after the unwind did not return within %s", lifecycleWatchdog)
 }
 
-// testImageUnwindWithWriteMu unwinds the request for start 1 on session 0, with writeMu free, at
-// the clock read its pre-write decision makes with writeMu acquired, by a panic or runtime.Goexit.
+// testImageUnwindWithWriteMu unwinds the request for start 1 on session 0, with writeMu free, at the clock read its pre-write decision makes with writeMu acquired, by a panic or runtime.Goexit.
 func testImageUnwindWithWriteMu(t *testing.T, goexit bool) {
 	f := newImageTestFixture(t, 2)
 	round := f.round(t, imageUnwindLimits(), 0, 1)
@@ -2637,9 +2679,8 @@ func testImageUnwindWithWriteMu(t *testing.T, goexit bool) {
 	requireReturned(t, lifecycleClose(f.s), "Close")
 }
 
-// testImageUnwindWaiting unwinds a request at a pre-write clock read after a failed TryLock of the writeMu the test holds; the next request writes
-// its frame only after the test releases it. The test unlocks writeMu only after three pre-write clock reads of that request, the second of which
-// follows a failed TryLock made after the first, so the test still holds it; that request's ctx ends at cleanup.
+// testImageUnwindWaiting unwinds a request at a pre-write clock read after a failed TryLock of the writeMu the test holds; the next request writes its frame only after the test releases it. The test unlocks
+// writeMu only after three pre-write clock reads of that request, the second of which follows a failed TryLock made after the first, so the test still holds it; that request's ctx ends at cleanup.
 func testImageUnwindWaiting(t *testing.T) {
 	f := newImageTestFixture(t, 1)
 	round := f.round(t, imageUnwindLimits(), 0)
@@ -2661,8 +2702,7 @@ func testImageUnwindWaiting(t *testing.T) {
 	requireReturned(t, lifecycleClose(f.s), "Close")
 }
 
-// testImageUnwindWrite makes the connection write of the request frame for start 1 on session 0 panic before it records a byte, or after its
-// 24 header bytes: no close and no last error follow.
+// testImageUnwindWrite makes the connection write of the request frame for start 1 on session 0 panic before it records a byte, or after its 24 header bytes: no close and no last error follow.
 func testImageUnwindWrite(t *testing.T) {
 	for skip := range 2 {
 		f := newImageTestFixture(t, 1)
@@ -2749,8 +2789,7 @@ func testImageUnwindStop(t *testing.T, atRD, roundCtx, pass bool) {
 	requireReturned(t, lifecycleClose(f.s), "Close")
 }
 
-// testImageUnwindStopRoundEnd unwinds the pre-write retirement at the Request ctx stop call; canceling the round ctx
-// then retires the instance with that ctx's error, with no pass run.
+// testImageUnwindStopRoundEnd unwinds the pre-write retirement at the Request ctx stop call; canceling the round ctx then retires the instance with that ctx's error, with no pass run.
 func testImageUnwindStopRoundEnd(t *testing.T) {
 	f := newImageTestFixture(t, 1)
 	c, roundCtx := newImageHookCtx(), newImageHookCtx()
