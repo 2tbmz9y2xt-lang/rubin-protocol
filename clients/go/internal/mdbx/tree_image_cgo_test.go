@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"runtime"
 	"testing"
+	"time"
 )
 
 // tiOutcome is how one UpdateImageV1 call ended: returned with r, or unwound with the
@@ -476,9 +477,8 @@ func tiAccountRefusal(t *testing.T, s *Store, o *OperationReservationOwner, acco
 	t.Helper()
 	value, state := tiAccountSnapshot(account)
 	calls, replays := 0, 0
-	s.operations.Lock()
-	r := tiInvoke(s, account, tiCounted(t, &calls, &replays))
-	s.operations.Unlock()
+	var r tsResult
+	tiHeld(t, s, func() { r = tiInvoke(s, account, tiCounted(t, &calls, &replays)) })
 	r.tuple(t, 1, 1, -1)
 	treeNativeError(t, r.err, operationUpdate, "InvalidInput", 22, diagnostic, nil)
 	if calls != 0 || replays != 0 || reservationLive(o) != 0 {
@@ -491,6 +491,32 @@ func tiAccountRefusal(t *testing.T, s *Store, o *OperationReservationOwner, acco
 	ran := false
 	if err := account.WithReservation(1, func() error { ran = true; return nil }); any(err) != any(errOperationReservationInput) || ran || reservationLive(o) != 0 {
 		t.Fatalf("refused account WithReservation returned %v ran %v live %d", err, ran, reservationLive(o))
+	}
+}
+
+// tiHeld runs call on a fresh goroutine while s.operations is held and waits for it at most
+// five seconds. A call still running then fails the test after the owner is released and the
+// call has finished.
+func tiHeld(t *testing.T, s *Store, call func()) {
+	t.Helper()
+	done := make(chan struct{})
+	s.operations.Lock()
+	go func() {
+		defer close(done)
+		call()
+	}()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	returned := true
+	select {
+	case <-done:
+	case <-timer.C:
+		returned = false
+	}
+	s.operations.Unlock()
+	<-done
+	if !returned {
+		t.Fatal("UpdateImageV1 did not return within five seconds while the Store operation owner was held")
 	}
 }
 
@@ -554,12 +580,12 @@ func tiAdmissionStore(t *testing.T, name string) {
 	planner := tiCounted(t, &calls, &replays)
 	refuse := func(hold uint64) {
 		t.Helper()
+		var out tiOutcome
+		call := func() { out = tiCall(s, o, LaneOperation, hold, planner) }
 		if name == "busy" {
-			s.operations.Lock()
-		}
-		out := tiCall(s, o, LaneOperation, hold, planner)
-		if name == "busy" {
-			s.operations.Unlock()
+			tiHeld(t, s, call)
+		} else {
+			call()
 		}
 		tiStoreRefusal(t, name, tiReturned(t, out), terminal)
 		if calls != 0 || replays != 0 || reservationLive(o) != 0 || s.state != state || any(s.terminal) != any(terminal) || s.terminalTruth != truth || !tiSameTree(values, tiErrorTree(terminal, nil)) {

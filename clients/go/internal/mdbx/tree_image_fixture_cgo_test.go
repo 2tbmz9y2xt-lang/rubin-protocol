@@ -387,6 +387,14 @@ func tiPublicationCase(t *testing.T, s *Store, o *OperationReservationOwner, row
 }
 
 func tiForeignIdentity(t *testing.T) {
+	for _, hold := range []uint64{1, 0} {
+		tiForeignIdentityHold(t, hold)
+	}
+}
+
+// tiForeignIdentityHold runs the foreign meta 03 identity publication under caller hold hold on a fresh
+// Store, then the next public calls.
+func tiForeignIdentityHold(t *testing.T, hold uint64) {
 	envelope := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 0)
 	s, _, o := prunedTreeSeed(t, envelope)
 	treeNativeSeed(t, s, 0, []byte{3}, bytes.Repeat([]byte{8}, 32))
@@ -399,7 +407,7 @@ func tiForeignIdentity(t *testing.T) {
 	p := &tiPlanner{replays: &replays, want02: encoded, want02Present: true, outcome: func(*Reader) (TreeImagePublicationV1, error) { return publication, nil }}
 	check := func(out tiOutcome) { tiInvalidBatch(t, tiDisposition(t, s, 0, false, tiReturned(t, out), true)) }
 	var out tiOutcome
-	native := tiNative(t, s, o, 0, 0, nil, 1, func() { out = tiCall(s, o, LaneOperation, 1, p.imagePlan) })
+	native := tiNative(t, s, o, 0, 0, nil, 1, func() { out = tiCall(s, o, LaneOperation, hold, p.imagePlan) })
 	check(out)
 	if p.calls != 1 || replays != 0 {
 		t.Fatalf("planner %d replay %d", p.calls, replays)
@@ -409,7 +417,7 @@ func tiForeignIdentity(t *testing.T) {
 	var got TreeAuthorityV1
 	var present, usable bool
 	readErr := errors.New("View did not read the authority")
-	tiAfter(t, s, o, LaneOperation, 1, p, nil, check, func(r *Reader) {
+	tiAfter(t, s, o, LaneOperation, hold, p, nil, check, func(r *Reader) {
 		got, present, readErr = r.ReadTreeAuthorityV1()
 		usable = r.usable()
 	}, func() {
