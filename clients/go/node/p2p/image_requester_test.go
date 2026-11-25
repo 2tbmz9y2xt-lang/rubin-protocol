@@ -1079,29 +1079,27 @@ func testImageEndBeforeWrite(t *testing.T) {
 			requireEqual(t, f.closes(0), 0, "session closes after the follow-up requests")
 		}))
 	}
-	t.Run("frozen now keeps the wait parked until the ctx ends", inImageBubble(func(t *testing.T) {
+	t.Run("frozen now keeps the wait parked for 200 ms of wall time until the ctx ends", func(t *testing.T) {
 		f := newImageTestFixture(t, 1)
 		limits := imageTestLimits(50 * time.Millisecond)
 		round := f.round(t, limits, 0)
 		ctx, cancel := context.WithCancel(context.Background())
 		release := f.holdWrite(t, 0)
-		// Neither ctx is done before the canceling hook, so of the ctx callbacks and the deadline
-		// timer only the timer reads the clock; the hook is installed after that read.
+		// No ctx is done before the cancel, so the first clock read inside applyImageEnd is the deadline timer's; the
+		// cancel runs inside a clock read of the parked request's endBeforeWrite, which holds the requester mutex.
 		timerRead := f.clock.applyImageEndRead()
 		pending := f.goRequest(round, ctx, 0, 1)
 		f.waitAdmitted(t, 0, 1, "parked request")
 		_, returned := receiveWithin(pending, 200*time.Millisecond)
 		require(t, !returned, "frozen now: the parked request returned")
 		requireChannelClosed(t, timerRead, "deadline timer read")
-		synctest.Wait()
-		f.clock.cancelOnRead(cancel)
+		f.clock.onReadFrom(".(*ImageRound).endBeforeWrite", func(now time.Time) time.Time { cancel(); return now })
 		got := awaitImageResult(t, pending, "canceled wait")
 		requireImageResult(t, got, 1, 1, context.Canceled, "canceled wait")
-		synctest.Wait()
 		must(t, release(), "holder write")
 		f.requireFrames(t, 0, "frozen now")
 		f.requireUsage(t, round, 0, imageUsage(0, 1, 1, 1, 0), imageUsage(0, 1, 1, 1, 0), "canceled wait")
-	}))
+	})
 }
 
 func testImageEndSeenUnderWriteMu(t *testing.T) {
