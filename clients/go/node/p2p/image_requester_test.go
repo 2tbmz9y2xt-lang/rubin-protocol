@@ -2704,9 +2704,8 @@ func testImageUnwindWrite(t *testing.T) {
 
 func testImageUnwindArming(t *testing.T, goexit, roundCtx bool) {
 	inImageBubble(func(t *testing.T) {
-		c, cr, ran := newImageHookCtx(), newImageHookCtx(), make(chan int, 1)
+		c, cr, ran, f := newImageHookCtx(), newImageHookCtx(), make(chan int, 1), newImageTestFixture(t, 2)
 		roundC, requestC := imageUnwindCtx(c, cr, roundCtx)
-		f := newImageTestFixture(t, 2)
 		round, leases, reads := f.roundCtx(t, roundC, imageUnwindLimits(), 0, 1), f.leases(), f.clock.readCount()
 		c.onAfterFunc = func() {
 			if roundCtx {
@@ -2714,13 +2713,14 @@ func testImageUnwindArming(t *testing.T, goexit, roundCtx bool) {
 			}
 			imageUnwinder(goexit)()
 		}
-		f.requireUnwound(t, f.goRecovered(round, requestC, 0, 1), goexit)
+		unwound := f.goRecovered(round, requestC, 0, 1)
 		if roundCtx {
 			requireEqual(t, awaitImageResult(t, ran, "Request ctx functions"), 1, "Request ctx functions run")
 			waitUntil(t, func() bool { return f.leases() == leases }, "Service lease release by the Request ctx callback")
 			require(t, f.clock.readCount() == reads+1 && cr.applierErrs == 0 && f.instance(1) == nil, "Request ctx callback waiting through the unwind: clock reads %d->%d, Err calls %d, registered %v, want only the admission read", reads, f.clock.readCount(), cr.applierErrs, f.instance(1) != nil)
 			f.requireUsage(t, round, 0, imageUnitVector{}, imageUnitVector{}, "after the Request ctx callback waiting through the unwind")
 		}
+		f.requireUnwound(t, unwound, goexit)
 		f.requireNextAfterUnwind(t, round, 0, 1, 1)
 		f.admitted(t, round, context.Background(), 0, 2, 2)
 		g := newImageTestFixture(t, 2)
