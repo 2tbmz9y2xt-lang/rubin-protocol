@@ -990,15 +990,6 @@ func servingNativeInputsV1(t *testing.T) {
 			t.Fatal("nil tree callback tuple")
 		}
 		treeNativeError(t, result, engineOperation("update"), EngineClass("InvalidInput"), 22, "nil UpdateTreeV1 callback", nil)
-		truth, stage, index, result = s.UpdateImageV1(nil, nil)
-		if truth != 1 || stage != 1 || index != -1 {
-			t.Fatal("nil image planner tuple")
-		}
-		treeNativeError(t, result, engineOperation("update"), EngineClass("InvalidInput"), 22, "nil UpdateImageV1 callback", nil)
-		imgPlanner := func(*Reader) (TreeImagePublicationV1, error) {
-			t.Fatal("invalid account executed image planner")
-			return TreeImagePublicationV1{}, nil
-		}
 		use := func(*Reader) (TreeOperationV1, error) {
 			t.Fatal("invalid account executed native callback")
 			return TreeOperationV1{}, nil
@@ -1006,19 +997,39 @@ func servingNativeInputsV1(t *testing.T) {
 		for _, row := range []struct {
 			account *OperationAccount
 			text    string
-		}{{nil, "nil operation account"}, {closed, "closed operation account"}, {&OperationAccount{}, "closed operation account"}} {
+		}{{nil, "nil operation account"}, {&OperationAccount{}, "closed operation account"}} {
 			truth, stage, index, result = s.UpdateTreeV1(row.account, use)
 			if truth != 1 || stage != 1 || index != -1 {
 				t.Fatal("tree static account tuple")
 			}
 			treeNativeError(t, result, engineOperation("update"), EngineClass("InvalidInput"), 22, row.text, nil)
+		}
+		if e.closing {
+			t.Fatal("refused static input changed serving priority")
+		}
+		truth, stage, index, result = s.UpdateImageV1(nil, nil)
+		if truth != 1 || stage != 1 || index != -1 {
+			t.Fatal("nil image planner tuple")
+		}
+		treeNativeError(t, result, engineOperation("update"), EngineClass("InvalidInput"), 22, "nil UpdateImageV1 callback", nil)
+		if e.closing {
+			t.Fatal("refused nil image planner changed serving priority")
+		}
+		imgPlanner := func(*Reader) (TreeImagePublicationV1, error) {
+			t.Fatal("invalid account executed image planner")
+			return TreeImagePublicationV1{}, nil
+		}
+		for _, row := range []struct {
+			account *OperationAccount
+			text    string
+		}{{nil, "nil operation account"}, {closed, "closed operation account"}, {&OperationAccount{}, "closed operation account"}} {
 			truth, stage, index, result = s.UpdateImageV1(row.account, imgPlanner)
 			if truth != 1 || stage != 1 || index != -1 {
 				t.Fatal("image static account tuple")
 			}
 			treeNativeError(t, result, engineOperation("update"), EngineClass("InvalidInput"), 22, row.text, nil)
 			if e.closing {
-				t.Fatalf("refused %q input changed serving priority", row.text)
+				t.Fatalf("refused %q image input changed serving priority", row.text)
 			}
 		}
 		return e.CheckV1()
