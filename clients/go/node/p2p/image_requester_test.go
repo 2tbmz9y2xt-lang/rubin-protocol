@@ -2238,7 +2238,7 @@ func testImageBackoffGate(t *testing.T) {
 	round, err := f.begin(context.Background(), config)
 	must(t, err, "BeginImageRound at NotBefore")
 	f.admitted(t, round, context.Background(), 0, 1, 1)
-	config.NotBefore = time.Now().Add(t0.Sub(time.Now()) - time.Hour)
+	config.NotBefore = time.Now().Add(time.Until(t0) - time.Hour)
 	f.requireRoundRefused(t, context.Background(), config, errImagePolicy, "monotonic NotBefore at a wall-only now")
 	requireReturned(t, lifecycleClose(f.s), "Close after the refused round")
 	newImageTestFixtureAt(t, 1, time.Time{}.Add(-time.Hour)).round(t, imageTestLimits(), 0)
