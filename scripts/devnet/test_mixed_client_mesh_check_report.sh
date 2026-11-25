@@ -417,7 +417,7 @@ check_wait_receipt_deadlines() {
   local probe="${TMP_ROOT}/receipt-deadline.sh" probe_root="${TMP_ROOT}/receipt-deadline" lib="${TMP_ROOT}/receipt-deadline-lib.sh" eventually_py="${TMP_ROOT}/receipt-deadline-eventually.py"
   mkdir -p -- "${probe_root}"
   extract_slices "${lib}" "sidecar_derivations_py()" '[[ "${MESH_TIMEOUT}"' "tx_capture_reason()" "txgen_datadir_guard()" "wait_rust_accept()" "write_block_check_go()" "tip_matches()" "write_outputs()" "wait_peer_snapshot()" "wait_rust_to_go_link()" "parse_restart_tip_sidecar()" "go_restart_mine_target()" "wait_rust_restart_catch_up()" "write_partition_proxy()" "wait_peer_snapshot_state()" "parse_partition_mine_result()" "partition_capture_tip()" "partition_mine()" "wait_tip_to_match()" "store_neutrality_step()"
-  extract_slices "${eventually_py}" "def fail(" "def safe_path_str("
+  extract_slices "${eventually_py}" "MAX_TX_HEX_CHARS = " "def safe_path_str("
   cat >"${probe}" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -704,7 +704,7 @@ check_startup_waits_for_rust_identity() {
 # and a failed read still lets build_go_node run.
 check_commit_read_before_builds() {
   local lib="${TMP_ROOT}/build-read-lib.sh" log="${TMP_ROOT}/build-read.log" modes fail out
-  extract_slices "${lib}" "repo_git()" "# Writes mixed-client-mesh-store-neutrality.json" 'BUILD_HEAD="$(repo_git rev-parse HEAD)"' "start_go_node || finish_no_data"
+  extract_slices "${lib}" "repo_git()" "# Writes mixed-client-mesh-store-neutrality.json" "# HEAD and clients status before the first build" "start_go_node || finish_no_data"
   for modes in "1 0 0" "0 1 0" "0 0 1" "0 0 0"; do
     for fail in "" rev-parse; do
       rm -f -- "${log}"
@@ -725,10 +725,10 @@ check_commit_read_before_builds() {
         finish_no_data() { printf '%s\n' "$1"; exit 0; }
         # shellcheck source=/dev/null
         source "${lib}"
-        printf '%s %s %s\n' "${BUILD_COMMIT_READ}" "${BUILD_HEAD}" "${BUILD_CLIENTS_STATUS:-}"
+        printf '%s %s %s\n' "${BUILD_COMMIT_READ-unset}" "${BUILD_HEAD-unset}" "${BUILD_CLIENTS_STATUS:-}"
       )"
       if [[ -z "${fail}" ]]; then
-        [[ "${out}" == "1 head-0 " && "$(head -n 3 "${log}" | tr '\n' ,)" == "git rev-parse,git status,build_go_node," ]] || { echo "FAIL: build read (${modes}): ${out}; $(tr '\n' ',' <"${log}")" >&2; exit 1; }
+        [[ "${out}" == "1 head-0 " && "$(head -n 3 "${log}" | tr '\n' ,)" == "git rev-parse,git status,build_go_node," ]] || { echo "FAIL: HEAD read before build_go_node (${modes}): ${out}; $(tr '\n' ',' <"${log}")" >&2; exit 1; }
       else
         [[ "${out}" == 0* && "$(head -n 2 "${log}" | tr '\n' ,)" == "git rev-parse,build_go_node," ]] || { echo "FAIL: failed build read (${modes}): ${out}; $(tr '\n' ',' <"${log}")" >&2; exit 1; }
       fi
@@ -757,7 +757,7 @@ check_store_neutrality_producer_reasons() {
   mkdir -p -- "${probe_root}/cap" "${probe_root}/out"
   extract_slices "${lib}" "sidecar_derivations_py()" '[[ "${MESH_TIMEOUT}"' "chain_mode()" "capture_go_reorg_metrics()"
   extract_slices "${main}" "write_store_neutrality_sidecar ||" "if (( PARTITION_HEAL_REORG_MODE == 1 )); then"
-  extract_slices "${first}" 'BUILD_HEAD="$(repo_git rev-parse HEAD)"' "build_go_node ||"
+  extract_slices "${first}" "# HEAD and clients status before the first build" "build_go_node ||"
   python3 - "${probe_root}" <<'PY'
 import hashlib, json, sys
 root = sys.argv[1]
