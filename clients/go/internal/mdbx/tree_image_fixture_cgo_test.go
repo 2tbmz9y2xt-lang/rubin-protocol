@@ -65,12 +65,14 @@ func TestTreeImageLifecycleV1(t *testing.T) {
 			})
 		}
 	}
-	for _, mode := range []string{"ignored", "returned", "wrapped", "other", "panic", "goexit"} {
-		t.Run("Reader-recorded census failure with planner outcome "+mode+" consumes the Store", func(t *testing.T) {
-			for _, hold := range []uint64{1, 0} {
-				tiRecordedCase(t, mode, hold)
-			}
-		})
+	for _, source := range tiRecordedSources() {
+		for _, mode := range []string{"ignored", "returned", "wrapped", "other", "panic", "goexit"} {
+			t.Run("Reader-recorded "+source.name+" with planner outcome "+mode+" consumes the Store", func(t *testing.T) {
+				for _, hold := range []uint64{1, 0} {
+					tiRecordedCase(t, source, mode, hold)
+				}
+			})
+		}
 	}
 }
 
@@ -601,17 +603,46 @@ func tiPlannerEnd(t *testing.T, s *Store, outcome string, mode uint32, out tiOut
 	return result
 }
 
-// tiRecordedCase: the planner's ReadTreeAuthorityV1 records the census failure f
-// on a Store with a rank-1 row; readPrimary composes f with the error the planner returns,
-// nil when it returns nil, panics or calls Goexit. The call runs with caller hold hold.
-func tiRecordedCase(t *testing.T, mode string, hold uint64) {
+// tiRecordedSource is one failure of the planner's ReadTreeAuthorityV1: seed prepares the
+// Store, fault is the fixture mode armed at meta key 0x02 (0 for none) and want checks the
+// recorded failure.
+type tiRecordedSource struct {
+	name  string
+	seed  func(*testing.T, *Store)
+	fault uint32
+	want  func(*testing.T, error)
+}
+
+// tiRecordedSources lists a census failure of an absent meta key 0x02, a get EIO and a width
+// failure at its get, and a decode failure of a present one-byte value.
+func tiRecordedSources() []tiRecordedSource {
+	return []tiRecordedSource{
+		{name: "census failure", seed: tiRankOne, want: func(t *testing.T, err error) { treeNativeIntegrity(t, err, operationGet, nil) }},
+		{name: "get EIO at key 0x02", seed: func(*testing.T, *Store) {}, fault: 28, want: func(t *testing.T, err error) {
+			treeNativeError(t, err, operationGet, "IO", 5, "error 5", nil)
+		}},
+		{name: "width failure of a 1048577-byte key 0x02", seed: func(t *testing.T, s *Store) { treeNativeSeed(t, s, 0, []byte{2}, make([]byte, 1048577)) }, want: func(t *testing.T, err error) {
+			treeNativeIntegrity(t, err, operationGet, errSchema)
+		}},
+		{name: "decode failure of a one-byte key 0x02", seed: func(t *testing.T, s *Store) { treeNativeSeed(t, s, 0, []byte{2}, []byte{0}) }, want: func(t *testing.T, err error) {
+			treeNativeIntegrity(t, err, operationGet, errSchema)
+		}},
+	}
+}
+
+// tiRecordedCase: the planner's ReadTreeAuthorityV1 returns the zero authority, false and the
+// failure f of source, which it records; readPrimary composes f with the error the planner
+// returns, nil when it returns nil, panics or calls Goexit. The call runs with caller hold hold.
+func tiRecordedCase(t *testing.T, source tiRecordedSource, mode string, hold uint64) {
 	s, _, _ := treeNativeStore(t)
-	tiRankOne(t, s)
+	source.seed(t, s)
 	o := reservationOwner(t, MinReservationLimit)
 	var f, application error
+	var authority TreeAuthorityV1
+	present := true
 	value := new(int)
 	p := &tiPlanner{outcome: func(r *Reader) (TreeImagePublicationV1, error) {
-		_, _, f = r.ReadTreeAuthorityV1()
+		authority, present, f = r.ReadTreeAuthorityV1()
 		switch mode {
 		case "panic":
 			panic(value)
@@ -627,8 +658,11 @@ func tiRecordedCase(t *testing.T, mode string, hold uint64) {
 		return TreeImagePublicationV1{}, application
 	}}
 	var out tiOutcome
-	native := tiProbe(t, s, o, 1, func() { out = tiCall(s, o, LaneOperation, hold, p.imagePlan) })
-	treeNativeIntegrity(t, f, operationGet, nil)
+	native := tiNative(t, s, o, source.fault, 0, []byte{2}, 1, func() { out = tiCall(s, o, LaneOperation, hold, p.imagePlan) })
+	source.want(t, f)
+	if !reflect.DeepEqual(authority, TreeAuthorityV1{}) || present {
+		t.Fatalf("failed meta key 0x02 read returned authority %+v present %v", authority, present)
+	}
 	terminal := f
 	switch mode {
 	case "panic", "goexit":
