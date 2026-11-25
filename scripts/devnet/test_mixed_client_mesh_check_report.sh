@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --deadline-boundary-only runs only the wait deadline boundary rows.
+BOUNDARY_ONLY=0
+case "$#:${1:-}" in
+  0:) ;;
+  1:--deadline-boundary-only) BOUNDARY_ONLY=1 ;;
+  *) echo "usage: $0 [--deadline-boundary-only]" >&2; exit 2 ;;
+esac
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HARNESS="${REPO_ROOT}/scripts/devnet-mixed-client-mesh.sh"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
@@ -415,19 +422,20 @@ check_wait_receipt_deadlines() {
 #!/usr/bin/env bash
 set -euo pipefail
 source "$1"
-probe_root="$2"; eventually_py="$3"
+probe_root="$2"; eventually_py="$3"; boundary_only="$4"
 GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"; PEER="127.0.0.1:51002"
 TX_ID="$(printf 'c%.0s' {1..64})"; TX_HEX=0011; aa="$(printf 'a%.0s' {1..64})"
 RUST_STATUS_JSON="${probe_root}/rust-status.json"; RUST_GET_TX_JSON="${probe_root}/rust-get-tx.json"; GO_ACCEPT_STATUS_JSON="${probe_root}/go-status.json"; GO_ACCEPT_GET_TX_JSON="${probe_root}/go-get-tx.json"
 GO_CONVERGE_TIP_JSON="${probe_root}/go-converge-tip.json"; GO_CONVERGE_BLOCK_JSON="${probe_root}/go-converge-block.json"; RUST_CONVERGE_TIP_JSON="${probe_root}/rust-converge-tip.json"; RUST_CONVERGE_BLOCK_JSON="${probe_root}/rust-converge-block.json"
 RUST_MINE_HEIGHT=102; RUST_MINE_HASH="${aa}"; RUST_MINE_TX_COUNT=1; GO_MINE_HEIGHT=102; GO_MINE_HASH="${aa}"; GO_MINE_TX_COUNT=1
 RUST_CATCH_UP_TIP_JSON="${probe_root}/rust-catch-up-tip.json"; GO_RESTART_TARGET_HEIGHT=102; GO_RESTART_TARGET_TIP="${aa}"
-PEER_OUT="${probe_root}/peers.json"; CAPTURE_SLEEP=0; BLOCK_SLEEP=0; TIP_FAILS=0; PEER_FAILS=0; GET_TX_FOUND=true; ANSWER=""; FIRST_ANSWER=""
+PEER_OUT="${probe_root}/peers.json"; CAPTURE_SLEEP=0; BLOCK_SLEEP=0; TIP_FAILS=0; PEER_FAILS=0; GET_TX_FOUND=true; ANSWER=""; FIRST_ANSWER=""; FIRST_STDERR=""
 printf '{"best_known_height":102,"has_tip":true,"height":102,"in_ibd":false,"tip_hash":"%s"}\n' "${aa}" >"${probe_root}/tip.json"
 printf '{"best_known_height":103,"has_tip":true,"height":103,"in_ibd":false,"tip_hash":"%s"}\n' "${aa}" >"${probe_root}/tip-above.json"
 printf '[]\n' >"${probe_root}/array.json"
 printf '{"count":1,"peers":[{"addr":"%s","handshake_complete":true}]}\n' "${PEER}" >"${probe_root}/peer.json"
 printf '{"count":1,"peers":[{"addr":"%s","handshake_complete":false}]}\n' "${PEER}" >"${probe_root}/peer-incomplete.json"
+printf '{"count":1,"peers":[{"addr":"%s","best_height":%s,"handshake_complete":true}]}\n' "${PEER}" "$(printf '9%.0s' {1..5000})" >"${probe_root}/peer-long-height.json"
 # The stubs append the request path to the capture log; the last capture of an attempt sleeps CAPTURE_SLEEP before it answers.
 capture_tx_rpc_sidecar() {
   local raw=",\"raw_hex\":\"${TX_HEX}\""
@@ -446,12 +454,13 @@ capture_rpc_sidecar() {
   sleep "${CAPTURE_SLEEP}"
   cp -- "${ANSWER}" "$5"
 }
-# The first PEER_FAILS /peers captures fail with status 22; capture 1 answers FIRST_ANSWER at once when it is set.
+# The first PEER_FAILS /peers captures fail with status 22; capture 1 answers FIRST_ANSWER at once when it is set,
+# after writing FIRST_STDERR as one stderr line when that is set.
 rpc_json() {
   local n
   printf '%s\n' "$3" >>"${probe_root}/captures"; n="$(wc -l <"${probe_root}/captures")"
   (( n > PEER_FAILS )) || return 22
-  (( n != 1 )) || [[ -z "${FIRST_ANSWER}" ]] || { cat -- "${FIRST_ANSWER}"; return 0; }
+  (( n != 1 )) || [[ -z "${FIRST_ANSWER}" ]] || { [[ -z "${FIRST_STDERR}" ]] || printf '%s\n' "${FIRST_STDERR}" >&2; cat -- "${FIRST_ANSWER}"; return 0; }
   sleep "${CAPTURE_SLEEP}"; cat -- "${ANSWER}"
 }
 verify_block_inclusion() { printf '%s\n' "$1" >>"${probe_root}/verify"; }
@@ -551,7 +560,7 @@ PY
 )"; then echo "FAIL: eventually returned on a predicate answered at its deadline: ${output}" >&2; exit 1; fi
   [[ "${output}" == "FAIL: predicate answered at the deadline" ]] || { echo "FAIL: eventually output at its deadline: ${output}" >&2; exit 1; }
 }
-[[ "${DEADLINE_BOUNDARY_ONLY:-0}" != 1 ]] || { deadline_boundary_rows; exit 0; }
+[[ "${boundary_only}" != 1 ]] || { deadline_boundary_rows; exit 0; }
 
 export MESH_TIMEOUT=1 CAPTURE_SLEEP=2
 expect_late_answers_refused
@@ -613,10 +622,14 @@ FIRST_ANSWER="${probe_root}/peer-incomplete.json" expect_wait PEER_SNAPSHOT_REAS
 require_log captures $'/peers\n/peers' "wait_peer_snapshot after a refused snapshot"; require_absent "${PEER_OUT}" "wait_peer_snapshot after a refused snapshot"
 PEER_FAILS=1 expect_wait PEER_SNAPSHOT_REASON peer_snapshot_rpc_failed wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${PEER_OUT}" 3 "${PEER}"
 require_log captures $'/peers\n/peers' "wait_peer_snapshot after a failed capture"; require_absent "${PEER_OUT}" "wait_peer_snapshot after a failed capture"
+FIRST_ANSWER="${probe_root}/peer-long-height.json" expect_wait PEER_SNAPSHOT_REASON peer_snapshot_malformed_json wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${PEER_OUT}" 3 "${PEER}"
+require_log captures $'/peers\n/peers' "wait_peer_snapshot after an unparsable snapshot"; require_absent "${PEER_OUT}" "wait_peer_snapshot after an unparsable snapshot"
+FIRST_ANSWER="${probe_root}/peer-incomplete.json" FIRST_STDERR="peer capture warning" expect_wait PEER_SNAPSHOT_REASON peer_snapshot_rpc_failed wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${PEER_OUT}" 3 "${PEER}"
+require_log captures $'/peers\n/peers' "wait_peer_snapshot after a capture with stderr"; require_absent "${PEER_OUT}" "wait_peer_snapshot after a capture with stderr"
 
 deadline_boundary_rows
 SH
-  bash "${probe}" "${lib}" "${probe_root}" "${eventually_py}"
+  bash "${probe}" "${lib}" "${probe_root}" "${eventually_py}" "${BOUNDARY_ONLY}"
 }
 
 check_repo_git_reads_repo_root() {
@@ -2495,7 +2508,7 @@ extract_slices "${PROXY_GO_LOCAL_ADDR_LIB}" "proxy_go_local_addr()" "wait_peer_s
 extract_slices "${WAIT_PEER_SNAPSHOT_LIB}" "wait_peer_snapshot()" "wait_rust_to_go_link()"
 extract_slices "${CAPTURE_GO_REORG_METRICS_LIB}" "capture_go_reorg_metrics()" "run_partition_heal_reorg_scenario()"
 extract_slices "${WAIT_PEER_SNAPSHOT_STATE_LIB}" "wait_peer_snapshot_state()" "parse_partition_mine_result()"
-[[ "${DEADLINE_BOUNDARY_ONLY:-0}" != 1 ]] || { check_wait_receipt_deadlines; echo "PASS: wait deadline boundary rows"; exit 0; }
+(( BOUNDARY_ONLY == 0 )) || { check_wait_receipt_deadlines; echo "PASS: wait deadline boundary rows"; exit 0; }
 check_prepare_tx_chainstate_cleanup
 check_prepare_tx_chainstate_leaves_rust_empty
 check_rust_datadir_guard

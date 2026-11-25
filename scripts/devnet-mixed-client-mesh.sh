@@ -2294,7 +2294,7 @@ finish_no_data() {
   exit 1
 }
 wait_peer_snapshot() {
-  local label="$1" addr="$2" out="$3" timeout="$4" expected="$5" deadline tmp
+  local label="$1" addr="$2" out="$3" timeout="$4" expected="$5" deadline tmp last_err="" last_bad=""
   deadline=$((SECONDS + timeout)); PEER_SNAPSHOT_REASON=""
   tmp="${out}.tmp"
   while (( SECONDS < deadline )); do
@@ -2325,9 +2325,12 @@ PY
       then (( SECONDS < deadline )) || break; mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
       else rc=$?; PEER_SNAPSHOT_REASON=""; [[ ${rc} -eq 3 ]] && PEER_SNAPSHOT_REASON=unexpected_peer_snapshot_peer; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; [[ ${rc} -eq 5 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_invalid_shape; [[ ${rc} -eq 6 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_handshake_incomplete; [[ ${rc} -eq 7 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_expected_peer_absent; fi
     else rc=$?; [[ ${rc} -eq 23 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json || PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; fi
+    # The end reason reads the files as the last unaccepted capture left them.
+    last_err=""; [[ ! -s "${tmp}.err" ]] || last_err=1
+    last_bad=""; [[ ! -s "${tmp}" ]] || python3 -m json.tool "${tmp}" >/dev/null 2>&1 || last_bad=1
     sleep 1
   done
-  if [[ "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_rpc_failed || -s "${tmp}.err" ]]; then PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; elif [[ "${PEER_SNAPSHOT_REASON:-}" == unexpected_peer_snapshot_peer || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_malformed_json || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_invalid_shape || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_handshake_incomplete || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_expected_peer_absent ]]; then :; elif [[ -s "${tmp}" ]] && ! python3 -m json.tool "${tmp}" >/dev/null 2>&1; then PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; else PEER_SNAPSHOT_REASON="${label}_peer_snapshot_missing_endpoint"; fi
+  if [[ "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_rpc_failed || -n "${last_err}" ]]; then PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; elif [[ "${PEER_SNAPSHOT_REASON:-}" == unexpected_peer_snapshot_peer || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_malformed_json || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_invalid_shape || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_handshake_incomplete || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_expected_peer_absent ]]; then :; elif [[ -n "${last_bad}" ]]; then PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; else PEER_SNAPSHOT_REASON="${label}_peer_snapshot_missing_endpoint"; fi
   rm -f -- "${tmp}" "${tmp}.err"
   echo "timeout waiting for ${label} /peers completed handshake: ${PEER_SNAPSHOT_REASON}" >&2
   return 1
