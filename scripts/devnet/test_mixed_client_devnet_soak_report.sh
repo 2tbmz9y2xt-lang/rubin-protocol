@@ -67,10 +67,18 @@ def rewrite_root_paths(value, target_root=None):
     target = str(alias_root if target_root is None else target_root)
     if isinstance(value, str): return value.replace(str(root), target)
     if isinstance(value, list): return [rewrite_root_paths(item, target_root) for item in value]
-    if isinstance(value, dict): return {key: rewrite_root_paths(item, target_root) for key, item in value.items()}
+    if isinstance(value, dict):
+        out = {key: rewrite_root_paths(item, target_root) for key, item in value.items()}
+        if command_quotes_argv(value): out["command"] = shlex.join(out["command_argv"])
+        return out
     return value
+def command_quotes_argv(node):
+    try:
+        return isinstance(node.get("command"), str) and shlex.split(node["command"]) == node.get("command_argv")
+    except ValueError:
+        return False
 def space_escaped_arg(arg):
-    return arg.replace("\\", "\\\\").replace(" ", "\\ ")
+    return "".join(c if c.isascii() and (c.isalnum() or c in "_./:=-") else "\\" + c for c in arg)
 def raw(prop=None, conv=None, txid=h("1"), block_hash=h("2"), height=9):
     def bucket(kind, direction):
         if direction is None:

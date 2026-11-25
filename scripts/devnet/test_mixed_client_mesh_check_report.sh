@@ -226,6 +226,39 @@ SH
   bash "${probe}" "${lib}" "${probe_root}"
 }
 
+check_argv_cmd_round_trip() {
+  local probe="${TMP_ROOT}/argv-cmd-round-trip.sh" lib="${TMP_ROOT}/argv-cmd-lib.sh"
+  extract_slices "${lib}" "argv_cmd() {" "loopback_endpoint()"
+  cat >"${probe}" <<'SH'
+set -euo pipefail
+source "$1"
+expect_round_trip() {
+  local label="$1" out
+  shift
+  out="$(argv_cmd "$@")"
+  python3 - "${label}" "${out}" "$@" <<'PY'
+import shlex, sys
+try:
+    got = shlex.split(sys.argv[2])
+except ValueError as exc:
+    got = f"ValueError: {exc}"
+if got != sys.argv[3:]:
+    sys.exit(f"FAIL: argv_cmd output for {sys.argv[1]} does not split to its argv: {sys.argv[2]!r} -> {got!r}")
+PY
+}
+expect_round_trip space '/r/x y'
+expect_round_trip dollar '/r/x$y'
+expect_round_trip apostrophe "/r/x'y"
+expect_round_trip double-quote '/r/x"y'
+expect_round_trip backslash '/r/x\y'
+expect_round_trip e-acute $'/r/x\xc3\xa9y'
+expect_round_trip del $'/r/x\x7fy'
+expect_round_trip combined $'/r/x $\'"\\\xc3\xa9\x7fy'
+expect_round_trip argv-list /r/node --datadir '/r/x y' '/r/x$y' "/r/x'y" '/r/x"y' '/r/x\y' $'/r/x\xc3\xa9y' $'/r/x\x7fy'
+SH
+  env -u LANG -u LC_ALL -u LC_CTYPE /bin/bash "${probe}" "${lib}"
+}
+
 check_txgen_datadir_guard() {
   local probe="${TMP_ROOT}/txgen-datadir-guard.sh" probe_root="${TMP_ROOT}/txgen-datadir-guard" lib="${TMP_ROOT}/txgen-datadir-guard-lib.sh"
   mkdir -p -- "${probe_root}/go-node" "${probe_root}/rust-node"
@@ -770,6 +803,7 @@ write_reports() {
 from pathlib import Path
 import hashlib
 import json
+import shlex
 import stat
 import sys
 
@@ -882,7 +916,7 @@ def node(impl: str, create_store: bool) -> dict:
         argv.append("--create-store")
     return {
         "binary": str(binary),
-        "command": " ".join(argv),
+        "command": shlex.join(argv),
         "command_argv": argv,
         "implementation": impl,
         "name": name,
@@ -1222,7 +1256,7 @@ partition_proxy = "127.0.0.1:53010"
 partition_go_peer = "127.0.0.1:53011"
 partition_nodes = [node("go", False), node("rust", True)]
 partition_nodes[1]["command_argv"][-2] = partition_proxy
-partition_nodes[1]["command"] = " ".join(partition_nodes[1]["command_argv"])
+partition_nodes[1]["command"] = shlex.join(partition_nodes[1]["command_argv"])
 partition_peer_connectivity = {"bidirectional_observed": False, "counterpart_links": {"go_peer_snapshot_expected_addr": None, "rust_outbound_local_addr": None, "rust_outbound_pid": None, "rust_outbound_remote_addr": None, "rust_peer_snapshot_expected_addr": None}, "go_peer_snapshot": {"count": 0, "peers": []}, "go_to_rust": False, "rust_peer_snapshot": {"count": 0, "peers": []}, "rust_to_go": False}
 partition_final = {"peer_snapshots_rechecked": True, "process_identity_rechecked": True, "producer_side": True, "rust_outbound_link_rechecked": False, "rust_outbound_local_addr": None, "rust_outbound_pid": None, "rust_outbound_remote_addr": None}
 dump(artifact_root / "partition-common-go-mine.json", mine_sidecar("go", go_rpc, common_hash, common_height))
@@ -1290,8 +1324,8 @@ bad_partition = json.loads(json.dumps(partition_report)); bad_partition["peer_co
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["peer_connectivity"]["go_peer_snapshot"]["count"] = False; dump(artifact_root / "partition-peer-connectivity-bool-count-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["final_verification"]["rust_outbound_link_rechecked"] = True; dump(root / "partition-final-verification-overclaim-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["nodes"][0]["rpc_endpoint_process_backed"] = False; dump(artifact_root / "partition-unbacked-node-report.json", bad_partition)
-bad_partition = json.loads(json.dumps(partition_report)); bad_partition["nodes"][1]["command_argv"][-2] = go_p2p; bad_partition["nodes"][1]["command"] = " ".join(bad_partition["nodes"][1]["command_argv"]); dump(artifact_root / "partition-rust-peer-argv-mismatch-report.json", bad_partition)
-bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["partition_proxy_endpoint"] = go_p2p; bad_partition["nodes"][1]["command_argv"][-2] = go_p2p; bad_partition["nodes"][1]["command"] = " ".join(bad_partition["nodes"][1]["command_argv"]); bad_partition["observations"]["pre_partition"]["rust_peer_snapshot"] = str(artifact_root / "partition-direct-pre-rust-peers.json"); bad_partition["observations"]["heal"]["rust_peer_snapshot"] = str(artifact_root / "partition-direct-heal-rust-peers.json"); dump(artifact_root / "partition-direct-proxy-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["nodes"][1]["command_argv"][-2] = go_p2p; bad_partition["nodes"][1]["command"] = shlex.join(bad_partition["nodes"][1]["command_argv"]); dump(artifact_root / "partition-rust-peer-argv-mismatch-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["partition_proxy_endpoint"] = go_p2p; bad_partition["nodes"][1]["command_argv"][-2] = go_p2p; bad_partition["nodes"][1]["command"] = shlex.join(bad_partition["nodes"][1]["command_argv"]); bad_partition["observations"]["pre_partition"]["rust_peer_snapshot"] = str(artifact_root / "partition-direct-pre-rust-peers.json"); bad_partition["observations"]["heal"]["rust_peer_snapshot"] = str(artifact_root / "partition-direct-heal-rust-peers.json"); dump(artifact_root / "partition-direct-proxy-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["go_partition_tip"] = {"height": height, "hash": disconnected_go_hash}; bad_partition["observations"]["fork"]["go_mine"] = str(artifact_root / "partition-go-disconnected-mine.json"); bad_partition["observations"]["fork"]["go_tip"] = str(artifact_root / "partition-go-disconnected-tip.json"); bad_partition["observations"]["fork"]["go_block"] = str(artifact_root / "partition-go-disconnected-block.json"); dump(root / "partition-disconnected-go-fork-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["fork"]["rust_mine_1"] = str(artifact_root / "partition-rust-same-fork-mine.json"); bad_partition["observations"]["fork"]["rust_block_1"] = str(artifact_root / "partition-rust-same-fork-block.json"); dump(root / "partition-same-first-rust-fork-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["rust_winning_tip"] = {"height": rust_skip_height, "hash": rust_skip_hash}; bad_partition["proof"]["final_go_tip"] = {"height": rust_skip_height, "hash": rust_skip_hash}; bad_partition["proof"]["final_rust_tip"] = {"height": rust_skip_height, "hash": rust_skip_hash}; bad_partition["observations"]["fork"]["rust_mine_2"] = str(artifact_root / "partition-rust-skip-mine.json"); bad_partition["observations"]["fork"]["rust_tip"] = str(artifact_root / "partition-rust-skip-tip.json"); bad_partition["observations"]["fork"]["rust_block_2"] = str(artifact_root / "partition-rust-skip-block.json"); bad_partition["observations"]["reorg"]["go_tip"] = str(artifact_root / "partition-final-go-skip-tip.json"); bad_partition["observations"]["reorg"]["rust_tip"] = str(artifact_root / "partition-final-rust-skip-tip.json"); bad_partition["observations"]["reorg"]["go_tip_block"] = str(artifact_root / "partition-final-go-skip-block.json"); bad_partition["observations"]["reorg"]["rust_tip_block"] = str(artifact_root / "partition-final-rust-skip-block.json"); dump(artifact_root / "partition-skip-height-rust-winner-report.json", bad_partition)
@@ -1332,7 +1366,7 @@ dump(root / "tx-go-with-create-report.json", {**tx_report, "nodes": [node("go", 
 dump(root / "mesh-rust-without-create-report.json", {**mesh_report, "nodes": [node("go", True), node("rust", False)]})
 dump(root / "restart-old-without-create-report.json", {**restart_report, "rust_restart": {**restart_info, "old_command_argv": node("rust", False)["command_argv"]}})
 dump(root / "restart-new-with-create-report.json", {**restart_report, "nodes": [node("go", False), node("rust", True)], "rust_restart": {**restart_info, "new_command_argv": node("rust", True)["command_argv"]}})
-bad_partition = json.loads(json.dumps(partition_report)); del bad_partition["nodes"][1]["command_argv"][-1]; bad_partition["nodes"][1]["command"] = " ".join(bad_partition["nodes"][1]["command_argv"]); dump(root / "partition-rust-without-create-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); del bad_partition["nodes"][1]["command_argv"][-1]; bad_partition["nodes"][1]["command"] = shlex.join(bad_partition["nodes"][1]["command_argv"]); dump(root / "partition-rust-without-create-report.json", bad_partition)
 converge_report = {
     **tx_report,
     "go_converge": {
@@ -1733,10 +1767,18 @@ for site, sidecar_name, base_report, field, variants in mine_next_cases:
         target[field[-1]] = str(sidecar_path)
         dump(artifact_root / f"mine-next-{site}-{variant}.json", bad)
 import shutil
+def command_quotes_argv(node_obj: dict) -> bool:
+    try:
+        return isinstance(node_obj.get("command"), str) and shlex.split(node_obj["command"]) == node_obj.get("command_argv")
+    except ValueError:
+        return False
 def relocate(value: object, old: str, new: str) -> object:
     if isinstance(value, str): return value.replace(old, new)
     if isinstance(value, list): return [relocate(item, old, new) for item in value]
-    if isinstance(value, dict): return {relocate(key, old, new): relocate(item, old, new) for key, item in value.items()}
+    if isinstance(value, dict):
+        out = {relocate(key, old, new): relocate(item, old, new) for key, item in value.items()}
+        if command_quotes_argv(value): out["command"] = shlex.join(out["command_argv"])
+        return out
     return value
 SN_NAME = "mixed-client-mesh-store-neutrality.json"
 SCENARIO_ROOTS = {"mixed_client_mesh": "mesh", "mixed_client_go_submit_rust_accept": "tx-accept", "mixed_client_go_submit_rust_mine_go_converge": "tx-converge", "mixed_client_rust_submit_go_mine_rust_converge": "rust-submit", "mixed_client_rust_restart": "restart", "mixed_client_partition_heal_reorg": "partition"}
@@ -1749,6 +1791,9 @@ for report_path in sorted(root.rglob("*.json")):
         continue
     if isinstance(report_obj, dict) and report_obj.get("artifact_root") == old_root and report_obj.get("scenario") in SCENARIO_ROOTS:
         mode_root = root / SCENARIO_ROOTS[report_obj["scenario"]] / "artifact-root"
+        for node_obj in report_obj.get("nodes") if isinstance(report_obj.get("nodes"), list) else []:
+            if isinstance(node_obj, dict) and command_quotes_argv(node_obj):
+                report_text = report_text.replace(json.dumps(node_obj["command"])[1:-1], json.dumps(shlex.join(relocate(node_obj["command_argv"], old_root, str(mode_root))))[1:-1])
         for old, new in ((old_root, str(mode_root)), (json.dumps(old_root)[1:-1], json.dumps(str(mode_root))[1:-1])): report_text = report_text.replace(old, new)
         report_path.write_text(report_text, encoding="utf-8")
 genesis_header = (1).to_bytes(4, "little") + bytes(64) + (1).to_bytes(8, "little") + b"\xff" * 32 + (0).to_bytes(8, "little")
@@ -1818,7 +1863,7 @@ def sn_long_genesis(sidecar: dict, var_root: Path) -> None:
 def sn_drop_rust_create(report: dict) -> None:
     rust_node = next(node_obj for node_obj in report["nodes"] if node_obj["implementation"] == "rust")
     rust_node["command_argv"] = [arg for arg in rust_node["command_argv"] if arg != "--create-store"]
-    rust_node["command"] = " ".join(rust_node["command_argv"])
+    rust_node["command"] = shlex.join(rust_node["command_argv"])
 sn_variant("grammar-differs", "tx-accept", lambda s, r: s["header_bytes"].update(rust=148))
 sn_variant("grammar-outside", "tx-accept", lambda s, r: s["header_bytes"].update(go=120, rust=120))
 sn_variant("grammar-no-match", "tx-accept", lambda s, r: sn_edit_file(r, "genesis-rust-block.json", block_hex="00" + genesis_hex[2:]))
@@ -1860,7 +1905,7 @@ def sn_locked(var_root: Path, name: str) -> str:
 def sn_set_binary(report: dict, impl: str, binary: str) -> None:
     node_obj = next(node_obj for node_obj in report["nodes"] if node_obj["implementation"] == impl)
     node_obj["binary"] = node_obj["command_argv"][0] = binary
-    node_obj["command"] = " ".join(node_obj["command_argv"])
+    node_obj["command"] = shlex.join(node_obj["command_argv"])
     if impl == "rust" and "rust_restart" in report:
         report["rust_restart"]["new_command_argv"] = node_obj["command_argv"]
         report["rust_restart"]["old_command_argv"][0] = binary
@@ -2205,6 +2250,7 @@ extract_slices "${WAIT_PEER_SNAPSHOT_STATE_LIB}" "wait_peer_snapshot_state()" "p
 check_prepare_tx_chainstate_cleanup
 check_prepare_tx_chainstate_leaves_rust_empty
 check_rust_datadir_guard
+check_argv_cmd_round_trip
 check_txgen_datadir_guard
 check_initial_convergence_wait
 check_repo_git_reads_repo_root
