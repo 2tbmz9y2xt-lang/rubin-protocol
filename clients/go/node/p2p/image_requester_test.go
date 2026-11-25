@@ -2500,6 +2500,11 @@ func (f *imageTestFixture) recordClosers(round *ImageRound, session int, inReque
 const imageUnwindSentinel = "image requester test unwind"
 
 func testImageUnwind(t *testing.T) {
+	stop := func(name string, atRD, roundCtx, pass bool) {
+		var unreachable func() bool
+		ran := t.Run(name, func(t *testing.T) { unreachable = testImageUnwindStop(t, atRD, roundCtx, pass) })
+		require(t, !ran || unreachable(), "%s: Service reachable after Close and the retirement of its instances", name)
+	}
 	t.Run("a panic in the clock read of the pre-write decision made with writeMu acquired", func(t *testing.T) { testImageUnwindWithWriteMu(t, false) })
 	t.Run("runtime.Goexit in the clock read of the pre-write decision made with writeMu acquired", func(t *testing.T) { testImageUnwindWithWriteMu(t, true) })
 	t.Run("a panic in a clock read made after a failed TryLock", testImageUnwindWaiting)
@@ -2510,12 +2515,12 @@ func testImageUnwind(t *testing.T) {
 	t.Run("runtime.Goexit in the AfterFunc method of the round ctx at admission", func(t *testing.T) { testImageUnwindArming(t, true, true, true) })
 	t.Run("a panic in the round ctx AfterFunc method with the request ctx callback first run after the unwind", func(t *testing.T) { testImageUnwindArming(t, false, true, false) })
 	t.Run("runtime.Goexit in the round ctx AfterFunc method with the request ctx callback first run after the unwind", func(t *testing.T) { testImageUnwindArming(t, true, true, false) })
-	t.Run("a panic in the stop call of the pre-write retirement with D before RD", func(t *testing.T) { testImageUnwindStop(t, false, false, false) })
-	t.Run("a panic in the stop call of the pre-write retirement at RD with D equal to RD", func(t *testing.T) { testImageUnwindStop(t, true, false, false) })
-	t.Run("a panic in the round ctx stop call of the pre-write retirement with D before RD", func(t *testing.T) { testImageUnwindStop(t, false, true, false) })
+	stop("a panic in the stop call of the pre-write retirement with D before RD", false, false, false)
+	stop("a panic in the stop call of the pre-write retirement at RD with D equal to RD", true, false, false)
+	stop("a panic in the round ctx stop call of the pre-write retirement with D before RD", false, true, false)
 	t.Run("a round ctx callback after a panic in the stop call of the pre-write retirement retires the instance", testImageUnwindStopRoundEnd)
-	t.Run("a panic in the request ctx stop call of another request's pass retiring the instance", func(t *testing.T) { testImageUnwindStop(t, false, false, true) })
-	t.Run("a panic in the round ctx stop call of another request's pass retiring the instance", func(t *testing.T) { testImageUnwindStop(t, false, true, true) })
+	stop("a panic in the request ctx stop call of another request's pass retiring the instance", false, false, true)
+	stop("a panic in the round ctx stop call of another request's pass retiring the instance", false, true, true)
 	t.Run("a panic in the request ctx stop call of the retirement after a failed write", func(t *testing.T) { testImageUnwindFailedWrite(t, false, false, -1) })
 	t.Run("runtime.Goexit in the request ctx stop call of the retirement after a failed write", func(t *testing.T) { testImageUnwindFailedWrite(t, true, false, -1) })
 	t.Run("a panic in the round ctx stop call of the retirement after a failed write", func(t *testing.T) { testImageUnwindFailedWrite(t, false, true, -1) })
@@ -2541,8 +2546,7 @@ func imageUnwinder(goexit bool) func() {
 
 func (f *imageTestFixture) requireUnwound(t *testing.T, done <-chan any, goexit bool) {
 	t.Helper()
-	want := map[bool]any{false: imageUnwindSentinel, true: imageGoexit}[goexit]
-	recovered := awaitImageResult(t, done, "unwinding request")
+	recovered, want := awaitImageResult(t, done, "unwinding request"), map[bool]any{false: imageUnwindSentinel, true: imageGoexit}[goexit]
 	require(t, recovered == want, "recovered %v, want %v", recovered, want)
 	f.requireRequesterFree(t)
 }
@@ -2631,13 +2635,8 @@ const imageGoexit = "goroutine exited"
 func (f *imageTestFixture) goRecovered(round *ImageRound, ctx context.Context, session int, start byte) <-chan any {
 	done := make(chan any, 1)
 	go func() {
-		var result any = imageGoexit
-		defer func() {
-			if v := recover(); v != nil {
-				result = v
-			}
-			done <- result
-		}()
+		result := any(imageGoexit)
+		defer func() { done <- cmp.Or(recover(), result) }()
 		q, err := round.Request(ctx, f.ids[session], imageStart(start), imageTestByteLimit)
 		result = imageResult{q, err}
 	}()
@@ -2646,9 +2645,7 @@ func (f *imageTestFixture) goRecovered(round *ImageRound, ctx context.Context, s
 
 func (f *imageTestFixture) requireNextAfterUnwind(t *testing.T, round *ImageRound, session int, start byte, wantID uint64) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	got, returned := receiveWithin(f.goRequest(round, ctx, session, start), lifecycleWatchdog)
+	got, returned := receiveWithin(f.goRequest(round, t.Context(), session, start), lifecycleWatchdog)
 	if returned {
 		requireImageResult(t, got, wantID, start, nil, "request after the unwind")
 	}
@@ -2751,14 +2748,14 @@ func testImageUnwindArming(t *testing.T, goexit, roundCtx, parked bool) {
 	})(t)
 }
 
-func testImageUnwindStop(t *testing.T, atRD, roundCtx, pass bool) {
+func testImageUnwindStop(t *testing.T, atRD, roundCtx, pass bool) func() bool {
 	f := newImageTestFixture(t, 2)
 	t0, limits := f.clock.Now(), imageUnwindLimits(24*time.Hour, 48*time.Hour)
 	end := t0.Add(24*time.Hour + time.Nanosecond)
 	if atRD {
 		limits.RoundLifetime, end = 24*time.Hour, t0.Add(24*time.Hour)
 	}
-	c := newImageHookCtx()
+	c, nextCtx := newImageHookCtx(), newImageHookCtx()
 	c.onStop = func() { panic(imageUnwindSentinel) }
 	roundC, _ := imageUnwindCtx(c, context.Background(), roundCtx)
 	round := f.roundCtx(t, roundC, limits, 0, 1)
@@ -2772,9 +2769,9 @@ func testImageUnwindStop(t *testing.T, atRD, roundCtx, pass bool) {
 		f.refused(t, next, context.Background(), 1, 1, errImageAssignmentCurrent)
 		f.clock.add(time.Nanosecond)
 	}
-	f.admitted(t, next, context.Background(), 1, 1, 1)
+	following := f.admitted(t, next, nextCtx, 1, 1, 1)
 	f.requireEnd(t, inst, errImageExpired, "unwound instance after the next request")
-	held := weak.Make(inst)
+	held, svc := weak.Make(inst), weak.Make(f.s)
 	runtime.GC()
 	require(t, held.Value() == nil, "unwound instance reachable through its ctx after its retirement completed")
 	runtime.KeepAlive(c)
@@ -2783,7 +2780,10 @@ func testImageUnwindStop(t *testing.T, atRD, roundCtx, pass bool) {
 	}
 	release()
 	f.requireFault(t, 0, 0, "", "after the unwind")
+	requireEqual(t, nextCtx.endAndRun(errImageRequestEnd), 1, "Request ctx functions of the next request")
+	imageSpin(t, func() bool { _, end := f.ended(following); return errors.Is(end, errImageRequestEnd) }, "next request retired by its Request ctx")
 	requireReturned(t, lifecycleClose(f.s), "Close")
+	return func() bool { runtime.GC(); return svc.Value() == nil && c != nil }
 }
 
 func testImageUnwindStopRoundEnd(t *testing.T) {
