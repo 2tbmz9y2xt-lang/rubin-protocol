@@ -59,7 +59,7 @@ def req(ok: bool, message: str) -> None:
 def eventually(fn, message: str) -> None:
     deadline = time.monotonic() + LIVE_TIMEOUT
     while True:
-        if fn(): return
+        if fn() and (not live or time.monotonic() < deadline): return
         if not live or time.monotonic() >= deadline: fail(message)
         time.sleep(1)
 def safe_path_str(value: object) -> bool:
@@ -1640,6 +1640,7 @@ wait_rust_accept() {
     if capture_tx_rpc_sidecar rust "${RUST_RPC_ADDR}" "/tx_status?txid=${TX_ID}" "${RUST_STATUS_JSON}"; then
       if capture_tx_rpc_sidecar rust "${RUST_RPC_ADDR}" "/get_tx?txid=${TX_ID}" "${RUST_GET_TX_JSON}"; then
         if verify_tx_sidecars rust_accept rust "${RUST_RPC_ADDR}" "${TX_ID}" "${TX_HEX}" "/tx_status?txid=${TX_ID}" "/get_tx?txid=${TX_ID}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" >/dev/null 2>&1; then
+          (( SECONDS < deadline )) || break
           PROPAGATION_SAMPLE_SECONDS=$((SECONDS - start_seconds))
           return 0
         else
@@ -1666,6 +1667,7 @@ wait_go_accept() {
     if capture_tx_rpc_sidecar go "${GO_RPC_ADDR}" "/tx_status?txid=${TX_ID}" "${GO_ACCEPT_STATUS_JSON}"; then
       if capture_tx_rpc_sidecar go "${GO_RPC_ADDR}" "/get_tx?txid=${TX_ID}" "${GO_ACCEPT_GET_TX_JSON}"; then
         if verify_tx_sidecars go_accept go "${GO_RPC_ADDR}" "${TX_ID}" "${TX_HEX}" "/tx_status?txid=${TX_ID}" "/get_tx?txid=${TX_ID}" "${GO_ACCEPT_STATUS_JSON}" "${GO_ACCEPT_GET_TX_JSON}" >/dev/null 2>&1; then
+          (( SECONDS < deadline )) || break
           PROPAGATION_SAMPLE_SECONDS=$((SECONDS - start_seconds))
           return 0
         else
@@ -1891,6 +1893,7 @@ wait_go_converge_to_rust_mined_block() {
   while (( SECONDS < deadline )); do
     if capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /get_tip "${tmp}"; then
       if tip_matches "${tmp}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}"; then
+        (( SECONDS < deadline )) || break
         CONVERGENCE_SAMPLE_SECONDS=$((SECONDS - start_seconds))
         mv -- "${tmp}" "${GO_CONVERGE_TIP_JSON}" || { TX_REASON=go_converge_artifact_write_failed; return 1; }
         capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=${RUST_MINE_HEIGHT}" "${GO_CONVERGE_BLOCK_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason go_converge_get_block "${rc}")"; return 1; }
@@ -1919,6 +1922,7 @@ wait_rust_converge_to_go_mined_block() {
   while (( SECONDS < deadline )); do
     if capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" /get_tip "${tmp}"; then
       if tip_matches "${tmp}" "${GO_MINE_HEIGHT}" "${GO_MINE_HASH}"; then
+        (( SECONDS < deadline )) || break
         CONVERGENCE_SAMPLE_SECONDS=$((SECONDS - start_seconds))
         mv -- "${tmp}" "${RUST_CONVERGE_TIP_JSON}" || { TX_REASON=rust_converge_artifact_write_failed; return 1; }
         capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" "/get_block?height=${GO_MINE_HEIGHT}" "${RUST_CONVERGE_BLOCK_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason rust_converge_get_block "${rc}")"; return 1; }
@@ -2319,7 +2323,7 @@ if shape and has_expected_complete and count == 1:
     sys.exit(0)
 sys.exit(3 if shape and has_expected_complete else 5 if not shape else 6 if has_expected_incomplete else 7)
 PY
-      then mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
+      then (( SECONDS < deadline )) || break; mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
       else rc=$?; [[ ${rc} -eq 3 ]] && PEER_SNAPSHOT_REASON=unexpected_peer_snapshot_peer; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; [[ ${rc} -eq 5 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_invalid_shape; [[ ${rc} -eq 6 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_handshake_incomplete; [[ ${rc} -eq 7 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_expected_peer_absent; fi
     else rc=$?; [[ ${rc} -eq 23 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json || PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; fi
     sleep 1
@@ -2458,6 +2462,7 @@ wait_rust_restart_catch_up() {
         rm -f -- "${tmp}"
         return 1
       else
+        (( SECONDS < deadline )) || break
         mv -- "${tmp}" "${RUST_CATCH_UP_TIP_JSON}" || { RUST_RESTART_REASON=rust_restart_catch_up_artifact_write_failed; rm -f -- "${tmp}"; return 1; }
         POST_RESTART_RUST_HEIGHT="${height}"
         POST_RESTART_RUST_TIP="${tip}"
@@ -2625,7 +2630,7 @@ with open(path, "w", encoding="utf-8") as dst:
     json.dump({"count": count, "peers": [{"addr": p["addr"], "handshake_complete": p["handshake_complete"]} for p in peers]}, dst, sort_keys=True)
     dst.write("\n")
 PY
-      then mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
+      then (( SECONDS < deadline )) || break; mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
       else rc=$?; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; [[ ${rc} -eq 5 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_invalid_shape; [[ ${rc} -eq 6 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_not_empty; [[ ${rc} -eq 7 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_expected_peer_absent; fi
     else rc=$?; [[ ${rc} -eq 23 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json || PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; fi
     sleep 1

@@ -406,6 +406,155 @@ SH
   bash "${probe}" "${lib}" "${probe_root}"
 }
 
+check_wait_receipt_deadlines() {
+  local probe="${TMP_ROOT}/receipt-deadline.sh" probe_root="${TMP_ROOT}/receipt-deadline" lib="${TMP_ROOT}/receipt-deadline-lib.sh" eventually_py="${TMP_ROOT}/receipt-deadline-eventually.py"
+  mkdir -p -- "${probe_root}"
+  extract_slices "${lib}" "sidecar_derivations_py()" '[[ "${MESH_TIMEOUT}"' "tx_capture_reason()" "txgen_datadir_guard()" "wait_rust_accept()" "write_block_check_go()" "tip_matches()" "write_outputs()" "wait_peer_snapshot()" "wait_rust_to_go_link()" "parse_restart_tip_sidecar()" "go_restart_mine_target()" "wait_rust_restart_catch_up()" "write_partition_proxy()" "wait_peer_snapshot_state()" "parse_partition_mine_result()"
+  extract_slices "${eventually_py}" "def eventually(" "def safe_path_str("
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+probe_root="$2"; eventually_py="$3"
+GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"; PEER="127.0.0.1:51002"
+TX_ID="$(printf 'c%.0s' {1..64})"; TX_HEX=0011; aa="$(printf 'a%.0s' {1..64})"
+RUST_STATUS_JSON="${probe_root}/rust-status.json"; RUST_GET_TX_JSON="${probe_root}/rust-get-tx.json"; GO_ACCEPT_STATUS_JSON="${probe_root}/go-status.json"; GO_ACCEPT_GET_TX_JSON="${probe_root}/go-get-tx.json"
+GO_CONVERGE_TIP_JSON="${probe_root}/go-converge-tip.json"; GO_CONVERGE_BLOCK_JSON="${probe_root}/go-converge-block.json"; RUST_CONVERGE_TIP_JSON="${probe_root}/rust-converge-tip.json"; RUST_CONVERGE_BLOCK_JSON="${probe_root}/rust-converge-block.json"
+RUST_MINE_HEIGHT=102; RUST_MINE_HASH="${aa}"; RUST_MINE_TX_COUNT=1; GO_MINE_HEIGHT=102; GO_MINE_HASH="${aa}"; GO_MINE_TX_COUNT=1
+RUST_CATCH_UP_TIP_JSON="${probe_root}/rust-catch-up-tip.json"; GO_RESTART_TARGET_HEIGHT=102; GO_RESTART_TARGET_TIP="${aa}"
+PEER_OUT="${probe_root}/peers.json"; CAPTURE_SLEEP=0; BLOCK_SLEEP=0; TIP_FAILS=0; GET_TX_FOUND=true; ANSWER=""
+printf '{"best_known_height":102,"has_tip":true,"height":102,"in_ibd":false,"tip_hash":"%s"}\n' "${aa}" >"${probe_root}/tip.json"
+printf '{"best_known_height":103,"has_tip":true,"height":103,"in_ibd":false,"tip_hash":"%s"}\n' "${aa}" >"${probe_root}/tip-above.json"
+printf '[]\n' >"${probe_root}/array.json"
+printf '{"count":1,"peers":[{"addr":"%s","handshake_complete":true}]}\n' "${PEER}" >"${probe_root}/peer.json"
+printf '{"count":1,"peers":[{"addr":"%s","handshake_complete":false}]}\n' "${PEER}" >"${probe_root}/peer-incomplete.json"
+# The stubs append the request path to the capture log; the last capture of an attempt sleeps CAPTURE_SLEEP before it answers.
+capture_tx_rpc_sidecar() {
+  local raw=",\"raw_hex\":\"${TX_HEX}\""
+  printf '%s\n' "$3" >>"${probe_root}/captures"
+  [[ "$3" == /get_tx* ]] || { printf '{"implementation":"%s","request_path":"%s","rpc_endpoint":"%s","status":"pending","txid":"%s"}\n' "$1" "$3" "$2" "${TX_ID}" >"$4"; return 0; }
+  sleep "${CAPTURE_SLEEP}"
+  [[ "${GET_TX_FOUND}" == true ]] || raw=""
+  printf '{"found":%s,"implementation":"%s"%s,"request_path":"%s","rpc_endpoint":"%s","txid":"%s"}\n' "${GET_TX_FOUND}" "$1" "${raw}" "$3" "$2" "${TX_ID}" >"$4"
+}
+# The first TIP_FAILS /get_tip captures fail with status 22; /get_block sleeps BLOCK_SLEEP.
+capture_rpc_sidecar() {
+  printf '%s\n' "$4" >>"${probe_root}/captures"
+  [[ "$4" != /get_block* ]] || { sleep "${BLOCK_SLEEP}"; printf '{}\n' >"$5"; return 0; }
+  printf 'x\n' >>"${probe_root}/tips"
+  (( $(wc -l <"${probe_root}/tips") > TIP_FAILS )) || return 22
+  sleep "${CAPTURE_SLEEP}"
+  cp -- "${ANSWER}" "$5"
+}
+rpc_json() { printf '%s\n' "$3" >>"${probe_root}/captures"; sleep "${CAPTURE_SLEEP}"; cat -- "${ANSWER}"; }
+verify_block_inclusion() { printf '%s\n' "$1" >>"${probe_root}/verify"; }
+# Runs a wait on fresh logs; $1 names its reason variable, $2 is ok or the wanted reason.
+expect_wait() {
+  local var="$1" want="$2" wait_rc=0
+  shift 2
+  rm -f -- "${probe_root}/captures" "${probe_root}/tips" "${probe_root}/verify" "${GO_CONVERGE_TIP_JSON}" "${RUST_CONVERGE_TIP_JSON}" "${RUST_CATCH_UP_TIP_JSON}" "${PEER_OUT}"
+  unset PROPAGATION_SAMPLE_SECONDS CONVERGENCE_SAMPLE_SECONDS POST_RESTART_RUST_HEIGHT
+  "$@" 2>"${probe_root}/wait.err" || wait_rc=$?
+  if [[ "${want}" == ok ]]; then
+    (( wait_rc == 0 )) || { echo "FAIL: $1 refused an answer captured in time: ${!var}" >&2; exit 1; }
+  else
+    (( wait_rc != 0 )) || { echo "FAIL: $1 accepted, want ${want}" >&2; exit 1; }
+    [[ "${!var}" == "${want}" ]] || { echo "FAIL: $1 reason ${!var}, want ${want}" >&2; exit 1; }
+  fi
+}
+require_log() { [[ "$(cat -- "${probe_root}/$1" 2>/dev/null)" == "$2" ]] || { echo "FAIL: $3: $1 log '$(cat -- "${probe_root}/$1" 2>/dev/null)', want '$2'" >&2; exit 1; }; }
+require_unset() { [[ -z "${!1+x}" ]] || { echo "FAIL: $2 set $1" >&2; exit 1; }; }
+require_absent() { [[ ! -e "$1" ]] || { echo "FAIL: $2 wrote $1" >&2; exit 1; }; }
+tx_log="/tx_status?txid=${TX_ID}"$'\n'"/get_tx?txid=${TX_ID}"
+peers_norm="{\"count\": 1, \"peers\": [{\"addr\": \"${PEER}\", \"handshake_complete\": true}]}"
+eventually_run() { python3 - "${eventually_py}" "$@" <<'PY'
+import sys, time
+def fail(message: str) -> None: print(f"FAIL: {message}", file=sys.stderr); sys.exit(1)
+live, LIVE_TIMEOUT, delay, calls = True, int(sys.argv[2]), int(sys.argv[3]), []
+exec(open(sys.argv[1], encoding="utf-8").read())
+def predicate() -> bool:
+    calls.append(1); time.sleep(delay); return True
+eventually(predicate, "predicate answered after the deadline")
+print(f"returned after {len(calls)} call")
+PY
+}
+
+export MESH_TIMEOUT=1 CAPTURE_SLEEP=2
+GET_TX_FOUND=true
+expect_wait TX_REASON rust_accept_pending_timeout wait_rust_accept
+require_unset PROPAGATION_SAMPLE_SECONDS "late wait_rust_accept"; require_log captures "${tx_log}" "late wait_rust_accept"
+expect_wait TX_REASON go_accept_pending_timeout wait_go_accept
+require_unset PROPAGATION_SAMPLE_SECONDS "late wait_go_accept"; require_log captures "${tx_log}" "late wait_go_accept"
+ANSWER="${probe_root}/tip.json"
+for side in go rust; do
+  tip_out="${GO_CONVERGE_TIP_JSON}"; [[ "${side}" == go ]] || tip_out="${RUST_CONVERGE_TIP_JSON}"
+  wait_fn=wait_go_converge_to_rust_mined_block; [[ "${side}" == go ]] || wait_fn=wait_rust_converge_to_go_mined_block
+  expect_wait TX_REASON "${side}_converge_timeout" "${wait_fn}"
+  require_absent "${tip_out}" "late ${wait_fn}"; require_unset CONVERGENCE_SAMPLE_SECONDS "late ${wait_fn}"
+  require_log captures /get_tip "late ${wait_fn}"; require_absent "${probe_root}/verify" "late ${wait_fn}"
+done
+expect_wait RUST_RESTART_REASON rust_restart_catch_up_timeout wait_rust_restart_catch_up
+require_absent "${RUST_CATCH_UP_TIP_JSON}" "late wait_rust_restart_catch_up"; require_unset POST_RESTART_RUST_HEIGHT "late wait_rust_restart_catch_up"
+ANSWER="${probe_root}/peer.json"
+expect_wait PEER_SNAPSHOT_REASON node-go_peer_snapshot_missing_endpoint wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${PEER_OUT}" 1 "${PEER}"
+require_absent "${PEER_OUT}" "late wait_peer_snapshot"
+expect_wait PEER_SNAPSHOT_REASON node-rust_peer_snapshot_timeout wait_peer_snapshot_state node-rust "${RUST_RPC_ADDR}" "${PEER_OUT}" 1 "${PEER}" connected
+require_absent "${PEER_OUT}" "late wait_peer_snapshot_state"
+if output="$(eventually_run 1 2 2>&1)"; then echo "FAIL: eventually returned on a late predicate: ${output}" >&2; exit 1; fi
+[[ "${output}" == "FAIL: predicate answered after the deadline" ]] || { echo "FAIL: late eventually output: ${output}" >&2; exit 1; }
+
+export MESH_TIMEOUT=10 CAPTURE_SLEEP=0
+expect_wait TX_REASON ok wait_rust_accept
+[[ -n "${PROPAGATION_SAMPLE_SECONDS:-}" ]] || { echo "FAIL: wait_rust_accept left PROPAGATION_SAMPLE_SECONDS unset" >&2; exit 1; }; require_log captures "${tx_log}" "wait_rust_accept"
+expect_wait TX_REASON ok wait_go_accept
+[[ -n "${PROPAGATION_SAMPLE_SECONDS:-}" ]] || { echo "FAIL: wait_go_accept left PROPAGATION_SAMPLE_SECONDS unset" >&2; exit 1; }; require_log captures "${tx_log}" "wait_go_accept"
+ANSWER="${probe_root}/tip.json"
+for side in go rust; do
+  tip_out="${GO_CONVERGE_TIP_JSON}"; [[ "${side}" == go ]] || tip_out="${RUST_CONVERGE_TIP_JSON}"
+  wait_fn=wait_go_converge_to_rust_mined_block; [[ "${side}" == go ]] || wait_fn=wait_rust_converge_to_go_mined_block
+  expect_wait TX_REASON ok "${wait_fn}"
+  cmp -s -- "${ANSWER}" "${tip_out}" && [[ -n "${CONVERGENCE_SAMPLE_SECONDS:-}" ]] || { echo "FAIL: ${wait_fn} did not keep the accepted tip" >&2; exit 1; }
+  require_log captures $'/get_tip\n/get_block?height=102' "${wait_fn}"; require_log verify "${side}_converge" "${wait_fn}"
+done
+expect_wait RUST_RESTART_REASON ok wait_rust_restart_catch_up
+cmp -s -- "${ANSWER}" "${RUST_CATCH_UP_TIP_JSON}" && [[ "${POST_RESTART_RUST_HEIGHT:-}" == 102 ]] || { echo "FAIL: wait_rust_restart_catch_up did not keep the accepted tip" >&2; exit 1; }
+require_log captures /get_tip "wait_rust_restart_catch_up"
+ANSWER="${probe_root}/peer.json"
+expect_wait PEER_SNAPSHOT_REASON ok wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${PEER_OUT}" 10 "${PEER}"
+require_log captures /peers "wait_peer_snapshot"; require_log peers.json "${peers_norm}" "wait_peer_snapshot"
+expect_wait PEER_SNAPSHOT_REASON ok wait_peer_snapshot_state node-rust "${RUST_RPC_ADDR}" "${PEER_OUT}" 10 "${PEER}" connected
+require_log captures /peers "wait_peer_snapshot_state"; require_log peers.json "${peers_norm}" "wait_peer_snapshot_state"
+output="$(eventually_run 10 0)" || { echo "FAIL: eventually refused a predicate answered in time" >&2; exit 1; }
+[[ "${output}" == "returned after 1 call" ]] || { echo "FAIL: eventually output: ${output}" >&2; exit 1; }
+
+export MESH_TIMEOUT=1 CAPTURE_SLEEP=2
+GET_TX_FOUND=false
+expect_wait TX_REASON rust_accept_timeout_last_get_tx_not_found wait_rust_accept
+expect_wait TX_REASON go_accept_timeout_last_get_tx_not_found wait_go_accept
+GET_TX_FOUND=true; ANSWER="${probe_root}/array.json"
+expect_wait TX_REASON go_converge_malformed_rpc_body wait_go_converge_to_rust_mined_block
+expect_wait TX_REASON rust_converge_malformed_rpc_body wait_rust_converge_to_go_mined_block
+ANSWER="${probe_root}/tip-above.json"
+expect_wait RUST_RESTART_REASON rust_restart_catch_up_above_go_target wait_rust_restart_catch_up
+ANSWER="${probe_root}/peer-incomplete.json"
+expect_wait PEER_SNAPSHOT_REASON peer_snapshot_handshake_incomplete wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${PEER_OUT}" 1 "${PEER}"
+ANSWER="${probe_root}/peer.json"
+expect_wait PEER_SNAPSHOT_REASON peer_snapshot_not_empty wait_peer_snapshot_state node-rust "${RUST_RPC_ADDR}" "${PEER_OUT}" 1 "" empty
+
+export MESH_TIMEOUT=3 CAPTURE_SLEEP=0 BLOCK_SLEEP=4
+ANSWER="${probe_root}/tip.json"
+expect_wait TX_REASON ok wait_go_converge_to_rust_mined_block
+require_log verify go_converge "wait_go_converge_to_rust_mined_block with a slow /get_block"
+expect_wait TX_REASON ok wait_rust_converge_to_go_mined_block
+require_log verify rust_converge "wait_rust_converge_to_go_mined_block with a slow /get_block"
+
+export MESH_TIMEOUT=3 CAPTURE_SLEEP=3 BLOCK_SLEEP=0 TIP_FAILS=1
+expect_wait TX_REASON go_converge_tip_rpc_failed wait_go_converge_to_rust_mined_block
+expect_wait TX_REASON rust_converge_tip_rpc_failed wait_rust_converge_to_go_mined_block
+SH
+  bash "${probe}" "${lib}" "${probe_root}" "${eventually_py}"
+}
+
 check_repo_git_reads_repo_root() {
   local lib="${TMP_ROOT}/repo-git-lib.sh" other="${TMP_ROOT}/repo-git-other" clean_env want_head want_status other_head got
   extract_slices "${lib}" "repo_git()" "# Writes mixed-client-mesh-store-neutrality.json"
@@ -2285,6 +2434,7 @@ check_rust_datadir_guard
 check_argv_cmd_round_trip
 check_txgen_datadir_guard
 check_initial_convergence_wait
+check_wait_receipt_deadlines
 check_repo_git_reads_repo_root
 check_store_neutrality_producer_reasons
 check_proxy_go_local_addr_reason
