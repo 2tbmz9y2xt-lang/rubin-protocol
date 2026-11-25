@@ -2032,6 +2032,7 @@ func testImageFailedWrite(t *testing.T) {
 
 func testImageStaleHandle(t *testing.T) {
 	t.Run("a ctx callback started before a pass retired its instance runs after the replacement", inImageBubble(testImageStaleCallback))
+	t.Run("a ctx callback that loaded its instance before a retirement under the requester mutex", testImageCallbackAfterRetirement)
 	t.Run("write failure of an instance ended during the write", func(t *testing.T) {
 		f := newImageTestFixture(t, 3)
 		t0 := f.clock.Now()
@@ -2046,6 +2047,33 @@ func testImageStaleHandle(t *testing.T) {
 		f.refused(t, round, context.Background(), 2, 1, errImageAssignmentCurrent)
 		require(t, f.instance(1) == replacement, "replacement retired by a stale write failure")
 	})
+}
+
+// testImageCallbackAfterRetirement runs the Request ctx callback while the test holds the requester mutex, retires the instance once that callback waits for the mutex and checks
+// that after the unlock the callback reads neither the clock nor the ctx's Err and leaves the registry and usage unchanged.
+func testImageCallbackAfterRetirement(t *testing.T) {
+	f := newImageTestFixture(t, 1)
+	round, ctx := f.round(t, imageTestLimits(math.MaxInt64, math.MaxInt64), 0), newImageHookCtx()
+	inst := f.admitted(t, round, ctx, 0, 1, 1)
+	req, ran := f.lockRequester(), make(chan int, 1)
+	go func() { ran <- ctx.endAndRun(context.Canceled) }()
+	waitUntil(t, func() bool {
+		buf := make([]byte, 1<<20)
+		for _, g := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+			if strings.Contains(g, "p2p.applyImageEnd") && strings.Contains(g, "sync.(*Mutex).Lock") {
+				return true
+			}
+		}
+		return false
+	}, "Request ctx callback waiting for the requester mutex")
+	req.retireLocked(inst, errImageExpired)
+	reads := f.clock.readCount()
+	req.mu.Unlock()
+	requireEqual(t, awaitImageResult(t, ran, "Request ctx functions"), 1, "Request ctx functions run")
+	require(t, f.clock.readCount() == reads && ctx.applierErrs == 0, "callback after the retirement: clock reads %d->%d, ctx Err calls %d, want none", reads, f.clock.readCount(), ctx.applierErrs)
+	f.requireEnd(t, inst, errImageExpired, "instance retired while its callback waited")
+	f.requireOwners(t, round, 0, imageOneInstance(0), "after the callback")
+	f.requireUsage(t, round, 0, imageUsage(0, 1, 1, 1, 0), imageUsage(0, 1, 1, 1, 0), "after the callback")
 }
 
 // testImageStaleCallback cancels the first instance's ctx in the admission clock read of a request for the same start on another session, so its callback runs after the replacement is registered.
@@ -2566,12 +2594,9 @@ func imageUnwinder(goexit bool) func() {
 // requireUnwound runs the request for start 1 on session 0 with ctx and checks that it ended by runtime.Goexit, with goexit set, or else by a panic with imageUnwindSentinel.
 func (f *imageTestFixture) requireUnwound(t *testing.T, round *ImageRound, ctx context.Context, goexit bool) {
 	t.Helper()
-	if goexit {
-		require(t, f.requestExited(t, round, ctx, 0, 1), "request returned instead of exiting its goroutine")
-	} else {
-		recovered := awaitImageResult(t, f.goRecovered(round, ctx, 0, 1), "unwinding request")
-		require(t, recovered == imageUnwindSentinel, "recovered %v, want %q", recovered, imageUnwindSentinel)
-	}
+	want := map[bool]any{false: imageUnwindSentinel, true: imageGoexit}[goexit]
+	recovered := awaitImageResult(t, f.goRecovered(round, ctx, 0, 1), "unwinding request")
+	require(t, recovered == want, "recovered %v, want %v", recovered, want)
 	f.requireRequesterFree(t)
 }
 
@@ -2630,27 +2655,25 @@ func (f *imageTestFixture) unwindAtPreWriteRead(unwind func()) {
 	f.clock.onReadFrom(".(*ImageRound).endBeforeWrite", func(now time.Time) time.Time { unwind(); return now })
 }
 
-// goRecovered requests start on session with ctx on its own goroutine and delivers the value the call panicked with, or nil when it returned.
+// imageGoexit is what goRecovered delivers when the request's goroutine exits by runtime.Goexit.
+const imageGoexit = "goroutine exited"
+
+// goRecovered requests start on session with ctx on its own goroutine and delivers the value the call panicked with, imageGoexit when the goroutine exited, or nil when it returned.
 func (f *imageTestFixture) goRecovered(round *ImageRound, ctx context.Context, session int, start byte) <-chan any {
 	done := make(chan any, 1)
 	go func() {
-		defer func() { done <- recover() }()
-		_, _ = round.Request(ctx, f.ids[session], imageStart(start), imageTestByteLimit)
-	}()
-	return done
-}
-
-// requestExited requests start on session with ctx on its own goroutine and reports whether that goroutine ended without the call returning.
-func (f *imageTestFixture) requestExited(t *testing.T, round *ImageRound, ctx context.Context, session int, start byte) bool {
-	t.Helper()
-	returned, ended := false, make(chan struct{})
-	go func() {
-		defer close(ended)
+		returned := false
+		defer func() {
+			if v := recover(); v != nil || returned {
+				done <- v
+			} else {
+				done <- imageGoexit
+			}
+		}()
 		_, _ = round.Request(ctx, f.ids[session], imageStart(start), imageTestByteLimit)
 		returned = true
 	}()
-	requireChannelClosed(t, ended, "request goroutine end")
-	return !returned
+	return done
 }
 
 // requireNextAfterUnwind requests start on session and checks the query with wantID and nil and one frame for it; the request's ctx is canceled at cleanup.
@@ -2764,8 +2787,7 @@ func testImageUnwindStop(t *testing.T, atRD, roundCtx, pass bool) {
 	c.onStop = func() { panic(imageUnwindSentinel) }
 	roundC, _ := imageUnwindCtx(c, context.Background(), roundCtx)
 	round := f.roundCtx(t, roundC, limits, 0, 1)
-	inst, recovered, release := f.unwindRetirement(t, round, c, roundCtx, end, pass)
-	require(t, recovered == imageUnwindSentinel, "recovered %v, want %q", recovered, imageUnwindSentinel)
+	inst, release := f.unwindRetirement(t, round, c, roundCtx, end, pass)
 	f.requireRequesterFree(t)
 	f.requireCurrentAfterUnwind(t, round, inst)
 	f.requireUsage(t, round, 0, imageUsage(1, 1, 1, 1, 0), imageUsage(1, 1, 1, 1, 0), "after the stop call unwound")
@@ -2795,24 +2817,24 @@ func testImageUnwindStopRoundEnd(t *testing.T) {
 	c, roundCtx := newImageHookCtx(), newImageHookCtx()
 	c.onStop = func() { panic(imageUnwindSentinel) }
 	round := f.roundCtx(t, roundCtx, imageUnwindLimits(24*time.Hour, 48*time.Hour), 0)
-	inst, recovered, release := f.unwindRetirement(t, round, c, false, f.clock.Now().Add(24*time.Hour+time.Nanosecond), false)
-	require(t, recovered == imageUnwindSentinel, "recovered %v, want %q", recovered, imageUnwindSentinel)
+	inst, release := f.unwindRetirement(t, round, c, false, f.clock.Now().Add(24*time.Hour+time.Nanosecond), false)
 	requireEqual(t, roundCtx.endAndRun(errImageRoundEnd), 1, "round ctx functions")
 	waitUntil(t, func() bool { retired, _ := f.ended(inst); return retired }, "round ctx callback retirement")
 	f.requireEnd(t, inst, errImageRoundEnd, "unwound instance after its round ctx ended")
 	release()
 }
 
-// unwindRetirement makes a retirement of the instance of start 1 on session 0, admitted with the Request ctx that imageUnwindCtx gives for c, run with now at end and returns that instance, the value its
-// unwinding caller panicked with and a func the test calls before Close: with pass set the caller is a request for start 2 on session 1, whose pass runs at end; else it is the instance's own request,
-// waiting for the writeMu the test holds until that func runs.
-func (f *imageTestFixture) unwindRetirement(t *testing.T, round *ImageRound, c *imageHookCtx, roundCtx bool, end time.Time, pass bool) (*imageInstance, any, func()) {
+// unwindRetirement makes a retirement of the instance of start 1 on session 0, admitted with the Request ctx that imageUnwindCtx gives for c, run with now at end, checks that its unwinding caller panicked
+// with imageUnwindSentinel and returns that instance and a func the test calls before Close: with pass set the caller is a request for start 2 on session 1, whose pass runs at end; else it is the
+// instance's own request, waiting for the writeMu the test holds until that func runs.
+func (f *imageTestFixture) unwindRetirement(t *testing.T, round *ImageRound, c *imageHookCtx, roundCtx bool, end time.Time, pass bool) (*imageInstance, func()) {
 	t.Helper()
 	_, ctx := imageUnwindCtx(c, context.Background(), roundCtx)
 	if pass {
 		inst := f.admitted(t, round, ctx, 0, 1, 1)
 		f.clock.set(end)
-		return inst, awaitImageResult(t, f.goRecovered(round, context.Background(), 1, 2), "unwinding request"), func() {}
+		requireEqual(t, awaitImageResult(t, f.goRecovered(round, context.Background(), 1, 2), "unwinding request"), any(imageUnwindSentinel), "value the unwinding request panicked with")
+		return inst, func() {}
 	}
 	session := f.peers[0]
 	session.writeMu.Lock()
@@ -2820,8 +2842,8 @@ func (f *imageTestFixture) unwindRetirement(t *testing.T, round *ImageRound, c *
 	f.waitAdmitted(t, 0, 1, "request waiting for writeMu")
 	inst := f.instance(1)
 	f.clock.set(end)
-	recovered := awaitImageResult(t, unwound, "request waiting for writeMu")
-	return inst, recovered, func() {
+	requireEqual(t, awaitImageResult(t, unwound, "request waiting for writeMu"), any(imageUnwindSentinel), "value the unwinding request panicked with")
+	return inst, func() {
 		require(t, !session.writeMu.TryLock(), "writeMu released while the test held it")
 		session.writeMu.Unlock()
 	}
