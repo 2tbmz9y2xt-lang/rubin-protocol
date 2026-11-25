@@ -324,15 +324,17 @@ source "$1"
 probe_root="$2"
 MESH_TIMEOUT=2; GO_RPC_ADDR="127.0.0.1:51001"; RUST_RPC_ADDR="127.0.0.1:51003"; TX_PATH_MODE=0; RUST_RESTART_MODE=0; PARTITION_HEAL_REORG_MODE=0
 INITIAL_GO_TIP_JSON="${probe_root}/go-tip.json"; INITIAL_RUST_TIP_JSON="${probe_root}/rust-tip.json"
-GO_CAPTURE_FAILS=0; RUST_CAPTURE_FAILS=0; GO_FAIL_AT=0; RUST_FAIL_AT=0; GO_FIRST_TIP=""; RUST_FIRST_TIP=""
+GO_CAPTURE_FAILS=0; RUST_CAPTURE_FAILS=0; GO_FAIL_AT=0; RUST_FAIL_AT=0; GO_FIRST_TIP=""; RUST_FIRST_TIP=""; CAPTURE_SLEEP=0; GO_TIP_INPUT=""; RUST_TIP_INPUT=""
 # Capture N of a client fails when N is at most its CAPTURE_FAILS count or equals its FAIL_AT;
-# a capture that does not fail answers its FIRST_TIP at N = CAPTURE_FAILS+1 when that is set, else its TIP_INPUT.
+# a capture that does not fail answers its FIRST_TIP at N = CAPTURE_FAILS+1 when that is set, else its TIP_INPUT,
+# and sleeps CAPTURE_SLEEP seconds before it writes that answer.
 capture_rpc_sidecar() {
   local fails="${RUST_CAPTURE_FAILS}" fail_at="${RUST_FAIL_AT}" first="${RUST_FIRST_TIP}" input="${RUST_TIP_INPUT}" n
   [[ "$1" != go ]] || { fails="${GO_CAPTURE_FAILS}"; fail_at="${GO_FAIL_AT}"; first="${GO_FIRST_TIP}"; input="${GO_TIP_INPUT}"; }
   printf '%s\n' "$4" >>"${probe_root}/captures-$1"; n="$(wc -l <"${probe_root}/captures-$1")"
   (( n > fails && n != fail_at )) || return 1
   (( n > fails + 1 )) || [[ -z "${first}" ]] || input="${first}"
+  sleep "${CAPTURE_SLEEP}"
   cp -- "${input}" "$5"
 }
 tip() { printf '{"best_known_height":%s,"has_tip":%s,"height":%s,"in_ibd":false,"tip_hash":%s}\n' "$2" "$3" "$2" "$4" >"${probe_root}/$1.json"; printf '%s\n' "${probe_root}/$1.json"; }
@@ -363,8 +365,19 @@ expect_match_after() {
   MESH_TIMEOUT=10 expect_match "$3" "$4"
   [[ "$(wc -l <"${probe_root}/captures-go")" -eq "$1" && "$(wc -l <"${probe_root}/captures-rust")" -eq "$2" ]] || { echo "FAIL: Go tip captures $(wc -l <"${probe_root}/captures-go"), Rust tip captures $(wc -l <"${probe_root}/captures-rust"), want $1 and $2" >&2; exit 1; }
 }
+# Waits for the partition_go_tip label on the Go tip at height 101 with hash aa..a.
+partition_go_tip_wait() {
+  GO_TIP_INPUT="$1"; rm -f -- "${probe_root}/captures-go" "${probe_root}/partition-go-tip.json"
+  wait_tip_to_match partition_go_tip go "${GO_RPC_ADDR}" 101 "$(printf 'a%.0s' {1..64})" "${probe_root}/partition-go-tip.json"
+}
+if CAPTURE_SLEEP=2 MESH_TIMEOUT=1 partition_go_tip_wait "${go101}"; then echo "FAIL: partition_go_tip accepted an answer captured after its deadline" >&2; exit 1; fi
+[[ "${PARTITION_REASON}" == partition_go_tip_timeout ]] || { echo "FAIL: late partition_go_tip reason ${PARTITION_REASON}" >&2; exit 1; }
+MESH_TIMEOUT=10 partition_go_tip_wait "${go101}" || { echo "FAIL: partition_go_tip rejected the matching answer: ${PARTITION_REASON}" >&2; exit 1; }
+[[ "$(wc -l <"${probe_root}/captures-go")" -eq 1 ]] && cmp -s -- "${go101}" "${probe_root}/partition-go-tip.json" || { echo "FAIL: partition_go_tip did not accept its first capture" >&2; exit 1; }
 TX_PATH_MODE=3
 expect_match "${go101}" "${rust101}"
+CAPTURE_SLEEP=2 MESH_TIMEOUT=1 expect_reason initial_convergence_timeout "${go101}" "${rust101}"
+expect_match_after 1 1 "${go101}" "${rust101}"
 MESH_TIMEOUT=1 expect_polled_timeout "${go101}" "${rust100}"
 expect_reason initial_convergence_timeout "${go101}" "${rust101b}"
 expect_reason initial_convergence_go_tip_tip_absent "${absent}" "${absent}"
@@ -375,6 +388,8 @@ expect_reason initial_convergence_timeout "${go101}" "${rust101}"
 RUST_CAPTURE_FAILS=0
 TX_PATH_MODE=0
 expect_match "${absent}" "${absent}"
+CAPTURE_SLEEP=2 MESH_TIMEOUT=1 expect_reason initial_convergence_timeout "${absent}" "${absent}"
+expect_match_after 1 1 "${absent}" "${absent}"
 RUST_CAPTURE_FAILS=1 expect_match_after 2 2 "${absent}" "${absent}"
 RUST_FIRST_TIP="${rust_zero}" expect_match_after 2 2 "${absent}" "${absent}"
 GO_CAPTURE_FAILS=1 expect_match_after 2 2 "${absent}" "${absent}"
@@ -2113,6 +2128,23 @@ sn_variant("tx-accept-datadir-through-missing", "tx-accept", lambda s, r: s["dat
 sn_variant("mesh-binary-through-missing", "mesh", lambda s, r: None, lambda report: sn_set_binary(report, "go", sn_through_missing(Path(report["artifact_root"]), "rubin-node-go")))
 sn_variant("mesh-marker-through-missing", "mesh", lambda s, r: None, lambda report: report["legacy_schema_compatibility"].update(marker_path=sn_through_missing(Path(report["legacy_schema_compatibility"]["marker_path"]).parent, Path(report["legacy_schema_compatibility"]["marker_path"]).name)))
 sn_variant("restart-report-datadir-through-missing", "restart", lambda s, r: None, lambda report: report["rust_restart"].update(datadir=sn_through_missing(Path(report["artifact_root"]), "node-rust")))
+def sn_move_marker(report: dict, subdir: str, suffix: str = "") -> None:
+    old = Path(report["legacy_schema_compatibility"]["marker_path"])
+    new = old.parent / subdir / (old.name + suffix)
+    new.parent.mkdir(exist_ok=True)
+    shutil.copyfile(old, new)
+    report["legacy_schema_compatibility"]["marker_path"] = str(new)
+for sn_name, sn_dir, sn_suffix in (("tab-dir", "t\tdir", ""), ("unit-separator-dir", "u\x1fdir", ""), ("space-dir", "s dir", ""), ("trailing-space", "", " ")):
+    sn_variant(f"mesh-marker-{sn_name}", "mesh", lambda s, r: None, lambda report, d=sn_dir, x=sn_suffix: sn_move_marker(report, d, x))
+def sn_control_dot_dot(report: dict, name: str) -> str:
+    (Path(report["artifact_root"]) / "x\x01").mkdir(exist_ok=True)
+    return str(Path(report["artifact_root"]) / "x\x01" / ".." / name)
+def sn_argv0_control(report: dict) -> None:
+    node = next(n for n in report["nodes"] if n["name"] == "node-go")
+    node["command_argv"][0] = sn_control_dot_dot(report, "rubin-node-go")
+    node["command"] = shlex.join(node["command_argv"])
+sn_variant("mesh-argv0-control", "mesh", lambda s, r: None, sn_argv0_control)
+sn_variant("restart-report-datadir-control", "restart", lambda s, r: None, lambda report: report["rust_restart"].update(datadir=sn_control_dot_dot(report, "node-rust")))
 sn_variant("mesh-marker-unsearchable-parent", "mesh", lambda s, r: None, sn_lock_report_path("legacy_schema_compatibility", "marker_path"))
 def sn_root_through_missing(report: dict) -> None:
     recorded = Path(report["artifact_root"])
@@ -2700,6 +2732,12 @@ sn_check "sidecar datadir through a missing directory" "${SN_INVALID}" "datadirs
 sidecar_value_check "node binary through a missing directory" "node-go command/binary is not bound to executable rubin-node-go" unknown public "${TMP_ROOT}/sn-mesh-binary-through-missing-report.json"
 sidecar_value_check "legacy marker through a missing directory" "legacy marker is not a regular file" legacy_marker_invalid public "${TMP_ROOT}/sn-mesh-marker-through-missing-report.json"
 sidecar_value_check "restart datadir through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-report-datadir-through-missing-report.json"
+sidecar_value_check "restart datadir through a control character" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-report-datadir-control-report.json"
+for sn_name in tab-dir unit-separator-dir trailing-space; do
+  expect_fail_contains "legacy marker path ${sn_name}" "FAIL: legacy_schema_compatibility.marker_path is not a safe unquoted path string" check_report "${TMP_ROOT}/sn-mesh-marker-${sn_name}-report.json" offline public
+done
+expect_pass_contains "legacy marker path in a directory holding a space" "PASS: mixed_client_mesh report structurally accepted" check_report "${TMP_ROOT}/sn-mesh-marker-space-dir-report.json" offline public
+expect_fail_contains "go command_argv[0] through a control character" "FAIL: node-go.command_argv[0] is not a safe unquoted path string" check_report "${TMP_ROOT}/sn-mesh-argv0-control-report.json" offline public
 sn_check "artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" public mesh-root-through-missing
 sn_check "tx artifact root through a missing directory" "${SN_INVALID}" "store-neutrality sidecar file is missing" tx tx-accept-root-through-missing
 sidecar_value_check "restart artifact root through a missing directory" "rust_restart datadir is not bound to artifact root" rust_restart_datadir_not_bound rust-restart "${TMP_ROOT}/sn-restart-root-through-missing-report.json"

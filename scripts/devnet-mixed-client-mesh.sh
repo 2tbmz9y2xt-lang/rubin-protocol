@@ -62,8 +62,10 @@ def eventually(fn, message: str) -> None:
         if fn(): return
         if not live or time.monotonic() >= deadline: fail(message)
         time.sleep(1)
+def safe_path_str(value: object) -> bool:
+    return isinstance(value, str) and value.strip() == value and bool(value) and value[0] not in "'\"" and value[-1] not in "'\"" and "\0" not in value and all(ord(c) >= 32 for c in value)
 def checked_path(label: str, value: object) -> Path:
-    req(isinstance(value, str) and value.strip() == value and value and value[0] not in "'\"" and value[-1] not in "'\"" and "\0" not in value and all(ord(c) >= 32 for c in value), f"{label} is not a safe unquoted path string")
+    req(safe_path_str(value), f"{label} is not a safe unquoted path string")
     try: p = Path(value); req(p.is_absolute(), f"{label} is not absolute"); return Path(os.path.realpath(p))
     except (OSError, RuntimeError, ValueError) as exc: fail(f"{label} path is invalid: {exc}")
 def ep(value: object) -> bool:
@@ -603,7 +605,7 @@ if restart_mode:
         datadir_path = Path(datadir_raw).resolve() if isinstance(datadir_raw, str) and Path(datadir_raw).is_absolute() else None
     except (OSError, RuntimeError, ValueError):
         datadir_path = None
-    req(isinstance(datadir_raw, str) and Path(datadir_raw).name == "node-rust" and datadir_path == root_datadir and os.path.isdir(root_entry("node-rust")) and not root_datadir.is_symlink() and os.path.isdir(datadir_raw), "rust_restart datadir is not bound to artifact root")
+    req(safe_path_str(datadir_raw) and Path(datadir_raw).name == "node-rust" and datadir_path == root_datadir and os.path.isdir(root_entry("node-rust")) and not root_datadir.is_symlink() and os.path.isdir(datadir_raw), "rust_restart datadir is not bound to artifact root")
     pre_restart_height = json_int(restart_info.get("pre_restart_height"), "rust_restart.pre_restart_height")
     req(pre_restart_height == restart["pre_restart_height"], "rust_restart pre_restart_height mismatch")
     go_target_height = json_int(restart_info.get("go_target_height"), "rust_restart.go_target_height")
@@ -2652,7 +2654,7 @@ wait_tip_to_match() {
   local label="$1" impl="$2" addr="$3" height="$4" block_hash="$5" out="$6" deadline tmp
   deadline=$((SECONDS + MESH_TIMEOUT)); tmp="${out}.tmp"; PARTITION_REASON=""
   while :; do
-    if partition_capture_tip "${label}" "${impl}" "${addr}" "${tmp}" >/dev/null; then
+    if partition_capture_tip "${label}" "${impl}" "${addr}" "${tmp}" >/dev/null && (( SECONDS < deadline )); then
       if tip_matches "${tmp}" "${height}" "${block_hash}"; then
         mv -- "${tmp}" "${out}" || { PARTITION_REASON="${label}_artifact_write_failed"; rm -f -- "${tmp}"; return 1; }
         return 0
@@ -2677,7 +2679,7 @@ wait_initial_tips_absent() {
   while :; do
     go_status=0; capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /get_tip "${INITIAL_GO_TIP_JSON}" || go_status=$?
     rust_status=0; capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" /get_tip "${INITIAL_RUST_TIP_JSON}" || rust_status=$?
-    if (( go_status == 0 && rust_status == 0 )) && tips_absent "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}"; then
+    if (( go_status == 0 && rust_status == 0 && SECONDS < deadline )) && tips_absent "${INITIAL_GO_TIP_JSON}" "${INITIAL_RUST_TIP_JSON}"; then
       return 0
     fi
     sleep 1

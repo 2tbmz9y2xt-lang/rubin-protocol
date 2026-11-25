@@ -8,7 +8,7 @@ LINK_PARENT="${TMP_ROOT}-parent-link"
 ALIAS_ROOT="${LINK_PARENT}/$(basename "${TMP_ROOT}")"
 SPACE_LINK_PARENT="${TMP_ROOT}-parent link"
 SPACE_ALIAS_ROOT="${SPACE_LINK_PARENT}/$(basename "${TMP_ROOT}")"
-trap 'chmod -R u+w "${TMP_ROOT}" || true; rm -rf -- "${TMP_ROOT}" "${LINK_PARENT}" "${SPACE_LINK_PARENT}"' EXIT
+trap 'chmod -R u+w "${TMP_ROOT}" || true; rm -rf -- "${TMP_ROOT}" "${LINK_PARENT}" "${SPACE_LINK_PARENT}" "${TMP_ROOT}-outside"' EXIT
 python3 - "${TMP_ROOT}" <<'PY'
 import hashlib, json, os, shlex, sys; from pathlib import Path
 root = Path(os.path.realpath(sys.argv[1])); root.mkdir(exist_ok=True)
@@ -229,6 +229,28 @@ bad = json.loads((root / "go_accept.json").read_text()); bad["nodes"] = argv_nod
 bad = json.loads(json.dumps(restart)); bad["rust_restart"]["old_command_argv"] = rust_argv; dump("restart_old_without_create.json", bad)
 bad = json.loads(json.dumps(restart)); bad["nodes"] = argv_nodes(go_argv, rust_argv + create); bad["rust_restart"]["new_command_argv"] = rust_argv + create; dump("restart_new_with_create.json", bad)
 bad = json.loads(json.dumps(part)); bad["nodes"][1]["command_argv"] = bad["nodes"][1]["command_argv"][:-1]; bad["nodes"][1]["command"] = shlex.join(bad["nodes"][1]["command_argv"]); dump("partition_rust_without_create.json", bad)
+def moved_path(report, dotted, target):
+    keys = dotted.split("."); obj = report
+    for key in keys[:-1]: obj = obj[key]
+    target.parent.mkdir(exist_ok=True); target.write_bytes(Path(obj[keys[-1]]).read_bytes()); obj[keys[-1]] = str(target)
+    return report
+load_report = lambda name: json.loads((root / name).read_text(encoding="utf-8"))
+tab_dir = root / "tab\tdir"
+for name, src, field, target in (("mesh_marker_tab_dir.json", "mesh.json", "legacy_schema_compatibility.marker_path", tab_dir / "marker.json"), ("go_accept_marker_tab_dir.json", "go_accept.json", "legacy_schema_compatibility.marker_path", tab_dir / "go-accept-marker.json"),
+        ("restart_marker_tab_dir.json", "restart.json", "legacy_schema_compatibility.marker_path", tab_dir / "restart-marker.json"), ("partition_marker_tab_dir.json", "partition.json", "legacy_schema_compatibility.marker_path", tab_dir / "partition-marker.json"),
+        ("go_accept_status_tab_dir.json", "go_accept.json", "go_submit.tx_status_path", tab_dir / "go-submit-status.json"), ("go_conv_mine_next_tab_dir.json", "go_conv.json", "rust_mine.mine_next_path", tab_dir / "go-conv-mine-next.json"),
+        ("restart_pre_tip_tab_dir.json", "restart.json", "rust_restart.pre_restart_tip_path", tab_dir / "rust-pre-restart-tip.json"), ("partition_metrics_tab_dir.json", "partition.json", "observations.reorg.go_metrics", tab_dir / "partition-metrics.prom"),
+        ("partition_metrics_tab_outside.json", "partition.json", "observations.reorg.go_metrics", root.parent / f"{root.name}-outside" / "tab\tmetrics.prom"),
+        ("mesh_marker_trailing_space.json", "mesh.json", "legacy_schema_compatibility.marker_path", root / "marker.json "), ("mesh_marker_unit_separator_dir.json", "mesh.json", "legacy_schema_compatibility.marker_path", root / "u\x1fdir" / "marker.json"),
+        ("mesh_marker_space_dir.json", "mesh.json", "legacy_schema_compatibility.marker_path", root / "s dir" / "marker.json")):
+    dump(name, moved_path(load_report(src), field, target))
+(root / "x\x01").mkdir(); bad = load_report("mesh.json"); bad["nodes"][0]["command_argv"][0] = str(root / "x\x01" / ".." / "rubin-node-go"); bad["nodes"][0]["command"] = shlex.join(bad["nodes"][0]["command_argv"]); dump("mesh_argv0_control.json", bad)
+bad = load_report("restart.json"); bad["rust_restart"]["datadir"] = str(root / "x\x01" / ".." / "node-rust"); dump("restart_datadir_control.json", bad)
+tab_root = root / "tab\troot"; tab_root.mkdir(); tab_link = root / "tab-root-link"; tab_link.symlink_to(tab_root, target_is_directory=True)
+for name in ("rubin-node-go", "rubin-node-rust", "marker.json"):
+    (tab_root / name).write_bytes((root / name).read_bytes()); (tab_root / name).chmod((root / name).stat().st_mode)
+(tab_root / "mesh.json").write_text(json.dumps(rewrite_root_paths(load_report("mesh.json"), tab_link), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+(root / "cli\tdir").mkdir(); (root / "cli\tdir" / "mesh.json").write_bytes((root / "mesh.json").read_bytes())
 PY
 complete="${TMP_ROOT}/complete.json"; home_complete="${TMP_ROOT}/home-complete.json"; partial="${TMP_ROOT}/partial.json"; empty_input="${TMP_ROOT}/empty-input.json"; unbound_metrics="${TMP_ROOT}/unbound-metrics.json"; zero_height="${TMP_ROOT}/restart-zero-height-out.json"; symlink_parent="${TMP_ROOT}/restart-symlink-parent-out.json"; mesh_symlink_parent="${TMP_ROOT}/mesh-symlink-parent-out.json"; mesh_escaped_command="${TMP_ROOT}/mesh-escaped-command-out.json"; base_args=(--mesh-report "${TMP_ROOT}/mesh.json" --go-submit-rust-accept-report "${TMP_ROOT}/go_accept.json" --go-submit-rust-mine-go-converge-report "${TMP_ROOT}/go_conv.json" --rust-submit-go-mine-rust-converge-report "${TMP_ROOT}/rust_conv.json" --rust-restart-report "${TMP_ROOT}/restart.json" --partition-heal-reorg-report "${TMP_ROOT}/partition.json")
 tilde_partition="~""/partition.json"
@@ -334,4 +356,21 @@ expect_fail_reason process_identity_missing_or_invalid --go-submit-rust-accept-r
 expect_fail_reason restart_source_binding_contradiction:argv_mismatch --rust-restart-report "${TMP_ROOT}/restart_old_without_create.json"
 expect_fail_reason restart_source_binding_contradiction:node_identity_invalid --rust-restart-report "${TMP_ROOT}/restart_new_with_create.json"
 expect_fail_reason partition_reorg_source_binding_contradiction:node_identity_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition_rust_without_create.json"
+expect_mesh_pass() { out="${TMP_ROOT}/mesh-pass-out.json"; python3 "${GEN}" --mesh-report "$1" --output "${out}" >/dev/null 2>"${TMP_ROOT}/err" || { cat "${TMP_ROOT}/err" >&2; exit 1; }; python3 -c 'import json, sys; r = json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if r["sections"]["mesh"]["status"] == "pass" and ("mesh", "pass") in {(c["section"], c["token"]) for c in r["claim_inventory"]} else 1)' "${out}" || { echo "mesh report not accepted with claim token pass: $1" >&2; exit 1; }; }
+expect_fail_reason malformed_source_fields:legacy_schema_compatibility.marker_path --mesh-report "${TMP_ROOT}/mesh_marker_tab_dir.json"
+expect_fail_reason go_to_rust_accept_legacy_marker_invalid --go-submit-rust-accept-report "${TMP_ROOT}/go_accept_marker_tab_dir.json"
+expect_fail_reason restart_source_binding_contradiction:legacy_marker_invalid --rust-restart-report "${TMP_ROOT}/restart_marker_tab_dir.json"
+expect_fail_reason partition_reorg_source_binding_contradiction:legacy_marker_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition_marker_tab_dir.json"
+expect_fail_reason go_submit_sidecar_invalid --go-submit-rust-accept-report "${TMP_ROOT}/go_accept_status_tab_dir.json"
+expect_fail_reason convergence_sidecar_path_invalid --go-submit-rust-mine-go-converge-report "${TMP_ROOT}/go_conv_mine_next_tab_dir.json"
+expect_fail_reason restart_source_binding_contradiction:pre_restart_tip_sidecar_invalid --rust-restart-report "${TMP_ROOT}/restart_pre_tip_tab_dir.json"
+expect_fail_reason partition_reorg_source_binding_contradiction:sidecar_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition_metrics_tab_dir.json"
+expect_fail_reason partition_reorg_source_binding_contradiction:sidecar_invalid --partition-heal-reorg-report "${TMP_ROOT}/partition_metrics_tab_outside.json"
+expect_fail_reason process_identity_missing_or_invalid --mesh-report "${TMP_ROOT}/mesh_argv0_control.json"
+expect_mesh_pass "${TMP_ROOT}/tab-root-link/mesh.json"
+expect_fail_reason restart_source_binding_contradiction:datadir_not_bound --rust-restart-report "${TMP_ROOT}/restart_datadir_control.json"
+expect_fail_reason malformed_source_fields:legacy_schema_compatibility.marker_path --mesh-report "${TMP_ROOT}/mesh_marker_trailing_space.json"
+expect_mesh_pass "${TMP_ROOT}/cli"$'\t'"dir/mesh.json"
+expect_fail_reason malformed_source_fields:legacy_schema_compatibility.marker_path --mesh-report "${TMP_ROOT}/mesh_marker_unit_separator_dir.json"
+expect_mesh_pass "${TMP_ROOT}/mesh_marker_space_dir.json"
 printf 'PASS: RUB-239 final source-bound report closeout covered\n'

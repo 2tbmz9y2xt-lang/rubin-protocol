@@ -150,8 +150,10 @@ def regular_path(raw_path: str, reason: str) -> tuple[Path, str | None]: raw = P
 def regular_abs_path(raw_path: str, reason: str) -> tuple[Path, str | None]:
     raw = Path(os.path.expanduser(raw_path)); canon = Path(os.path.realpath(raw))  # noqa: E702
     return (canon, None) if raw.is_absolute() and raw.is_file() and not raw.is_symlink() else (canon, reason)
+def safe_path_str(value: Any) -> bool:
+    return isinstance(value, str) and value.strip() == value and bool(value) and value[0] not in "'\"" and value[-1] not in "'\"" and "\0" not in value and all(ord(c) >= 32 for c in value)
 def safe_abs_path(value: Any) -> Path | None:
-    if not isinstance(value, str) or value.strip() != value or not value or value[0] in "'\"" or value[-1] in "'\"" or "\0" in value or any(ord(c) < 32 for c in value):
+    if not safe_path_str(value):
         return None
     raw = Path(value)
     if not raw.is_absolute():
@@ -175,7 +177,7 @@ def same_arg_path(left: str, right: str) -> bool:
     except (OSError, ValueError):
         return False
 def argv_eq(actual: Any, expected: Any, path_indexes: set[int]) -> bool:
-    return str_list(actual) and str_list(expected) and len(actual) == len(expected) and all(same_arg_path(actual[i], expected[i]) if i in path_indexes else actual[i] == expected[i] for i in range(len(expected)))
+    return str_list(actual) and str_list(expected) and len(actual) == len(expected) and all(safe_path_str(actual[i]) and same_arg_path(actual[i], expected[i]) if i in path_indexes else actual[i] == expected[i] for i in range(len(expected)))
 def get(data: Any, dotted: str) -> tuple[Any, bool]:
     cur = data
     for part in dotted.split("."):
@@ -313,6 +315,8 @@ def source_report_contract_error(name: str, data: dict[str, Any], path: Path) ->
         return f"{name}_legacy_marker_invalid"
     if legacy.get("purpose") != SOURCE_LEGACY_PURPOSE or legacy.get("reason") not in SOURCE_LEGACY_REASONS:
         return f"{name}_legacy_marker_invalid"
+    if not safe_path_str(marker_raw):
+        return f"{name}_legacy_marker_invalid"
     marker_path = str(Path(os.path.expanduser(marker_raw)) if Path(os.path.expanduser(marker_raw)).is_absolute() else path.parent / marker_raw)
     marker_canon, marker_err = regular_path(marker_path, "legacy_schema_marker_not_regular")
     try:
@@ -340,7 +344,7 @@ def source_report_contract_error(name: str, data: dict[str, Any], path: Path) ->
         return None if marker.get("verdict") == "FAIL" and isinstance(marker.get("failure_reason"), str) and marker["failure_reason"] else f"{name}_legacy_marker_invalid"
     return None if marker.get("verdict") == "PASS" and marker.get("tx_path") == data.get("tx_path") else f"{name}_legacy_marker_invalid"
 def source_artifact(path_value: Any, root: Path, reason: str) -> tuple[Path | None, str | None]:
-    p, err = regular_abs_path(path_value, reason) if isinstance(path_value, str) else (None, reason)
+    p, err = regular_abs_path(path_value, reason) if safe_path_str(path_value) else (None, reason)
     if err or p is None:
         return None, reason
     try:
@@ -748,7 +752,7 @@ def restart_pass_contract_error(data: dict[str, Any], path: Path) -> str | None:
     if legacy.get("purpose") != "schema-valid legacy artifact only; not the Rust restart report verdict" or legacy.get("reason") != "existing mixed_client_evidence_v1 PASS requires tx_path; Rust restart PASS lives in this report":
         return "restart_source_binding_contradiction:legacy_marker_invalid"
     marker_path_raw = legacy.get("marker_path")
-    if not isinstance(marker_path_raw, str):
+    if not safe_path_str(marker_path_raw):
         return "restart_source_binding_contradiction:legacy_marker_invalid"
     marker_path, marker_err = regular_abs_path(marker_path_raw, "restart_source_binding_contradiction:legacy_marker_invalid")
     if marker_err:
@@ -823,7 +827,7 @@ def restart_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     except ValueError:
         return "restart_source_binding_contradiction:report_outside_artifact_root"
     def artifact(field: str, reason: str) -> tuple[Path | None, str | None]:
-        if not isinstance(rr.get(field), str):
+        if not safe_path_str(rr.get(field)):
             return None, reason
         p, err = regular_abs_path(str(rr[field]), reason)
         if err:
@@ -943,7 +947,7 @@ def partition_pass_contract_error(data: dict[str, Any], path: Path) -> str | Non
     if legacy.get("purpose") != PARTITION_LEGACY_PURPOSE or legacy.get("reason") != PARTITION_LEGACY_REASON:
         return "partition_reorg_source_binding_contradiction:legacy_marker_invalid"
     marker_raw = legacy.get("marker_path")
-    if not isinstance(marker_raw, str) or not marker_raw:
+    if not safe_path_str(marker_raw):
         return "partition_reorg_source_binding_contradiction:legacy_marker_invalid"
     marker_path, marker_err = regular_abs_path(marker_raw, "partition_reorg_source_binding_contradiction:legacy_marker_invalid")
     if marker_err:
@@ -1052,7 +1056,7 @@ def partition_obs_paths(data: dict[str, Any], root: Path) -> tuple[dict[str, Pat
         value, present = get(data, dotted)
         if not present:
             return None, "partition_reorg_source_binding_contradiction:malformed_source_fields"
-        sidecar, err = regular_abs_path(value, "partition_reorg_source_binding_contradiction:sidecar_invalid") if isinstance(value, str) else (None, "partition_reorg_source_binding_contradiction:sidecar_invalid")
+        sidecar, err = regular_abs_path(value, "partition_reorg_source_binding_contradiction:sidecar_invalid") if safe_path_str(value) else (None, "partition_reorg_source_binding_contradiction:sidecar_invalid")
         if err or sidecar is None:
             return None, err or "partition_reorg_source_binding_contradiction:sidecar_invalid"
         try:
@@ -1183,7 +1187,7 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
     if data.get("verdict") != "PASS" or bad_marker:
         return section(name, "fail", "source_verdict_not_pass" if data.get("verdict") != "PASS" else "pass_artifact_contains_failure_fields", source_artifact_path=path, scenario=got)
     missing = [f for f in fields if not get(data, f)[1]]
-    malformed = "legacy_schema_compatibility.marker_path" if name == "mesh" and get(data, "legacy_schema_compatibility.marker_path")[1] and (not isinstance((m := get(data, "legacy_schema_compatibility.marker_path")[0]), str) or not m or regular_path(str(Path(os.path.expanduser(m)) if Path(os.path.expanduser(m)).is_absolute() else path.parent / m), "legacy_schema_marker_not_regular")[1]) else "observations.reorg" if name == "partition_heal_reorg" and get(data, "observations.reorg")[1] and not isinstance(get(data, "observations.reorg")[0], dict) else None
+    malformed = "legacy_schema_compatibility.marker_path" if name == "mesh" and get(data, "legacy_schema_compatibility.marker_path")[1] and (not safe_path_str(m := get(data, "legacy_schema_compatibility.marker_path")[0]) or regular_path(str(Path(os.path.expanduser(m)) if Path(os.path.expanduser(m)).is_absolute() else path.parent / m), "legacy_schema_marker_not_regular")[1]) else "observations.reorg" if name == "partition_heal_reorg" and get(data, "observations.reorg")[1] and not isinstance(get(data, "observations.reorg")[0], dict) else None
     if malformed:
         return section(name, "fail", "malformed_source_fields:" + malformed, source_artifact_path=path, scenario=got)
     if name in {"rust_restart", "partition_heal_reorg"}:
