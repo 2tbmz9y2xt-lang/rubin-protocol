@@ -226,7 +226,17 @@ func testImageReceiveOrder(t *testing.T) {
 	requireImageTake(t, &copyOfRound, t.Context(), 1, second, errImageRoundEnd, "second admitted result")
 	requireImageAbsent(t, &copyOfRound, t.Context(), 1, errImageNoAssignment)
 	requireImageTake(t, &copyOfRound, t.Context(), 2, unrelated, context.Canceled, "unrelated start's result")
-	f.admitted(t, round, t.Context(), 0, 1, 3)
+	requireImageResult(t, f.request(round, t.Context(), 0, 1), 3, 1, nil, "independent round request")
+
+	waitCtx, cancelWait := context.WithCancel(t.Context())
+	cancelWait()
+	result, err := copyOfRound.Receive(waitCtx, imageStart(1))
+	requireEqual(t, err, errImageNoAssignment, "previous round receive error for a reassigned start")
+	requireEqual(t, result, ImageResult{}, "previous round receive result")
+	result, err = round.Receive(waitCtx, imageStart(1))
+	requireEqual(t, err, context.Canceled, "current round receive error")
+	requireEqual(t, result, ImageResult{}, "current round receive result")
+
 	f.requireUsage(t, &copyOfRound, 0, imageUsage(0, 2, 2, 2, 0), imageUsage(0, 2, 3, 3, 0), "original round after handle reassignment")
 	f.requireUsage(t, round, 0, imageUsage(1, 1, 1, 1, 0), imageUsage(1, 1, 1, 1, 0), "independent round")
 }
