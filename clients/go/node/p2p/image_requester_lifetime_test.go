@@ -67,7 +67,8 @@ func testImageRoundAdmissionClock(t *testing.T) {
 	requireChannelClosed(t, entered, "actual round admission clock read")
 	mu := &f.s.imageRequester.mu
 	if mu.TryLock() {
-		defer mu.Unlock()
+		mu.Unlock()
+		t.Fatal("round admission clock read outside the requester lock")
 	}
 	release()
 	got := awaitImageResult(t, begin, "round admission after clock release")
