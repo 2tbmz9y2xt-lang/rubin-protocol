@@ -70,7 +70,7 @@ func (r *ImageRound) Receive(ctx context.Context, expectedStart [36]byte) (Image
 	round := *r
 	s := round.service
 	for {
-		result, err, wake := round.receiveOnce(ctx, expectedStart)
+		result, wake, err := round.receiveOnce(ctx, expectedStart)
 		if wake == nil {
 			return result, err
 		}
@@ -83,20 +83,20 @@ func (r *ImageRound) Receive(ctx context.Context, expectedStart [36]byte) (Image
 }
 
 // receiveOnce holds a lease only through its nonwaiting decision, even if DRAINING is published after entry.
-func (r *ImageRound) receiveOnce(ctx context.Context, start [36]byte) (ImageResult, error, <-chan struct{}) {
+func (r *ImageRound) receiveOnce(ctx context.Context, start [36]byte) (ImageResult, <-chan struct{}, error) {
 	s := r.service
 	if !s.acquireWork() {
-		return ImageResult{}, errServiceClosed, nil
+		return ImageResult{}, nil, errServiceClosed
 	}
 	defer s.releaseWork()
 	if ctx == nil {
-		return ImageResult{}, errImageNilContext, nil
+		return ImageResult{}, nil, errImageNilContext
 	}
 	req := s.imageRequester
 	req.mu.Lock()
 	defer req.mu.Unlock()
 	if r.closed {
-		return ImageResult{}, errImageRoundClosed, nil
+		return ImageResult{}, nil, errImageRoundClosed
 	}
 	req.receiveEndPassLocked(s.cfg.Now())
 	return r.takeOrWaitLocked(ctx, start)
@@ -111,24 +111,24 @@ func (req *imageRequester) receiveEndPassLocked(now time.Time) {
 	}
 }
 
-func (r *ImageRound) takeOrWaitLocked(ctx context.Context, start [36]byte) (ImageResult, error, <-chan struct{}) {
+func (r *ImageRound) takeOrWaitLocked(ctx context.Context, start [36]byte) (ImageResult, <-chan struct{}, error) {
 	queue := r.outcomes[start]
 	if len(queue) != 0 && queue[0].ready {
 		outcome := queue[0]
 		r.deleteOutcomeLocked(start, queue, 0)
-		return ImageResult{Query: outcome.query}, outcome.end, nil
+		return ImageResult{Query: outcome.query}, nil, outcome.end
 	}
 	current := r.service.imageRequester.current[imageKey{r.anchor, start}]
 	if len(queue) == 0 && (current == nil || current.round.imageRoundUsage != r.imageRoundUsage) {
-		return ImageResult{}, errImageNoAssignment, nil
+		return ImageResult{}, nil, errImageNoAssignment
 	}
 	if err := ctx.Err(); err != nil {
-		return ImageResult{}, err, nil
+		return ImageResult{}, nil, err
 	}
 	if r.wake == nil {
 		r.wake = make(chan struct{})
 	}
-	return ImageResult{}, nil, r.wake
+	return ImageResult{}, r.wake, nil
 }
 
 // wakeImageWaitersLocked releases the round's passive waiters for another decision.

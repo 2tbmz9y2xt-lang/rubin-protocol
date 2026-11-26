@@ -3,6 +3,7 @@ package p2p
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math"
 	"net"
 	"reflect"
@@ -236,7 +237,7 @@ func testImageCompetingReceivers(t *testing.T) {
 	*round = *other
 	ctx.endAndRun(errImageRequestEnd)
 	one, two := awaitImageResult(t, a, "first waiter"), awaitImageResult(t, b, "second waiter")
-	if one.err == errImageNoAssignment {
+	if errors.Is(one.err, errImageNoAssignment) {
 		one, two = two, one
 	}
 	requireImageResult(t, one, 1, 1, errImageRequestEnd, "successful take")
@@ -421,13 +422,13 @@ func checkImageEndAtActualWrite(t *testing.T, want error, end func(*testing.T, *
 	waitCtx, cancel := context.WithCancel(t.Context())
 	cancel()
 	wantBlocked := error(context.Canceled)
-	if want == errImageRoundClosed {
+	if errors.Is(want, errImageRoundClosed) {
 		wantBlocked = errImageRoundClosed
 	}
 	requireImageAbsent(t, round, waitCtx, 1, wantBlocked)
 	writing.release <- fault
 	requireImageResult(t, awaitImageResult(t, pending, "authorized write result"), 1, 1, nil, "authorized write result")
-	if want == errImageRoundClosed {
+	if errors.Is(want, errImageRoundClosed) {
 		requireImageAbsent(t, round, t.Context(), 1, errImageRoundClosed)
 	} else {
 		requireImageTake(t, round, t.Context(), 1, expectedImageQuery(1, 1), want, "single ended result")
@@ -1004,10 +1005,7 @@ func admitImageToPlainPeer(t *testing.T, f *imageTestFixture, remote net.Conn) *
 		must(t, err, "read the peer frame")
 		return frame
 	}
-	for {
-		if read().Command == messageGetAddr {
-			break
-		}
+	for read().Command != messageGetAddr {
 	}
 	config := ImageRoundConfig{Anchor: imageTestAnchor, Limits: imageTestLimits(), SourceIDs: []string{imageWorkerAddr}}
 	round, err := f.begin(t.Context(), config)
@@ -1278,7 +1276,7 @@ func testImageProbeConstructor(t *testing.T) {
 			config := imageProbeConfig(f, base, imageTestLimits(), 0, 1)
 			tc.mutate(&config)
 			ctx := t.Context()
-			if tc.want == errImageNilContext {
+			if errors.Is(tc.want, errImageNilContext) {
 				ctx = nil
 			}
 			checkImageProbeBegin(t, f, ctx, config, tc.want)
@@ -1470,10 +1468,10 @@ func checkImageEarlyRefusalEnd(t *testing.T, tc imageEarlyRefusalCase) {
 	} else {
 		target = f.round(t, limits, 0)
 	}
-	switch tc.want {
-	case errImageRoundClosed:
+	switch {
+	case errors.Is(tc.want, errImageRoundClosed):
 		target.Close()
-	case errImageDisconnected:
+	case errors.Is(tc.want, errImageDisconnected):
 		f.s.unregisterPeer(f.peers[0])
 	}
 	f.clock.add(time.Hour + 1)
