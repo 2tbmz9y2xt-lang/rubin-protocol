@@ -309,7 +309,7 @@ func tiDescriptorRows(t *testing.T) []tiRow {
 		{name: "RecordLimit 0", edit: func(p *TreeImagePublicationV1) { p.RecordLimit = 0 }},
 		{name: "a TreeOperation account", kind: TreeOperation},
 		{name: "nil Authority", edit: func(p *TreeImagePublicationV1) { p.Authority = nil }},
-		{name: "an Authority of 1048577 bytes", edit: func(p *TreeImagePublicationV1) { p.Authority = oversized }},
+		{name: "an Authority of 1048577 bytes", edit: func(p *TreeImagePublicationV1) { p.Tag, p.RecordLimit, p.Authority = 4, 1, oversized }},
 		{name: "a PRUNED B 1 U 0 Authority", edit: func(p *TreeImagePublicationV1) { p.Authority = pruned }},
 	}
 	for i := range rows {
