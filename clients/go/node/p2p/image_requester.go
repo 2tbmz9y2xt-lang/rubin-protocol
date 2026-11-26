@@ -60,12 +60,9 @@ type ImageUnits struct {
 	HolderBytes         uint64
 }
 
-// ImageLimits are the per-peer and round-global limits and the durations a round captures (RUBIN_L1_P2P_AUX.md
-// Section 6.5). A Request is admitted only when its round's own usage plus the charge fits every limit without
-// overflow; a release decrements the admitting round. D = min(now + AttemptLifetime, RD) is fixed at admission. A done
-// ctx, a done round ctx or now after D ends an assignment once, recorded in that precedence as the ctx error, the round
-// ctx error or errImageExpired, by its Request, a later Request's pass, its ctx callbacks or its deadline timer, which
-// acts only after D and is not re-armed (RUBIN_L1_P2P_AUX.md Section 7.5).
+// ImageLimits holds the positive per-peer and round limits and durations captured by a round.
+// Admission checks prospective charges without overflow and fixes D at min(start + AttemptLifetime, RD)
+// (RUBIN_L1_P2P_AUX.md Sections 6.5 and 7.5).
 type ImageLimits struct {
 	PerPeer         ImageUnits
 	Global          ImageUnits

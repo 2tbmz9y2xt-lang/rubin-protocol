@@ -23,10 +23,19 @@ type imageSession struct {
 	lastID    uint64
 }
 
-// imageSourcesLive checks the requested entries before allocating the candidate source set.
+// imageSourcesLive bounds the requested list by live identifiers and checks its entries before allocation.
 func (req *imageRequester) imageSourcesLive(ids []string, peers map[string]*peer) bool {
 	req.mu.Lock()
 	defer req.mu.Unlock()
+	live := 0
+	for _, p := range peers {
+		if p != nil && !p.imageRetired {
+			live++
+		}
+	}
+	if len(ids) > live {
+		return false
+	}
 	for _, id := range ids {
 		if p := peers[id]; p == nil || p.imageRetired {
 			return false

@@ -7,6 +7,7 @@ import (
 	"net"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -38,6 +39,7 @@ func TestImageRequesterLifetime(t *testing.T) {
 	t.Run("registration exit before retry join", testImageExitBeforeRetryJoin)
 	t.Run("same address replacement", testImageReplacementRetainsNoPeer)
 	t.Run("exit before first capture", testImageExitBeforeCapture)
+	t.Run("source bound counts live aliases", testImageLiveSourceBound)
 	t.Run("terminal context hooks", testImageTerminalHooks)
 	t.Run("caller context after service close", testImageTerminalServiceRetention)
 	t.Run("probe deadlines", testImageProbeDeadlines)
@@ -613,9 +615,13 @@ func testImageRoundOutcomeClose(t *testing.T) {
 	synctest.Wait()
 	requireImageWaiting(t, waiting, "round waiter")
 	requireImageWaiting(t, independent, "independent waiter")
+	reads := f.clock.readCount()
 	copied := *round
 	copied.Close()
+	requireImageResult(t, f.request(other, t.Context(), 2, 3), 2, 3, nil, "independent round reuses the already-written start")
 	requireQueryResult(t, awaitImageResult(t, waiting, "closed round waiter"), consensus.UTXOImageQuery{}, errImageRoundClosed, "closed round waiter")
+	synctest.Wait()
+	requireEqual(t, f.clock.readCount(), reads+3, "clock reads by round close and replacement request")
 	requireImageWaiting(t, independent, "independent round after close")
 	assertImageRoundClosed(t, f, round)
 	stall.release <- nil
@@ -639,7 +645,7 @@ func assertImageRoundClosed(t *testing.T, f *imageTestFixture, round *ImageRound
 
 func testImageServiceOutcomeClose(t *testing.T) {
 	inImageBubble(func(t *testing.T) {
-		f, round := newImageRound(t, 3, 0, 1, 2)
+		f, round := newImageRound(t, 4, 0, 1, 2, 3)
 		ready, waiting := newImageHookCtx(), newImageHookCtx()
 		f.admitted(t, round, ready, 0, 1, 1)
 		ready.endAndRun(errImageRequestEnd)
@@ -654,6 +660,7 @@ func testImageServiceOutcomeClose(t *testing.T) {
 		send := f.goRequest(round, t.Context(), 2, 3)
 		requireChannelClosed(t, entered, "actual writer")
 		checkImageServiceOutcomeClose(t, f, round, wait, send, release)
+		assertImageRequesterDetached(t, f, round)
 		reads := f.clock.readCount()
 		waiting.endAndRun(errImageRoundEnd)
 		synctest.Wait()
@@ -664,6 +671,22 @@ func testImageServiceOutcomeClose(t *testing.T) {
 			perPeer: imageUsage(0, 1, 1, 1, 0), global: imageUsage(0, 3, 3, 3, 0),
 		}, "round work retained and requester registry empty at Close")
 	})
+}
+
+func assertImageRequesterDetached(t *testing.T, f *imageTestFixture, round *ImageRound) {
+	t.Helper()
+	req := f.lockRequester()
+	current, sessions := len(req.current), len(req.sessions)
+	detached := [4]bool{
+		round.sources[f.ids[0]].transport == nil,
+		round.sources[f.ids[1]].transport == nil,
+		round.sources[f.ids[2]].transport == nil,
+		round.sources[f.ids[3]].transport == nil,
+	}
+	req.mu.Unlock()
+	requireEqual(t, current, 0, "joined requester current registry")
+	requireEqual(t, sessions, 0, "joined requester session registry")
+	requireEqual(t, detached, [4]bool{true, true, true, true}, "captured transports after Close")
 }
 
 func checkImageServiceOutcomeClose(t *testing.T, f *imageTestFixture, round *ImageRound, wait, send <-chan imageResult, release func()) {
@@ -1058,6 +1081,54 @@ func testImageExitBeforeCapture(t *testing.T) {
 	require(t, !created, "retired source acquired a registration identity")
 	release()
 	requireChannelClosed(t, done, "peer cleanup")
+}
+
+func testImageLiveSourceBound(t *testing.T) {
+	f := newImageTestFixture(t, 2)
+	alias := strings.Repeat("x", 32<<20)
+	f.s.peersMu.Lock()
+	f.s.peers[alias] = f.peers[1]
+	f.s.peersMu.Unlock()
+	retired := f.peers[0]
+	release := sync.OnceFunc(f.s.lockPeerQuotaKey(retired.daQuotaIdentity))
+	defer release()
+	done := make(chan struct{})
+	go func() { defer close(done); f.s.unregisterPeer(retired) }()
+	waitForPeerQuotaLockRefs(t, f.s, retired.daQuotaIdentity, 2)
+	requireEqual(t, f.serviceEntry(f.ids[0]), retired, "retired peer's logical name during cleanup")
+	requireEqual(t, f.serviceEntry("192.0.2.40:9"), retired, "retired peer's alias during cleanup")
+	config := f.config(imageTestLimits(), 1)
+	config.SourceIDs = []string{alias, alias, alias, alias}
+	f.s.peersMu.RLock()
+	raw := len(f.s.peers)
+	f.s.peersMu.RUnlock()
+	requireEqual(t, raw, 5, "mapped sources with two retired names")
+	requireBoundedImageSourceRefusal(t, f, config, alias)
+	release()
+	requireChannelClosed(t, done, "retired source cleanup")
+}
+
+func requireBoundedImageSourceRefusal(t *testing.T, f *imageTestFixture, config ImageRoundConfig, alias string) {
+	t.Helper()
+	begin := func() (*ImageRound, error) { return f.s.BeginImageRound(t.Context(), config) }
+	denied, allocated := measureImageBeginAllocation(begin)
+	requireEqual(t, denied, imageBegin{err: errImageSourceSet}, "more identifiers than live entries")
+	size := uint64(len(alias))
+	require(t, allocated < size/4, "overbound list allocated %d bytes for a %d-byte alias", allocated, size)
+	config.SourceIDs = []string{alias}
+	admitted, allocated := measureImageBeginAllocation(begin)
+	must(t, admitted.err, "one live alias")
+	require(t, admitted.round != nil && allocated >= size, "eligible alias allocated %d bytes, need a reachable %d-byte copy", allocated, size)
+	got := requestWithin(lifecycleWatchdog, admitted.round, t.Context(), alias, 1, imageTestByteLimit)
+	requireImageResult(t, got, 1, 1, nil, "request through the long live alias")
+}
+
+func measureImageBeginAllocation(begin func() (*ImageRound, error)) (imageBegin, uint64) {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	round, err := begin()
+	runtime.ReadMemStats(&after)
+	return imageBegin{round: round, err: err}, after.TotalAlloc - before.TotalAlloc
 }
 
 func imageProbeConfig(f *imageTestFixture, base time.Time, limits ImageLimits, sessions ...int) ImageProbeRoundConfig {
