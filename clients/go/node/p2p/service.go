@@ -53,6 +53,7 @@ type Service struct {
 	cancel   context.CancelFunc
 	listener net.Listener
 
+	// peersMu protects the peer registry and its coupled PeerManager updates.
 	peersMu sync.RWMutex
 	peers   map[string]*peer
 	// peerRegistrations is the last registration order handed out by registerPeer; a newer
@@ -66,21 +67,24 @@ type Service struct {
 	livePeers        map[*peer]struct{}
 	peerQuotaLocksMu sync.Mutex
 	peerQuotaLocks   map[string]*peerQuotaLock
+	// lifecycleMu serializes lifecycle field updates and snapshots, the closed
+	// and closeDone publications, and Start and loop wait group registration.
+	lifecycleMu sync.Mutex
 	// closed is set to true by Close. A Service instance is single-use: once
 	// Close has returned, Start refuses to restart the same Service and the
-	// accept/reconnect loops must not be revived. Close stores it under peersMu.
+	// accept/reconnect loops stay stopped. Close stores it under lifecycleMu.
 	closed atomic.Bool
 	// closeDone is published by the Close that owns the teardown and closed
 	// when that teardown completes; every later Close waits on it instead of
 	// tearing down again. closed==true with a nil closeDone means the flag
 	// was published without a teardown owner, so the next Close still owns
-	// the teardown. Guarded by peersMu.
+	// the teardown. Guarded by lifecycleMu.
 	closeDone chan struct{}
 	// boundAddr caches listener.Addr().String() captured when Start
 	// successfully publishes the listener. Addr() returns it so that
 	// wildcard/ephemeral binds (e.g. ":0") still surface the concrete
 	// resolved port after Close, without needing to call Addr() on a
-	// closed net.Listener. Guarded by peersMu.
+	// closed net.Listener. Guarded by lifecycleMu.
 	boundAddr string
 	loopWG    sync.WaitGroup
 	// startWG counts in-progress Start invocations. Start increments on
@@ -88,7 +92,7 @@ type Service struct {
 	// snapshotting s.listener so that a Close that races with a Start call
 	// which has already returned from net.Listen but not yet published the
 	// listener into s.listener cannot return while the freshly created
-	// listener is still bound. Start observes s.closed in its write-lock
+	// listener is still bound. Start observes s.closed in its lifecycle
 	// re-check and closes the local listener on its own, but Close must
 	// wait for that cleanup before declaring the port free.
 	startWG sync.WaitGroup
@@ -288,15 +292,15 @@ var errServiceClosed = errors.New("service already closed")
 // acquireWork registers one Service work lease and reports whether the
 // Service was still OPEN. A rejected caller must perform no parsing,
 // producer call, state mutation, queueing, or send. The loopWG increment
-// happens under the same peersMu section that reads closed, and Close
+// happens under the same lifecycleMu section that reads closed, and Close
 // publishes closed under that lock before it releases it and waits, so a
 // lease can never be added after Close began waiting for it.
 func (s *Service) acquireWork() bool {
 	if s == nil {
 		return false
 	}
-	s.peersMu.Lock()
-	defer s.peersMu.Unlock()
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	if s.closed.Load() {
 		return false
 	}
@@ -332,10 +336,10 @@ func (s *Service) releaseWork() {
 	s.loopWG.Done()
 }
 
-// workAuthorized reports whether the Service is still OPEN. A peer worker
-// calls it immediately before authorizing one more frame read; it takes no
-// lease and the caller keeps the worker lease it already owns. A peer with
-// no Service owns no lifecycle gate and stays authorized.
+// workAuthorized reports whether the Service is still OPEN with one atomic
+// read. A peer worker calls it immediately before authorizing one more frame
+// read and keeps its existing worker lease. A peer with no Service stays
+// authorized.
 func (s *Service) workAuthorized() bool {
 	if s == nil {
 		return true

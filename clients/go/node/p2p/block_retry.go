@@ -43,8 +43,8 @@ type blockRetrySlot struct {
 // armBlockRetry arms the peer's re-request slot for hash, given the capacity release
 // notification observed at the refusal and the refused frame's receive start (a time.Now
 // reading). Call it only from the owning registered peer's frame-processing sequence, before
-// handleConn joins the waiter through finishBlockRetry, and without Service peersMu held
-// (acquireWork takes it). It returns the first refusal in this order:
+// handleConn joins the waiter through finishBlockRetry. The caller holds neither
+// lifecycleMu nor peersMu. The first refusal wins:
 //   - notify is nil: blockRetryNoNotification, before any Service work lease, context or
 //     slot check.
 //   - the Service refuses a work lease, or its context is nil, already canceled or has no
@@ -64,9 +64,9 @@ func (p *peer) armBlockRetry(hash [32]byte, notify <-chan struct{}, receiveStart
 	if !s.acquireWork() {
 		return blockRetryServiceClosed
 	}
-	s.peersMu.RLock()
+	s.lifecycleMu.Lock()
 	parent, stop := s.ctx, s.cancel
-	s.peersMu.RUnlock()
+	s.lifecycleMu.Unlock()
 	if parent == nil || stop == nil || parent.Err() != nil {
 		s.releaseWork()
 		return blockRetryServiceClosed

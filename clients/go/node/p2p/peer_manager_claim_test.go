@@ -85,8 +85,8 @@ func snapshotHas(pm *node.PeerManager, addr string) bool {
 }
 
 func closeOwned(s *Service) bool {
-	s.peersMu.RLock()
-	defer s.peersMu.RUnlock()
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	return s.closeDone != nil
 }
 
