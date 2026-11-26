@@ -620,12 +620,12 @@ func retainedCapacityPlannedExclusion(t *testing.T, malformed bool) {
 	if malformed {
 		logicalMDBXAssert(t, proof.roles == ([2]retainedRoleV1{}) && retainedCapacityClearedV1(a), "malformed plan retained prework")
 	}
-	err = a.ApplyDirectMDBX(proof, run.truth, run.stage, run.index, run.err, true)
+	err = a.ApplyDirectMDBX(proof, run.truth, run.stage, run.index, run.err, false)
 	logicalMDBXAssert(t, err == nil && proof.applied && a.active == nil, "apply native exclusion refusal: %v", err)
 	normal := &DirectRetainedProofV1{}
 	run = retainedCapacityNativePlan(t, w, a, normal, bound)
 	logicalMDBXAssert(t, run.planErr == nil && normal.prepared && normal.pre > 0, "valid same-owner plan after exclusion refusal: %+v/%d", run, normal.pre)
-	err = a.ApplyDirectMDBX(normal, run.truth, run.stage, run.index, run.err, true)
+	err = a.ApplyDirectMDBX(normal, run.truth, run.stage, run.index, run.err, false)
 	logicalMDBXAssert(t, err == nil && normal.applied && a.active == nil, "apply valid plan's native abort: %v", err)
 	replayImage := rtImage(t, w)
 	logicalMDBXAssert(t, reflect.DeepEqual(replayImage, before) && reflect.DeepEqual(rtEnvelope(t, w), old), "retained exclusion refusal published authority")

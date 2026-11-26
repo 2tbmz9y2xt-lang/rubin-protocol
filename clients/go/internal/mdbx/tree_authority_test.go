@@ -421,6 +421,28 @@ func consensusTokenTree(tag byte, branch *InvalidBranchV1) TreeAuthorityV1 {
 	return tree
 }
 
+func checkAcceptedTreeConsensusToken(t *testing.T, tag byte, branch *InvalidBranchV1) {
+	t.Helper()
+	tree := consensusTokenTree(tag, branch)
+	before := treeInputSnapshot(t, tree)
+	literal, err := tree.Encode()
+	if err != nil {
+		t.Fatalf("encode legal tree token under tag %d: %v", tag, err)
+	}
+	decoded, err := DecodeTreeAuthorityV1(literal)
+	if err != nil || !reflect.DeepEqual(decoded, tree) {
+		t.Fatalf("decode legal tree token under tag %d: %+v/%v", tag, decoded, err)
+	}
+	reencoded, err := decoded.Encode()
+	if err != nil || !bytes.Equal(reencoded, literal) || !bytes.Equal(treeInputSnapshot(t, tree), before) {
+		t.Fatalf("tree token round-trip under tag %d changed bytes or input: %v", tag, err)
+	}
+	wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{2}, literal, nil)
+	if literal[0] != tag || inspectTreeAuthorityV1(literal) != nil {
+		t.Fatalf("borrowed tree admission for tag %d", tag)
+	}
+}
+
 func replaceTreeAuthorityToken(t *testing.T, input []byte, legal string, bad []byte) []byte {
 	t.Helper()
 	end := 22 + int(binary.BigEndian.Uint32(input[18:22]))

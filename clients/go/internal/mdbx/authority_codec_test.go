@@ -83,16 +83,23 @@ func checkAcceptedConsensusToken(t *testing.T, branch *InvalidBranchV1) {
 	if err := ValidateStorageAuthorityV1(a); err != nil {
 		t.Fatalf("ValidateStorageAuthorityV1 = %v, want success", err)
 	}
-	wantCodecRoundTrip(t, a)
+	encoded, err := a.Encode()
+	if err != nil {
+		t.Fatalf("encode legal storage token: %v", err)
+	}
+	decoded, err := DecodeStorageAuthorityV1(encoded)
+	if err != nil || !reflect.DeepEqual(decoded, a) {
+		t.Fatalf("decode legal storage token: %+v/%v", decoded, err)
+	}
+	reencoded, err := decoded.Encode()
+	if err != nil || !bytes.Equal(reencoded, encoded) {
+		t.Fatalf("storage token round-trip changed bytes: %v", err)
+	}
 	if !bytes.Equal(treeInputSnapshot(t, a), before) {
 		t.Fatal("storage authority input changed")
 	}
 	for _, tag := range []byte{1, 2} {
-		tree := consensusTokenTree(tag, branch)
-		literal := wantTreeAuthority(t, tree)
-		if literal[0] != tag || inspectTreeAuthorityV1(literal) != nil {
-			t.Fatalf("borrowed tree admission for tag %d", tag)
-		}
+		checkAcceptedTreeConsensusToken(t, tag, branch)
 	}
 }
 
