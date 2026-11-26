@@ -407,7 +407,7 @@ func (f *imageTestFixture) unwindRetirement(t *testing.T, round *ImageRound, ctx
 	if pass {
 		inst := f.admitted(t, round, ctx, 0, 1, 1)
 		f.clock.set(end)
-		requireImageUnwindReport(t, f.goRecovered(round, context.Background(), 1, 2), false)
+		requireImageUnwindReport(t, f.goRecovered(round, t.Context(), 1, 2), false)
 		return inst
 	}
 	f.peers[0].writeMu.Lock()
