@@ -294,7 +294,8 @@ func TestService_CloseWaitsForInFlightStartToReleaseListener(t *testing.T) {
 	requireClosedRejection(t, s.Start(context.Background()), "Start during Close")
 	require(t, capturedAddr != "", "post-listen hook did not capture the bound address")
 	requireReturned(t, closeResult, "Close after releasing Start")
-	rebind, err := net.Listen("tcp", capturedAddr)
+	var lc net.ListenConfig
+	rebind, err := lc.Listen(context.Background(), "tcp", capturedAddr)
 	must(t, err, "rebind immediately after Close")
 	_ = rebind.Close()
 }
