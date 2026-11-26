@@ -1275,7 +1275,7 @@ func TestTreeAuthorityBoundsIsolation(t *testing.T) {
 
 func checkTreeNestedAuthoritySize(t *testing.T) {
 	t.Helper()
-	tree := treeAuthorityFixture(ordinaryAuthorityAtSize(t, 1048549))
+	tree := treeAuthorityFixture(ordinaryAuthorityAtSize(1048549))
 	exact := wantTreeAuthority(t, tree)
 	if len(exact) != 1048576 || binary.BigEndian.Uint32(exact[18:22]) != 1048549 {
 		t.Fatalf("tree cap length = %d, inner length = %d", len(exact), binary.BigEndian.Uint32(exact[18:22]))

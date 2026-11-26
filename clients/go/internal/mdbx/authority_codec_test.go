@@ -822,8 +822,7 @@ func TestStorageAuthorityV1CodecBounds(t *testing.T) {
 	t.Run("ordinary evidence cap", checkStandaloneAuthoritySize)
 }
 
-func ordinaryAuthorityAtSize(t *testing.T, size int) StorageAuthorityV1 {
-	t.Helper()
+func ordinaryAuthorityAtSize(size int) StorageAuthorityV1 {
 	a := modelOrdinary(3, 1, 2, 15120, 1, 1, 13681)
 	a.Ordinary.CarriedCleanup = modelCleanup()
 	hash := a.Ordinary.NewSuffix[1].BlockHash
@@ -837,13 +836,13 @@ func ordinaryAuthorityAtSize(t *testing.T, size int) StorageAuthorityV1 {
 func checkStandaloneAuthoritySize(t *testing.T) {
 	t.Helper()
 	const maxSize, evidenceLenOffset = 1_048_576, 426
-	exact := ordinaryAuthorityAtSize(t, maxSize)
+	exact := ordinaryAuthorityAtSize(maxSize)
 	b := wantCodecRoundTrip(t, exact)
 	if len(b) != maxSize || binary.BigEndian.Uint32(b[evidenceLenOffset:]) != maxSize-518 {
 		t.Fatalf("exact cap size = %d, evidence length = %d", len(b), binary.BigEndian.Uint32(b[evidenceLenOffset:]))
 	}
-	over := ordinaryAuthorityAtSize(t, maxSize+1)
-	expectedOver := ordinaryAuthorityAtSize(t, maxSize+1)
+	over := ordinaryAuthorityAtSize(maxSize + 1)
+	expectedOver := ordinaryAuthorityAtSize(maxSize + 1)
 	end := evidenceLenOffset + 4 + maxSize - 518
 	manual := append(bytes.Clone(b[:end]), 0x80)
 	manual = append(manual, b[end:]...)
