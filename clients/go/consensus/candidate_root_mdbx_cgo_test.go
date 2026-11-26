@@ -1,0 +1,643 @@
+//go:build cgo && (darwin || linux) && (amd64 || arm64)
+
+package consensus
+
+import (
+	"bytes"
+	"crypto/sha3"
+	"encoding/binary"
+	"errors"
+	"maps"
+	"slices"
+	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
+)
+
+type candidateScene struct {
+	world   *btWorld
+	parent  mdbx.TreeEndpointV1
+	entries map[Outpoint]UtxoEntry
+	funding Outpoint
+	other   Outpoint
+	key     *MLDSA87Keypair
+	cov     []byte
+}
+
+func newCandidateScene(t *testing.T, height uint64) candidateScene {
+	t.Helper()
+	w := btNew(t)
+	key := icbKeyV1(t)
+	cov := p2pkCovenantDataForPubkey(key.PubkeyBytes())
+	seed, cb, ordinary := icbSeedV1(t, w, cov, height)
+	a, b := Outpoint{Txid: ordinary.id}, Outpoint{Txid: ordinary.id, Vout: 1}
+	entries := map[Outpoint]UtxoEntry{
+		{Txid: cb.id}: btEntry(7, 0, validP2PKCovenantData(), height-1, true),
+		a:             btEntry(1000, 0, cov, height-1, false),
+		b:             btEntry(2000, 0, cov, height-1, false),
+	}
+	return candidateScene{w, seed.Endpoint, entries, a, b, key, cov}
+}
+
+func candidateInput(t *testing.T, raw []byte, parent mdbx.TreeEndpointV1) CandidateRootInput {
+	t.Helper()
+	height := parent.Height + 1
+	frozen, err := FreezeCandidateRootRotation(height, DefaultRotationProvider{})
+	logicalMDBXAssert(t, err == nil, "freeze candidate rotation: %v", err)
+	registry, err := NewCandidateRootCapRegistry(nil)
+	logicalMDBXAssert(t, err == nil, "candidate cap registry: %v", err)
+	return CandidateRootInput{
+		Raw: raw, Selection: mdbx.CandidateRootParentV1{DatabaseID: [32]byte{7}, Generation: 1, Height: height, Parent: parent},
+		ExpectedTarget: POW_LIMIT, ParentTimestamps: slices.Repeat([]uint64{blockStepsMedian}, int(min(height, 11))),
+		CapRegistry: registry, Registry: DefaultSuiteRegistry(), Rotation: frozen,
+	}
+}
+
+func candidateFrame(t *testing.T, parent mdbx.TreeEndpointV1, payout uint64, others ...[]byte) ([]byte, Outpoint) {
+	t.Helper()
+	commit := initial148BlockWitnessCommit(t, others...)
+	cb := coinbaseTxWithOutputs(uint32(parent.Height+1), []testOutput{
+		{value: payout, covenantType: 0, covenantData: validP2PKCovenantData()},
+		{covenantType: 2, covenantData: commit[:]},
+	})
+	raw := initial148BlockFrame(t, append([][]byte{cb}, others...), func(h *initial148BlockHead) { h.parent = parent.BlockHash })
+	return raw, Outpoint{Txid: testTxID(t, cb)}
+}
+
+func (s candidateScene) spend(t *testing.T, nonce uint64, input Outpoint, old, next uint64) ([]byte, Outpoint) {
+	t.Helper()
+	tx := inputViewTx(nonce, input)
+	tx.Outputs[0] = TxOutput{Value: next, CovenantType: 0, CovenantData: s.cov}
+	raw := icbSignV1(t, s.key, tx, old)
+	return raw, Outpoint{Txid: testTxID(t, raw)}
+}
+
+func (s candidateScene) body(t *testing.T, spends int, payout uint64) (CandidateRootInput, [32]byte) {
+	t.Helper()
+	final := maps.Clone(s.entries)
+	h := s.parent.Height + 1
+	var other [][]byte
+	if spends > 0 {
+		raw, created := s.spend(t, 11, s.funding, 1000, 990)
+		other = append(other, raw)
+		delete(final, s.funding)
+		if spends > 1 {
+			raw, created = s.spend(t, 12, created, 990, 980)
+			other = append(other, raw)
+			final[created] = btEntry(980, 0, s.cov, h, false)
+		} else {
+			final[created] = btEntry(990, 0, s.cov, h, false)
+		}
+	}
+	raw, cb := candidateFrame(t, s.parent, payout, other...)
+	final[cb] = btEntry(payout, 0, validP2PKCovenantData(), h, true)
+	return candidateInput(t, raw, s.parent), canonicalUTXORoot(final)
+}
+
+func candidateRootOK(t *testing.T, r *mdbx.Reader, o *mdbx.OperationReservationOwner, in CandidateRootInput, want [32]byte) {
+	t.Helper()
+	got, err := DeriveCandidateUTXORootV1(r, o, in)
+	logicalMDBXAssert(t, err == nil && got == want, "candidate digest %x/%v, want %x", got, err, want)
+}
+
+func candidateTxError(t *testing.T, r *mdbx.Reader, o *mdbx.OperationReservationOwner, in CandidateRootInput, code ErrorCode, diagnostic string) {
+	t.Helper()
+	got, err := DeriveCandidateUTXORootV1(r, o, in)
+	var tx *TxError
+	logicalMDBXAssert(t, got == [32]byte{} && errors.As(err, &tx) && tx != nil && any(err) == any(tx) && tx.Code == code && tx.Msg == diagnostic,
+		"candidate first result %x/%v, want %s/%q", got, err, code, diagnostic)
+}
+
+func candidateView(t *testing.T, w *btWorld, use func(*mdbx.Reader)) {
+	t.Helper()
+	err := w.s.View(func(r *mdbx.Reader) error {
+		use(r)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "candidate View: %v", err)
+}
+
+func TestCandidateRootResult(t *testing.T) {
+	s := newCandidateScene(t, 5)
+	full, want := s.body(t, 2, 20)
+	coinbase, coinbaseWant := s.body(t, 0, 1)
+	short, shortWant := s.body(t, 1, 20)
+	payout, payoutWant := s.body(t, 2, 21)
+	t.Run("unsolved", func(t *testing.T) { candidateUnsolved(t, s, full, want) })
+	t.Run("header_tail", func(t *testing.T) {
+		first, second := full, full
+		first.Raw, second.Raw = bytes.Clone(full.Raw), bytes.Clone(full.Raw)
+		copy(first.Raw[108:140], want[:])
+		copy(second.Raw[108:148], bytes.Repeat([]byte{0xa5}, 40))
+		candidateView(t, s.world, func(r *mdbx.Reader) {
+			candidateRootOK(t, r, s.world.owner, first, want)
+			candidateRootOK(t, r, s.world.owner, second, want)
+		})
+		initial148Unchanged(t, first.Raw[148:], second.Raw[148:])
+	})
+	t.Run("final_map", func(t *testing.T) {
+		candidateUnchanged(t, s, full, want)
+	})
+	t.Run("coinbase_only", func(t *testing.T) {
+		candidateView(t, s.world, func(r *mdbx.Reader) { candidateRootOK(t, r, s.world.owner, coinbase, coinbaseWant) })
+	})
+	t.Run("membership", func(t *testing.T) { candidateMembership(t, s) })
+	t.Run("variant", func(t *testing.T) {
+		logicalMDBXAssert(t, shortWant != want && payoutWant != want, "candidate variants share an oracle digest")
+		candidateView(t, s.world, func(r *mdbx.Reader) {
+			candidateRootOK(t, r, s.world.owner, short, shortWant)
+			candidateRootOK(t, r, s.world.owner, payout, payoutWant)
+		})
+	})
+}
+
+func candidateUnsolved(t *testing.T, s candidateScene, in CandidateRootInput, want [32]byte) {
+	t.Helper()
+	in.Raw = bytes.Clone(in.Raw)
+	in.ExpectedTarget[0] = 0x7f
+	copy(in.Raw[76:108], in.ExpectedTarget[:])
+	for Initial148PowCheck(in.Raw[:148], in.ExpectedTarget) == nil {
+		nonce := binary.LittleEndian.Uint64(in.Raw[140:148])
+		binary.LittleEndian.PutUint64(in.Raw[140:148], nonce+1)
+	}
+	initial148BlockWantError(t, "unsolved input", Initial148PowCheck(in.Raw[:148], in.ExpectedTarget), "BLOCK_ERR_POW_INVALID", "pow invalid")
+	candidateView(t, s.world, func(r *mdbx.Reader) {
+		root, err := DeriveCandidateUTXORootV1(r, s.world.owner, in)
+		logicalMDBXAssert(t, err == nil && root == want, "unsolved candidate digest %x/%v, want %x", root, err, want)
+		candidateSolved(t, s, r, in, root)
+	})
+}
+
+func candidateSolved(t *testing.T, s candidateScene, reader *mdbx.Reader, in CandidateRootInput, root [32]byte) {
+	t.Helper()
+	parsed, err := ParseInitial148HeaderBytes(in.Raw[:148])
+	logicalMDBXAssert(t, err == nil, "solved header parse: %v", err)
+	header := initial148BlockHead{version: parsed.Version, parent: parsed.PrevBlockHash, merkle: parsed.MerkleRoot, target: parsed.Target, timestamp: parsed.Timestamp, root: root}
+	solved := append(initial148BlockMine(t, header), in.Raw[148:]...)
+	complete := initial148CompleteBlockInputV1{
+		Raw: solved, Height: in.Selection.Height, Parent: in.Selection.Parent, ParentHash: in.Selection.Parent.BlockHash,
+		ExpectedTarget: in.ExpectedTarget, ParentTimestamps: in.ParentTimestamps, DatabaseID: in.Selection.DatabaseID, Generation: in.Selection.Generation,
+		CapRegistry: &in.CapRegistry.registry, Registry: in.Registry, Rotation: in.Rotation.rotation,
+		Endpoint: mdbx.TreeEndpointV1{Kind: 1, Height: in.Selection.Height, BlockHash: sha3.Sum256(solved[:148]), CumulativeChainwork: [40]byte{39: 100}},
+	}
+	err = s.world.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+		_, err := withInitial148CompleteBlockV1(a, complete, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+			result, err := validate(reader)
+			logicalMDBXAssert(t, err == nil && result != nil && result.summary.TxCount == 3, "solved composer: %v", err)
+			return err
+		})
+		return err
+	})
+	logicalMDBXAssert(t, err == nil, "solved account: %v", err)
+}
+
+func candidateUnchanged(t *testing.T, s candidateScene, in CandidateRootInput, want [32]byte) {
+	t.Helper()
+	before, err := s.world.s.Inspect()
+	logicalMDBXAssert(t, err == nil, "candidate prestate: %v", err)
+	raw := bytes.Clone(in.Raw)
+	candidateView(t, s.world, func(r *mdbx.Reader) {
+		candidateRootOK(t, r, s.world.owner, in, want)
+		candidateRootOK(t, r, s.world.owner, in, want)
+		candidateAssertParentRows(t, r, s)
+	})
+	after, err := s.world.s.Inspect()
+	logicalMDBXAssert(t, err == nil && before.RecentTxnID == after.RecentTxnID && before.DBIs == after.DBIs, "candidate mutated store: %v", err)
+	initial148Unchanged(t, in.Raw, raw)
+	btReservationsReleased(t, s.world.owner)
+}
+
+func candidateAssertParentRows(t *testing.T, r *mdbx.Reader, s candidateScene) {
+	t.Helper()
+	leaves := map[[36]byte][]byte{}
+	for op, row := range s.entries {
+		icbLeafKindV1(leaves, op, row.Value, row.CovenantType, row.CovenantData, row.CreationHeight, row.CreatedByCoinbase)
+		candidateReadExact(t, r, 1, btUTXOKey(1, op), btValue(btFrame(row.Value, row.CovenantType, row.CovenantData), row.CreationHeight, row.CreatedByCoinbase))
+	}
+	root, present, err := r.ReadTreeRootBindingV1(1)
+	logicalMDBXAssert(t, err == nil && present && root.RootDigest == canonicalUTXORoot(s.entries) && root.Endpoint == s.parent, "candidate changed binding: %v/%+v", err, root)
+	icbRootV1(leaves, func(id mdbx.TreeNodeIDV1, value []byte) {
+		key, err := mdbx.TreeNodeKey(1, id)
+		logicalMDBXAssert(t, err == nil, "parent node key: %v", err)
+		candidateReadExact(t, r, 8, key, value)
+	})
+}
+
+func candidateReadExact(t *testing.T, r *mdbx.Reader, rank uint8, key, want []byte) {
+	t.Helper()
+	got, present, err := r.Get(mdbx.TreeSchemaV1DBIs()[rank], key)
+	logicalMDBXAssert(t, err == nil && present == (want != nil) && bytes.Equal(got, want), "candidate row %d/%x: %x/%v/%v, want %x", rank, key, got, present, err, want)
+}
+
+func candidateMembership(t *testing.T, s candidateScene) {
+	t.Helper()
+	id, payload := [32]byte{0x75}, []byte("B")
+	hash := sha3.Sum256(payload)
+	commit, chunk := inputViewTx(17, s.funding), inputViewTx(18, s.other)
+	commit.TxKind, commit.DaCommitCore = 1, &DaCommitCore{DaID: id, ChunkCount: 1}
+	commit.Outputs = []TxOutput{{Value: 990, CovenantType: 0, CovenantData: s.cov}, {CovenantType: 0x0103, CovenantData: hash[:]}}
+	chunk.TxKind, chunk.DaChunkCore, chunk.DaPayload = 2, &DaChunkCore{DaID: id, ChunkHash: hash}, payload
+	chunk.Outputs = nil
+	first, second := icbSignV1(t, s.key, commit, 1000), icbSignV1(t, s.key, chunk, 2000)
+	raw, cb := candidateFrame(t, s.parent, 1, first, second)
+	final := maps.Clone(s.entries)
+	delete(final, s.funding)
+	delete(final, s.other)
+	final[cb] = btEntry(1, 0, validP2PKCovenantData(), 5, true)
+	final[Outpoint{Txid: testTxID(t, first)}] = btEntry(990, 0, s.cov, 5, false)
+	candidateView(t, s.world, func(r *mdbx.Reader) {
+		candidateRootOK(t, r, s.world.owner, candidateInput(t, raw, s.parent), canonicalUTXORoot(final))
+	})
+}
+
+type candidateOrderCase struct {
+	name string
+	raw  []byte
+	code ErrorCode
+	msg  string
+}
+
+func TestCandidateRootOrder(t *testing.T) {
+	s := newCandidateScene(t, 5)
+	for _, row := range append(candidateHeaderCases(t, s), candidateBlockResourceCases(t, s)...) {
+		t.Run(row.name, func(t *testing.T) {
+			in := candidateInput(t, row.raw, s.parent)
+			next, want := s.body(t, 0, 1)
+			candidateView(t, s.world, func(r *mdbx.Reader) {
+				candidateTxError(t, r, s.world.owner, in, row.code, row.msg)
+				candidateRootOK(t, r, s.world.owner, next, want)
+			})
+		})
+	}
+	t.Run("transaction_before_subsidy", func(t *testing.T) { candidateSpendOrder(t, s) })
+	t.Run("subsidy_before_law", func(t *testing.T) { candidateSubsidyBeforeLaw(t) })
+}
+
+func candidateHeaderCases(t *testing.T, s candidateScene) []candidateOrderCase {
+	t.Helper()
+	in, _ := s.body(t, 0, 1)
+	target, link, merkle := bytes.Clone(in.Raw), bytes.Clone(in.Raw), bytes.Clone(in.Raw)
+	target[76], target[4] = 0x7f, target[4]^1
+	link[4], link[36] = link[4]^1, link[36]^1
+	wrong := coinbaseTxWithOutputs(5, []testOutput{{value: 1, covenantType: 0, covenantData: validP2PKCovenantData()}})
+	witness := initial148BlockFrame(t, [][]byte{wrong}, func(h *initial148BlockHead) { h.parent, h.timestamp = s.parent.BlockHash, blockStepsMedian })
+	copy(merkle, witness)
+	merkle[36] ^= 1
+	return []candidateOrderCase{
+		{"trailing_bytes", append(target, 0), "BLOCK_ERR_PARSE", "trailing bytes after tx list"},
+		{"target", target, "BLOCK_ERR_TARGET_INVALID", "target mismatch"},
+		{"linkage", link, "BLOCK_ERR_LINKAGE_INVALID", "prev_block_hash mismatch"},
+		{"merkle", merkle, "BLOCK_ERR_MERKLE_INVALID", "merkle_root mismatch"},
+		{"witness", witness, "BLOCK_ERR_WITNESS_COMMITMENT", "coinbase witness commitment missing or duplicated"},
+	}
+}
+
+func candidateBlockResourceCases(t *testing.T, s candidateScene) []candidateOrderCase {
+	t.Helper()
+	a, b, p := blockStepsIDs[0], blockStepsIDs[1], []byte{0x42}
+	good, bad := blockStepsChunk(a, 0, p, sha3.Sum256(p)), blockStepsChunk(b, 0, p, [32]byte{})
+	invalidPayload := blockStepsCommit(a, 1, blockStepsDAOut([32]byte{3}))
+	frame := func(txs ...[]byte) []byte {
+		return initial148BlockFrame(t, append([][]byte{initial148BlockCoinbase(t, txs...)}, txs...), func(h *initial148BlockHead) { h.parent = s.parent.BlockHash })
+	}
+	anchor := frame(blockStepsAnchors(131072-31), bad)
+	weight := frame(append(blockStepsWeighted(t, 68_000_001), bad)...)
+	old, future := bytes.Clone(weight), bytes.Clone(anchor)
+	binary.LittleEndian.PutUint64(old[68:76], blockStepsMedian)
+	binary.LittleEndian.PutUint64(future[68:76], blockStepsMedian+7201)
+	return []candidateOrderCase{
+		{"timestamp_old", old, "BLOCK_ERR_TIMESTAMP_OLD", "timestamp <= MTP median"},
+		{"timestamp_future", future, "BLOCK_ERR_TIMESTAMP_FUTURE", "timestamp exceeds future drift"},
+		{"weight", weight, "BLOCK_ERR_WEIGHT_EXCEEDED", "block weight exceeded"},
+		{"anchor_bytes", anchor, "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED", "anchor bytes exceeded"},
+		{"chunk_hash", frame(invalidPayload, good, bad), "BLOCK_ERR_DA_CHUNK_HASH_INVALID", "chunk_hash mismatch"},
+		{"set", frame(invalidPayload, good, blockStepsChunk(b, 0, p, sha3.Sum256(p))), "BLOCK_ERR_DA_SET_INVALID", "DA chunks without DA commit"},
+		{"incomplete", frame(blockStepsCommit(a, 2, blockStepsDAOut([32]byte{3})), good), "BLOCK_ERR_DA_INCOMPLETE", "DA chunk count mismatch"},
+		{"payload", frame(invalidPayload, good), "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID", "payload commitment mismatch"},
+	}
+}
+
+func candidateSpendOrder(t *testing.T, s candidateScene) {
+	t.Helper()
+	first, _ := s.spend(t, 1, s.funding, 1000, 990)
+	op := Outpoint{Txid: [32]byte{0x99}}
+	second, _ := s.spend(t, 2, op, 990, 980)
+	raw, _ := candidateFrame(t, s.parent, 4_900_000_000_000_000, first, second)
+	next, want := s.body(t, 0, 1)
+	candidateView(t, s.world, func(r *mdbx.Reader) {
+		candidateTxError(t, r, s.world.owner, candidateInput(t, raw, s.parent), "TX_ERR_MISSING_UTXO", "utxo not found")
+		candidateRootOK(t, r, s.world.owner, next, want)
+	})
+}
+
+func candidateSubsidyBeforeLaw(t *testing.T) {
+	t.Helper()
+	w, in, _, txs := candidateGrowthSetup(t, true)
+	in.Raw, _ = candidateFrame(t, in.Selection.Parent, 4_900_000_000_000_000, txs...)
+	nextRaw, cb := candidateFrame(t, in.Selection.Parent, 1)
+	next := in
+	next.Raw = nextRaw
+	final := logicalGrowthParents(candidateGrowthCov(t, txs))
+	final[cb] = btEntry(1, 0, validP2PKCovenantData(), 200, true)
+	candidateView(t, w, func(r *mdbx.Reader) {
+		candidateTxError(t, r, w.owner, in, "BLOCK_ERR_SUBSIDY_EXCEEDED", "coinbase outputs exceed subsidy+fees bound")
+		candidateRootOK(t, r, w.owner, next, canonicalUTXORoot(final))
+	})
+}
+
+func candidateGrowthCov(t *testing.T, raws [][]byte) []byte {
+	t.Helper()
+	tx, _, _, _, err := ParseTx(raws[0])
+	logicalMDBXAssert(t, err == nil && len(tx.Outputs) != 0, "growth signed outputs: %v", err)
+	return tx.Outputs[0].CovenantData
+}
+
+func candidateSeedRows(t *testing.T, w *btWorld, generation uint64, parent mdbx.TreeEndpointV1, entries map[Outpoint]UtxoEntry) {
+	t.Helper()
+	rows, leaves := candidateSeedLeaves(entries, generation)
+	var top mdbx.TreeTopV1
+	root := icbRootV1(leaves, func(id mdbx.TreeNodeIDV1, row []byte) {
+		key, err := mdbx.TreeNodeKey(generation, id)
+		logicalMDBXAssert(t, err == nil, "seed tree key: %v", err)
+		rows = append(rows, btMutation(8, key, row))
+		last := id
+		top = mdbx.TreeTopV1{Kind: mdbx.TreeTopKindV1(id.Kind), Node: &last}
+	})
+	binding := mdbx.RootBindingV1{
+		DatabaseID: [32]byte{7}, CommitmentVersion: 1, Endpoint: parent, RootDigest: root, Top: top, Assurance: mdbx.TreeAssuranceV1{Kind: 1},
+	}
+	encoded, err := binding.Encode()
+	logicalMDBXAssert(t, err == nil, "candidate seed binding: %v", err)
+	counter := binary.BigEndian.AppendUint64(nil, logicalGrowthCensusBytes(entries))
+	counter = binary.BigEndian.AppendUint64(counter, uint64(len(entries)))
+	total, rootRow := btMutation(0, btMeta(16, generation), counter), btMutation(0, btMeta(17, generation), encoded)
+	total.BeforePresent, rootRow.BeforePresent = true, true
+	key, err := mdbx.HeightKey(generation, parent.Height)
+	logicalMDBXAssert(t, err == nil, "candidate seed tip key: %v", err)
+	tip := btMutation(2, key, mdbx.ChainValue(parent.BlockHash, [32]byte{}, parent.CumulativeChainwork))
+	w.pair(t, append(rows, total, rootRow, tip)...)
+}
+
+func candidateSeedLeaves(entries map[Outpoint]UtxoEntry, generation uint64) ([]mdbx.Mutation, map[[36]byte][]byte) {
+	rows := make([]mdbx.Mutation, 0, len(entries))
+	leaves := make(map[[36]byte][]byte, len(entries))
+	for op, value := range entries {
+		row := btValue(btFrame(value.Value, value.CovenantType, value.CovenantData), value.CreationHeight, value.CreatedByCoinbase)
+		rows = append(rows, btMutation(1, btUTXOKey(generation, op), row))
+		icbLeafKindV1(leaves, op, value.Value, value.CovenantType, value.CovenantData, value.CreationHeight, value.CreatedByCoinbase)
+	}
+	return rows, leaves
+}
+
+func candidateGrowthSetup(t *testing.T, over bool) (*btWorld, CandidateRootInput, [32]byte, [][]byte) {
+	t.Helper()
+	return candidateGrowthAtHeight(t, over, 200)
+}
+
+func candidateGrowthAtHeight(t *testing.T, over bool, height uint64) (*btWorld, CandidateRootInput, [32]byte, [][]byte) {
+	t.Helper()
+	kp := icbKeyV1(t)
+	parent := mdbx.TreeEndpointV1{Kind: 1, Height: height - 1, BlockHash: [32]byte{0xd2}, CumulativeChainwork: [40]byte{38: 2, 39: 1}}
+	entries := logicalGrowthParents(p2pkCovenantDataForPubkey(kp.PubkeyBytes()))
+	w := btNew(t)
+	candidateSeedRows(t, w, 1, parent, entries)
+	census := logicalGrowthEqual
+	s1, events := uint64(773921), 8674
+	if over {
+		census, s1, events = logicalGrowthOver, 773922, 8691
+	}
+	txs := logicalGrowthTxs(t, kp, [32]byte{}, census)
+	raws := logicalGrowthMarshal(t, txs)
+	final := candidateGrowthOutputs(t, height, txs, raws)
+	raw, cb := candidateFrame(t, parent, 1, raws...)
+	final[cb] = btEntry(1, 0, validP2PKCovenantData(), height, true)
+	logicalMDBXAssert(t, logicalGrowthCensusBytes(entries) == 801 && logicalGrowthCensusBytes(final) == s1 && len(final)+len(entries) == events,
+		"signed growth census %d/%d/%d", logicalGrowthCensusBytes(entries), logicalGrowthCensusBytes(final), len(final)+len(entries))
+	candidateAssertGrowthFunding(t, uint64(len(raw)), uint64(events))
+	return w, candidateInput(t, raw, parent), canonicalUTXORoot(final), raws
+}
+
+func candidateGrowthOutputs(t *testing.T, height uint64, txs []*Tx, raws [][]byte) map[Outpoint]UtxoEntry {
+	t.Helper()
+	final := map[Outpoint]UtxoEntry{}
+	logicalMDBXAssert(t, len(txs) == 9, "growth input count %d", len(txs))
+	for i, tx := range txs {
+		witness := tx.Witness[0]
+		digest, err := SighashV1DigestWithType(tx, 0, 2000, [32]byte{}, 1)
+		logicalMDBXAssert(t, err == nil && len(witness.Signature) == 4628 && witness.Signature[4627] == 1, "growth signature envelope %d: %v", i, err)
+		ok, err := VerifyMLDSA87Digest32(witness.Pubkey, witness.Signature[:4627], digest)
+		logicalMDBXAssert(t, ok && err == nil, "growth signature %d: %v", i, err)
+		id := testTxID(t, raws[i])
+		for v, output := range tx.Outputs {
+			final[Outpoint{Txid: id, Vout: uint32(v)}] = btEntry(output.Value, output.CovenantType, output.CovenantData, height, false)
+		}
+	}
+	return final
+}
+
+func candidateW(n, timestamps, caps uint64) uint64 {
+	w := n - 149
+	b := min(17000000, w, (68000157-n)/3)
+	return 16777216 + n + max(131072*min(1024, b/41)+4194304+6*b+w+512*(w/7227), 16*b) + 128*caps + 1024 + 18 + 8*timestamps
+}
+
+func candidateAssertGrowthFunding(t *testing.T, n, events uint64) {
+	t.Helper()
+	w := candidateW(n, 11, 1)
+	r, d := 135192+48*events, 288440+104*events
+	logicalMDBXAssert(t, n <= 1048576 && w <= 163652311 && w+r <= 164204671 && n+4096+36*events+d <= 2557852,
+		"growth funding %d/%d: W=%d, R=%d, D=%d", n, events, w, r, d)
+}
+
+func TestCandidateRootGrowth(t *testing.T) {
+	t.Run("equal", func(t *testing.T) { candidateGrowthBoundary(t, false) })
+	t.Run("over", func(t *testing.T) { candidateGrowthBoundary(t, true) })
+	t.Run("cap_first", candidateCapFirst)
+	t.Run("inactive_counters", candidateInactiveCounters)
+	t.Run("cap_activation", candidateCapActivation)
+	t.Run("above_cap_nonincrease", candidateNonincrease)
+}
+
+func candidateGrowthBoundary(t *testing.T, over bool) {
+	t.Helper()
+	w, in, want, raws := candidateGrowthSetup(t, over)
+	next, nextRoot := candidateGrowthCoinbase(t, in, raws)
+	candidateView(t, w, func(r *mdbx.Reader) {
+		if over {
+			candidateTxError(t, r, w.owner, in, "BLOCK_ERR_STATE_GROWTH_EXCEEDED", "logical state growth exceeded")
+		} else {
+			candidateRootOK(t, r, w.owner, in, want)
+		}
+		candidateRootOK(t, r, w.owner, next, nextRoot)
+	})
+}
+
+func candidateGrowthCoinbase(t *testing.T, in CandidateRootInput, raws [][]byte) (CandidateRootInput, [32]byte) {
+	t.Helper()
+	raw, cb := candidateFrame(t, in.Selection.Parent, 1)
+	in.Raw = raw
+	final := logicalGrowthParents(candidateGrowthCov(t, raws))
+	final[cb] = btEntry(1, 0, validP2PKCovenantData(), in.Selection.Height, true)
+	return in, canonicalUTXORoot(final)
+}
+
+func candidateSetCap(t *testing.T, in *CandidateRootInput, chain [32]byte, height uint64) {
+	t.Helper()
+	registry, err := NewCandidateRootCapRegistry([]CandidateRootCapRow{{chain, height}})
+	logicalMDBXAssert(t, err == nil, "candidate cap activation: %v", err)
+	in.CapRegistry = registry
+}
+
+func candidateCapFirst(t *testing.T) {
+	w, in, _, _ := candidateGrowthAtHeight(t, true, 20001)
+	candidateSetCap(t, &in, [32]byte{}, 20001)
+	irCounterV1(t, w, 1649267441664-773120, 25200009)
+	candidateView(t, w, func(r *mdbx.Reader) {
+		candidateTxError(t, r, w.owner, in, "BLOCK_ERR_STATE_CAP_EXCEEDED", "logical state cap exceeded")
+	})
+}
+
+func candidateInactiveCounters(t *testing.T) {
+	w, in, _, _ := candidateGrowthSetup(t, true)
+	irCounterV1(t, w, 1, 9)
+	candidateView(t, w, func(r *mdbx.Reader) {
+		got, err := DeriveCandidateUTXORootV1(r, w.owner, in)
+		logicalMDBXAssert(t, got == [32]byte{}, "counter refusal returned a digest")
+		irFailureV1(t, err, logicalStateFailureStoreIntegrity, "invalid required logical counter envelope")
+		id := [32]byte{7}
+		candidateReadExact(t, r, 0, []byte{3}, id[:])
+	})
+}
+
+func candidateCapActivation(t *testing.T) {
+	w, in, want, _ := candidateGrowthAtHeight(t, false, 20001)
+	candidateSetCap(t, &in, [32]byte{}, 20001)
+	for _, s0 := range []uint64{1649267441664 - 773121, 1649267441664 - 773120} {
+		irCounterV1(t, w, s0, 25200009)
+		candidateView(t, w, func(r *mdbx.Reader) { candidateRootOK(t, r, w.owner, in, want) })
+	}
+	irCounterV1(t, w, 1649267441664+1, 25200009)
+	candidateView(t, w, func(r *mdbx.Reader) {
+		for _, at := range []uint64{20000, 20001} {
+			candidateSetCap(t, &in, [32]byte{}, at)
+			candidateTxError(t, r, w.owner, in, "BLOCK_ERR_STATE_CAP_EXCEEDED", "logical state cap exceeded")
+		}
+		candidateSetCap(t, &in, [32]byte{}, 20002)
+		candidateRootOK(t, r, w.owner, in, want)
+		candidateSetCap(t, &in, [32]byte{1}, 20001)
+		candidateRootOK(t, r, w.owner, in, want)
+	})
+}
+
+func candidateNonincrease(t *testing.T) {
+	s := newCandidateScene(t, 20001)
+	tx := inputViewTx(22, s.funding, s.other)
+	tx.Outputs[0] = TxOutput{Value: 2990, CovenantType: 0, CovenantData: s.cov}
+	spend := icbSignV1(t, s.key, tx, 1000, 2000)
+	raw, cb := candidateFrame(t, s.parent, 1, spend)
+	in := candidateInput(t, raw, s.parent)
+	candidateSetCap(t, &in, [32]byte{}, 20001)
+	irCounterV1(t, s.world, 1649267441664+1, 25200003)
+	final := maps.Clone(s.entries)
+	delete(final, s.funding)
+	delete(final, s.other)
+	final[cb] = btEntry(1, 0, validP2PKCovenantData(), 20001, true)
+	final[Outpoint{Txid: testTxID(t, spend)}] = btEntry(2990, 0, s.cov, 20001, false)
+	candidateView(t, s.world, func(r *mdbx.Reader) { candidateRootOK(t, r, s.world.owner, in, canonicalUTXORoot(final)) })
+}
+
+func TestCandidateRootAdmission(t *testing.T) {
+	s := newCandidateScene(t, 5)
+	in, want := s.body(t, 0, 1)
+	for _, row := range []struct {
+		name string
+		edit func(*CandidateRootInput)
+		want error
+	}{
+		{"nil_cap_registry", func(in *CandidateRootInput) { in.CapRegistry = nil }, nil},
+		{"zero_cap_registry", func(in *CandidateRootInput) { in.CapRegistry = &CandidateRootCapRegistry{} }, nil},
+		{"nil_suite_registry", func(in *CandidateRootInput) { in.Registry = nil }, nil},
+		{"zero_suite_registry", func(in *CandidateRootInput) { in.Registry = &SuiteRegistry{} }, nil},
+		{"unresolved_suite", func(in *CandidateRootInput) { in.Registry = NewSuiteRegistryFromParams(nil) }, nil},
+		{"nil_rotation", func(in *CandidateRootInput) { in.Rotation = nil }, nil},
+		{"zero_rotation", func(in *CandidateRootInput) { in.Rotation = &CandidateRootRotation{} }, nil},
+		{"different_height", func(in *CandidateRootInput) { in.Rotation = &CandidateRootRotation{rotation: icbFrozenV1(4)} }, nil},
+		{"zero_target", func(in *CandidateRootInput) { in.ExpectedTarget = [32]byte{} }, ErrBlockSteps1To12Context},
+		{"short_window", func(in *CandidateRootInput) { in.ParentTimestamps = in.ParentTimestamps[:4] }, ErrBlockSteps1To12Context},
+		{"long_window", func(in *CandidateRootInput) { in.ParentTimestamps = make([]uint64, 6) }, ErrBlockSteps1To12Context},
+		{"oversize_before_window", func(in *CandidateRootInput) { in.Raw, in.ParentTimestamps = make([]byte, 68000158), nil }, ErrInitial148BlockCapacity},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			bad := in
+			row.edit(&bad)
+			candidateView(t, s.world, func(r *mdbx.Reader) {
+				root, err := DeriveCandidateUTXORootV1(r, s.world.owner, bad)
+				logicalMDBXAssert(t, root == [32]byte{}, "invalid context returned digest %x", root)
+				if row.want == nil {
+					irFailureV1(t, err, logicalStateFailureLocalInvariant, "invalid candidate validation context")
+				} else {
+					logicalMDBXAssert(t, any(err) == any(row.want), "candidate admission returned %v, want %v", err, row.want)
+				}
+				candidateRootOK(t, r, s.world.owner, in, want)
+			})
+		})
+	}
+}
+
+func TestCandidateRootContextConstruction(t *testing.T) {
+	for _, rows := range [][]CandidateRootCapRow{
+		{{ChainID: [32]byte{1}, ActivationHeight: 1 << 32}},
+		{{ChainID: [32]byte{2}}, {ChainID: [32]byte{1}}},
+		{{ChainID: [32]byte{1}}, {ChainID: [32]byte{1}}},
+	} {
+		registry, err := NewCandidateRootCapRegistry(rows)
+		logicalMDBXAssert(t, registry == nil && err != nil, "invalid candidate cap rows: %+v/%v", registry, err)
+	}
+	var missing *candidateFreezeProvider
+	frozen, err := FreezeCandidateRootRotation(5, missing)
+	logicalMDBXAssert(t, frozen == nil && err != nil, "typed nil rotation: %+v/%v", frozen, err)
+	t.Run("deployment_read", candidateFrozenDeployment)
+	t.Run("copied_cap", candidateCopiedCap)
+}
+
+type candidateFreezeProvider struct {
+	DefaultRotationProvider
+	descriptor []SimplicityDeploymentDescriptor
+	calls      int
+	err        error
+}
+
+func (provider *candidateFreezeProvider) PublishedSimplicityDeployments() ([]SimplicityDeploymentDescriptor, [32]byte, bool, error) {
+	provider.calls++
+	return provider.descriptor, [32]byte{7}, true, provider.err
+}
+
+func candidateFrozenDeployment(t *testing.T) {
+	t.Helper()
+	cause := errors.New("deployment source unavailable")
+	provider := &candidateFreezeProvider{descriptor: []SimplicityDeploymentDescriptor{{ActivationHeight: 5}}, err: cause}
+	frozen, err := FreezeCandidateRootRotation(5, provider)
+	logicalMDBXAssert(t, err == nil && frozen != nil, "freeze deployment: %v", err)
+	provider.descriptor[0].ActivationHeight, provider.err = 6, nil
+	deployment := frozen.rotation.(SimplicityDeploymentProvider)
+	for range 2 {
+		rows, anchor, present, got := deployment.PublishedSimplicityDeployments()
+		logicalMDBXAssert(t, len(rows) == 1 && rows[0].ActivationHeight == 5 && anchor == [32]byte{7} && present && any(got) == any(cause),
+			"frozen deployment changed: %+v/%x/%t/%v", rows, anchor, present, got)
+		rows[0].ActivationHeight = 7
+	}
+	logicalMDBXAssert(t, provider.calls == 1, "deployment provider read count %d", provider.calls)
+}
+
+func candidateCopiedCap(t *testing.T) {
+	t.Helper()
+	s := newCandidateScene(t, 20001)
+	in, want := s.body(t, 0, 1)
+	rows := []CandidateRootCapRow{{ChainID: [32]byte{1}, ActivationHeight: 20002}}
+	registry, err := NewCandidateRootCapRegistry(rows)
+	logicalMDBXAssert(t, err == nil, "ordered cap configuration: %v", err)
+	rows[0].ActivationHeight = 20000
+	in.CapRegistry, in.ChainID = registry, [32]byte{1}
+	irCounterV1(t, s.world, 1649267441664+1, 25200003)
+	candidateView(t, s.world, func(r *mdbx.Reader) { candidateRootOK(t, r, s.world.owner, in, want) })
+}

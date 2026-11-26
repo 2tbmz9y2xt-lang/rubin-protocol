@@ -1735,6 +1735,8 @@ func TestTreeStreamSurfaceV1(t *testing.T) {
 	want := []string{"TreePositionV1", "TreeWriterV1", "TreeReadbackV1", "TreeDeltaSinkV1", "TreeOutpointV1", "TreeEventKindV1", "TreeEventSpendV1", "TreeEventCreateV1", "TreeBlockV1", "TreeEventV1", "BeginV1", "EventV1", "WindowV1", "TreeUndoEffectV1", "UndoWriteOrReuseV1", "UndoTransientV1", "UndoCompareV1", "UndoCompareDeleteV1", "UndoSourceRetainV1", "UndoSourceDeleteV1", "TreeDirectionV1", "TreeForwardV1", "TreeInverseV1", "TreePrimitiveKindV1", "TreeKindDirectApplyV1", "TreeKindConnectV1", "TreeKindReplayNextV1", "TreeKindFirstGenesisV1", "TreeKindRestoreOldV1", "TreeKindLagForwardV1", "TreeKindDisconnectV1", "TreeKindRollbackNewV1", "TreeKindLagReverseV1", "TreePairV1", "TreeSourceV1", "TreePrimitiveV1", "TreeOperationV1", "UpdateTreeV1"}
 	want = append(want, "TreeSourceCoverageV1", "TreeObservationV1", "TreeObservationKindV1", "TreeObservationAbsentV1", "TreeObservationMalformedV1", "TreeObservationIdentityMismatchV1", "TreeObservationDigestMismatchV1")
 	want = append(want, "TreeRootReadV1", "CheckTreeRootReadV1", "DeriveTreeRootV1")
+	want = append(want, "CandidateRootParentV1", "CandidateRootBodyV1", "CandidateRootScopeV1", "ErrCandidateParentNotCurrent", "ErrCandidateSourceUnavailable",
+		"WithCandidateRootV1", "WithCandidateValidationV1", "WithCandidateCensusV1", "WithCandidateFactsV1", "QualifyCurrentV1", "DeriveCandidateRootV1")
 	want = append(want, "TreeRoleDeltaV1", "TreeUndoFamilyEffectV1", "TreeUndoFamilyNoneV1", "TreeUndoFamilyWrittenV1", "TreeUndoFamilyKeptV1", "TreeUndoFamilyDeletedV1", "TreeUndoChargeV1", "TreeDeltaReportV1")
 	want = append(want, "TreeHeaderSlotV1")
 	want = append(want, "TreeImagePublicationV1", "TreeImageRecordV1", "UpdateImageV1")

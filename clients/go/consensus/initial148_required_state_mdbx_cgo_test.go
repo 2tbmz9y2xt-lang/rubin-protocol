@@ -769,7 +769,7 @@ func irLifetimeV1(t *testing.T) {
 	irFailureV1(t, derive().cause, logicalStateFailureLocalInvariant, "required root derive is not available")
 	scope := kept.(*initial148RequiredScopeV1)
 	_, _, known := scope.recordedV1(Outpoint{})
-	logicalMDBXAssert(t, !known && scope.calls == 0 && scope.keys == nil && scope.lengths == nil && scope.index == nil, "expired scope retained records or counted lookup")
+	logicalMDBXAssert(t, !known && scope.calls == 0 && scope.keys == nil && scope.lengths == nil && scope.index == nil && scope.reader == nil, "expired scope retained records, Reader or lookup")
 	btReservationsReleased(t, w.owner)
 }
 

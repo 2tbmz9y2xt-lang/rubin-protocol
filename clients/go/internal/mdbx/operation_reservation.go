@@ -262,6 +262,11 @@ func (o *OperationReservationOwner) WithOperation(kind OperationKind, callback f
 	if !ok {
 		return errOperationReservationInput
 	}
+	return o.withAccountV1(ceiling, callback)
+}
+
+// withAccountV1 closes its private account on every callback exit.
+func (o *OperationReservationOwner) withAccountV1(ceiling uint64, callback func(*OperationAccount) error) error {
 	s := o.shared
 	account := &operationAccountState{origin: s, ceiling: ceiling}
 	defer s.close(account)
@@ -301,14 +306,18 @@ func (a *OperationAccount) WithPhaseReservationV1(initial, retained uint64, call
 		if err := h.grow(initial); err != nil {
 			return err
 		}
-		var once sync.Once
-		var result error
-		release := func() error {
-			once.Do(func() { result = h.shrink(initial - retained) })
-			return result
-		}
-		return callback(release)
+		return callback(h.reductionV1(initial - retained))
 	})
+}
+
+// reductionV1 lends an idempotent reduction of the open hold.
+func (h *operationHold) reductionV1(bytes uint64) func() error {
+	var once sync.Once
+	var result error
+	return func() error {
+		once.Do(func() { result = h.shrink(bytes) })
+		return result
+	}
 }
 
 // openV1 reports whether a was opened and its WithOperation frame has not left.

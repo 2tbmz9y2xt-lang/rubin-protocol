@@ -81,10 +81,9 @@ func prepareBlockTreeEffectV1(dst *blockTreeSourceV1, old *mdbx.Reader, account 
 	err := account.WithReservation(4824, func() error {
 		var window [1024]byte
 		return source.visitV1(old, window[:], func(c *blockTreeCursorV1) error {
-			parent = c.blockV1(request.HeaderBytes, request.Height)
-			source.coverage.BlockMeta.TxCount = c.txs
-			source.coverage.BlockMeta.EventCount = c.events
-			return c.err
+			var err error
+			parent, err = c.censusV1(request.HeaderBytes, request.Height, &source.coverage.BlockMeta)
+			return err
 		})
 	})
 	if err != nil {
@@ -127,27 +126,14 @@ func (s *blockTreeSourceV1) TreeDeltaV1(position mdbx.TreePositionV1, old *mdbx.
 		return err
 	}
 	return s.visitV1(old, sink.WindowV1(), func(c *blockTreeCursorV1) error {
-		c.sink = sink
-		c.digest = sha3.New256()
-		c.blockV1(s.coverage.HeaderBytes, s.coverage.Height)
-		if c.txs != s.coverage.BlockMeta.TxCount || c.events != s.coverage.BlockMeta.EventCount {
-			c.failV1()
-		}
-		return c.err
+		return c.eventsV1(sink, s.coverage.HeaderBytes, s.coverage.Height, s.coverage.BlockMeta)
 	})
-}
-
-func (s *blockTreeSourceV1) framingV1() error {
-	if s.coverage.BodyKind == 2 {
-		return &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: errors.New("required block tree source framing differs")}
-	}
-	return localLogicalStateFailure("qualified block tree source framing differs")
 }
 
 // Row, Reader, sink, hash, window and cursors are synchronous visit-local state.
 // Only the immutable coverage/borrowed Raw survives; no source reservation exists.
 func (s *blockTreeSourceV1) visitV1(old *mdbx.Reader, window []byte, visit func(*blockTreeCursorV1) error) error {
-	c := blockTreeCursorV1{raw: s.Raw, window: window, source: s, length: uint64(len(s.Raw))}
+	c := blockTreeCursorV1{raw: s.Raw, window: window, stored: s.coverage.BodyKind == 2, length: uint64(len(s.Raw))}
 	if s.coverage.BodyKind == 1 || s.coverage.BodyKind == 3 {
 		return visit(&c)
 	}
@@ -173,7 +159,6 @@ type blockTreeCursorV1 struct {
 	raw         []byte
 	row         mdbx.LargeImageRowV1
 	window      []byte
-	source      *blockTreeSourceV1
 	sink        *mdbx.TreeDeltaSinkV1
 	hash        *sha3.SHA3
 	digest      *sha3.SHA3
@@ -181,12 +166,60 @@ type blockTreeCursorV1 struct {
 	length, off uint64
 	txs, events uint32
 	field       [40]byte
+	stored      bool
+}
+
+// censusV1 records the exact transaction and event counts without recording events.
+func (c *blockTreeCursorV1) censusV1(width uint16, height uint64, meta *mdbx.TreeBlockV1) ([32]byte, error) {
+	parent := c.blockV1(width, height)
+	meta.TxCount, meta.EventCount = c.txs, c.events
+	return parent, c.err
+}
+
+// eventsV1 sends the ordered raw events and checks the declared coverage counts.
+func (c *blockTreeCursorV1) eventsV1(sink *mdbx.TreeDeltaSinkV1, width uint16, height uint64, meta mdbx.TreeBlockV1) error {
+	c.sink, c.digest = sink, sha3.New256()
+	c.blockV1(width, height)
+	if c.txs != meta.TxCount || c.events != meta.EventCount {
+		c.failV1()
+	}
+	return c.err
+}
+
+// candidateTreeCensusV1 funds the raw body's coverage count.
+func candidateTreeCensusV1(scope *mdbx.CandidateRootScopeV1, raw []byte, height uint64) (mdbx.TreeBlockV1, error) {
+	var meta mdbx.TreeBlockV1
+	err := scope.WithCandidateCensusV1(func() error {
+		c := blockTreeCursorV1{raw: raw, length: uint64(len(raw))}
+		_, err := c.censusV1(Initial148HeaderBytes, height, &meta)
+		return err
+	})
+	return meta, err
+}
+
+// candidateTreeBodyV1 binds one immutable body to its forward event stream.
+func candidateTreeBodyV1(raw []byte, height uint64, meta mdbx.TreeBlockV1) mdbx.CandidateRootBodyV1 {
+	return mdbx.CandidateRootBodyV1{
+		Raw: raw, HeaderBytes: Initial148HeaderBytes, BlockMeta: meta,
+		Events: func(raw []byte, sink *mdbx.TreeDeltaSinkV1) error {
+			if err := sink.BeginV1(meta); err != nil {
+				return err
+			}
+			c := blockTreeCursorV1{raw: raw, length: uint64(len(raw))}
+			return c.eventsV1(sink, Initial148HeaderBytes, height, meta)
+		},
+	}
 }
 
 func (c *blockTreeCursorV1) failV1() {
-	if c.err == nil {
-		c.err = c.source.framingV1()
+	if c.err != nil {
+		return
 	}
+	if c.stored {
+		c.err = initial148RequiredIntegrityV1("required block tree source framing differs")
+		return
+	}
+	c.err = localLogicalStateFailure("qualified block tree source framing differs")
 }
 
 func (c *blockTreeCursorV1) spanV1(n uint64) bool {
