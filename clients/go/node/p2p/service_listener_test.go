@@ -266,11 +266,6 @@ func TestService_StartPostListenStartedRace_ReturnsAlreadyStarted(t *testing.T) 
 }
 
 func TestService_CloseWaitsForInFlightStartToReleaseListener(t *testing.T) {
-	// Close waits for Start to release a bound listener when the lifecycle
-	// re-check refuses to publish it.
-	//
-	// The post-listen hook starts Close before Start re-checks publication.
-	// The captured address is reusable immediately after Close returns.
 	s := &Service{cfg: ServiceConfig{BindAddr: "127.0.0.1:0"}}
 	serviceStartPostListenHookMu.Lock()
 	defer serviceStartPostListenHookMu.Unlock()
@@ -278,48 +273,29 @@ func TestService_CloseWaitsForInFlightStartToReleaseListener(t *testing.T) {
 	defer func() { serviceStartPostListenHook = prevHook }()
 
 	var capturedAddr string
-	closeDone := make(chan error, 1)
+	var closeResult <-chan error
 	serviceStartPostListenHook = func(s *Service, ln net.Listener) {
 		capturedAddr = ln.Addr().String()
-		// Mark the Service closed so Start refuses publication after the hook.
-		s.lifecycleMu.Lock()
-		s.closed.Store(true)
-		s.lifecycleMu.Unlock()
-		// Close publishes the flag under lifecycleMu, then waits for Start.
-		go func() {
-			closeDone <- s.Close()
-		}()
-		// Give the Close goroutine a chance to schedule and reach
-		// s.startWG.Wait. 50ms is generous vs the handful of instructions
-		// it needs to get there, and the test only pays this cost once.
-		time.Sleep(50 * time.Millisecond)
-	}
+		result, exited := startClose(s)
+		closeResult = result
+		t.Cleanup(func() {
+			_ = ln.Close()
+			joinWithin(t, "Close cleanup", exited)
+		})
 
-	err := s.Start(context.Background())
-	if err == nil || err.Error() != "service already closed" {
-		t.Fatalf("Start() post-listen closed race: err=%v want %q", err, "service already closed")
-	}
-
-	select {
-	case closeErr := <-closeDone:
-		if closeErr != nil {
-			t.Fatalf("Close() returned error: %v", closeErr)
+		waitDraining(t, s)
+		select {
+		case <-exited:
+			t.Error("Close returned while Start held the listener")
+		case <-time.After(lifecycleSettle):
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatalf("Close() did not return within 3s — possible startWG deadlock")
-	}
-	if capturedAddr == "" {
-		t.Fatalf("post-listen hook did not capture the bound address")
 	}
 
-	// Strict invariant: once Close returns, the captured port must be
-	// IMMEDIATELY rebindable with zero retries. Without the startWG.Wait
-	// guard, Close would return here while Start's stalled local listener
-	// still held the port and this net.Listen would fail with EADDRINUSE.
-	rebind, bindErr := net.Listen("tcp", capturedAddr)
-	if bindErr != nil {
-		t.Fatalf("port %q still bound immediately after Close returned: %v", capturedAddr, bindErr)
-	}
+	requireClosedRejection(t, s.Start(context.Background()), "Start during Close")
+	require(t, capturedAddr != "", "post-listen hook did not capture the bound address")
+	requireReturned(t, closeResult, "Close after releasing Start")
+	rebind, err := net.Listen("tcp", capturedAddr)
+	must(t, err, "rebind immediately after Close")
 	_ = rebind.Close()
 }
 
