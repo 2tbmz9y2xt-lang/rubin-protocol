@@ -274,14 +274,22 @@ func testImageUnwindArming(t *testing.T, tc imageArmingUnwindCase) {
 		}
 	}
 	unwound := f.goRecovered(round, requestCtx, 0, 1)
+	var parkedS1 bool
+	var parkedUsage [2]imageUnitVector
 	if tc.parked {
 		must(t, awaitImageResult(t, setup, "parked callback setup"), "park the request context callback")
 		requireImageUnwindReport(t, unwound, tc.goexit)
-		f.requireParkedArmingUnwind(t, round, cr, leases, reads)
+		parkedS1, parkedUsage = f.observeParkedArmingUnwind(t, round, cr, leases, reads)
 	} else {
 		f.requireUnwound(t, unwound, tc.goexit, leases)
 	}
-	f.requireNextAfterUnwind(t, round, 0, 1, 1)
+	report := awaitImageResult(t, f.goRecovered(round, t.Context(), 0, 1), "request after the arming unwind")
+	requireEqual(t, report, any(imageResult{q: expectedImageQuery(1, 1)}), "request after the arming unwind")
+	f.requireFrames(t, 0, "request after the arming unwind", expectedImageQuery(1, 1))
+	if tc.parked {
+		require(t, !parkedS1, "unpublished start had a registered instance before the retry")
+		requireEqual(t, parkedUsage, [2]imageUnitVector{}, "per-peer and global usage before the retry")
+	}
 	f.admitted(t, round, context.Background(), 0, 2, 2)
 	f.requireFrames(t, 0, "after the next requests", expectedImageQuery(1, 1), expectedImageQuery(2, 2))
 	want := imageUsage(2, 2, 2, 2, 0)
@@ -299,8 +307,10 @@ func testImageUnwindArming(t *testing.T, tc imageArmingUnwindCase) {
 func (f *imageTestFixture) parkUnarmedImageCallback(cr *imageHookCtx) error {
 	f.clock.onReadFrom("p2p.applyImageEnd", func(now time.Time) time.Time { runtime.Goexit(); return now })
 	err := waitImageMutexWaiter(&f.s.imageRequester.mu, func() error {
-		if ran := cr.endAndRun(context.Canceled); ran != 1 {
-			return fmt.Errorf("request context functions run %d, want 1", ran)
+		ran := make(chan int, 1)
+		go func() { ran <- cr.endAndRun(context.Canceled) }()
+		if count := <-ran; count != 1 {
+			return fmt.Errorf("request context functions run %d, want 1", count)
 		}
 		return nil
 	})
@@ -310,7 +320,7 @@ func (f *imageTestFixture) parkUnarmedImageCallback(cr *imageHookCtx) error {
 	return err
 }
 
-func (f *imageTestFixture) requireParkedArmingUnwind(t *testing.T, round *ImageRound, cr *imageHookCtx, leases uint64, reads int) {
+func (f *imageTestFixture) observeParkedArmingUnwind(t *testing.T, round *ImageRound, cr *imageHookCtx, leases uint64, reads int) (bool, [2]imageUnitVector) {
 	t.Helper()
 	imageSpin(t, func() bool { return f.leases() == leases }, "Service lease release by the request context callback")
 	f.requireRequesterFree(t)
@@ -319,9 +329,9 @@ func (f *imageTestFixture) requireParkedArmingUnwind(t *testing.T, round *ImageR
 	cr.mu.Unlock()
 	requireEqual(t, f.clock.readCount(), reads+1, "clock reads after the parked callback")
 	requireEqual(t, errReads, 0, "request context Err reads from the parked callback")
-	require(t, f.instance(1) == nil, "unpublished start has a registered instance")
-	f.requireUsage(t, round, 0, imageUnitVector{}, imageUnitVector{}, "after the parked callback")
 	f.clock.onNextRead(nil)
+	per, global := f.usage(round, 0)
+	return f.instance(1) != nil, [2]imageUnitVector{per, global}
 }
 
 func (f *imageTestFixture) requireUnarmedCallbackIdle(t *testing.T, cr *imageHookCtx) {
@@ -560,14 +570,12 @@ func testImageUnwindAfterFailedWrite(t *testing.T, tc imageFailedWriteUnwindCase
 	defer close(done)
 	var stallB *imageStall
 	var heldB <-chan imageResult
-	var waitWrite <-chan struct{}
 	var closing chan struct{}
 	var sawClosed <-chan bool
 	var releaseB func()
 	if tc.holder >= 0 {
 		stallB = f.wires[tc.holder].armStallAfter(0)
 		if tc.holder == 0 {
-			waitWrite = stallB.entered
 			closing = make(chan struct{})
 			sawClosed, releaseB = f.holdUnwindClosedWrite(closing)
 			defer releaseB()
@@ -577,13 +585,14 @@ func testImageUnwindAfterFailedWrite(t *testing.T, tc imageFailedWriteUnwindCase
 	}
 	if tc.holder == 1 {
 		requireChannelClosed(t, stallB.entered, "write of the second holder")
-	}
-	if tc.holder == 0 {
+	} else if tc.holder == 0 {
 		synctest.Wait()
 	}
-	observedClose := f.observeUnwindClose(round, closing, waitWrite, done)
+	closeReady := make(chan error, 1)
+	observedClose := f.observeUnwindClose(round, closeReady, closing, stallB, done)
 	stall.release <- errImageScriptedWrite
 	if tc.holder == 0 {
+		must(t, awaitImageResult(t, closeReady, "first close hook requester mutex probe"), "requester mutex in the first close hook")
 		require(t, awaitImageResult(t, sawClosed, "second holder observing the closed connection in Write"),
 			"second holder entered Write before the first close hook")
 	}
@@ -640,7 +649,7 @@ type imageUnwindClose struct {
 	err       error
 }
 
-func (f *imageTestFixture) observeUnwindClose(round *ImageRound, closing chan<- struct{}, waitWrite, done <-chan struct{}) <-chan imageUnwindClose {
+func (f *imageTestFixture) observeUnwindClose(round *ImageRound, ready chan<- error, closing chan<- struct{}, stallB *imageStall, done <-chan struct{}) <-chan imageUnwindClose {
 	observed := make(chan imageUnwindClose, 1)
 	f.onClose(0, func() {
 		select {
@@ -648,10 +657,17 @@ func (f *imageTestFixture) observeUnwindClose(round *ImageRound, closing chan<- 
 			return
 		default:
 		}
-		if waitWrite != nil {
+		if closing != nil {
+			mu := &f.s.imageRequester.mu
+			if !mu.TryLock() {
+				ready <- errors.New("requester mutex held in the close hook")
+				return
+			}
+			mu.Unlock()
 			close(closing)
+			ready <- nil
 			select {
-			case <-waitWrite:
+			case <-stallB.entered:
 			case <-done:
 				return
 			}
