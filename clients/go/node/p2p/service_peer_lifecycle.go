@@ -58,7 +58,8 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 	}
 	defer current.releaseCompactOutstandingLease() // runs after finishBlockRetry: a released charge wakes retry slots waiting on the budget
 	defer s.unregisterPeer(current)
-	defer current.finishBlockRetry() // runs first: the retry waiter is joined before unregistration
+	defer current.finishBlockRetry()
+	defer s.retireImagePeer(current)
 
 	s.cfg.SyncEngine.RecordBestKnownHeight(state.RemoteVersion.BestHeight)
 	if err := s.sendPostHandshakeAnnouncements(current); err != nil {

@@ -274,6 +274,12 @@ func (s *Service) BeginImageRound(ctx context.Context, config ImageRoundConfig) 
 	if err != nil {
 		return nil, err
 	}
+	req := s.imageRequester
+	req.mu.Lock()
+	defer req.mu.Unlock()
+	if err := checkImageSourcesLocked(sources); err != nil {
+		return nil, err
+	}
 	now := s.cfg.Now()
 	if !s.workAuthorized() {
 		return nil, errServiceClosed
@@ -283,7 +289,7 @@ func (s *Service) BeginImageRound(ctx context.Context, config ImageRoundConfig) 
 		return nil, err
 	}
 	round := ImageRound{service: s, ctx: ctx, anchor: config.Anchor, limits: config.Limits, admissionTime: now, roundDeadline: roundDeadline}
-	return s.captureImageRound(round, sources)
+	return req.captureImageRoundLocked(round, sources), nil
 }
 
 // BeginImageProbeRound captures the existing body round's context, sources, times and IMAGE limits
@@ -308,17 +314,17 @@ func (s *Service) BeginImageProbeRound(ctx context.Context, config ImageProbeRou
 		service: s, ctx: ctx, anchor: config.Anchor, limits: config.Limits,
 		admissionTime: admission, roundDeadline: deadline, probe: true,
 	}
-	return s.captureImageRound(round, sources)
-}
-
-// captureImageRound resolves stable sessions while the source registrations are still eligible.
-func (s *Service) captureImageRound(round ImageRound, sources map[string]*peer) (*ImageRound, error) {
 	req := s.imageRequester
 	req.mu.Lock()
 	defer req.mu.Unlock()
 	if err := checkImageSourcesLocked(sources); err != nil {
 		return nil, err
 	}
+	return req.captureImageRoundLocked(round, sources), nil
+}
+
+// captureImageRoundLocked captures stable identities for the validated source entries.
+func (req *imageRequester) captureImageRoundLocked(round ImageRound, sources map[string]*peer) *ImageRound {
 	round.sources = make(map[string]*imageSession, len(sources))
 	for id, p := range sources {
 		if p.imageSession == nil {
@@ -331,7 +337,7 @@ func (s *Service) captureImageRound(round ImageRound, sources map[string]*peer) 
 		perPeer: make(map[*imageSession]*imageUnitVector), attempted: make(map[imageAttemptKey]struct{}),
 		starts: make(map[[36]byte]struct{}),
 	}
-	return &round, nil
+	return &round
 }
 
 // roundAdmission returns RD or the clock-domain and NotBefore refusal of now (RUBIN_L1_P2P_AUX.md Section 6.6).
