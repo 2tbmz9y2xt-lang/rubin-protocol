@@ -17,8 +17,8 @@ func TestCandidateRootFixtureOrder(t *testing.T) {
 }
 
 func candidateGrowthBeforeBinding(t *testing.T) {
-	w, in, _, raws := candidateGrowthSetup(t, true)
-	after, want := candidateGrowthCoinbase(t, in, raws)
+	w, in, _, funding := candidateGrowthSetup(t, true)
+	after, want := candidateGrowthCoinbase(t, in, funding.parents)
 	key := btMeta(17, 1)
 	evidence, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, key, func() {
 		candidateView(t, w, func(r *mdbx.Reader) {
@@ -391,13 +391,12 @@ func candidateDifferentGeneration(t *testing.T, mode string, scenario uint8) {
 
 func candidateSeedTip(t *testing.T, w *btWorld, parent mdbx.TreeEndpointV1, generation uint64, malformed bool) {
 	t.Helper()
-	key, err := mdbx.HeightKey(generation, parent.Height)
-	logicalMDBXAssert(t, err == nil, "candidate canonical tip key: %v", err)
+	tip, owner := candidateTipRows(t, parent, generation)
 	if malformed {
-		candidateRawRow(t, w, 2, key, make([]byte, 103))
+		candidateRawRow(t, w, 2, tip.Key, make([]byte, 103))
 		return
 	}
-	w.pair(t, btMutation(2, key, mdbx.ChainValue(parent.BlockHash, [32]byte{}, parent.CumulativeChainwork)))
+	w.pair(t, tip, owner)
 }
 
 func candidateMatchingCursor(t *testing.T) {

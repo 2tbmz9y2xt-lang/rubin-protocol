@@ -847,9 +847,11 @@ func trCandidateSetup(t *testing.T) (*Store, *OperationReservationOwner, Candida
 	s, _, o := tsNew(t)
 	parent := TreeEndpointV1{Kind: 1, Height: 5, BlockHash: tdTxid(5), CumulativeChainwork: [40]byte{39: 37}}
 	selection := CandidateRootParentV1{DatabaseID: [32]byte{7}, Generation: 1, Height: 6, Parent: parent}
-	key, err := HeightKey(1, parent.Height)
-	mustEnvironment(t, err)
-	trSeedV1(t, s, o, 2, key, ChainValue(parent.BlockHash, [32]byte{}, parent.CumulativeChainwork))
+	tip := canonicalForwardLiteral(1, parent.Height, parent.BlockHash, parent.CumulativeChainwork)
+	op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{tip, canonicalOwnerPairOf(tip)}}}
+	result := tsRun(t, s, o, TreeOperation, op)
+	result.tuple(t, 2, 3, -1)
+	mustEnvironment(t, result.err)
 	trSeedV1(t, s, o, 0, tsRootKey(1), trBindingV1(t, 1, parent))
 	raw := append(initial148NativeLiteral(t), 1)
 	copy(raw[4:36], parent.BlockHash[:])

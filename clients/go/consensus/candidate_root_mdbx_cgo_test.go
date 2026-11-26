@@ -453,81 +453,81 @@ func candidateSpendOrder(t *testing.T, s candidateScene) {
 
 func candidateSubsidyBeforeLaw(t *testing.T) {
 	t.Helper()
-	w, in, _, txs := candidateGrowthSetup(t, true)
-	in.Raw, _ = candidateFrame(t, in.Selection.Parent, 4_900_000_000_000_000, txs...)
-	nextRaw, cb := candidateFrame(t, in.Selection.Parent, 1)
-	next := in
-	next.Raw = nextRaw
-	final := logicalGrowthParents(candidateGrowthCov(t, txs))
-	final[cb] = btEntry(1, 0, validP2PKCovenantData(), 200, true)
+	w, in, _, funding := candidateGrowthSetup(t, true)
+	in.Raw, _ = candidateFrame(t, in.Selection.Parent, 4_900_000_000_000_000, funding.spends...)
+	next, want := candidateGrowthCoinbase(t, in, funding.parents)
 	candidateView(t, w, func(r *mdbx.Reader) {
 		candidateTxError(t, r, w.owner, in, "BLOCK_ERR_SUBSIDY_EXCEEDED", "coinbase outputs exceed subsidy+fees bound")
-		candidateRootOK(t, r, w.owner, next, canonicalUTXORoot(final))
+		candidateRootOK(t, r, w.owner, next, want)
 	})
 }
 
-func candidateGrowthCov(t *testing.T, raws [][]byte) []byte {
+func candidateTipRows(t *testing.T, parent mdbx.TreeEndpointV1, generation uint64) (mdbx.Mutation, mdbx.Mutation) {
 	t.Helper()
-	tx, _, _, _, err := ParseTx(raws[0])
-	logicalMDBXAssert(t, err == nil && len(tx.Outputs) != 0, "growth signed outputs: %v", err)
-	return tx.Outputs[0].CovenantData
+	key, err := mdbx.HeightKey(generation, parent.Height)
+	logicalMDBXAssert(t, err == nil, "candidate canonical tip key: %v", err)
+	ownerKey, err := mdbx.CanonicalOwnerKey(generation, parent.BlockHash)
+	logicalMDBXAssert(t, err == nil, "candidate canonical owner key: %v", err)
+	return btMutation(2, key, mdbx.ChainValue(parent.BlockHash, [32]byte{}, parent.CumulativeChainwork)),
+		btMutation(7, ownerKey, mdbx.CanonicalOwnerValue(parent.Height))
 }
 
-func candidateSeedRows(t *testing.T, w *btWorld, generation uint64, parent mdbx.TreeEndpointV1, entries map[Outpoint]UtxoEntry) {
+func candidateSeedGrowth(t *testing.T, w *btWorld, parent mdbx.TreeEndpointV1, cov []byte) ([32]byte, map[Outpoint]UtxoEntry) {
 	t.Helper()
-	rows, leaves := candidateSeedLeaves(entries, generation)
-	var top mdbx.TreeTopV1
-	root := icbRootV1(leaves, func(id mdbx.TreeNodeIDV1, row []byte) {
-		key, err := mdbx.TreeNodeKey(generation, id)
-		logicalMDBXAssert(t, err == nil, "seed tree key: %v", err)
-		rows = append(rows, btMutation(8, key, row))
-		last := id
-		top = mdbx.TreeTopV1{Kind: mdbx.TreeTopKindV1(id.Kind), Node: &last}
-	})
-	binding := mdbx.RootBindingV1{
-		DatabaseID: [32]byte{7}, CommitmentVersion: 1, Endpoint: parent, RootDigest: root, Top: top, Assurance: mdbx.TreeAssuranceV1{Kind: 1},
+	frames := slices.Repeat([][]byte{btFrame(2000, COV_TYPE_P2PK, cov)}, 9)
+	coinbase := btTransaction(1, 0, []Outpoint{{Txid: [32]byte{0x77}}}, frames, nil, []byte{0}, nil)
+	seed := btRequest(btBody(148, 8, [32]byte{}, coinbase), 0)
+	seed.Kind = mdbx.TreeKindFirstGenesisV1
+	result, _, _ := w.run(t, []blockTreeRequestV1{seed}, nil)
+	result.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, result.err == nil, "growth funding genesis: %v", result.err)
+	entries := make(map[Outpoint]UtxoEntry, len(frames))
+	for i := range frames {
+		entries[Outpoint{Txid: coinbase.id, Vout: uint32(i)}] = btEntry(2000, COV_TYPE_P2PK, cov, 0, true)
 	}
+	var binding mdbx.RootBindingV1
+	candidateView(t, w, func(r *mdbx.Reader) {
+		root, present, err := r.ReadTreeRootBindingV1(1)
+		logicalMDBXAssert(t, err == nil && present && root.Endpoint == seed.Endpoint, "growth funding binding: %+v/%t/%v", root, present, err)
+		binding = root
+	})
+	binding.Endpoint = parent
 	encoded, err := binding.Encode()
 	logicalMDBXAssert(t, err == nil, "candidate seed binding: %v", err)
-	counter := binary.BigEndian.AppendUint64(nil, logicalGrowthCensusBytes(entries))
-	counter = binary.BigEndian.AppendUint64(counter, uint64(len(entries)))
-	total, rootRow := btMutation(0, btMeta(16, generation), counter), btMutation(0, btMeta(17, generation), encoded)
-	total.BeforePresent, rootRow.BeforePresent = true, true
-	key, err := mdbx.HeightKey(generation, parent.Height)
-	logicalMDBXAssert(t, err == nil, "candidate seed tip key: %v", err)
-	tip := btMutation(2, key, mdbx.ChainValue(parent.BlockHash, [32]byte{}, parent.CumulativeChainwork))
-	w.pair(t, append(rows, total, rootRow, tip)...)
+	rootRow := btMutation(0, btMeta(0x11, 1), encoded)
+	rootRow.BeforePresent = true
+	tip, owner := candidateTipRows(t, parent, 1)
+	w.pair(t, rootRow, tip, owner)
+	stepTreeStateV1(t, w, 1, parent, entries)
+	return coinbase.id, entries
 }
 
-func candidateSeedLeaves(entries map[Outpoint]UtxoEntry, generation uint64) ([]mdbx.Mutation, map[[36]byte][]byte) {
-	rows := make([]mdbx.Mutation, 0, len(entries))
-	leaves := make(map[[36]byte][]byte, len(entries))
-	for op, value := range entries {
-		row := btValue(btFrame(value.Value, value.CovenantType, value.CovenantData), value.CreationHeight, value.CreatedByCoinbase)
-		rows = append(rows, btMutation(1, btUTXOKey(generation, op), row))
-		icbLeafKindV1(leaves, op, value.Value, value.CovenantType, value.CovenantData, value.CreationHeight, value.CreatedByCoinbase)
-	}
-	return rows, leaves
+type candidateGrowthFunding struct {
+	parents map[Outpoint]UtxoEntry
+	spends  [][]byte
 }
 
-func candidateGrowthSetup(t *testing.T, over bool) (*btWorld, CandidateRootInput, [32]byte, [][]byte) {
+func candidateGrowthSetup(t *testing.T, over bool) (*btWorld, CandidateRootInput, [32]byte, candidateGrowthFunding) {
 	t.Helper()
 	return candidateGrowthAtHeight(t, over, 200)
 }
 
-func candidateGrowthAtHeight(t *testing.T, over bool, height uint64) (*btWorld, CandidateRootInput, [32]byte, [][]byte) {
+func candidateGrowthAtHeight(t *testing.T, over bool, height uint64) (*btWorld, CandidateRootInput, [32]byte, candidateGrowthFunding) {
 	t.Helper()
 	kp := icbKeyV1(t)
 	parent := mdbx.TreeEndpointV1{Kind: 1, Height: height - 1, BlockHash: [32]byte{0xd2}, CumulativeChainwork: [40]byte{38: 2, 39: 1}}
-	entries := logicalGrowthParents(p2pkCovenantDataForPubkey(kp.PubkeyBytes()))
 	w := btNew(t)
-	candidateSeedRows(t, w, 1, parent, entries)
+	fundingID, entries := candidateSeedGrowth(t, w, parent, p2pkCovenantDataForPubkey(kp.PubkeyBytes()))
 	census := logicalGrowthEqual
 	s1, events := uint64(773921), 8674
 	if over {
 		census, s1, events = logicalGrowthOver, 773922, 8691
 	}
 	txs := logicalGrowthTxs(t, kp, [32]byte{}, census)
+	for i, tx := range txs {
+		tx.Inputs[0].PrevTxid, tx.Inputs[0].PrevVout = fundingID, uint32(i)
+		tx.Witness[0] = signP2PKInputWitness(t, tx, 0, 2000, [32]byte{}, kp)
+	}
 	raws := logicalGrowthMarshal(t, txs)
 	final := candidateGrowthOutputs(t, height, txs, raws)
 	raw, cb := candidateFrame(t, parent, 1, raws...)
@@ -535,7 +535,7 @@ func candidateGrowthAtHeight(t *testing.T, over bool, height uint64) (*btWorld, 
 	logicalMDBXAssert(t, logicalGrowthCensusBytes(entries) == 801 && logicalGrowthCensusBytes(final) == s1 && len(final)+len(entries) == events,
 		"signed growth census %d/%d/%d", logicalGrowthCensusBytes(entries), logicalGrowthCensusBytes(final), len(final)+len(entries))
 	candidateAssertGrowthFunding(t, uint64(len(raw)), uint64(events))
-	return w, candidateInput(t, raw, parent), canonicalUTXORoot(final), raws
+	return w, candidateInput(t, raw, parent), canonicalUTXORoot(final), candidateGrowthFunding{parents: entries, spends: raws}
 }
 
 func candidateGrowthOutputs(t *testing.T, height uint64, txs []*Tx, raws [][]byte) map[Outpoint]UtxoEntry {
@@ -581,8 +581,8 @@ func TestCandidateRootGrowth(t *testing.T) {
 
 func candidateGrowthBoundary(t *testing.T, over bool) {
 	t.Helper()
-	w, in, want, raws := candidateGrowthSetup(t, over)
-	next, nextRoot := candidateGrowthCoinbase(t, in, raws)
+	w, in, want, funding := candidateGrowthSetup(t, over)
+	next, nextRoot := candidateGrowthCoinbase(t, in, funding.parents)
 	candidateView(t, w, func(r *mdbx.Reader) {
 		if over {
 			candidateTxError(t, r, w.owner, in, "BLOCK_ERR_STATE_GROWTH_EXCEEDED", "logical state growth exceeded")
@@ -593,11 +593,11 @@ func candidateGrowthBoundary(t *testing.T, over bool) {
 	})
 }
 
-func candidateGrowthCoinbase(t *testing.T, in CandidateRootInput, raws [][]byte) (CandidateRootInput, [32]byte) {
+func candidateGrowthCoinbase(t *testing.T, in CandidateRootInput, parents map[Outpoint]UtxoEntry) (CandidateRootInput, [32]byte) {
 	t.Helper()
 	raw, cb := candidateFrame(t, in.Selection.Parent, 1)
 	in.Raw = raw
-	final := logicalGrowthParents(candidateGrowthCov(t, raws))
+	final := maps.Clone(parents)
 	final[cb] = btEntry(1, 0, validP2PKCovenantData(), in.Selection.Height, true)
 	return in, canonicalUTXORoot(final)
 }
