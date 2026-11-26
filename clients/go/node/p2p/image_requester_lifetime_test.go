@@ -1,0 +1,1318 @@
+package p2p
+
+import (
+	"bytes"
+	"context"
+	"math"
+	"net"
+	"reflect"
+	"runtime"
+	"sync"
+	"testing"
+	"testing/synctest"
+	"time"
+	"weak"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
+)
+
+func TestImageRequesterLifetime(t *testing.T) {
+	t.Run("local ends", testImageLocalEnds)
+	t.Run("receive order", inImageBubble(testImageReceiveOrder))
+	t.Run("competing receivers", inImageBubble(testImageCompetingReceivers))
+	t.Run("wait context", inImageBubble(testImageReceiveWaitContext))
+	t.Run("end before write", testImageTerminalEndBeforeWrite)
+	t.Run("recorded end across adapter", testImageRecordedEndAcrossAdapter)
+	t.Run("end during authorized write", testImageEndAtActualWrite)
+	t.Run("staged order", testImageStagedOrder)
+	t.Run("write unwind precedes end", testImageUnwindThenEnd)
+	t.Run("pending capacity", inImageBubble(testImageOutcomePendingCapacity))
+	t.Run("first write error", testImageFirstWriteError)
+	t.Run("round close", inImageBubble(testImageRoundOutcomeClose))
+	t.Run("service close", testImageServiceOutcomeClose)
+	t.Run("leased receive", testImageLeasedReceive)
+	t.Run("passive receive during join", testImagePassiveReceiveJoin)
+	t.Run("exact registration", testImageExitAtQuota)
+	t.Run("same address replacement", testImageReplacementRetainsNoPeer)
+	t.Run("exit before first capture", testImageExitBeforeCapture)
+	t.Run("terminal context hooks", testImageTerminalHooks)
+	t.Run("caller context after service close", testImageTerminalServiceRetention)
+	t.Run("probe deadlines", testImageProbeDeadlines)
+	t.Run("probe constructor refusals", testImageProbeConstructor)
+	t.Run("probe entry refusals", testImageProbeEntryRefusals)
+	t.Run("terminal entry precedence", testImageTerminalEntryPriority)
+	t.Run("probe draining", testImageProbeDrain)
+	t.Run("probe presend deadlines", testImageProbeBeforeWrite)
+}
+
+func takeImage(round *ImageRound, ctx context.Context, start byte) imageResult {
+	result, err := round.Receive(ctx, imageStart(start))
+	return imageResult{result.Query, err}
+}
+
+func goTakeImage(round *ImageRound, ctx context.Context, start byte) <-chan imageResult {
+	out := make(chan imageResult, 1)
+	go func() { out <- takeImage(round, ctx, start) }()
+	return out
+}
+
+func requireImageTake(t *testing.T, round *ImageRound, ctx context.Context, start byte, q consensus.UTXOImageQuery, want error, label string) {
+	t.Helper()
+	got := awaitImageResult(t, goTakeImage(round, ctx, start), label)
+	requireQueryResult(t, got, q, want, label)
+}
+
+func requireImageAbsent(t *testing.T, round *ImageRound, ctx context.Context, start byte, want error) {
+	t.Helper()
+	requireImageTake(t, round, ctx, start, consensus.UTXOImageQuery{}, want, "receive without a result")
+}
+
+func requireImageWaiting(t *testing.T, done <-chan imageResult, label string) {
+	t.Helper()
+	select {
+	case got := <-done:
+		t.Fatalf("%s: Receive returned %+v while its assignment was pending", label, got)
+	default:
+	}
+}
+
+type imageLocalEndCase struct {
+	name   string
+	want   error
+	capD   bool
+	follow bool
+	wait   bool
+	end    func(*testing.T, *imageTestFixture, *imageHookCtx, *imageHookCtx, time.Time)
+}
+
+func testImageLocalEnds(t *testing.T) {
+	for _, tc := range []imageLocalEndCase{
+		{name: "request ctx", want: errImageRequestEnd, follow: true, wait: true, end: endImageRequestCtx},
+		{name: "round ctx", want: errImageRoundEnd, wait: true, end: endImageRoundCtx},
+		{name: "timer past D", want: errImageExpired, follow: true, wait: true, end: endImageTimer},
+		{name: "receive after capped D", want: errImageExpired, capD: true, end: endImageAfterSpentTimer},
+		{name: "session exit", want: errImageDisconnected, end: endImageSession},
+		{name: "independent request pass", want: errImageExpired, follow: true, end: endImageRequestPass},
+	} {
+		t.Run(tc.name, inImageBubble(func(t *testing.T) { checkImageLocalEnd(t, tc) }))
+	}
+}
+
+func checkImageLocalEnd(t *testing.T, tc imageLocalEndCase) {
+	f := newImageTestFixture(t, 2)
+	limits := imageTestLimits(10*time.Second, time.Hour)
+	if tc.capD {
+		limits.RoundLifetime = 5 * time.Second
+	}
+	ctx, owner := newImageHookCtx(), newImageHookCtx()
+	round := f.roundCtx(t, owner, limits, 0, 1)
+	inst := f.admitted(t, round, ctx, 0, 1, 1)
+	var passive <-chan imageResult
+	if tc.wait {
+		passive = goTakeImage(round, t.Context(), 1)
+		synctest.Wait()
+		requireImageWaiting(t, passive, "waiter before assignment end")
+	}
+	tc.end(t, f, ctx, owner, inst.deadline)
+	if passive == nil {
+		passive = goTakeImage(round, t.Context(), 1)
+	}
+	requireImageResult(t, awaitImageResult(t, passive, "recorded local end"), 1, 1, tc.want, "recorded local end")
+	requireImageAbsent(t, round, t.Context(), 1, errImageNoAssignment)
+	if tc.follow {
+		f.refused(t, round, t.Context(), 0, 1, errImageAttempted)
+		nextID := uint64(1)
+		if tc.name == "independent request pass" {
+			nextID = 2
+		}
+		f.admitted(t, round, t.Context(), 1, 1, nextID)
+	}
+	f.requireFrames(t, 0, "ended assignment", expectedImageQuery(1, 1))
+}
+
+func endImageRequestCtx(t *testing.T, _ *imageTestFixture, ctx, _ *imageHookCtx, _ time.Time) {
+	requireEqual(t, ctx.endAndRun(errImageRequestEnd), 1, "request callback count")
+}
+
+func endImageRoundCtx(t *testing.T, _ *imageTestFixture, _, owner *imageHookCtx, _ time.Time) {
+	requireEqual(t, owner.endAndRun(errImageRoundEnd), 1, "round callback count")
+}
+
+func endImageTimer(_ *testing.T, f *imageTestFixture, _, _ *imageHookCtx, deadline time.Time) {
+	f.clock.set(deadline.Add(1))
+	time.Sleep(10*time.Second + 1)
+	synctest.Wait()
+}
+
+func endImageAfterSpentTimer(t *testing.T, f *imageTestFixture, _, _ *imageHookCtx, deadline time.Time) {
+	reads := f.clock.readCount()
+	time.Sleep(5*time.Second + 1)
+	synctest.Wait()
+	requireEqual(t, f.clock.readCount(), reads+1, "spent timer clock read")
+	f.clock.set(deadline.Add(1))
+}
+
+func endImageSession(_ *testing.T, f *imageTestFixture, _, _ *imageHookCtx, _ time.Time) {
+	f.s.unregisterPeer(f.peers[0])
+}
+
+func endImageRequestPass(t *testing.T, f *imageTestFixture, _, _ *imageHookCtx, deadline time.Time) {
+	f.clock.set(deadline.Add(1))
+	other := f.round(t, imageTestLimits(), 1)
+	ctx := newImageHookCtx()
+	f.admitted(t, other, ctx, 1, 1, 1)
+	ctx.endAndRun(errImageRequestEnd)
+}
+
+func testImageReceiveOrder(t *testing.T) {
+	f, round := newImageRound(t, 2, 0, 1)
+	a, b, sibling := newImageHookCtx(), newImageHookCtx(), newImageHookCtx()
+	first, second, unrelated := expectedImageQuery(1, 1), expectedImageQuery(1, 1), expectedImageQuery(2, 2)
+	second.ByteLimit++
+	f.admitted(t, round, a, 0, 1, 1)
+	a.endAndRun(errImageRequestEnd)
+	requireQueryResult(t, awaitImageResult(t, launch(round, b, f.ids[1], 1, second.ByteLimit), "second send"), second, nil, "second send")
+	b.endAndRun(errImageRoundEnd)
+	f.admitted(t, round, sibling, 0, 2, 2)
+	sibling.endAndRun(context.Canceled)
+	copyOfRound := *round
+	other := f.round(t, imageTestLimits(), 0)
+	*round = *other
+	requireImageAbsent(t, round, t.Context(), 1, errImageNoAssignment)
+	requireImageTake(t, &copyOfRound, t.Context(), 1, first, errImageRequestEnd, "first admitted result")
+	requireImageTake(t, &copyOfRound, t.Context(), 1, second, errImageRoundEnd, "second admitted result")
+	requireImageAbsent(t, &copyOfRound, t.Context(), 1, errImageNoAssignment)
+	requireImageTake(t, &copyOfRound, t.Context(), 2, unrelated, context.Canceled, "unrelated start's result")
+	f.admitted(t, round, t.Context(), 0, 1, 3)
+	f.requireUsage(t, &copyOfRound, 0, imageUsage(0, 2, 2, 2, 0), imageUsage(0, 2, 3, 3, 0), "original round after handle reassignment")
+	f.requireUsage(t, round, 0, imageUsage(1, 1, 1, 1, 0), imageUsage(1, 1, 1, 1, 0), "independent round")
+}
+
+func testImageCompetingReceivers(t *testing.T) {
+	f, round := newImageRound(t, 1, 0)
+	ctx := newImageHookCtx()
+	f.admitted(t, round, ctx, 0, 1, 1)
+	a, b := goTakeImage(round, t.Context(), 1), goTakeImage(round, t.Context(), 1)
+	synctest.Wait()
+	requireImageWaiting(t, a, "first waiter")
+	requireImageWaiting(t, b, "second waiter")
+	other := f.round(t, imageTestLimits(), 0)
+	*round = *other
+	ctx.endAndRun(errImageRequestEnd)
+	one, two := awaitImageResult(t, a, "first waiter"), awaitImageResult(t, b, "second waiter")
+	if one.err == errImageNoAssignment {
+		one, two = two, one
+	}
+	requireImageResult(t, one, 1, 1, errImageRequestEnd, "successful take")
+	requireQueryResult(t, two, consensus.UTXOImageQuery{}, errImageNoAssignment, "competing take")
+}
+
+func testImageReceiveWaitContext(t *testing.T) {
+	f, round := newImageRound(t, 2, 0, 1)
+	ctx := newImageHookCtx()
+	f.admitted(t, round, ctx, 0, 1, 1)
+	waitCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	waiting := goTakeImage(round, waitCtx, 1)
+	synctest.Wait()
+	requireImageWaiting(t, waiting, "live waiter")
+	reads := f.clock.readCount()
+	time.Sleep(250 * time.Millisecond)
+	synctest.Wait()
+	requireEqual(t, f.clock.readCount(), reads, "clock reads while Receive waits")
+	cancel()
+	requireQueryResult(t, awaitImageResult(t, waiting, "canceled waiter"), consensus.UTXOImageQuery{}, context.Canceled, "canceled waiter")
+	f.refused(t, round, t.Context(), 1, 1, errImageAssignmentCurrent)
+	ctx.endAndRun(errImageRequestEnd)
+	requireImageTake(t, round, waitCtx, 1, expectedImageQuery(1, 1), errImageRequestEnd, "ready result with canceled waiter")
+	requireImageAbsent(t, round, waitCtx, 1, errImageNoAssignment)
+	f.admitted(t, round, t.Context(), 1, 1, 1)
+}
+
+type imageTerminalEndCase struct {
+	name         string
+	requestErr   error
+	roundErr     error
+	expired      bool
+	adapterClose bool
+	ordinary     bool
+	want         error
+}
+
+func testImageTerminalEndBeforeWrite(t *testing.T) {
+	for _, tc := range []imageTerminalEndCase{
+		{name: "disconnect", want: errImageDisconnected},
+		{name: "request ctx before disconnect", requestErr: errImageRequestEnd, roundErr: errImageRoundEnd, expired: true, want: errImageRequestEnd},
+		{name: "round ctx before disconnect", roundErr: errImageRoundEnd, expired: true, want: errImageRoundEnd},
+		{name: "expiry before disconnect", expired: true, want: errImageExpired},
+		{name: "explicit close", adapterClose: true, want: errImageRoundClosed},
+		{name: "request ctx before close", adapterClose: true, requestErr: errImageRequestEnd, roundErr: errImageRoundEnd, expired: true, want: errImageRequestEnd},
+		{name: "round ctx before close", adapterClose: true, roundErr: errImageRoundEnd, expired: true, want: errImageRoundEnd},
+		{name: "expiry before close", adapterClose: true, expired: true, want: errImageExpired},
+		{name: "request ctx while queued", ordinary: true, requestErr: errImageRequestEnd, want: errImageRequestEnd},
+		{name: "round ctx while queued", ordinary: true, roundErr: errImageRoundEnd, want: errImageRoundEnd},
+		{name: "expiry while queued", ordinary: true, expired: true, want: errImageExpired},
+	} {
+		t.Run(tc.name, inImageBubble(func(t *testing.T) { checkImageTerminalEndBeforeWrite(t, tc) }))
+	}
+}
+
+func checkImageTerminalEndBeforeWrite(t *testing.T, tc imageTerminalEndCase) {
+	f := newImageTestFixture(t, 2)
+	owner, ctx := newImageHookCtx(), newImageHookCtx()
+	round := f.roundCtx(t, owner, imageTestLimits(), 0)
+	replacement := f.round(t, imageTestLimits(), 1)
+	release := f.holdWrite(t, 0)
+	pending := f.goRequest(round, ctx, 0, 1)
+	synctest.Wait()
+	f.waitAdmitted(t, 0, 1, "request waiting for writeMu")
+	if tc.requestErr != nil {
+		ctx.end(tc.requestErr)
+	}
+	if tc.roundErr != nil {
+		owner.end(tc.roundErr)
+	}
+	if tc.expired {
+		f.clock.add(10*time.Second + 1)
+	}
+	if !tc.ordinary {
+		if tc.adapterClose {
+			round.Close()
+		} else {
+			f.s.unregisterPeer(f.peers[0])
+		}
+	}
+	requireImageResult(t, awaitImageResult(t, pending, "request before write"), 1, 1, tc.want, "recorded end before write")
+	wantReceive := errImageNoAssignment
+	if tc.adapterClose {
+		wantReceive = errImageRoundClosed
+	}
+	requireImageAbsent(t, round, t.Context(), 1, wantReceive)
+	f.admitted(t, replacement, t.Context(), 1, 1, 1)
+	must(t, release(), "holder write")
+	f.requireFrames(t, 0, "ended before write")
+}
+
+func testImageRecordedEndAcrossAdapter(t *testing.T) {
+	inImageBubble(func(t *testing.T) {
+		f := newImageTestFixture(t, 2)
+		ctx, owner := newImageHookCtx(), newImageHookCtx()
+		round := f.roundCtx(t, owner, imageTestLimits(), 0)
+		next := f.round(t, imageTestLimits(), 1)
+		release := f.holdWrite(t, 0)
+		send := f.goRequest(round, ctx, 0, 1)
+		synctest.Wait()
+		f.waitAdmitted(t, 0, 1, "parked assignment")
+		owner.endAndRun(errImageRoundEnd)
+		ctx.end(errImageRequestEnd)
+		f.clock.add(10*time.Second + 1)
+		round.Close()
+		f.s.unregisterPeer(f.peers[0])
+		requireImageResult(t, awaitImageResult(t, send, "parked assignment after close and exit"), 1, 1, errImageRoundEnd, "first recorded end")
+		f.admitted(t, next, t.Context(), 1, 1, 1)
+		requireImageAbsent(t, round, t.Context(), 1, errImageRoundClosed)
+		must(t, release(), "holder write")
+		f.requireFrames(t, 0, "parked assignment after close and exit")
+	})(t)
+}
+
+type imageStagedWriteCase struct {
+	name   string
+	fault  error
+	unwind func()
+	goexit bool
+}
+
+func testImageStagedOrder(t *testing.T) {
+	for _, tc := range []imageStagedWriteCase{
+		{name: "successful send"},
+		{name: "failed send after local end", fault: errImageScriptedWrite},
+		{name: "write panic", unwind: imageUnwinder(false)},
+		{name: "write Goexit", unwind: imageUnwinder(true), goexit: true},
+	} {
+		t.Run(tc.name, inImageBubble(func(t *testing.T) { checkImageStagedOrder(t, tc) }))
+	}
+}
+
+func testImageEndAtActualWrite(t *testing.T) {
+	for _, local := range []struct {
+		name string
+		want error
+		end  func(*testing.T, *imageTestFixture, *ImageRound, *imageHookCtx, *imageHookCtx)
+	}{
+		{"request context", errImageRequestEnd, func(_ *testing.T, _ *imageTestFixture, _ *ImageRound, ctx, _ *imageHookCtx) {
+			ctx.endAndRun(errImageRequestEnd)
+		}},
+		{"round context", errImageRoundEnd, func(_ *testing.T, _ *imageTestFixture, _ *ImageRound, _, owner *imageHookCtx) {
+			owner.endAndRun(errImageRoundEnd)
+		}},
+		{"elapsed attempt", errImageExpired, func(_ *testing.T, f *imageTestFixture, _ *ImageRound, _, _ *imageHookCtx) {
+			f.clock.add(10*time.Second + 1)
+		}},
+		{"exact peer exit", errImageDisconnected, func(_ *testing.T, f *imageTestFixture, _ *ImageRound, _, _ *imageHookCtx) {
+			f.s.unregisterPeer(f.peers[0])
+		}},
+		{"explicit round close", errImageRoundClosed, func(_ *testing.T, _ *imageTestFixture, round *ImageRound, _, _ *imageHookCtx) {
+			round.Close()
+		}},
+	} {
+		t.Run(local.name, func(t *testing.T) {
+			for _, fault := range []struct {
+				name string
+				err  error
+			}{{"nil write result", nil}, {"transport error", errImageScriptedWrite}} {
+				t.Run(fault.name, inImageBubble(func(t *testing.T) {
+					checkImageEndAtActualWrite(t, local.want, local.end, fault.err)
+				}))
+			}
+		})
+	}
+}
+
+func checkImageEndAtActualWrite(t *testing.T, want error, end func(*testing.T, *imageTestFixture, *ImageRound, *imageHookCtx, *imageHookCtx), fault error) {
+	f := newImageTestFixture(t, 1)
+	ctx, owner := newImageHookCtx(), newImageHookCtx()
+	round := f.roundCtx(t, owner, imageTestLimits(), 0)
+	writing, pending := f.stalledRequest(t, round, ctx, 0, 1)
+	defer close(writing.release)
+	end(t, f, round, ctx, owner)
+	waitCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	wantBlocked := error(context.Canceled)
+	if want == errImageRoundClosed {
+		wantBlocked = errImageRoundClosed
+	}
+	requireImageAbsent(t, round, waitCtx, 1, wantBlocked)
+	writing.release <- fault
+	requireImageResult(t, awaitImageResult(t, pending, "authorized write result"), 1, 1, nil, "authorized write result")
+	if want == errImageRoundClosed {
+		requireImageAbsent(t, round, t.Context(), 1, errImageRoundClosed)
+	} else {
+		requireImageTake(t, round, t.Context(), 1, expectedImageQuery(1, 1), want, "single ended result")
+		requireImageAbsent(t, round, t.Context(), 1, errImageNoAssignment)
+	}
+	if fault != nil {
+		f.requireFault(t, 0, 1, fault.Error(), "actual write fault behind the recorded end")
+	}
+}
+
+// holdImageFrame pauses the connection before accepting the first frame byte.
+func (f *imageTestFixture) holdImageFrame(t *testing.T, session int, finish func()) (<-chan struct{}, func()) {
+	t.Helper()
+	entered, gate := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	t.Cleanup(release)
+	conn, wire := f.conns[session], f.wires[session]
+	var once sync.Once
+	conn.mu.Lock()
+	conn.writeHook = func(b []byte) (int, error) {
+		once.Do(func() { close(entered); <-gate; finish() })
+		return wire.write(b)
+	}
+	conn.mu.Unlock()
+	return entered, release
+}
+
+func (f *imageTestFixture) beginStagedWrite(t *testing.T, round *ImageRound, ctx context.Context, tc imageStagedWriteCase) (<-chan any, func()) {
+	t.Helper()
+	if tc.unwind != nil {
+		entered, release := f.holdImageFrame(t, 0, tc.unwind)
+		writing := f.goRecovered(round, ctx, 0, 1)
+		requireChannelClosed(t, entered, "authorized write")
+		return writing, release
+	}
+	stall := f.wires[0].armStallAfter(0)
+	writing := f.goRecovered(round, ctx, 0, 1)
+	requireChannelClosed(t, stall.entered, "authorized write")
+	release := sync.OnceFunc(func() { stall.release <- tc.fault })
+	t.Cleanup(release)
+	return writing, release
+}
+
+func checkImageStagedOrder(t *testing.T, tc imageStagedWriteCase) {
+	f, round := newImageRound(t, 2, 0, 1)
+	first, second := newImageHookCtx(), newImageHookCtx()
+	write, release := f.beginStagedWrite(t, round, first, tc)
+	defer release()
+	first.endAndRun(errImageRequestEnd)
+	q1, q2 := expectedImageQuery(1, 1), expectedImageQuery(1, 1)
+	q2.ByteLimit++
+	requireQueryResult(t, awaitImageResult(t, launch(round, second, f.ids[1], 1, q2.ByteLimit), "second send"), q2, nil, "second send")
+	second.endAndRun(errImageRoundEnd)
+	take := goTakeImage(round, t.Context(), 1)
+	synctest.Wait()
+	requireImageWaiting(t, take, "earlier write awaiting its return")
+	release()
+	returned := awaitImageResult(t, write, "first send verdict")
+	if tc.unwind != nil {
+		requireImageUnwindValue(t, returned, tc.goexit)
+		requireQueryResult(t, awaitImageResult(t, take, "first take after unwind"), q2, errImageRoundEnd, "first take after unwind")
+	} else {
+		requireEqual(t, returned, any(imageResult{q: q1}), "first send result")
+		requireQueryResult(t, awaitImageResult(t, take, "first take after send"), q1, errImageRequestEnd, "first take after send")
+		requireImageTake(t, round, t.Context(), 1, q2, errImageRoundEnd, "second take after send")
+	}
+	requireImageAbsent(t, round, t.Context(), 1, errImageNoAssignment)
+	if tc.fault != nil {
+		f.requireFault(t, 0, 1, tc.fault.Error(), "actual write fault behind the recorded end")
+	}
+}
+
+func testImageUnwindThenEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		goexit bool
+	}{{"panic", false}, {"Goexit", true}} {
+		t.Run(tc.name, inImageBubble(func(t *testing.T) {
+			f, round := newImageRound(t, 2, 0, 1)
+			ctx := newImageHookCtx()
+			write, release := f.beginStagedWrite(t, round, ctx, imageStagedWriteCase{unwind: imageUnwinder(tc.goexit)})
+			release()
+			requireImageUnwindReport(t, write, tc.goexit)
+			f.refused(t, round, t.Context(), 1, 1, errImageAssignmentCurrent)
+			ctx.endAndRun(errImageRequestEnd)
+			requireImageAbsent(t, round, t.Context(), 1, errImageNoAssignment)
+			f.admitted(t, round, t.Context(), 1, 1, 1)
+		}))
+	}
+}
+
+func testImageOutcomePendingCapacity(t *testing.T) {
+	f := newImageTestFixture(t, 3)
+	limits := imageTestLimits()
+	limits.Global.PendingNetworkBytes = 240
+	round := f.round(t, limits, 0, 1, 2)
+	a, waitDone := newImageHookCtx(), t.Context()
+	stallA, pendingA := f.stalledRequest(t, round, a, 0, 1)
+	stallB, pendingB := f.stalledRequest(t, round, waitDone, 1, 2)
+	defer close(stallA.release)
+	defer close(stallB.release)
+	a.endAndRun(errImageRequestEnd)
+	f.refused(t, round, waitDone, 2, 3, errImageLimit)
+	stallA.release <- nil
+	requireImageResult(t, awaitImageResult(t, pendingA, "first send"), 1, 1, nil, "first send")
+	stallC, pendingC := f.stalledRequest(t, round, waitDone, 2, 3)
+	defer close(stallC.release)
+	f.refused(t, round, waitDone, 0, 4, errImageLimit)
+	stallB.release <- nil
+	requireImageResult(t, awaitImageResult(t, pendingB, "sibling send"), 1, 2, nil, "sibling send")
+	f.admitted(t, round, waitDone, 0, 4, 2)
+	stallC.release <- nil
+	requireImageResult(t, awaitImageResult(t, pendingC, "third send"), 1, 3, nil, "third send")
+	requireImageTake(t, round, waitDone, 1, expectedImageQuery(1, 1), errImageRequestEnd, "first write's end")
+}
+
+func testImageFirstWriteError(t *testing.T) {
+	f, round := newImageRound(t, 2, 0, 1)
+	f.admitted(t, round, t.Context(), 0, 2, 1)
+	closer := make(chan imageResult, 1)
+	f.onClose(0, func() {
+		if imageCalledFrom(".(*ImageRound).Request") {
+			q, err := round.Request(t.Context(), f.ids[1], imageStart(1), imageTestByteLimit)
+			closer <- imageResult{q, err}
+		}
+	})
+	stall, pending := f.stalledRequest(t, round, t.Context(), 0, 1)
+	stall.release <- errImageScriptedWrite
+	requireImageResult(t, awaitImageResult(t, pending, "failed write"), 2, 1, errImageScriptedWrite, "failed write")
+	requireImageResult(t, awaitImageResult(t, closer, "replacement in Close hook"), 1, 1, nil, "replacement in Close hook")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	requireImageAbsent(t, round, ctx, 1, context.Canceled)
+	other := f.round(t, imageTestLimits(), 1)
+	f.refused(t, other, t.Context(), 1, 2, errImageAssignmentCurrent)
+	f.s.unregisterPeer(f.peers[0])
+	requireImageTake(t, round, t.Context(), 2, expectedImageQuery(1, 2), errImageDisconnected, "sibling ends at session exit")
+	requireImageAbsent(t, round, t.Context(), 2, errImageNoAssignment)
+	f.s.unregisterPeer(f.peers[0])
+	requireImageAbsent(t, round, ctx, 1, context.Canceled)
+	f.requireFault(t, 0, 1, errImageScriptedWrite.Error(), "first failed write")
+}
+
+func testImageRoundOutcomeClose(t *testing.T) {
+	f, round := newImageRound(t, 3, 0, 1)
+	ready, writing := newImageHookCtx(), newImageHookCtx()
+	f.admitted(t, round, ready, 0, 1, 1)
+	ready.endAndRun(errImageRequestEnd)
+	stall, inWrite := f.stalledRequest(t, round, writing, 0, 2)
+	defer close(stall.release)
+	writing.endAndRun(errImageRequestEnd)
+	f.admitted(t, round, t.Context(), 1, 3, 1)
+	other := f.round(t, imageTestLimits(), 2)
+	sibling := newImageHookCtx()
+	f.admitted(t, other, sibling, 2, 4, 1)
+	waiting, independent := goTakeImage(round, t.Context(), 3), goTakeImage(other, t.Context(), 4)
+	synctest.Wait()
+	requireImageWaiting(t, waiting, "round waiter")
+	requireImageWaiting(t, independent, "independent waiter")
+	copied := *round
+	copied.Close()
+	requireQueryResult(t, awaitImageResult(t, waiting, "closed round waiter"), consensus.UTXOImageQuery{}, errImageRoundClosed, "closed round waiter")
+	requireImageWaiting(t, independent, "independent round after close")
+	assertImageRoundClosed(t, f, round)
+	stall.release <- nil
+	requireImageResult(t, awaitImageResult(t, inWrite, "write after round close"), 2, 2, nil, "write after round close")
+	requireImageAbsent(t, round, t.Context(), 2, errImageRoundClosed)
+	sibling.endAndRun(errImageRoundEnd)
+	requireImageResult(t, awaitImageResult(t, independent, "independent waiter"), 1, 4, errImageRoundEnd, "independent waiter")
+	requireEqual(t, len(round.outcomes), 0, "queued records after close")
+}
+
+func assertImageRoundClosed(t *testing.T, f *imageTestFixture, round *ImageRound) {
+	t.Helper()
+	for _, start := range []byte{1, 2, 3, 5} {
+		requireImageAbsent(t, round, t.Context(), start, errImageRoundClosed)
+	}
+	f.refused(t, round, t.Context(), 1, 3, errImageRoundClosed)
+	reads := f.clock.readCount()
+	round.Close()
+	requireEqual(t, f.clock.readCount(), reads, "clock reads by repeated round close")
+}
+
+func testImageServiceOutcomeClose(t *testing.T) {
+	inImageBubble(func(t *testing.T) {
+		f, round := newImageRound(t, 3, 0, 1, 2)
+		ready, waiting := newImageHookCtx(), newImageHookCtx()
+		f.admitted(t, round, ready, 0, 1, 1)
+		ready.endAndRun(errImageRequestEnd)
+		inst := f.admitted(t, round, waiting, 1, 2, 1)
+		wait := goTakeImage(round, t.Context(), 2)
+		synctest.Wait()
+		requireImageWaiting(t, wait, "passive waiter")
+		requireEqual(t, f.leases(), uint64(0), "leases at the passive wait")
+		entered, release := f.holdImageFrame(t, 2, func() {})
+		defer release()
+		send := f.goRequest(round, t.Context(), 2, 3)
+		requireChannelClosed(t, entered, "actual writer")
+		checkImageServiceOutcomeClose(t, f, round, wait, send, release)
+		reads := f.clock.readCount()
+		waiting.endAndRun(errImageRoundEnd)
+		requireEqual(t, f.clock.readCount(), reads, "clock reads by a callback after Close")
+		requireEqual(t, inst.ref.Load(), (*imageInstance)(nil), "callback reference after Close")
+		requireEqual(t, f.owners(round, 2), imageOwners{
+			peerKeys: 3, peerKey: true, attempted: 3, starts: 3,
+			perPeer: imageUsage(0, 1, 1, 1, 0), global: imageUsage(0, 3, 3, 3, 0),
+		}, "round work retained and requester registry empty at Close")
+	})
+}
+
+func checkImageServiceOutcomeClose(t *testing.T, f *imageTestFixture, round *ImageRound, wait, send <-chan imageResult, release func()) {
+	t.Helper()
+	first := lifecycleClose(f.s)
+	for _, conn := range f.conns {
+		requireChannelClosed(t, conn.closed, "connection close during drain")
+	}
+	second := lifecycleClose(f.s)
+	synctest.Wait()
+	requireQueryResult(t, awaitImageResult(t, wait, "waiter on drain"), consensus.UTXOImageQuery{}, errServiceClosed, "waiter on drain")
+	requireStillBlocked(t, first, "first Close while actual write is held")
+	requireStillBlocked(t, second, "second Close while actual write is held")
+	requireImageAbsent(t, round, nil, 1, errServiceClosed)
+	f.refused(t, round, nil, 2, 4, errServiceClosed)
+	f.requireRoundRefused(t, nil, f.config(imageTestLimits(), 2), errServiceClosed, "constructor while draining")
+	round.Close()
+	require(t, !round.closed && len(round.outcomes[imageStart(1)]) == 1, "late round close changed the ready result")
+	release()
+	requireImageResult(t, awaitImageResult(t, send, "drained writer"), 1, 3, net.ErrClosed, "drained writer")
+	requireReturned(t, first, "first Close")
+	requireReturned(t, second, "second Close")
+	requireImageAbsent(t, round, t.Context(), 1, errServiceClosed)
+}
+
+func testImageLeasedReceive(t *testing.T) {
+	f, round := newImageRound(t, 1, 0)
+	ctx := newImageHookCtx()
+	f.admitted(t, round, ctx, 0, 1, 1)
+	ctx.endAndRun(errImageRequestEnd)
+	req := f.lockRequester()
+	unlock := sync.OnceFunc(req.mu.Unlock)
+	defer unlock()
+	leased := goTakeImage(round, t.Context(), 1)
+	waitUntil(t, func() bool { return f.leases() == 1 }, "Receive work lease")
+	requireParked(t, "leased Receive at the requester mutex", "[sync.Mutex.Lock", "p2p.(*ImageRound).receiveOnce(")
+	closed := lifecycleClose(f.s)
+	waitDraining(t, f.s)
+	requireImageAbsent(t, round, t.Context(), 1, errServiceClosed)
+	requireStillBlocked(t, closed, "Close while leased Receive holds its decision")
+	unlock()
+	requireImageResult(t, awaitImageResult(t, leased, "leased Receive result"), 1, 1, errImageRequestEnd, "leased Receive result")
+	requireReturned(t, closed, "Close after leased Receive")
+	requireImageAbsent(t, round, t.Context(), 1, errServiceClosed)
+}
+
+type imageWaitBarrier struct {
+	context.Context
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (c imageWaitBarrier) Done() <-chan struct{} {
+	close(c.entered)
+	<-c.release
+	return c.Context.Done()
+}
+
+func testImagePassiveReceiveJoin(t *testing.T) {
+	f, round := newImageRound(t, 1, 0)
+	f.admitted(t, round, t.Context(), 0, 1, 1)
+	entered, gate := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	defer release()
+	wait := goTakeImage(round, imageWaitBarrier{Context: t.Context(), entered: entered, release: gate}, 1)
+	requireChannelClosed(t, entered, "Receive entering its passive wait")
+	requireReturned(t, lifecycleClose(f.s), "Close while the passive wait has not returned")
+	release()
+	requireQueryResult(t, awaitImageResult(t, wait, "passive wait after join"), consensus.UTXOImageQuery{}, errServiceClosed, "passive wait after join")
+}
+
+func testImageTerminalHooks(t *testing.T) {
+	for _, terminal := range []string{"peer exit", "round close", "service close", "receive pass"} {
+		t.Run(terminal, func(t *testing.T) { checkImageTerminalHooks(t, terminal) })
+	}
+}
+
+func checkImageTerminalHooks(t *testing.T, terminal string) {
+	f, round := newImageRound(t, 2, 0)
+	ctx := newImageHookCtx()
+	called, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	ctx.onStop = func() { close(called); <-release }
+	inst := f.admitted(t, round, ctx, 0, 1, 1)
+	ctx.end(errImageRequestEnd)
+	reads := f.clock.readCount()
+	ctx.mu.Lock()
+	errReads := ctx.errCalls
+	ctx.mu.Unlock()
+	if terminal == "receive pass" {
+		requireImageTake(t, round, t.Context(), 1, expectedImageQuery(1, 1), errImageRequestEnd, "end pass ready result")
+	} else {
+		complete := make(chan struct{})
+		go func() { applyImageTerminal(f, round, terminal); close(complete) }()
+		requireChannelClosed(t, complete, "terminal adapter completion")
+		requireImageTerminalOutcome(t, round, terminal)
+	}
+	require(t, !isClosed(called), "terminal adapter invoked a caller-controlled stop")
+	if terminal == "service close" {
+		requireEqual(t, f.clock.readCount(), reads, "clock reads by final requester teardown")
+		ctx.mu.Lock()
+		after := ctx.errCalls
+		ctx.mu.Unlock()
+		requireEqual(t, after, errReads, "context reads by final requester teardown")
+	} else {
+		replacement := f.round(t, imageTestLimits(), 1)
+		f.admitted(t, replacement, t.Context(), 1, 1, 1)
+		defer f.refused(t, replacement, t.Context(), 1, 1, errImageAssignmentCurrent)
+	}
+	before := f.clock.readCount()
+	requireEqual(t, ctx.endAndRun(context.Canceled), 1, "retained external callback")
+	requireEqual(t, f.clock.readCount(), before, "clock reads by inert callback")
+	requireEqual(t, inst.ref.Load(), (*imageInstance)(nil), "retired callback instance")
+}
+
+func testImageTerminalServiceRetention(t *testing.T) {
+	ctx := newImageHookCtx()
+	var service weak.Pointer[Service]
+	if t.Run("publish and join", func(t *testing.T) {
+		f, round := newImageRound(t, 1, 0)
+		f.admitted(t, round, ctx, 0, 1, 1)
+		requireReturned(t, lifecycleClose(f.s), "Close with registered context callback")
+		requireImageAbsent(t, round, t.Context(), 1, errServiceClosed)
+		service = weak.Make(f.s)
+	}) {
+		runtime.GC()
+		require(t, service.Value() == nil, "retained context callback keeps the closed Service alive")
+		requireEqual(t, ctx.endAndRun(errImageRequestEnd), 1, "inert callback retained by caller context")
+	}
+}
+
+func applyImageTerminal(f *imageTestFixture, round *ImageRound, terminal string) {
+	switch terminal {
+	case "peer exit":
+		f.s.unregisterPeer(f.peers[0])
+	case "round close":
+		round.Close()
+	case "service close":
+		_ = f.s.Close()
+	}
+}
+
+func requireImageTerminalOutcome(t *testing.T, round *ImageRound, terminal string) {
+	t.Helper()
+	switch terminal {
+	case "peer exit":
+		requireImageTake(t, round, t.Context(), 1, expectedImageQuery(1, 1), errImageRequestEnd, "due error at peer exit")
+	case "round close":
+		requireImageAbsent(t, round, t.Context(), 1, errImageRoundClosed)
+	case "service close":
+		requireImageAbsent(t, round, t.Context(), 1, errServiceClosed)
+	}
+}
+
+const (
+	imageWorkerHost = "198.51.100.40"
+	imageWorkerAddr = imageWorkerHost + ":19110"
+)
+
+type imageExitingWorker struct {
+	announcing <-chan struct{}
+	fail       func()
+	done       <-chan struct{}
+	wire       *imageWire
+}
+
+func startImageExitingWorker(t *testing.T, f *imageTestFixture) imageExitingWorker {
+	t.Helper()
+	local, remote := net.Pipe()
+	conn := newBlockRetryConn(endpointConn{Conn: local, remote: stubAddr(imageWorkerAddr)})
+	t.Cleanup(func() { _ = remote.Close() })
+	announcing, fail, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	failWrite := sync.OnceFunc(func() { close(fail) })
+	t.Cleanup(failWrite)
+	wire := &imageWire{closed: conn.closed}
+	conn.writeHook = imageExitingWorkerWrites(local, wire, announcing, fail)
+	require(t, f.s.acquireWork(), "worker lease refused")
+	go func() { defer close(done); f.s.runConn(conn, false) }()
+	cfg := f.s.cfg.PeerRuntimeConfig
+	must(t, remote.SetDeadline(time.Now().Add(lifecycleWatchdog)), "remote deadline")
+	must(t, completeRemoteHandshake(remote, cfg, testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 0)), "remote handshake")
+	return imageExitingWorker{announcing: announcing, fail: failWrite, done: done, wire: wire}
+}
+
+func imageExitingWorkerWrites(conn net.Conn, wire *imageWire, announcing chan<- struct{}, fail <-chan struct{}) func([]byte) (int, error) {
+	imagePayload := false
+	return func(b []byte) (int, error) {
+		if imagePayload {
+			imagePayload = false
+			return wire.write(b)
+		}
+		if len(b) == wireHeaderSize {
+			command := b[4:16]
+			if bytes.Equal(bytes.TrimRight(command, "\x00"), []byte("sendcmpct")) {
+				close(announcing)
+				<-fail
+				return 0, errImageScriptedWrite
+			}
+			if [12]byte(command) == imageRequestCommand {
+				imagePayload = true
+				return wire.write(b)
+			}
+		}
+		return conn.Write(b)
+	}
+}
+
+func testImageExitAtQuota(t *testing.T) {
+	f := newImageTestFixture(t, 0)
+	f.s.reconnectMu.Lock()
+	resume := sync.OnceFunc(f.s.reconnectMu.Unlock)
+	defer resume()
+	worker := startImageExitingWorker(t, f)
+	waitUntil(t, func() bool { return f.serviceEntry(imageWorkerAddr) != nil }, "peer registration")
+	old := f.serviceEntry(imageWorkerAddr)
+	config := ImageRoundConfig{Anchor: imageTestAnchor, Limits: imageTestLimits(), SourceIDs: []string{imageWorkerAddr}}
+	round, err := f.begin(t.Context(), config)
+	must(t, err, "capture the actual peer")
+	got := requestWithin(lifecycleWatchdog, round, t.Context(), imageWorkerAddr, 1, imageTestByteLimit)
+	requireImageResult(t, got, 1, 1, nil, "request before the first announcement")
+	resume()
+	requireChannelClosed(t, worker.announcing, "first announcement write")
+	release := sync.OnceFunc(f.s.lockPeerQuotaKey(imageWorkerHost))
+	defer release()
+	worker.fail()
+	requireParked(t, "actual worker at exit quota lock", peerExitFrames...)
+	checkImageExitAtQuota(t, f, round, config, old)
+	release()
+	requireChannelClosed(t, worker.done, "connection worker exit")
+	requireEqual(t, len(worker.wire.bytes()), wireHeaderSize+120, "admitted wire length")
+}
+
+func checkImageExitAtQuota(t *testing.T, f *imageTestFixture, round *ImageRound, config ImageRoundConfig, old *peer) {
+	t.Helper()
+	got := requestWithin(lifecycleWatchdog, round, t.Context(), imageWorkerAddr, 2, imageTestByteLimit)
+	requireQueryResult(t, got, consensus.UTXOImageQuery{}, errImageDisconnected, "request before peer registry cleanup")
+	f.requireRoundRefused(t, t.Context(), config, errImageSourceSet, "constructor before peer registry cleanup")
+	requireImageTake(t, round, t.Context(), 1, expectedImageQuery(1, 1), errImageDisconnected, "result before peer registry cleanup")
+	requireImageAbsent(t, round, t.Context(), 1, errImageNoAssignment)
+	requireEqual(t, f.serviceEntry(imageWorkerAddr), old, "registry entry while quota cleanup waits")
+	requireEqual(t, old.snapshotState().LastError, errImageScriptedWrite.Error(), "first announcement failure")
+}
+
+func testImageReplacementRetainsNoPeer(t *testing.T) {
+	f, used := newImageRound(t, 1, 0)
+	unused := f.round(t, imageTestLimits(), 0)
+	alias, err := f.begin(t.Context(), ImageRoundConfig{Anchor: imageTestAnchor, Limits: imageTestLimits(), SourceIDs: []string{"192.0.2.40:9"}})
+	must(t, err, "capture the old alias")
+	f.admitted(t, used, t.Context(), 0, 1, 1)
+	f.admitted(t, used, t.Context(), 0, 2, 2)
+	old := replaceImageTestPeer(t, f, used, unused, alias)
+	runtime.GC()
+	require(t, old.Value() == nil, "retained round and untaken result keep the old peer alive")
+	requireImageTake(t, used, t.Context(), 2, expectedImageQuery(2, 2), errImageDisconnected, "retained outcome after old peer collection")
+	runtime.KeepAlive(unused)
+	runtime.KeepAlive(alias)
+}
+
+func replaceImageTestPeer(t *testing.T, f *imageTestFixture, used, unused, alias *ImageRound) weak.Pointer[peer] {
+	t.Helper()
+	old := f.peers[0]
+	f.s.unregisterPeer(old)
+	newer := f.addSession(t, f.ids[0], "192.0.2.81:9")
+	replacement := f.round(t, imageTestLimits(), newer)
+	f.admitted(t, replacement, t.Context(), newer, 1, 1)
+	f.refused(t, unused, t.Context(), 0, 3, errImageDisconnected)
+	f.refusedDropping(t, alias, t.Context(), "192.0.2.40:9", 0, 3, imageTestByteLimit, errImageDisconnected, imageDrop{})
+	f.s.unregisterPeer(old)
+	f.refused(t, replacement, t.Context(), newer, 1, errImageAssignmentCurrent)
+	requireImageTake(t, used, t.Context(), 1, expectedImageQuery(1, 1), errImageDisconnected, "recorded old end after repeated exit")
+	req := f.lockRequester()
+	detached := old.imageSession.lastID == 0
+	req.mu.Unlock()
+	require(t, detached, "old session still owns its allocator")
+	f.peers[0] = nil
+	return weak.Make(old)
+}
+
+func testImageExitBeforeCapture(t *testing.T) {
+	f := newImageTestFixture(t, 1)
+	p := f.peers[0]
+	release := sync.OnceFunc(f.s.lockPeerQuotaKey(p.daQuotaIdentity))
+	defer release()
+	done := make(chan struct{})
+	go func() { defer close(done); f.s.unregisterPeer(p) }()
+	waitForPeerQuotaLockRefs(t, f.s, p.daQuotaIdentity, 2)
+	reads := f.clock.readCount()
+	f.requireRoundRefused(t, t.Context(), f.config(imageTestLimits(), 0), errImageSourceSet, "first capture during exit cleanup")
+	config := imageProbeConfig(f, f.clock.add(0), imageTestLimits(), 0)
+	checkImageProbeBegin(t, f, t.Context(), config, errImageSourceSet)
+	requireEqual(t, f.clock.readCount(), reads, "clock reads for retired source constructors")
+	req := f.lockRequester()
+	created := p.imageSession != nil || len(req.sessions) != 0
+	req.mu.Unlock()
+	require(t, !created, "retired source acquired a registration identity")
+	release()
+	requireChannelClosed(t, done, "peer cleanup")
+}
+
+func imageProbeConfig(f *imageTestFixture, base time.Time, limits ImageLimits, sessions ...int) ImageProbeRoundConfig {
+	config := f.config(limits, sessions...)
+	return ImageProbeRoundConfig{
+		Anchor: config.Anchor, SourceIDs: config.SourceIDs, Limits: limits,
+		BodyAdmissionTime: base, BodyRD: base.Add(100 * time.Second),
+	}
+}
+
+func checkImageProbeBegin(t *testing.T, f *imageTestFixture, ctx context.Context, config ImageProbeRoundConfig, want error) *ImageRound {
+	t.Helper()
+	got := callWithin(t, "BeginImageProbeRound", func() imageBegin {
+		round, err := f.s.BeginImageProbeRound(ctx, config)
+		return imageBegin{round: round, err: err}
+	})
+	requireEqual(t, got.err, want, "probe round constructor error")
+	requireEqual(t, got.round != nil, want == nil, "probe constructor result presence")
+	return got.round
+}
+
+func launchImageProbe(round *ImageRound, ctx context.Context, source string, start byte, limit uint32, hash [32]byte) <-chan imageResult {
+	done := make(chan imageResult, 1)
+	go func() {
+		q, err := round.Probe(ctx, source, imageStart(start), limit, hash)
+		done <- imageResult{q: q, err: err}
+	}()
+	return done
+}
+
+func checkImageProbe(t *testing.T, round *ImageRound, ctx context.Context, source string, start byte, limit uint32, hash [32]byte, q consensus.UTXOImageQuery, want error) {
+	t.Helper()
+	got := awaitImageResult(t, launchImageProbe(round, ctx, source, start, limit, hash), "Probe")
+	requireQueryResult(t, got, q, want, "probe result")
+}
+
+func requireProbeRefusal(t *testing.T, f *imageTestFixture, round *ImageRound, source int, start byte, limit uint32, want error) {
+	t.Helper()
+	before := f.snapshot(round, source)
+	checkImageProbe(t, round, t.Context(), f.ids[source], start, limit, [32]byte{}, consensus.UTXOImageQuery{}, want)
+	requireEqual(t, f.snapshot(round, source), before, "probe refusal effects")
+}
+
+func testImageProbeDeadlines(t *testing.T) {
+	t.Run("attempt starts date their own deadlines", testImageProbeOwnStarts)
+	t.Run("capped deadline stays current at RD", testImageProbeCappedDeadline)
+	t.Run("request count stays spent", func(t *testing.T) { testImageProbeWindow(t, false) })
+	t.Run("distinct starts stay spent", func(t *testing.T) { testImageProbeWindow(t, true) })
+	t.Run("body hash does not enter the query", testImageProbeHashOutsideQuery)
+}
+
+func testImageProbeOwnStarts(t *testing.T) {
+	f := newImageTestFixture(t, 2)
+	base := f.clock.add(0)
+	config := imageProbeConfig(f, base, imageTestLimits(), 0)
+	before := f.clock.readCount()
+	probe := checkImageProbeBegin(t, f, t.Context(), config, nil)
+	requireEqual(t, f.clock.readCount(), before, "clock reads by probe constructor")
+	other := f.round(t, imageTestLimits(80*time.Second), 1)
+	q1, q2 := expectedImageQuery(1, 1), expectedImageQuery(2, 2)
+	f.clock.set(base.Add(5 * time.Second))
+	hash1, hash2 := [32]byte{}, [32]byte{0x73, 31: 0x9a}
+	checkImageProbe(t, probe, t.Context(), f.ids[0], 1, imageTestByteLimit, hash1, q1, nil)
+	first := f.instance(1)
+	f.clock.set(base.Add(15 * time.Second))
+	f.refused(t, other, t.Context(), 1, 1, errImageAssignmentCurrent)
+	f.clock.add(time.Second)
+	requireImageTake(t, probe, t.Context(), 1, q1, errImageExpired, "first attempt after its D")
+	f.admitted(t, other, t.Context(), 1, 1, 1)
+	f.clock.set(base.Add(20 * time.Second))
+	checkImageProbe(t, probe, t.Context(), f.ids[0], 2, imageTestByteLimit, hash2, q2, nil)
+	f.clock.set(base.Add(25 * time.Second))
+	f.refused(t, other, t.Context(), 1, 2, errImageAssignmentCurrent)
+	f.clock.set(base.Add(30 * time.Second))
+	f.refused(t, other, t.Context(), 1, 2, errImageAssignmentCurrent)
+	second := f.instance(2)
+	require(t, first.round.probe && second.round.probe, "admitted assignments lost probe mode")
+	requireEqual(t, first.expectedBodyHash, hash1, "first admitted hash after second probe")
+	requireEqual(t, second.expectedBodyHash, hash2, "second admitted hash")
+	f.clock.add(time.Second)
+	requireImageTake(t, probe, t.Context(), 2, q2, errImageExpired, "second attempt after its D")
+	f.requireFrames(t, 0, "probe wire tuples", q1, q2)
+}
+
+func testImageProbeCappedDeadline(t *testing.T) {
+	f := newImageTestFixture(t, 2)
+	base := f.clock.add(0)
+	config := imageProbeConfig(f, base, imageTestLimits(), 0)
+	config.BodyRD = base.Add(9 * time.Second)
+	probe := checkImageProbeBegin(t, f, t.Context(), config, nil)
+	other := f.round(t, imageTestLimits(), 1)
+	f.clock.add(5 * time.Second)
+	q := expectedImageQuery(1, 1)
+	checkImageProbe(t, probe, t.Context(), f.ids[0], 1, imageTestByteLimit, [32]byte{}, q, nil)
+	f.clock.set(config.BodyRD)
+	f.refused(t, other, t.Context(), 1, 1, errImageAssignmentCurrent)
+	f.clock.add(time.Nanosecond)
+	requireImageTake(t, probe, t.Context(), 1, q, errImageExpired, "one tick after capped deadline")
+	f.admitted(t, other, t.Context(), 1, 1, 1)
+	requireProbeRefusal(t, f, probe, 0, 2, imageTestByteLimit, errImageRoundDeadline)
+}
+
+func testImageProbeWindow(t *testing.T, distinct bool) {
+	f := newImageTestFixture(t, 1)
+	base := f.clock.add(0)
+	limits := imageTestLimits()
+	if distinct {
+		limits.Global.DistinctStarts = 2
+	} else {
+		limits.Global.AdmittedRequests = 2
+	}
+	probe := checkImageProbeBegin(t, f, t.Context(), imageProbeConfig(f, base, limits, 0), nil)
+	for i := byte(1); i <= 2; i++ {
+		q := expectedImageQuery(uint64(i), i)
+		checkImageProbe(t, probe, t.Context(), f.ids[0], i, imageTestByteLimit, [32]byte{i}, q, nil)
+		f.clock.add(10*time.Second + 1)
+		requireImageTake(t, probe, t.Context(), i, q, errImageExpired, "spent attempt")
+	}
+	requireProbeRefusal(t, f, probe, 0, 3, imageTestByteLimit, errImageLimit)
+	ordinary := f.round(t, imageTestLimits(), 0)
+	inst := f.admitted(t, ordinary, t.Context(), 0, 3, 3)
+	require(t, !inst.round.probe && inst.expectedBodyHash == [32]byte{}, "ordinary assignment has a probe binding")
+}
+
+func testImageProbeHashOutsideQuery(t *testing.T) {
+	for _, hash := range [][32]byte{{}, {0xff, 31: 0xbe}} {
+		f := newImageTestFixture(t, 1)
+		probe := checkImageProbeBegin(t, f, t.Context(), imageProbeConfig(f, f.clock.add(0), imageTestLimits(), 0), nil)
+		q := expectedImageQuery(1, 8)
+		checkImageProbe(t, probe, t.Context(), f.ids[0], 8, imageTestByteLimit, hash, q, nil)
+		f.requireFrames(t, 0, "query independent of the body hash", q)
+		requireEqual(t, f.instance(8).expectedBodyHash, hash, "exact instance hash")
+	}
+}
+
+type imageProbeBeginCase struct {
+	name   string
+	want   error
+	mutate func(*ImageProbeRoundConfig)
+}
+
+func testImageProbeConstructor(t *testing.T) {
+	f := newImageTestFixture(t, 2)
+	base := f.clock.add(0)
+	for _, tc := range imageProbeBeginCases(f) {
+		t.Run(tc.name, func(t *testing.T) {
+			config := imageProbeConfig(f, base, imageTestLimits(), 0, 1)
+			tc.mutate(&config)
+			ctx := t.Context()
+			if tc.want == errImageNilContext {
+				ctx = nil
+			}
+			checkImageProbeBegin(t, f, ctx, config, tc.want)
+		})
+	}
+	checkImageProbeUnitRefusals(t, f, base)
+	probe := checkImageProbeBegin(t, f, t.Context(), imageProbeConfig(f, base, imageTestLimits(), 0), nil)
+	checkImageProbe(t, probe, t.Context(), f.ids[0], 1, imageTestByteLimit, [32]byte{}, expectedImageQuery(1, 1), nil)
+	t.Run("clock pairs", testImageProbeClockPairs)
+}
+
+func imageProbeBeginCases(f *imageTestFixture) []imageProbeBeginCase {
+	return []imageProbeBeginCase{
+		{"nil context before height", errImageNilContext, func(c *ImageProbeRoundConfig) { c.Anchor.Height = 0x100000000 }},
+		{"height before limits", errImageRequestDomain, func(c *ImageProbeRoundConfig) { c.Anchor.Height, c.Limits.Backoff = 0x100000000, 0 }},
+		{"zero attempt lifetime", errImagePolicy, func(c *ImageProbeRoundConfig) { c.Limits.AttemptLifetime = 0 }},
+		{"negative attempt lifetime", errImagePolicy, func(c *ImageProbeRoundConfig) { c.Limits.AttemptLifetime = -1 }},
+		{"zero round lifetime", errImagePolicy, func(c *ImageProbeRoundConfig) { c.Limits.RoundLifetime = 0 }},
+		{"negative round lifetime", errImagePolicy, func(c *ImageProbeRoundConfig) { c.Limits.RoundLifetime = -1 }},
+		{"zero backoff before sources", errImagePolicy, func(c *ImageProbeRoundConfig) { c.Limits.Backoff, c.SourceIDs = 0, nil }},
+		{"negative backoff", errImagePolicy, func(c *ImageProbeRoundConfig) { c.Limits.Backoff = -1 }},
+		{"admission after deadline", errImagePolicy, func(c *ImageProbeRoundConfig) { c.BodyRD = c.BodyAdmissionTime.Add(-1) }},
+		{"monotonic admission and wall deadline", errImagePolicy, func(c *ImageProbeRoundConfig) {
+			c.BodyAdmissionTime = time.Now()
+			c.BodyRD = c.BodyAdmissionTime.Round(0).Add(time.Hour)
+		}},
+		{"wall admission and monotonic deadline", errImagePolicy, func(c *ImageProbeRoundConfig) {
+			c.BodyRD = time.Now().Add(time.Hour)
+			c.BodyAdmissionTime = c.BodyRD.Round(0).Add(-time.Hour)
+		}},
+		{"nil sources", errImageSourceSet, func(c *ImageProbeRoundConfig) { c.SourceIDs = nil }},
+		{"empty sources", errImageSourceSet, func(c *ImageProbeRoundConfig) { c.SourceIDs = []string{} }},
+		{"unknown source", errImageSourceSet, func(c *ImageProbeRoundConfig) { c.SourceIDs = []string{f.ids[0], "absent:9"} }},
+		{"duplicate source", errImageSourceSet, func(c *ImageProbeRoundConfig) { c.SourceIDs = []string{f.ids[0], f.ids[0]} }},
+		{"logical name and alias", errImageSourceSet, func(c *ImageProbeRoundConfig) { c.SourceIDs = []string{f.ids[0], "192.0.2.40:9"} }},
+	}
+}
+
+func checkImageProbeUnitRefusals(t *testing.T, f *imageTestFixture, base time.Time) {
+	t.Helper()
+	fields := reflect.TypeFor[ImageUnits]()
+	for i := range fields.NumField() {
+		for _, side := range []string{"per peer", "global"} {
+			t.Run("zero "+side+" "+fields.Field(i).Name, func(t *testing.T) {
+				config := imageProbeConfig(f, base, imageTestLimits(), 0)
+				units := &config.Limits.PerPeer
+				if side == "global" {
+					units = &config.Limits.Global
+				}
+				reflect.ValueOf(units).Elem().Field(i).SetUint(0)
+				checkImageProbeBegin(t, f, t.Context(), config, errImagePolicy)
+			})
+		}
+	}
+}
+
+func testImageProbeClockPairs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		now  time.Time
+	}{{"wall pair", time.Unix(1_800_000_000, 0)}, {"monotonic pair", time.Now()}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newImageTestFixtureAt(t, 1, tc.now)
+			config := imageProbeConfig(f, tc.now, imageTestLimits(), 0)
+			equal := config
+			equal.BodyRD = equal.BodyAdmissionTime
+			probe := checkImageProbeBegin(t, f, t.Context(), equal, nil)
+			requireProbeRefusal(t, f, probe, 0, 1, imageTestByteLimit, errImageRoundDeadline)
+			f.clock.add(1)
+			requireProbeRefusal(t, f, probe, 0, 1, imageTestByteLimit, errImageRoundDeadline)
+			done, cancel := context.WithCancel(t.Context())
+			cancel()
+			canceled := checkImageProbeBegin(t, f, done, config, nil)
+			checkImageProbe(t, canceled, t.Context(), f.ids[0], 1, imageTestByteLimit, [32]byte{}, consensus.UTXOImageQuery{}, context.Canceled)
+			valid := checkImageProbeBegin(t, f, t.Context(), config, nil)
+			checkImageProbe(t, valid, t.Context(), f.ids[0], 1, imageTestByteLimit, [32]byte{}, expectedImageQuery(1, 1), nil)
+		})
+	}
+}
+
+func testImageProbeEntryRefusals(t *testing.T) {
+	t.Run("mode and wire domain", testImageProbeModeAndDomain)
+	t.Run("start clock domain", testImageProbeSampleDomain)
+	t.Run("inexact sum before the cutoff", testImageProbeInexactDeadline)
+	t.Run("unit refusal before exhausted ID", testImageProbeUnitsBeforeID)
+}
+
+func testImageProbeModeAndDomain(t *testing.T) {
+	f, ordinary := newImageRound(t, 2, 0)
+	base := f.clock.add(0)
+	limits := imageTestLimits()
+	limits.Global.AdmittedRequests = 2
+	probe := checkImageProbeBegin(t, f, t.Context(), imageProbeConfig(f, base, limits, 0, 1), nil)
+	for _, limit := range []uint32{imageTestByteLimit, 150904} {
+		requireProbeRefusal(t, f, ordinary, 0, 1, limit, errImageRoundMode)
+		f.refusedDropping(t, probe, t.Context(), f.ids[0], 0, 1, limit, errImageRoundMode, imageDrop{})
+	}
+	for _, limit := range []uint32{150904, 2097153} {
+		requireProbeRefusal(t, f, probe, 0, 1, limit, errImageRequestDomain)
+	}
+	q1, q2 := expectedImageQuery(1, 1), expectedImageQuery(2, 2)
+	q1.ByteLimit, q2.ByteLimit = 150905, 2097152
+	checkImageProbe(t, probe, t.Context(), f.ids[0], 1, q1.ByteLimit, [32]byte{}, q1, nil)
+	checkImageProbe(t, probe, t.Context(), f.ids[0], 2, q2.ByteLimit, [32]byte{}, q2, nil)
+	requireProbeRefusal(t, f, probe, 1, 3, imageTestByteLimit, errImageLimit)
+	f.requireFrames(t, 0, "wire-domain boundaries", q1, q2)
+}
+
+func testImageProbeSampleDomain(t *testing.T) {
+	base := time.Now()
+	f := newImageTestFixtureAt(t, 1, base.Round(0))
+	config := imageProbeConfig(f, base, imageTestLimits(), 0)
+	config.Limits.Global.AdmittedRequests = 1
+	probe := checkImageProbeBegin(t, f, t.Context(), config, nil)
+	requireProbeRefusal(t, f, probe, 0, 1, imageTestByteLimit, errImagePolicy)
+	f.clock.set(base)
+	checkImageProbe(t, probe, t.Context(), f.ids[0], 1, imageTestByteLimit, [32]byte{}, expectedImageQuery(1, 1), nil)
+	requireProbeRefusal(t, f, probe, 0, 2, imageTestByteLimit, errImageLimit)
+}
+
+func testImageProbeInexactDeadline(t *testing.T) {
+	base := time.Now()
+	f := newImageTestFixtureAt(t, 1, base)
+	config := imageProbeConfig(f, base, imageTestLimits(time.Duration(math.MaxInt64)), 0)
+	probe := checkImageProbeBegin(t, f, t.Context(), config, nil)
+	requireProbeRefusal(t, f, probe, 0, 1, imageTestByteLimit, errImagePolicy)
+	f.clock.add(time.Nanosecond)
+	requireProbeRefusal(t, f, probe, 0, 1, imageTestByteLimit, errImagePolicy)
+	config.Limits.AttemptLifetime = 10 * time.Second
+	valid := checkImageProbeBegin(t, f, t.Context(), config, nil)
+	checkImageProbe(t, valid, t.Context(), f.ids[0], 1, imageTestByteLimit, [32]byte{}, expectedImageQuery(1, 1), nil)
+}
+
+func testImageProbeUnitsBeforeID(t *testing.T) {
+	f := newImageTestFixture(t, 2)
+	base := f.clock.add(0)
+	limits := imageTestLimits()
+	limits.PerPeer.AdmittedRequests = 1
+	limits.Global.AdmittedRequests = 2
+	probe := checkImageProbeBegin(t, f, t.Context(), imageProbeConfig(f, base, limits, 0, 1), nil)
+	ctx := newImageHookCtx()
+	checkImageProbe(t, probe, ctx, f.ids[0], 1, imageTestByteLimit, [32]byte{}, expectedImageQuery(1, 1), nil)
+	ctx.endAndRun(errImageRequestEnd)
+	f.setLastID(0, math.MaxUint64)
+	requireProbeRefusal(t, f, probe, 0, 2, imageTestByteLimit, errImageLimit)
+	fresh := checkImageProbeBegin(t, f, t.Context(), imageProbeConfig(f, base, limits, 0), nil)
+	requireProbeRefusal(t, f, fresh, 0, 2, imageTestByteLimit, errImageIDExhausted)
+	checkImageProbe(t, probe, t.Context(), f.ids[1], 2, imageTestByteLimit, [32]byte{}, expectedImageQuery(1, 2), nil)
+}
+
+func testImageTerminalEntryPriority(t *testing.T) {
+	t.Run("closed round and contexts", testImageClosedRoundEntryPriority)
+	t.Run("retired and unlisted source", testImageSourceEntryPriority)
+}
+
+func testImageClosedRoundEntryPriority(t *testing.T) {
+	f := newImageTestFixture(t, 1)
+	ctx, owner := newImageHookCtx(), newImageHookCtx()
+	round := f.roundCtx(t, owner, imageTestLimits(), 0)
+	round.Close()
+	owner.end(errImageRoundEnd)
+	ctx.end(errImageRequestEnd)
+	for _, tc := range []struct {
+		ctx  context.Context
+		want error
+	}{{nil, errImageNilContext}, {ctx, errImageRequestEnd}, {t.Context(), errImageRoundEnd}} {
+		f.refusedDropping(t, round, tc.ctx, "unknown:1", 0, 1, 150904, tc.want, imageDrop{})
+		checkImageProbe(t, round, tc.ctx, "unknown:1", 1, 150904, [32]byte{}, consensus.UTXOImageQuery{}, tc.want)
+	}
+	requireImageAbsent(t, round, nil, 1, errImageNilContext)
+	requireImageAbsent(t, round, ctx, 1, errImageRoundClosed)
+	live := f.round(t, imageTestLimits(), 0)
+	live.Close()
+	f.refusedDropping(t, live, t.Context(), "unknown:1", 0, 1, 150904, errImageRoundClosed, imageDrop{})
+	checkImageProbe(t, live, t.Context(), "unknown:1", 1, 150904, [32]byte{}, consensus.UTXOImageQuery{}, errImageRoundClosed)
+	next := f.round(t, imageTestLimits(), 0)
+	f.admitted(t, next, t.Context(), 0, 1, 1)
+}
+
+func testImageSourceEntryPriority(t *testing.T) {
+	f, ordinary := newImageRound(t, 2, 0, 1)
+	probe := checkImageProbeBegin(t, f, t.Context(), imageProbeConfig(f, f.clock.add(0), imageTestLimits(), 0, 1), nil)
+	f.s.unregisterPeer(f.peers[0])
+	requireProbeRefusal(t, f, ordinary, 0, 1, 150904, errImageDisconnected)
+	f.refusedDropping(t, probe, t.Context(), f.ids[0], 0, 1, 150904, errImageDisconnected, imageDrop{})
+	checkImageProbe(t, probe, t.Context(), "192.0.2.41:9", 1, 150904, [32]byte{}, consensus.UTXOImageQuery{}, errImageUnknownSource)
+	f.refusedDropping(t, ordinary, t.Context(), "192.0.2.41:9", 1, 1, 150904, errImageUnknownSource, imageDrop{})
+	checkImageProbe(t, probe, t.Context(), f.ids[1], 1, imageTestByteLimit, [32]byte{}, expectedImageQuery(1, 1), nil)
+}
+
+func testImageProbeDrain(t *testing.T) {
+	t.Run("draining beats the held sample", testImageProbeDrainAtSample)
+	t.Run("open sample wins before draining", testImageProbeDrainAfterSample)
+}
+
+func testImageProbeDrainAtSample(t *testing.T) {
+	f := newImageTestFixture(t, 1)
+	config := imageProbeConfig(f, f.clock.add(0), imageTestLimits(), 0)
+	probe := checkImageProbeBegin(t, f, t.Context(), config, nil)
+	entered, release := f.blockNextRead(func(now time.Time) time.Time { return now }, func() {})
+	send := launchImageProbe(probe, t.Context(), f.ids[0], 1, imageTestByteLimit, [32]byte{0x42})
+	closed := f.closeWhileReadHeld(t, entered, release)
+	requireQueryResult(t, awaitImageResult(t, send, "probe stopped by drain"), consensus.UTXOImageQuery{}, errServiceClosed, "probe stopped by drain")
+	requireReturned(t, closed, "Close")
+	requireEqual(t, f.owners(probe, 0), imageOwners{}, "drain-won admission effects")
+	f.requireFrames(t, 0, "drain-won probe")
+	config.Anchor.Height, config.Limits.Backoff, config.SourceIDs = math.MaxUint64, 0, nil
+	checkImageProbeBegin(t, f, nil, config, errServiceClosed)
+	checkImageProbe(t, probe, nil, "unknown:9", 1, 150904, [32]byte{}, consensus.UTXOImageQuery{}, errServiceClosed)
+	fresh := newImageTestFixture(t, 1)
+	valid := checkImageProbeBegin(t, fresh, t.Context(), imageProbeConfig(fresh, fresh.clock.add(0), imageTestLimits(), 0), nil)
+	checkImageProbe(t, valid, t.Context(), fresh.ids[0], 1, imageTestByteLimit, [32]byte{0x42}, expectedImageQuery(1, 1), nil)
+}
+
+func testImageProbeDrainAfterSample(t *testing.T) {
+	f := newImageTestFixture(t, 1)
+	probe := checkImageProbeBegin(t, f, t.Context(), imageProbeConfig(f, f.clock.add(0), imageTestLimits(), 0), nil)
+	ctx, entered, gate := newImageHookCtx(), make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	defer release()
+	ctx.onSecondErr = func() { close(entered); <-gate }
+	send := launchImageProbe(probe, ctx, f.ids[0], 1, imageTestByteLimit, [32]byte{0x42})
+	requireChannelClosed(t, entered, "probe operation context recheck after OPEN")
+	closed := lifecycleClose(f.s)
+	requireChannelClosed(t, f.conns[0].closed, "connection close during probe drain")
+	requireStillBlocked(t, closed, "Close while probe admission is held")
+	release()
+	requireImageResult(t, awaitImageResult(t, send, "probe authorized before drain"), 1, 1, net.ErrClosed, "probe authorized before drain")
+	requireReturned(t, closed, "Close after probe")
+	f.requireOwners(t, probe, 0, imageJoinedOwners(imageOneInstance(0)), "admitted work at Close return")
+	attempted, _ := f.conns[0].snapshot()
+	requireEqual(t, len(attempted), wireHeaderSize, "actual write attempted after OPEN admission")
+	f.requireFault(t, 0, 2, net.ErrClosed.Error(), "transport error remains visible")
+}
+
+func testImageProbeBeforeWrite(t *testing.T) {
+	t.Run("RD reached under writeMu", testImageProbeWriteAtRD)
+	for _, tc := range []struct {
+		name string
+		at   time.Duration
+		rd   time.Duration
+		want error
+	}{{"one tick after D", 10*time.Second + 1, 100 * time.Second, errImageExpired}, {"at RD", 5 * time.Second, 5 * time.Second, errImageRoundDeadline}} {
+		t.Run(tc.name, inImageBubble(func(t *testing.T) {
+			f := newImageTestFixture(t, 1)
+			base := f.clock.add(0)
+			config := imageProbeConfig(f, base, imageTestLimits(), 0)
+			config.BodyRD = base.Add(tc.rd)
+			probe := checkImageProbeBegin(t, f, t.Context(), config, nil)
+			release := f.holdWrite(t, 0)
+			pending := launchImageProbe(probe, t.Context(), f.ids[0], 1, imageTestByteLimit, [32]byte{})
+			synctest.Wait()
+			f.waitAdmitted(t, 0, 1, "probe waiting for writeMu")
+			f.clock.set(base.Add(tc.at))
+			requireImageResult(t, awaitImageResult(t, pending, "probe presend refusal"), 1, 1, tc.want, "probe presend refusal")
+			requireImageAbsent(t, probe, t.Context(), 1, errImageNoAssignment)
+			must(t, release(), "holder write")
+			f.requireFrames(t, 0, "presend refusal")
+			f.requireUsage(t, probe, 0, imageUsage(0, 1, 1, 1, 0), imageUsage(0, 1, 1, 1, 0), "consumed probe units")
+		}))
+	}
+}
+
+func testImageProbeWriteAtRD(t *testing.T) {
+	f := newImageTestFixture(t, 1)
+	base := f.clock.add(0)
+	config := imageProbeConfig(f, base, imageTestLimits(), 0)
+	config.BodyRD = base.Add(5 * time.Second)
+	probe := checkImageProbeBegin(t, f, t.Context(), config, nil)
+	f.clock.onReadFrom(".(*ImageRound).endBeforeWrite", func(time.Time) time.Time { return config.BodyRD })
+	got := awaitImageResult(t, launchImageProbe(probe, t.Context(), f.ids[0], 1, imageTestByteLimit, [32]byte{}), "probe checked under writeMu")
+	f.requireFrames(t, 0, "frames at the exclusive send cutoff")
+	requireImageResult(t, got, 1, 1, errImageRoundDeadline, "probe checked under writeMu")
+}

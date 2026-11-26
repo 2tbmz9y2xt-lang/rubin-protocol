@@ -417,6 +417,12 @@ func imageOneInstance(current int) imageOwners {
 	return imageOwners{ids: 1, current: current, idKeys: 1, peerKeys: 1, peerKey: true, perPeer: usage, global: usage, attempted: 1, starts: 1}
 }
 
+func imageJoinedOwners(owners imageOwners) imageOwners {
+	owners.ids, owners.idKeys, owners.current = 0, 0, 0
+	owners.perPeer[unitCurrentAssignments], owners.global[unitCurrentAssignments] = 0, 0
+	return owners
+}
+
 func (f *imageTestFixture) lockRequester() *imageRequester {
 	f.t.Helper()
 	req := f.s.imageRequester
@@ -455,12 +461,15 @@ func (f *imageTestFixture) requireFaultsKept(t *testing.T, want []imageFault, la
 func (f *imageTestFixture) owners(round *ImageRound, session int) imageOwners {
 	req := f.lockRequester()
 	defer req.mu.Unlock()
-	owners := imageOwners{current: len(req.current), idKeys: len(req.lastID)}
-	for _, id := range req.lastID {
-		owners.ids += id
+	owners := imageOwners{current: len(req.current)}
+	for key := range req.sessions {
+		if key.lastID != 0 {
+			owners.idKeys++
+			owners.ids += key.lastID
+		}
 	}
 	if round != nil {
-		usage, peerKey := round.perPeer[f.peers[session]]
+		usage, peerKey := round.perPeer[f.peers[session].imageSession]
 		owners.perPeer, owners.peerKey = *cmp.Or(usage, &imageUnitVector{}), peerKey
 		owners.global, owners.attempted, owners.starts, owners.peerKeys = round.global, len(round.attempted), len(round.starts), len(round.perPeer)
 	}
@@ -508,12 +517,15 @@ func (f *imageTestFixture) refused(t *testing.T, round *ImageRound, ctx context.
 func (f *imageTestFixture) lastID(session int) uint64 {
 	req := f.lockRequester()
 	defer req.mu.Unlock()
-	return req.lastID[f.peers[session]]
+	if key := f.peers[session].imageSession; key != nil {
+		return key.lastID
+	}
+	return 0
 }
 
 func (f *imageTestFixture) setLastID(session int, id uint64) {
 	req := f.lockRequester()
-	req.lastID[f.peers[session]] = id
+	f.peers[session].imageSession.lastID = id
 	req.mu.Unlock()
 }
 
@@ -680,8 +692,8 @@ func testImageIDsIncrease(t *testing.T) {
 
 func testImageIDMaximum(t *testing.T) {
 	f := newImageTestFixture(t, 2)
-	f.setLastID(0, 18446744073709551614)
 	round := f.round(t, imageTestLimits(), 0, 1)
+	f.setLastID(0, 18446744073709551614)
 	f.admitted(t, round, context.Background(), 0, 1, 18446744073709551615)
 	f.requireFrames(t, 0, "maximum id", expectedImageQuery(18446744073709551615, 1))
 	f.refused(t, round, context.Background(), 0, 2, errImageIDExhausted)
@@ -876,8 +888,8 @@ func testImagePendingAtMaximum(t *testing.T) {
 		f, limits := newImageTestFixture(t, 1), imageTestLimits()
 		map[bool]*ImageUnits{false: &limits.PerPeer, true: &limits.Global}[global].PendingNetworkBytes = math.MaxUint64
 		round := f.round(t, limits, 0)
-		round.perPeer[f.peers[0]] = &imageUnitVector{}
-		used := map[bool]*imageUnitVector{false: round.perPeer[f.peers[0]], true: &round.global}[global]
+		round.perPeer[f.peers[0].imageSession] = &imageUnitVector{}
+		used := map[bool]*imageUnitVector{false: round.perPeer[f.peers[0].imageSession], true: &round.global}[global]
 		used[unitPendingNetworkBytes] = math.MaxUint64 - 119
 		f.refused(t, round, context.Background(), 0, 1, errImageLimit)
 		used[unitPendingNetworkBytes] = math.MaxUint64 - 120
@@ -1276,7 +1288,7 @@ func testImageRequestRetiresEnded(t *testing.T) {
 		f.requireEnd(t, inst, errImageExpired, "after cancellation")
 		f.refused(t, round, context.Background(), 0, 0x81, errImageAssignmentCurrent)
 		replacement := f.instance(0x81)
-		require(t, replacement != nil && replacement.session == f.peers[1], "replacement not current")
+		require(t, replacement != nil && replacement.session == f.peers[1].imageSession, "replacement not current")
 		f.admitted(t, round, context.Background(), 0, 0x83, 3)
 		requireEqual(t, f.lastID(1), uint64(1), "replacement session last id")
 	}))
@@ -1390,10 +1402,11 @@ func testImageClosedRefusalRetiresNothing(t *testing.T) {
 		b.endRequest()
 		b.expire()
 		retired, reads, now, owners, end := b.state()
-		require(t, !retired && end == nil && b.inst.ctx.Err() != nil && now.After(b.inst.deadline) && owners == imageOneInstance(1), "before the request: retired=%v end=%v ctx err=%v now %v D %v owner state %+v, want the ended instance unretired", retired, end, b.inst.ctx.Err(), now, b.inst.deadline, owners)
+		want := imageJoinedOwners(imageOneInstance(1))
+		require(t, retired && end == errServiceClosed && b.inst.ctx.Err() != nil && now.After(b.inst.deadline) && owners == want, "before the request: retired=%v end=%v ctx err=%v now %v D %v owner state %+v, want the instance detached", retired, end, b.inst.ctx.Err(), now, b.inst.deadline, owners)
 		b.f.refused(t, b.round, context.Background(), 0, 2, errServiceClosed)
 		retired, after, _, owners, end := b.state()
-		require(t, !retired && end == nil && after == reads && owners == imageOneInstance(1) && b.f.instance(1) == b.inst, "after the refusal: retired=%v end=%v clock reads %d->%d owner state %+v, want the ended instance unretired and the clock unread", retired, end, reads, after, owners)
+		require(t, retired && end == errServiceClosed && after == reads && owners == want && b.f.instance(1) == nil, "after the refusal: retired=%v end=%v clock reads %d->%d owner state %+v, want the instance detached and the clock unread", retired, end, reads, after, owners)
 	})
 }
 
@@ -1486,7 +1499,7 @@ func testImageEndDuringWrite(t *testing.T) {
 				requireImageResult(t, f.request(round, context.Background(), 1, 1), 1, 1, nil, "replacement during the write")
 			}
 			sibling := f.instance(1)
-			require(t, sibling != nil && sibling.session == f.peers[1], "replacement is not current on session 1")
+			require(t, sibling != nil && sibling.session == f.peers[1].imageSession, "replacement is not current on session 1")
 			f.requireOwners(t, round, 0, imageOwners{
 				ids: 2, current: 1, idKeys: 2, peerKeys: 2, peerKey: true, attempted: 2, starts: 1,
 				perPeer: imageUsage(0, 1, 1, 1, 120), global: imageUsage(1, 1, 2, 2, 120),
@@ -1782,11 +1795,11 @@ func testImageCallbackOrTimerAfterClose(t *testing.T) {
 				_, reads, _, _, _ := b.state()
 				tc.trigger(b)
 				retired, after, now, owners, end := b.state()
-				require(t, !retired && end == nil && after == reads && now.Equal(b.t0) && owners == imageOneInstance(1) && b.f.instance(1) == b.inst, "callback or timer after close: retired=%v end=%v clock reads %d->%d now %v owner state %+v, want the instance current at %v and no clock read", retired, end, reads, after, now, owners, b.t0)
+				require(t, retired && end == errServiceClosed && after == reads && now.Equal(b.t0) && owners == imageJoinedOwners(imageOneInstance(1)) && b.f.instance(1) == nil, "callback or timer after close: retired=%v end=%v clock reads %d->%d now %v owner state %+v, want a detached instance at %v with no clock read", retired, end, reads, after, now, owners, b.t0)
 				req := b.f.lockRequester()
 				stopped := tc.stop(b.inst)
 				req.mu.Unlock()
-				require(t, !stopped, "callback or timer after close: its stop handle stopped it, want it started before")
+				require(t, !stopped, "callback or timer after close: stop handle reported active work")
 			})
 		})
 	}
@@ -2069,7 +2082,7 @@ func testImageStaleCallback(t *testing.T, roundCtx bool) {
 	require(t, f.clock.readCount() == reads+2 && c.applierErrs == 0, "stale callback: clock reads %d->%d, its ctx Err calls %d, want only the replacement's 2 reads and none", reads, f.clock.readCount(), c.applierErrs)
 	f.refused(t, next, context.Background(), 2, 1, errImageAssignmentCurrent)
 	replacement := f.instance(1)
-	require(t, replacement != nil && replacement != stale && replacement.session == f.peers[1], "current instance after the stale callback: %p, want the replacement on session 1", replacement)
+	require(t, replacement != nil && replacement != stale && replacement.session == f.peers[1].imageSession, "current instance after the stale callback: %p, want the replacement on session 1", replacement)
 	retired, replacementEnd := f.ended(replacement)
 	_, end := f.ended(stale)
 	require(t, !retired && replacementEnd == nil, "replacement retired=%v end=%v, want current with no end", retired, replacementEnd)
@@ -2163,7 +2176,7 @@ func testImageSourceBound(t *testing.T) {
 		var shared bool
 		for capturedID, session := range round.sources {
 			requireEqual(t, capturedID, sourceID, "captured source id")
-			requireEqual(t, session, f.peers[0], "captured source session")
+			requireEqual(t, session, f.peers[0].imageSession, "captured source session")
 			shared = unsafe.StringData(capturedID) == unsafe.StringData(sourceID)
 		}
 		return weak.Make(unsafe.StringData(large)), round, shared
@@ -2406,7 +2419,7 @@ func testImageServiceClose(t *testing.T) {
 		requireQueryResult(t, drained, consensus.UTXOImageQuery{}, errServiceClosed, "request while Close drains")
 		requireEqual(t, imageBegin{drainedRound, err}, imageBegin{err: errServiceClosed}, "round while Close drains")
 		requireReturned(t, closed, "Close")
-		f.requireOwners(t, round, 0, imageOneInstance(0), "after the drained refusals at Close return")
+		f.requireOwners(t, round, 0, imageJoinedOwners(imageOneInstance(0)), "after the drained refusals at Close return")
 		f.requireEnd(t, inst, errImageExpired, "at Close return")
 		requireImageResult(t, awaitImageResult(t, pending, "parked request"), 1, 1, errImageExpired, "parked request")
 		_ = release()
@@ -2442,7 +2455,7 @@ func testImageServiceClose(t *testing.T) {
 		require(t, slices.Equal(got, want) && f.closes(0) == 2, "connection closes before Close returns=%+v count %d, want %+v and 2", got, f.closes(0), want)
 		release()
 		requireReturned(t, closed, "Close")
-		f.requireOwners(t, round, 0, imageOneInstance(0), "at Close return")
+		f.requireOwners(t, round, 0, imageJoinedOwners(imageOneInstance(0)), "at Close return")
 		f.requireFault(t, 0, 2, net.ErrClosed.Error(), "at Close return")
 		requireImageResult(t, awaitImageResult(t, pending, "failed write"), 1, 1, net.ErrClosed, "failed write")
 		f.requireFrames(t, 0, "failed write")
@@ -2491,8 +2504,9 @@ func testImageDrainAdmission(t *testing.T, canceled bool) {
 	requireQueryResult(t, awaitImageResult(t, pending, "drained admission"), consensus.UTXOImageQuery{}, errServiceClosed, "admission after Close started")
 	requireReturned(t, closed, "Close")
 	f.requireFaultsKept(t, []imageFault{{closes: 1}, {closes: 1}}, "drained admission")
-	f.requireCurrentAfterUnwind(t, round, first, [2]uint64{1, 1})
-	f.requireOwners(t, round, 1, refusing, "drained admission")
+	f.requireEnd(t, first, errServiceClosed, "terminal end after the drained refusal")
+	requireEqual(t, first.ref.Load(), (*imageInstance)(nil), "applier reference after Close")
+	f.requireOwners(t, round, 1, imageJoinedOwners(refusing), "drained admission")
 	f.requireFrames(t, 1, "drained admission")
 }
 
@@ -2512,7 +2526,7 @@ func testImageDrainAfterOpenRead(t *testing.T) {
 	release()
 	requireImageResult(t, awaitImageResult(t, pending, "admission held across Close"), 1, 1, net.ErrClosed, "admission held across Close")
 	requireReturned(t, closed, "Close")
-	f.requireOwners(t, round, 0, imageOneInstance(0), "at Close return")
+	f.requireOwners(t, round, 0, imageJoinedOwners(imageOneInstance(0)), "at Close return")
 	f.requireFault(t, 0, 2, net.ErrClosed.Error(), "at Close return")
 	attempted, _ := f.conns[0].snapshot()
 	require(t, len(attempted) == wireHeaderSize && len(f.wires[0].bytes()) == 0, "write attempts of %d bytes with %d accepted, want the %d header bytes and none", len(attempted), len(f.wires[0].bytes()), wireHeaderSize)
@@ -2642,7 +2656,7 @@ func (f *imageTestFixture) recordClosers(round *ImageRound, session int, inReque
 			p.stateMu.Unlock()
 			req := f.s.imageRequester
 			req.mu.Lock()
-			record.perPeer, record.global = *cmp.Or(round.perPeer[p], &imageUnitVector{}), round.global
+			record.perPeer, record.global = *cmp.Or(round.perPeer[p.imageSession], &imageUnitVector{}), round.global
 			req.mu.Unlock()
 		}
 		mu.Lock()

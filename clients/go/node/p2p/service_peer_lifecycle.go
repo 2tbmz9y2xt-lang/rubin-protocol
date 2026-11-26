@@ -132,6 +132,7 @@ func (s *Service) unregisterPeer(p *peer) {
 	if s == nil || p == nil {
 		return
 	}
+	s.retireImagePeer(p)
 	addr := p.addr()
 	// An empty daQuotaIdentity (no IP endpoint) never owned DA quota: no key lock, no lock row, no
 	// DA cleanup; ordinary removal still happens exactly once.

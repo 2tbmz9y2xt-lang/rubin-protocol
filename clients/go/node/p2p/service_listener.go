@@ -182,6 +182,9 @@ func (s *Service) Close() error {
 		return nil
 	}
 	s.closed.Store(true)
+	if s.imageRequester != nil {
+		close(s.imageRequester.drain)
+	}
 	closeDone := make(chan struct{})
 	s.closeDone = closeDone
 	s.lifecycleMu.Unlock()
@@ -210,6 +213,7 @@ func (s *Service) Close() error {
 		_ = current.conn.Close()
 	}
 	s.loopWG.Wait()
+	s.finishImageRequester()
 	s.cfg.PeerManager.Release()
 	return nil
 }
