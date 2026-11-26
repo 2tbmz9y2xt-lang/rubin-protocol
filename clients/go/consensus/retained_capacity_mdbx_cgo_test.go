@@ -1355,7 +1355,7 @@ func TestRetainedCapacityMDBXBodyWindow(t *testing.T) {
 				logicalMDBXAssert(t, len(prior.ExactConsensusError) == row.width && len(next.ExactConsensusError) == row.width && len(stored) == len(changed), "excluded tuple widths differ")
 			}
 			_, err = f.promiseV1()
-			logicalMDBXAssert(t, err == errRetainedFiniteAPIV1, "changed excluded tuple: %v", err)
+			logicalMDBXAssert(t, any(err) == any(errRetainedFiniteAPIV1), "changed excluded tuple: %v", err)
 		})
 	}
 }

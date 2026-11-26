@@ -129,7 +129,7 @@ func startupAlreadyVerified(t *testing.T, w *replayWorld) {
 
 func startupVerifiedError(t *testing.T, err error) {
 	t.Helper()
-	e, ok := err.(*mdbx.EngineError)
+	e, ok := any(err).(*mdbx.EngineError)
 	logicalMDBXAssert(t, ok && e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "canonical owner index is already verified" && e.Cause == nil && !e.ReopenRequired, "already verified refusal: %v", err)
 }
 
