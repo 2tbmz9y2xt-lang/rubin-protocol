@@ -610,7 +610,9 @@ func candidateDLive(t *testing.T) {
 				logicalMDBXAssert(t, err == nil, "D continuing hold: %v", err)
 			})
 			logicalMDBXAssert(t, err == nil && live == expected && counts.Gets >= tc.get && counts.Writes == 0, "D live at get %d: %d want %d, counts %+v/%v", tc.get, live, expected, counts, err)
-			candidateBindingIO(t, s.world, in, tc.get)
+			fault := newCandidateScene(t, 5)
+			logicalMDBXAssert(t, fault.parent == in.Selection.Parent, "binding fault parent differs from observed parent")
+			candidateBindingIO(t, fault.world, in, tc.get)
 		})
 	}
 }

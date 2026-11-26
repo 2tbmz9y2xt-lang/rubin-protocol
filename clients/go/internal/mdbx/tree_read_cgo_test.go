@@ -828,7 +828,12 @@ func trCandidateSetup(t *testing.T) (*Store, *OperationReservationOwner, Candida
 	raw := append(initial148NativeLiteral(t), 1)
 	copy(raw[4:36], parent.BlockHash[:])
 	frame := tdFrame(37, 0, []byte{8, 9})
-	raw = append(raw, frame...)
+	raw = append(raw, 1, 0, 0, 0, 0)
+	raw = append(raw, make([]byte, 8)...)
+	raw = append(raw, 1)
+	raw = append(raw, make([]byte, 32)...)
+	raw = append(raw, 255, 255, 255, 255, 0, 255, 255, 255, 255, 1)
+	raw = append(append(raw, frame...), 6, 0, 0, 0, 0, 0)
 	meta := TreeBlockV1{TxCount: 1, EventCount: 1}
 	body := CandidateRootBodyV1{Raw: raw, HeaderBytes: 148, BlockMeta: meta, Events: func(backing []byte, sink *TreeDeltaSinkV1) error {
 		if !bytes.Equal(backing, raw) || &backing[0] != &raw[0] {
@@ -837,7 +842,7 @@ func trCandidateSetup(t *testing.T) (*Store, *OperationReservationOwner, Candida
 		if err := sink.BeginV1(meta); err != nil {
 			return err
 		}
-		return sink.EventV1(TreeEventV1{Kind: 2, Outpoint: TreeOutpointV1{Txid: tdTxid(37)}, FrameOffset: 149, FrameLength: uint32(len(frame))})
+		return sink.EventV1(TreeEventV1{Kind: 2, Outpoint: TreeOutpointV1{Txid: tdTxid(37)}, FrameOffset: 205, FrameLength: uint32(len(frame))})
 	}}
 	return s, o, selection, body, trWantRootV1(t, frame, 6)
 }
@@ -900,7 +905,7 @@ func trCandidateCoverageAdmission(t *testing.T, r *Reader, owner *OperationReser
 		{"wrong_linkage", func(b *CandidateRootBodyV1) { b.Raw[4] ^= 1 }, nil},
 		{"missing_callback", func(b *CandidateRootBodyV1) { b.Events = nil }, nil},
 		{"wrong_count", func(b *CandidateRootBodyV1) { b.BlockMeta.TxCount++ }, nil},
-		{"excess_events", func(b *CandidateRootBodyV1) { b.BlockMeta.EventCount++ }, nil},
+		{"excess_events", func(b *CandidateRootBodyV1) { b.BlockMeta.EventCount = 0xffffffff }, nil},
 		{"excess_inputs", nil, []TreeOutpointV1{{Txid: tdTxid(1)}, {Txid: tdTxid(2)}}},
 		{"duplicate_inputs", trCandidateTwoEvents, []TreeOutpointV1{{Txid: tdTxid(1)}, {Txid: tdTxid(1)}}},
 		{"descending_inputs", trCandidateTwoEvents, []TreeOutpointV1{{Txid: tdTxid(2)}, {Txid: tdTxid(1)}}},
@@ -923,7 +928,8 @@ func trCandidateCoverageAdmission(t *testing.T, r *Reader, owner *OperationReser
 }
 
 func trCandidateTwoEvents(body *CandidateRootBodyV1) {
-	body.Raw = append(body.Raw, tdFrame(1, 0, []byte{8})...)
+	body.Raw[204] = 2
+	body.Raw = append(append(body.Raw[:len(body.Raw)-6], tdFrame(1, 0, []byte{8})...), 6, 0, 0, 0, 0, 0)
 	body.BlockMeta.EventCount = 2
 }
 
