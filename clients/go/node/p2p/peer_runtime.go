@@ -437,22 +437,38 @@ func (p *peer) lockCompactFallbackWrite(ctx context.Context, deadline time.Time)
 		p.writeMu.Lock()
 		return true, nil
 	}
+	return p.lockWriteUnless(func() (bool, error) { return compactFallbackWriteStopped(ctx, deadline) })
+}
+
+func compactFallbackWriteStopped(ctx context.Context, deadline time.Time) (bool, error) {
+	if peerRunContextDone(ctx) {
+		return true, nil
+	}
+	if frameDeadlineExpired(time.Now(), deadline) {
+		return true, os.ErrDeadlineExceeded
+	}
+	return false, nil
+}
+
+// lockWriteUnless polls TryLock every millisecond, calling stop after a failed attempt and once
+// more with writeMu acquired, and returns true with a nil error holding writeMu when that last
+// call does not stop; when stop reports true, it returns false with stop's error without
+// holding writeMu. When that last call unwinds, writeMu is released once before the unwind
+// leaves lockWriteUnless; a stop call that unwinds before the acquisition releases nothing.
+func (p *peer) lockWriteUnless(stop func() (bool, error)) (acquired bool, err error) {
 	for !p.writeMu.TryLock() {
-		if peerRunContextDone(ctx) {
-			return false, nil
-		}
-		if frameDeadlineExpired(time.Now(), deadline) {
-			return false, os.ErrDeadlineExceeded
+		if stopped, stopErr := stop(); stopped {
+			return false, stopErr
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if peerRunContextDone(ctx) {
-		p.writeMu.Unlock()
-		return false, nil
-	}
-	if frameDeadlineExpired(time.Now(), deadline) {
-		p.writeMu.Unlock()
-		return false, os.ErrDeadlineExceeded
+	defer func() {
+		if !acquired {
+			p.writeMu.Unlock()
+		}
+	}()
+	if stopped, stopErr := stop(); stopped {
+		return false, stopErr
 	}
 	return true, nil
 }
