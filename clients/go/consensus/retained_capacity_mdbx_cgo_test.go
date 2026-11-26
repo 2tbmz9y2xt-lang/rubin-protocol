@@ -3,11 +3,13 @@
 package consensus
 
 import (
+	"bytes"
 	"crypto/sha3"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
