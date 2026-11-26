@@ -320,6 +320,8 @@ func (f *imageTestFixture) requireUnarmedCallbackIdle(t *testing.T, cr *imageHoo
 	t.Helper()
 	synctest.Wait()
 	func() {
+		f.s.peersMu.Lock()
+		defer f.s.peersMu.Unlock()
 		req := f.lockRequester()
 		defer req.mu.Unlock()
 		leases := f.leases()
@@ -365,7 +367,7 @@ func testImageRetirementUnwinds(t *testing.T) {
 		{name: "round stop panic in the next admission pass", roundCtx: true, pass: true},
 	} {
 		var serviceReleased func() bool
-		if t.Run(tc.name, func(t *testing.T) { serviceReleased = testImageUnwindStop(t, tc) }) {
+		if t.Run(tc.name, func(t *testing.T) { serviceReleased = testImageUnwindStop(t, tc) }) && serviceReleased != nil {
 			require(t, serviceReleased(), "%s: Service reachable after the fixture closed and retired its instances", tc.name)
 		}
 	}
@@ -573,11 +575,11 @@ func testImageUnwindAfterFailedWrite(t *testing.T, tc imageFailedWriteUnwindCase
 		wantLeases++
 	}
 	requireEqual(t, f.leases(), wantLeases, "Service leases after the failed write unwind report")
+	f.requireRequesterFree(t)
 	if tc.holder == 0 {
 		releaseB()
 		requireImageResult(t, awaitImageResult(t, heldB, "second holder"), 2, 2, net.ErrClosed, "second holder")
 	}
-	f.requireRequesterFree(t)
 	requireUnwindWritePrefix(t, f.wires[0], tc.skip*wireHeaderSize)
 	f.requireFailedUnwindClose(t, observedClose, tc.holder, leases)
 	f.finishFailedWriteUnwind(t, round, inst, c, tc.holder, stallB, heldB)
