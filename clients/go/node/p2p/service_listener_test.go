@@ -157,7 +157,8 @@ func TestService_StartAfterClose_ReturnsAlreadyClosed(t *testing.T) {
 	// Simulate the post-Close state directly: the closed flag is set. Start
 	// must reject the restart with "service already closed" before touching
 	// net.Listen, so no real bind is needed.
-	s := &Service{closed: true}
+	s := &Service{}
+	s.closed.Store(true)
 	err := s.Start(context.Background())
 	if err == nil {
 		t.Fatalf("Start() on closed Service must return error, got nil")
@@ -202,7 +203,7 @@ func TestService_StartPostListenClosedRace_ReturnsAlreadyClosed(t *testing.T) {
 	serviceStartPostListenHook = func(s *Service, ln net.Listener) {
 		capturedAddr = ln.Addr().String()
 		s.peersMu.Lock()
-		s.closed = true
+		s.closed.Store(true)
 		s.peersMu.Unlock()
 	}
 	defer func() { serviceStartPostListenHook = prevHook }()
@@ -291,7 +292,7 @@ func TestService_CloseWaitsForInFlightStartToReleaseListener(t *testing.T) {
 		// Mark the Service closed from inside the hook so Start's write-lock
 		// re-check takes the abort path when we return from the hook.
 		s.peersMu.Lock()
-		s.closed = true
+		s.closed.Store(true)
 		s.peersMu.Unlock()
 		// Spawn the racing Close on a separate goroutine. It will observe
 		// closed=true in its own peersMu section (a no-op here) and then
@@ -352,7 +353,7 @@ func TestService_CloseSetsClosedFlag(t *testing.T) {
 		t.Fatalf("Close() on zero-value Service: %v", err)
 	}
 	s.peersMu.RLock()
-	closed := s.closed
+	closed := s.closed.Load()
 	s.peersMu.RUnlock()
 	if !closed {
 		t.Fatalf("Close() did not set closed=true")
@@ -390,7 +391,8 @@ func TestService_AddrReturnsCachedBoundAddrAfterClose(t *testing.T) {
 	// exec review: wildcard / ":0" binds used to lose the resolved port
 	// once the Service flipped to closed=true.
 	cfg := ServiceConfig{BindAddr: ":0"}
-	s := &Service{cfg: cfg, boundAddr: "127.0.0.1:43219", closed: true}
+	s := &Service{cfg: cfg, boundAddr: "127.0.0.1:43219"}
+	s.closed.Store(true)
 	if got, want := s.Addr(), "127.0.0.1:43219"; got != want {
 		t.Fatalf("Addr() after Close: %q want %q", got, want)
 	}
