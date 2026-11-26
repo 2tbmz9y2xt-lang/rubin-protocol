@@ -800,6 +800,8 @@ func BenchmarkTreeRootInputsV1(b *testing.B) {
 func TestTreeRootReadCandidate(t *testing.T) {
 	t.Run("admission", trCandidateAdmission)
 	t.Run("scope_ceiling", trCandidateCeiling)
+	t.Run("facts_funding", trCandidateFacts)
+	t.Run("derivation_capacity", trCandidateDerivationCapacity)
 	t.Run("scope_expiry", trCandidateExpiry)
 	t.Run("scope_unwind", trCandidateUnwind)
 	t.Run("option_bearing_authority", trCandidateOrdinaryAuthority)
@@ -1004,7 +1006,7 @@ func trCandidateCeiling(t *testing.T) {
 }
 
 func trCandidateExpiry(t *testing.T) {
-	s, owner, selection, body, _ := trCandidateSetup(t)
+	s, owner, selection, body, want := trCandidateSetup(t)
 	var escaped *CandidateRootScopeV1
 	var reader *Reader
 	mustEnvironment(t, s.View(func(r *Reader) error {
@@ -1035,13 +1037,186 @@ func trCandidateExpiry(t *testing.T) {
 				t.Fatalf("expired scope/capacity order: %v", err)
 			}
 		}
-		return nil
+		trCandidateExpiredWork(t, r, owner, selection)
+		return trCandidateReuse(t, r, owner, selection, body, want)
 	}))
 	err := owner.WithCandidateRootV1(reader, selection, func(*CandidateRootScopeV1) error {
 		t.Fatal("expired Reader invoked callback")
 		return nil
 	})
 	treeNativeError(t, err, "get", "InvalidInput", 22, "Reader is not active", nil)
+}
+
+func trCandidateExpiredWork(t *testing.T, r *Reader, owner *OperationReservationOwner, selection CandidateRootParentV1) {
+	t.Helper()
+	var expired *CandidateRootScopeV1
+	mustEnvironment(t, owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
+		expired = scope
+		return nil
+	}))
+	err := expired.WithCandidateCensusV1(func() error {
+		t.Fatal("expired scope ran the census")
+		return nil
+	})
+	if !treeSameErrorV1(err, errOperationReservationInput) {
+		t.Fatalf("expired census error %v, want invalid reservation input", err)
+	}
+	err = expired.WithCandidateFactsV1(159, 1, func(func() error, func() error, func() error) error {
+		t.Fatal("expired scope lent fact storage")
+		return nil
+	})
+	if !treeSameErrorV1(err, errOperationReservationInput) {
+		t.Fatalf("expired facts error %v, want invalid reservation input", err)
+	}
+	trCandidateRefusal(t, [32]byte{}, expired.QualifyCurrentV1())
+}
+
+func trCandidateFacts(t *testing.T) {
+	s, owner, selection, _, _ := trCandidateSetup(t)
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		return owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
+			const validation = 25_000_000
+			mustEnvironment(t, scope.WithCandidateValidationV1(validation, 160, func(func() error) error {
+				trCandidateCensusCharge(t, scope, owner, validation)
+				return scope.QualifyCurrentV1()
+			}))
+			trCandidateFactAdmission(t, scope)
+			const held = 402_653_184 - 135_240
+			mustEnvironment(t, scope.WithCandidateValidationV1(held+1, 160, func(func() error) error {
+				err := scope.WithCandidateFactsV1(160, 1, func(func() error, func() error, func() error) error {
+					t.Fatal("unfunded facts ran the callback")
+					return nil
+				})
+				if !treeSameErrorV1(err, errOperationReservationCapacity) {
+					t.Fatalf("facts one byte short: %v, want reservation capacity", err)
+				}
+				trCandidateZeroFactCharge(t, scope, owner, held+1)
+				return nil
+			}))
+			mustEnvironment(t, scope.WithCandidateValidationV1(held, 160, func(func() error) error {
+				trCandidateFactCharge(t, scope, owner, held)
+				return nil
+			}))
+			trCandidateLive(t, owner, 0)
+			return nil
+		})
+	}))
+}
+
+func trCandidateFactAdmission(t *testing.T, scope *CandidateRootScopeV1) {
+	t.Helper()
+	if err := scope.WithCandidateFactsV1(160, 1, nil); !treeSameErrorV1(err, errOperationReservationInput) {
+		t.Fatalf("nil facts callback error %v, want invalid reservation input", err)
+	}
+	for _, row := range []struct {
+		raw    uint64
+		events uint32
+	}{{148, 0}, {159, 1}} {
+		err := scope.WithCandidateFactsV1(row.raw, row.events, func(func() error, func() error, func() error) error {
+			t.Fatalf("facts at raw width %d and %d events ran the callback", row.raw, row.events)
+			return nil
+		})
+		if !treeSameErrorV1(err, errOperationReservationCapacity) {
+			t.Fatalf("facts at raw width %d and %d events: %v, want reservation capacity", row.raw, row.events, err)
+		}
+	}
+}
+
+func trCandidateCensusCharge(t *testing.T, scope *CandidateRootScopeV1, owner *OperationReservationOwner, held uint64) {
+	t.Helper()
+	observed := errors.New("census callback result")
+	err := scope.WithCandidateCensusV1(func() error {
+		trCandidateLive(t, owner, held+4_824)
+		return observed
+	})
+	if !treeSameErrorV1(err, observed) {
+		t.Fatalf("census result %v, want callback result", err)
+	}
+	trCandidateLive(t, owner, held)
+}
+
+func trCandidateZeroFactCharge(t *testing.T, scope *CandidateRootScopeV1, owner *OperationReservationOwner, held uint64) {
+	t.Helper()
+	observed := errors.New("facts callback result")
+	err := scope.WithCandidateFactsV1(149, 0, func(func() error, func() error, func() error) error {
+		trCandidateLive(t, owner, held+135_192)
+		return observed
+	})
+	if !treeSameErrorV1(err, observed) {
+		t.Fatalf("zero-event facts result %v, want callback result", err)
+	}
+	trCandidateLive(t, owner, held)
+}
+
+func trCandidateFactCharge(t *testing.T, scope *CandidateRootScopeV1, owner *OperationReservationOwner, held uint64) {
+	t.Helper()
+	called := false
+	err := scope.WithCandidateFactsV1(160, 1, func(retireLookup, retireLengths, retireKeys func() error) error {
+		called = true
+		trCandidateLive(t, owner, 402_653_184)
+		mustEnvironment(t, retireLookup())
+		trCandidateLive(t, owner, held+40)
+		mustEnvironment(t, retireLengths())
+		trCandidateLive(t, owner, held+36)
+		mustEnvironment(t, retireKeys())
+		trCandidateLive(t, owner, held)
+		return nil
+	})
+	if !called || err != nil {
+		t.Fatalf("facts at scope ceiling: callback %t, error %v", called, err)
+	}
+	trCandidateLive(t, owner, held)
+}
+
+func trCandidateLive(t *testing.T, owner *OperationReservationOwner, want uint64) {
+	t.Helper()
+	if got := reservationLive(owner); got != want {
+		t.Fatalf("candidate reservation live bytes %d, want %d", got, want)
+	}
+}
+
+func trCandidateDerivationCapacity(t *testing.T) {
+	s, owner, selection, body, want := trCandidateSetup(t)
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		eventCalls := 0
+		originalEvents := body.Events
+		body.Events = func(raw []byte, sink *TreeDeltaSinkV1) error {
+			eventCalls++
+			return originalEvents(raw, sink)
+		}
+		mustEnvironment(t, owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
+			mustEnvironment(t, scope.QualifyCurrentV1())
+			const held = 402_653_184 - 288_544 + 1
+			return scope.WithCandidateValidationV1(held, uint64(len(body.Raw)), func(func() error) error {
+				root, err := scope.DeriveCandidateRootV1(body, nil)
+				if root != ([32]byte{}) || !treeSameErrorV1(err, errOperationReservationCapacity) || eventCalls != 0 {
+					t.Fatalf("derivation one byte short: root %x, error %v, event calls %d", root, err, eventCalls)
+				}
+				root, err = scope.DeriveCandidateRootV1(body, nil)
+				trCandidateRefusal(t, root, err)
+				if eventCalls != 0 {
+					t.Fatalf("consumed scope invoked the event source %d times", eventCalls)
+				}
+				trCandidateLive(t, owner, held)
+				return nil
+			})
+		}))
+		return trCandidateReuse(t, r, owner, selection, body, want)
+	}))
+}
+
+func trCandidateReuse(t *testing.T, r *Reader, owner *OperationReservationOwner, selection CandidateRootParentV1, body CandidateRootBodyV1, want [32]byte) error {
+	t.Helper()
+	err := owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
+		mustEnvironment(t, scope.QualifyCurrentV1())
+		root, err := scope.DeriveCandidateRootV1(body, nil)
+		if err != nil || root != want {
+			t.Fatalf("candidate after refusal: %x/%v, want %x", root, err, want)
+		}
+		return nil
+	})
+	trCandidateLive(t, owner, 0)
+	return err
 }
 
 func trCandidateUnwind(t *testing.T) {
