@@ -843,25 +843,23 @@ func TestReplayTreeDirectAbsence(t *testing.T) {
 	}
 }
 
-// X2 maximal envelope: the E plan copies every input envelope field it does not set (treeEntryBatch), so an
-// ExcludedInvalidBranch with an ExactConsensusError sized to make the planned envelope exactly MaxMetadataBytes is the
-// largest plan; it commits through A under an owner at MinReservationLimit with no other live charge (the account
-// ceiling LANE_MAX bounds OWN plus the step-5 charge, (*operationReservationState).admits).
+const longestStorageConsensusErrorToken = "TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN"
+
+// TestReplayTreeEntryAccountFitMaximal commits a carrier-free GENESIS_REPLAY
+// envelope with the longest exclusion token under the minimum reservation owner.
 func TestReplayTreeEntryAccountFitMaximal(t *testing.T) {
 	s := newQ148Seq(t, POW_LIMIT, 1<<30)
 	s.extend(t, 3, 2*TARGET_BLOCK_INTERVAL, false)
 	target := mdbx.RecoveryTargetV1{ChainID: [32]byte{0xc1}, GenesisHash: s.hashes[0], TipHash: s.tip(), TipHeight: 3, CumulativeChainwork: s.work(t, 3)}
 	input := rtStable()
-	input.Authority.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, FirstInvalidBlockHash: [32]byte{0xee}, ExactConsensusError: []byte{1}}
-	small, err := rtEntered(input, mdbx.StorageProfilePrunedV1, target).Encode()
-	logicalMDBXAssert(t, err == nil, "small output: %v", err)
-	input.Authority.ExcludedInvalidBranch.ExactConsensusError = bytes.Repeat([]byte{1}, 1+mdbx.MaxMetadataBytes-len(small))
+	input.Authority.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, FirstInvalidBlockHash: [32]byte{0xee}, ExactConsensusError: []byte(longestStorageConsensusErrorToken)}
 	full, err := rtEntered(input, mdbx.StorageProfilePrunedV1, target).Encode()
-	logicalMDBXAssert(t, err == nil && len(full) == mdbx.MaxMetadataBytes, "maximal output: %d %v", len(full), err)
+	logicalMDBXAssert(t, err == nil && len(full) == 305 && len(full) < mdbx.MaxMetadataBytes, "maximal replay envelope: %d/%v", len(full), err)
 	w, _, view := rtEntryWorld(t, func(e *mdbx.TreeAuthorityV1) { *e = input })
 	out := NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner)
-	logicalMDBXAssert(t, out.Err == nil && out.Truth == mdbx.CommitTruthNew && out.Result == "", "X2 maximal: %+v", out)
-	logicalMDBXAssert(t, bytes.Equal(rtImageRow(t, w.btWorld, []byte{2}), full), "X2 maximal: the committed envelope is not the maximal plan")
+	logicalMDBXAssert(t, out.Err == nil && out.Truth == mdbx.CommitTruthNew && out.Result == "", "maximal replay entry: %+v", out)
+	logicalMDBXAssert(t, bytes.Equal(rtImageRow(t, w.btWorld, []byte{2}), full), "committed replay envelope differs from planned bytes")
+	btReservationsReleased(t, w.owner)
 }
 
 // E10 (genesis first), D2 (entry): a complete published genesis at NONE/STABLE/PRE_GENESIS (empty active index) is the
@@ -1507,7 +1505,7 @@ func TestReplayWholeTargetContext(t *testing.T) {
 		"slot height":    {slotted, func(e *mdbx.TreeAuthorityV1) { e.Authority.ExcludedInvalidBranch.FirstInvalidHeight = 13 }},
 		"slot hash":      {slotted, func(e *mdbx.TreeAuthorityV1) { e.Authority.ExcludedInvalidBranch.FirstInvalidBlockHash[0] = 0x13 }},
 		"slot error bytes": {slotted, func(e *mdbx.TreeAuthorityV1) {
-			e.Authority.ExcludedInvalidBranch.ExactConsensusError = []byte("BLOCK_ERR_WEIGHT_EXCEEDEE")
+			e.Authority.ExcludedInvalidBranch.ExactConsensusError = []byte("BLOCK_ERR_ANCHOR_BYTES_EXCEEDED")
 		}},
 		"target chain ID":     {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Target.ChainID[0] = 0xd1 }},
 		"target genesis hash": {rtWhole(), func(e *mdbx.TreeAuthorityV1) { e.Authority.Replay.Target.GenesisHash[0] = 0xd2 }},

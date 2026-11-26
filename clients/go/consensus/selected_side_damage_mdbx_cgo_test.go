@@ -28,7 +28,7 @@ type sideWorldSpec struct {
 	override      map[uint64]uint64
 	custom        map[uint64]string
 	canonicalBody map[uint64]string
-	maxExclusion  bool // authority carries an exclusion slot sized so the encoded authority is exactly MaxMetadataBytes
+	maxExclusion  bool // authority carries the longest exclusion token
 	// generation and next override the selected generation (default 2) and next identity (default 3); published
 	// commits canonical 0 through the published-genesis owner (header, body, paired index, undo manifest, UTXO, counters).
 	generation, next uint64
@@ -272,15 +272,18 @@ func (w *sideWorld) authorityBytes() []byte {
 		a.Phase, a.Cleanup = mdbx.StoragePhasePruneGCV1, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: w.gen(), FirstHeight: w.first - 1, LastHeight: w.first - 1, NextHeight: w.first - 1}}}
 	}
 	if w.spec.maxExclusion {
-		a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: []byte{1}}
-		small, err := a.Encode()
-		logicalMDBXAssert(w.t, err == nil, "side world exclusion probe: %v", err)
-		a.ExcludedInvalidBranch.ExactConsensusError = make([]byte, 1+mdbx.MaxMetadataBytes-len(small))
+		a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: []byte(longestStorageConsensusErrorToken)}
 		w.exclusion = a.ExcludedInvalidBranch
 	}
 	encoded, err := a.Encode()
 	logicalMDBXAssert(w.t, err == nil, "side world authority: %v", err)
-	logicalMDBXAssert(w.t, !w.spec.maxExclusion || len(encoded) == mdbx.MaxMetadataBytes, "side world maximal authority is %d bytes", len(encoded))
+	if w.spec.maxExclusion {
+		want := 230
+		if w.spec.pendingSide {
+			want += 34
+		}
+		logicalMDBXAssert(w.t, len(encoded) == want && len(encoded) < mdbx.MaxMetadataBytes, "side world maximal authority is %d bytes, want %d", len(encoded), want)
+	}
 	w.authority = encoded
 	return encoded
 }
@@ -836,8 +839,7 @@ func TestSelectedSideDamageSameHeightOwner(t *testing.T) {
 // exactly iff k>=B, and every kept header is kept by hash at k, not by j.
 func TestSelectedSideDamageHashKeyedOwners(t *testing.T) {
 	t.Run("k below B at h at or above B clears", func(t *testing.T) {
-		// Maximal legal shape for the transfer budget: one-slot 1439 rows, a 1 MiB authority, a duplicate kept hash (100
-		// and 300 both name canonical 7) that reuses its one owner and header observation.
+		// The legal transfer fixture has 1439 rows, the longest exclusion token and a duplicate kept hash at 100 and 300.
 		w := newSideWorld(t, sideWorldSpec{f: 4, tip: 1444, rows: 1439, b: 5, canonicalTip: 8, pendingSide: true, maxExclusion: true, override: map[uint64]uint64{6: 1, 100: 7, 200: 3, 300: 7}})
 		sideWantCleared(t, w, w.run(6), "k below B")
 	})

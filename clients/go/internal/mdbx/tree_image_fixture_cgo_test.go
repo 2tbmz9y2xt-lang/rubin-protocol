@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"testing"
@@ -16,6 +18,7 @@ import (
 func TestTreeImageLifecycleV1(t *testing.T) {
 	// OpenTreeV1 checks the meta 03 identity before it reads meta key 0x02.
 	t.Run("bound and PRUNED B 1 U 0 Authority bytes decode as built", tiAuthorityDecodes)
+	t.Run("malformed exclusion", tiMalformedExclusion)
 	t.Run("OpenTreeV1 refuses meta 03 identity mismatch before one-byte key 0x02 decode", func(t *testing.T) {
 		store, path, identity := treeNativeStore(t)
 		treeNativeSeed(t, store, 0, []byte{2}, []byte{0})
@@ -224,6 +227,74 @@ func tiReleaseRetained(t *testing.T, s *Store) {
 
 func tiRankOne(t *testing.T, s *Store) { treeNativeSeed(t, s, 1, []byte{0xfe}, []byte{1}) }
 
+func tiMalformedExclusion(t *testing.T) {
+	for _, row := range []struct {
+		name        string
+		badNext     bool
+		badOld      bool
+		wantOldGets uint64
+	}{
+		{"legal NEXT", false, false, 1},
+		{"malformed NEXT", true, false, 0},
+		{"malformed OLD", false, true, 1},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			tiExclusionCase(t, row.badNext, row.badOld, row.wantOldGets)
+		})
+	}
+}
+
+func tiExclusionCase(t *testing.T, badNext, badOld bool, oldGets uint64) {
+	t.Helper()
+	s, path, _ := treeNativeStore(t)
+	var legal []byte
+	if badOld {
+		_, legal = seedLegalTreeExclusion(t, s)
+		old := replaceTreeAuthorityToken(t, legal, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
+		treeNativeSeed(t, s, 0, []byte{2}, old)
+	} else {
+		tiRankOne(t, s)
+		legal = wantTreeAuthority(t, consensusTokenTree(2, &InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: []byte("TX_ERR_PARSE")}))
+	}
+	before, err := os.ReadFile(filepath.Join(path, "mdbx.dat"))
+	mustEnvironment(t, err)
+	o := reservationOwner(t, MinReservationLimit)
+	plans, replays := 0, 0
+	p := tiPublication(t, &replays)
+	p.Authority = legal
+	if badNext {
+		p.Authority = replaceTreeAuthorityToken(t, legal, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
+	}
+	var out tiOutcome
+	native := tiProbe(t, s, o, oldGets, func() {
+		out = tiCall(s, o, LaneOperation, 0, func(*Reader) (TreeImagePublicationV1, error) {
+			plans++
+			return p, nil
+		})
+	})
+	got := tiReturned(t, out)
+	switch {
+	case badNext:
+		tiInvalidBatch(t, got)
+		called := false
+		next := s.View(func(*Reader) error { called = true; return nil })
+		if !called || next != nil {
+			t.Fatalf("malformed IMAGE NEXT consumed Store: %v", next)
+		}
+	case badOld:
+		tiSchemaFailure(t, got)
+		assertCachedSlotError(t, s, got, got)
+	default:
+		tiCensusFailure(t, got)
+		assertCachedSlotError(t, s, got, got)
+	}
+	native()
+	if plans != 1 || replays != 0 || reservationLive(o) != 0 {
+		t.Fatalf("IMAGE exclusion plans=%d, replays=%d, live=%d", plans, replays, reservationLive(o))
+	}
+	assertTreeExclusionFile(t, path, before)
+}
+
 func tiDescriptorRows(t *testing.T) []tiRow {
 	t.Helper()
 	oversized, pruned := tiAuthorityOverBound(t), tiPrunedB1U0(t)
@@ -249,56 +320,31 @@ func tiDescriptorRows(t *testing.T) []tiRow {
 	return rows
 }
 
-// tiBasePad is the ExactConsensusError length of the small envelope that tiAuthorityAtBound grows.
-const tiBasePad = 64
-
-// tiAuthorityAtBound is a NONE-phase envelope of exactly 1048576 bytes: the Encode output with
-// a tiBasePad-byte ExactConsensusError grown by tiGrowPad, which turns the Encode output of
-// tiBasePad bytes into the Encode output of tiBasePad+1 bytes.
+// tiAuthorityAtBound encodes a REPLAY/IMAGE envelope at the metadata limit.
 func tiAuthorityAtBound(t *testing.T) []byte {
 	t.Helper()
-	base := tiPaddedAuthority(t, tiBasePad)
-	if grown := tiGrowPad(t, base, tiBasePad, 1); !bytes.Equal(grown, tiPaddedAuthority(t, tiBasePad+1)) {
-		t.Fatal("pad growth does not reproduce the encoded Authority")
-	}
-	bound := tiGrowPad(t, base, tiBasePad, 1048576-27-84-tiBasePad)
-	if len(bound) != 1048576 {
-		t.Fatalf("bound Authority %d bytes", len(bound))
+	const carrierBytes = 1048576 - 194 - 84 - 32 - 1
+	a := consensusTokenTree(2, &InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: []byte(longestConsensusErrorToken)})
+	a.SourceIntent.Payload = bytes.Repeat([]byte{0x61}, carrierBytes)
+	bound := wantTreeAuthority(t, a)
+	if len(bound) != 1048576 || binary.BigEndian.Uint32(bound[18:22]) != 278 || binary.BigEndian.Uint32(bound[307:311]) != carrierBytes {
+		t.Fatalf("bound Authority framing has length %d", len(bound))
 	}
 	return bound
 }
 
-func tiPaddedAuthority(t *testing.T, pad int) []byte {
-	t.Helper()
-	a := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 18561)
-	a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 20001, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: bytes.Repeat([]byte{1}, pad)}
-	encoded, err := a.Encode()
-	mustEnvironment(t, err)
-	return encoded
-}
-
-// tiAuthorityOverBound is the tiAuthorityAtBound envelope with one more ExactConsensusError
-// byte, so it differs from a valid envelope only in its size.
+// tiAuthorityOverBound adds a byte to the trailing IMAGE carrier.
 func tiAuthorityOverBound(t *testing.T) []byte {
 	t.Helper()
-	return tiGrowPad(t, tiAuthorityAtBound(t), 1048576-27-84, 1)
-}
-
-// tiGrowPad inserts n pad bytes into b, whose ExactConsensusError is pad bytes of 1, and raises
-// both enclosing lengths (the authority length at bytes 18..21 and the pad blob length) by n.
-func tiGrowPad(t *testing.T, b []byte, pad, n int) []byte {
-	t.Helper()
-	at := bytes.Index(b, append(binary.BigEndian.AppendUint32(nil, uint32(pad)), 1))
-	if at < 22 || !bytes.Equal(b[at+4:at+4+pad], bytes.Repeat([]byte{1}, pad)) {
-		t.Fatalf("pad blob of %d bytes at %d", pad, at)
+	bound := tiAuthorityAtBound(t)
+	over := append(bytes.Clone(bound), 0x61)
+	const carrierLengthOffset = 307
+	length := binary.BigEndian.Uint32(bound[carrierLengthOffset:])
+	binary.BigEndian.PutUint32(over[carrierLengthOffset:], length+1)
+	if len(over) != 1048577 || int(binary.BigEndian.Uint32(over[carrierLengthOffset:])) != len(over)-carrierLengthOffset-4 {
+		t.Fatalf("over-cap Authority framing has length %d", len(over))
 	}
-	out := make([]byte, 0, len(b)+n)
-	out = append(out, b[:at+4]...)
-	out = append(out, bytes.Repeat([]byte{1}, n)...)
-	out = append(out, b[at+4:]...)
-	binary.BigEndian.PutUint32(out[18:22], binary.BigEndian.Uint32(out[18:22])+uint32(n))
-	binary.BigEndian.PutUint32(out[at:at+4], uint32(pad+n))
-	return out
+	return over
 }
 
 // tiAuthorityDecodes requires the decoder to accept the bound Authority, to refuse the PRUNED

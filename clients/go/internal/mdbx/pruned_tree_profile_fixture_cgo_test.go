@@ -240,7 +240,7 @@ func TestPrunedTreeProfileCommit(t *testing.T) {
 	// A10 and A7: the two optional fields an ARCHIVE NONE/STABLE envelope may carry
 	// survive on both the positive and the zero L_body branch.
 	optional := func(a *TreeAuthorityV1) {
-		a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 20001, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte{1}}
+		a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 20001, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte(longestConsensusErrorToken)}
 		a.Authority.SelectedSide = modelSide(3, 19000, 19001, 1, 117)
 	}
 	for _, row := range []struct {

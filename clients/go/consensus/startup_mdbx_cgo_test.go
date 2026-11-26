@@ -7,6 +7,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -89,6 +93,9 @@ func startupPreserved(t *testing.T, w *replayWorld, wantDecision uint8, wantResu
 	startupFreshGuard(t, w, false)
 	out := startupRun(w)
 	startupTuple(t, out, wantDecision == 1, wantDecision, wantResult)
+	if wantDecision == 1 {
+		startupAlreadyVerified(t, w)
+	}
 	logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { return nil }) == nil, "semantic startup rejection consumed original Store")
 	replaySameImage(t, before, w.image(), "startup readonly image")
 	startupFreshGuard(t, w, out.Verified)
@@ -99,15 +106,108 @@ func startupPreserved(t *testing.T, w *replayWorld, wantDecision uint8, wantResu
 		startupTuple(t, repeated, false, 3, wantResult)
 		logicalMDBXAssert(t, any(repeated.Err) != any(out.Err) && repeated.Err.Error() == out.Err.Error(), "clean semantic repeat must be a fresh observation")
 	case 1:
-		repeated := startupRun(w)
-		startupTuple(t, repeated, false, 0, "")
-		e, ok := any(repeated.Err).(*mdbx.EngineError)
-		logicalMDBXAssert(t, ok && e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "canonical owner index is already verified", "accepted observation preserves already verified refusal")
 		startupFreshGuard(t, w, true)
 	}
 	must := w.owner.WithReservation(154611151, func() error { return nil })
 	logicalMDBXAssert(t, must == nil, "startup grant leaked: %v", must)
 	return out
+}
+
+func startupAlreadyVerified(t *testing.T, w *replayWorld) {
+	t.Helper()
+	repeat := startupRun(w)
+	startupTuple(t, repeat, false, 0, "")
+	assertRefusal := func(err error) {
+		e, ok := err.(*mdbx.EngineError)
+		logicalMDBXAssert(t, ok && e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "canonical owner index is already verified" && e.Cause == nil && !e.ReopenRequired, "already verified refusal: %v", err)
+	}
+	assertRefusal(repeat.Err)
+	err, cached := w.store.StartupVerifyCanonicalV1(func(*mdbx.Reader) (mdbx.StartupCanonicalCompletionV1, error) {
+		t.Fatal("verified store entered the verification callback")
+		return mdbx.StartupCanonicalNotCompleteV1, nil
+	})
+	assertRefusal(err)
+	logicalMDBXAssert(t, !cached, "already verified refusal became terminal")
+}
+
+var startupOtherPhases = [...]struct{ phase, lifecycle uint8 }{{1, 1}, {1, 2}, {2, 1}, {2, 2}, {4, 2}}
+
+func startupOtherPhase(t *testing.T, phase, lifecycle uint8) *replayWorld {
+	t.Helper()
+	w := newReplayWorld(t, 0)
+	w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+		a.Phase, a.Lifecycle = mdbx.StoragePhaseV1(phase), mdbx.StorageLifecycleV1(lifecycle)
+		if lifecycle == 2 && phase != 4 {
+			p := mdbx.StorageProfilePrunedV1
+			a.PendingTargetProfile = &p
+		}
+		switch phase {
+		case 2:
+			a.NextGenerationID = 3
+			a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 2}}}
+		case 4:
+			a.NextGenerationID = 3
+			a.Ordinary = &mdbx.OrdinaryApplyV1{
+				Stage: 2, Target: mdbx.AuthorityPointV1{Height: 2, BlockHash: [32]byte{2}},
+				NewSuffix:            []mdbx.AuthorityPointV1{{Height: 1, BlockHash: [32]byte{1}}, {Height: 2, BlockHash: [32]byte{2}}},
+				CapturedSelectedSide: &mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 2, TipHash: [32]byte{2}, CumulativeChainwork: sideWorldWork(3), RowCount: 2, LogicalBytes: 240},
+			}
+		}
+	})
+	return w
+}
+
+func TestConsensusErrorCodeStorageAdmission(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "errors.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]bool)
+	for _, decl := range file.Decls {
+		group, ok := decl.(*ast.GenDecl)
+		if !ok || group.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range group.Specs {
+			constant := spec.(*ast.ValueSpec)
+			typeName, ok := constant.Type.(*ast.Ident)
+			if !ok || typeName.Name != "ErrorCode" {
+				continue
+			}
+			checkDeclaredStorageErrorCode(t, constant, seen)
+		}
+	}
+	if len(seen) != 50 {
+		t.Fatalf("distinct ErrorCode literals = %d, want 50", len(seen))
+	}
+}
+
+func checkDeclaredStorageErrorCode(t *testing.T, spec *ast.ValueSpec, seen map[string]bool) {
+	t.Helper()
+	if len(spec.Values) != len(spec.Names) {
+		t.Fatalf("ErrorCode declarations lack literal values: %v", spec.Names)
+	}
+	for i, value := range spec.Values {
+		literal, ok := value.(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			t.Fatalf("ErrorCode %s lacks a string literal", spec.Names[i].Name)
+		}
+		code, err := strconv.Unquote(literal.Value)
+		if err != nil || seen[code] {
+			t.Fatalf("ErrorCode %s has invalid or duplicate literal %q: %v", spec.Names[i].Name, code, err)
+		}
+		seen[code] = true
+		a := mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 2, Phase: 1, Lifecycle: 1,
+			ExcludedInvalidBranch: &mdbx.InvalidBranchV1{ExactConsensusError: []byte(code)}}
+		raw, err := a.Encode()
+		if err != nil {
+			t.Fatalf("ErrorCode %s cannot encode: %v", code, err)
+		}
+		got, err := mdbx.DecodeStorageAuthorityV1(raw)
+		if err != nil || got.ExcludedInvalidBranch == nil || string(got.ExcludedInvalidBranch.ExactConsensusError) != code {
+			t.Fatalf("ErrorCode %s did not round-trip: %+v, %v", code, got.ExcludedInvalidBranch, err)
+		}
+	}
 }
 
 func TestReplayStartupMDBXV1(t *testing.T) {
@@ -212,71 +312,41 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 			logicalMDBXAssert(t, err == nil && got == row.expected, "independent work=%x/%v, want%x", got, err, row.expected)
 		}
 	})
-	t.Run("A07 full exclusion domain", func(t *testing.T) {
-		for _, code := range strings.Fields(`TX_ERR_PARSE TX_ERR_VALUE_CONSERVATION TX_ERR_TX_NONCE_INVALID TX_ERR_SEQUENCE_INVALID TX_ERR_NONCE_REPLAY TX_ERR_SIG_INVALID TX_ERR_SIG_ALG_INVALID TX_ERR_SIGHASH_TYPE_INVALID TX_ERR_SIG_NONCANONICAL TX_ERR_TIMELOCK_NOT_MET TX_ERR_WITNESS_OVERFLOW TX_ERR_COVENANT_TYPE_INVALID TX_ERR_VAULT_MALFORMED TX_ERR_VAULT_PARAMS_INVALID TX_ERR_VAULT_KEYS_NOT_CANONICAL TX_ERR_VAULT_WHITELIST_NOT_CANONICAL TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN TX_ERR_VAULT_OWNER_AUTH_REQUIRED TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE TX_ERR_SIMPLICITY_ENVELOPE_TOO_LARGE TX_ERR_SIMPLICITY_CMR_MISMATCH TX_ERR_SIMPLICITY_DECODE TX_ERR_SIMPLICITY_JET_DISALLOWED TX_ERR_SIMPLICITY_BUDGET_EXCEEDED TX_ERR_SIMPLICITY_REJECTED TX_ERR_MISSING_UTXO TX_ERR_COINBASE_IMMATURE BLOCK_ERR_LINKAGE_INVALID BLOCK_ERR_MERKLE_INVALID BLOCK_ERR_WITNESS_COMMITMENT BLOCK_ERR_POW_INVALID BLOCK_ERR_TARGET_INVALID BLOCK_ERR_TIMESTAMP_OLD BLOCK_ERR_TIMESTAMP_FUTURE BLOCK_ERR_COINBASE_INVALID BLOCK_ERR_SUBSIDY_EXCEEDED BLOCK_ERR_STATE_CAP_EXCEEDED BLOCK_ERR_STATE_GROWTH_EXCEEDED BLOCK_ERR_WEIGHT_EXCEEDED BLOCK_ERR_ANCHOR_BYTES_EXCEEDED BLOCK_ERR_DA_INCOMPLETE BLOCK_ERR_DA_CHUNK_HASH_INVALID BLOCK_ERR_DA_SET_INVALID BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID BLOCK_ERR_DA_BATCH_EXCEEDED BLOCK_ERR_PARSE`) {
+	t.Run("exact exclusion tokens", func(t *testing.T) {
+		for _, code := range strings.Fields(`TX_ERR_PARSE TX_ERR_VALUE_CONSERVATION TX_ERR_TX_NONCE_INVALID TX_ERR_SEQUENCE_INVALID
+TX_ERR_NONCE_REPLAY TX_ERR_SIG_INVALID TX_ERR_SIG_ALG_INVALID TX_ERR_SIGHASH_TYPE_INVALID
+TX_ERR_SIG_NONCANONICAL TX_ERR_TIMELOCK_NOT_MET TX_ERR_WITNESS_OVERFLOW TX_ERR_COVENANT_TYPE_INVALID
+TX_ERR_VAULT_MALFORMED TX_ERR_VAULT_PARAMS_INVALID TX_ERR_VAULT_KEYS_NOT_CANONICAL TX_ERR_VAULT_WHITELIST_NOT_CANONICAL
+TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN TX_ERR_VAULT_OWNER_AUTH_REQUIRED TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN
+TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE TX_ERR_SIMPLICITY_ENVELOPE_TOO_LARGE TX_ERR_SIMPLICITY_CMR_MISMATCH
+TX_ERR_SIMPLICITY_DECODE TX_ERR_SIMPLICITY_JET_DISALLOWED TX_ERR_SIMPLICITY_BUDGET_EXCEEDED TX_ERR_SIMPLICITY_REJECTED
+TX_ERR_MISSING_UTXO TX_ERR_COINBASE_IMMATURE BLOCK_ERR_LINKAGE_INVALID BLOCK_ERR_MERKLE_INVALID
+BLOCK_ERR_WITNESS_COMMITMENT BLOCK_ERR_POW_INVALID BLOCK_ERR_TARGET_INVALID BLOCK_ERR_TIMESTAMP_OLD
+BLOCK_ERR_TIMESTAMP_FUTURE BLOCK_ERR_COINBASE_INVALID BLOCK_ERR_SUBSIDY_EXCEEDED BLOCK_ERR_STATE_CAP_EXCEEDED
+BLOCK_ERR_STATE_GROWTH_EXCEEDED BLOCK_ERR_UTXO_ROOT_MISMATCH BLOCK_ERR_WEIGHT_EXCEEDED BLOCK_ERR_ANCHOR_BYTES_EXCEEDED
+BLOCK_ERR_DA_INCOMPLETE BLOCK_ERR_DA_CHUNK_HASH_INVALID BLOCK_ERR_DA_SET_INVALID BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID
+BLOCK_ERR_DA_BATCH_EXCEEDED BLOCK_ERR_PARSE`) {
 			t.Run(code, func(t *testing.T) {
 				w := startupWorld(t, 0, 0)
-				w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
-					a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: [32]byte{0x91}, ExactConsensusError: []byte(code)}
-				})
+				slot := mdbx.InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: [32]byte{0x91}, ExactConsensusError: []byte(code)}
+				for _, hash := range w.hashes {
+					logicalMDBXAssert(t, hash != slot.FirstInvalidBlockHash, "exclusion overlaps a verified index hash")
+				}
+				w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.ExcludedInvalidBranch = &slot })
 				startupPreserved(t, w, 1, "")
+				got := w.authority().ExcludedInvalidBranch
+				logicalMDBXAssert(t, got != nil && got.FirstInvalidHeight == slot.FirstInvalidHeight && got.FirstInvalidBlockHash == slot.FirstInvalidBlockHash && string(got.ExactConsensusError) == code, "exclusion tuple changed: %+v", got)
 			})
 		}
 	})
-	// The empty token cannot be persisted (the authority descriptor refuses it); it stays outside the closed set.
-	logicalMDBXAssert(t, !startupExclusionToken(nil) && !startupExclusionToken([]byte{}), "empty exclusion token accepted")
-	for _, token := range []string{"BLOCK_ERR_STATE_GROWTH_EXCEEDEDsuffix", " BLOCK_ERR_STATE_GROWTH_EXCEEDED", "BLOCK_ERR_STATE_GROWTH_EXCEEDED ", "block_err_state_growth_exceeded", "BLOCK_ERR_STATE_GROWTH_EXCEEDED\x00", "TX_ERR_PARSEsuffix", "TX_ERR_SIG_HASH_INVALID", "CONSENSUS_INVALID(TX_ERR_PARSE)", "TX_ERR_", "tx_err_parse", " TX_ERR_PARSE", "TX_ERR_PARSE\n", "TX_ERR_PARSE\x00", "x", strings.Repeat("x", 512)} {
-		t.Run("R02 token "+token, func(t *testing.T) {
-			w := startupWorld(t, 0, 0)
-			w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
-				a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: [32]byte{0x91}, ExactConsensusError: []byte(token)}
+	t.Run("legal other phases", func(t *testing.T) {
+		for _, row := range startupOtherPhases {
+			t.Run(fmt.Sprint(row), func(t *testing.T) {
+				w := startupOtherPhase(t, row.phase, row.lifecycle)
+				out := startupPreserved(t, w, 0, "")
+				e := any(out.Err).(*mdbx.EngineError)
+				logicalMDBXAssert(t, e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "persisted authority is not REPLAY" && e.Cause == nil, "other phase refusal: %v", e)
 			})
-			for _, g := range []uint64{1, 2} {
-				w.apply(
-					mdbx.Mutation{DBI: logicalMDBXDBIs[2], Key: logicalMDBXMust(mdbx.HeightKey(g, 0)), BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(w.hashes[0], [32]byte{}, sideWorldWork(2))},
-					mdbx.Mutation{DBI: logicalMDBXDBIs[7], Key: logicalMDBXMust(mdbx.CanonicalOwnerKey(g, w.hashes[0])), BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: mdbx.CanonicalOwnerValue(0)})
-			}
-			out := startupPreserved(t, w, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
-			logicalMDBXAssert(t, out.Err.Error() == "invalid startup exclusion token", "exclusion did not precede active/target: %v", out.Err)
-		})
-	}
-	t.Run("A07 legal other phases", func(t *testing.T) {
-		for _, row := range []struct{ phase, lifecycle uint8 }{{1, 1}, {1, 2}, {2, 1}, {2, 2}, {4, 2}} {
-			for _, badToken := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%v invalid-token%v", row, badToken), func(t *testing.T) {
-					w := newReplayWorld(t, 0)
-					w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
-						a.Phase, a.Lifecycle = mdbx.StoragePhaseV1(row.phase), mdbx.StorageLifecycleV1(row.lifecycle)
-						if row.lifecycle == 2 && row.phase != 4 {
-							p := mdbx.StorageProfilePrunedV1
-							a.PendingTargetProfile = &p
-						}
-						if row.phase == 2 {
-							a.NextGenerationID = 3
-							a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 2}}}
-						}
-						if row.phase == 4 {
-							a.NextGenerationID = 3
-							a.Ordinary = &mdbx.OrdinaryApplyV1{
-								Stage: 2, Target: mdbx.AuthorityPointV1{Height: 2, BlockHash: [32]byte{2}},
-								NewSuffix:            []mdbx.AuthorityPointV1{{Height: 1, BlockHash: [32]byte{1}}, {Height: 2, BlockHash: [32]byte{2}}},
-								CapturedSelectedSide: &mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 2, TipHash: [32]byte{2}, CumulativeChainwork: sideWorldWork(3), RowCount: 2, LogicalBytes: 240},
-							}
-						}
-						if badToken {
-							a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: []byte("TX_ERR_PARSEsuffix")}
-						}
-					})
-					if badToken {
-						out := startupPreserved(t, w, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
-						logicalMDBXAssert(t, out.Err.Error() == "invalid startup exclusion token", "token did not precede legal phase refusal: %v", out.Err)
-						return
-					}
-					out := startupPreserved(t, w, 0, "")
-					e := any(out.Err).(*mdbx.EngineError)
-					logicalMDBXAssert(t, e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "persisted authority is not REPLAY" && e.Cause == nil, "other phase refusal: %v", e)
-				})
-			}
 		}
 	})
 	for _, row := range []struct {
@@ -321,7 +391,6 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 		{"H11 generic before repeat exclusion", -1, -1, 1, [40]byte{39: 1}, "", "tip genesis", 0, "work"},
 		{"H11 repeat before exclusion", 0, -1, 1, [40]byte{39: 2}, "", "tip genesis", 0, "repeat"},
 		{"H11 network before work", 0, -1, 1, [40]byte{39: 1}, "", "chainID", -1, "network"},
-		{"H11 token before work", 0, -1, 1, [40]byte{39: 1}, "", "token", 5, "token"},
 		{"R14 excluded genesis", 0, 1, 3, [40]byte{39: 4}, "", "", 0, "excluded"},
 		{"R14 excluded tip", 0, 1, 3, [40]byte{39: 4}, "", "", 1, "excluded"},
 		{"R14 excluded cursor", 0, 1, 3, [40]byte{39: 4}, "", "", 2, "excluded"},
@@ -397,9 +466,6 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 							hash = w.hashes[row.excluded-2]
 						}
 						a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: recordedHeight, FirstInvalidBlockHash: hash, ExactConsensusError: []byte("BLOCK_ERR_PARSE")}
-						if row.edit == "token" {
-							a.ExcludedInvalidBranch.ExactConsensusError = []byte("CONSENSUS_INVALID(BLOCK_ERR_PARSE)")
-						}
 					}
 				})
 				decision, result := uint8(1), ""
@@ -408,7 +474,7 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 				}
 				out := startupPreserved(t, w, decision, result)
 				if row.want != "" {
-					want := map[string]string{"network": "startup replay network identity mismatch", "bounds": "startup active bounds mismatch", "work": "startup replay target work outside consistency bounds", "repeat": "startup replay target repeats a known hash", "excluded": "startup replay target contains excluded hash", "known tip": "startup known target tip mismatch", "ancestry": "startup known target cursor ancestry mismatch", "token": "invalid startup exclusion token"}[row.want]
+					want := map[string]string{"network": "startup replay network identity mismatch", "bounds": "startup active bounds mismatch", "work": "startup replay target work outside consistency bounds", "repeat": "startup replay target repeats a known hash", "excluded": "startup replay target contains excluded hash", "known tip": "startup known target tip mismatch", "ancestry": "startup known target cursor ancestry mismatch"}[row.want]
 					logicalMDBXAssert(t, out.Err.Error() == want, "observed point owner/order: %v, want%s", out.Err, want)
 				}
 			})

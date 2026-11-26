@@ -500,6 +500,8 @@ func TestRetainedCapacityMDBXPlanPre(t *testing.T) {
 }
 
 func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
+	t.Run("legal newly-set slot", func(t *testing.T) { retainedCapacityPlannedExclusion(t, false) })
+	t.Run("malformed planned slot", func(t *testing.T) { retainedCapacityPlannedExclusion(t, true) })
 	w, _, _ := riGenesis(t)
 	denied := uint64(402653184 - retainedPlanFrameV1 + 1)
 	// D8/T1: op-only refusals (nil Source, Undo 0, a stored BodyKind 2 x body literal) precede the cost-1 denied frame.
@@ -583,6 +585,83 @@ func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 	if err := retainedCapacityPlanV1(t, w, a, dst, retainedCapacityBoundOpV1(t, w), 8192); err != nil || dst.pre != want || a.exactRet != want {
 		t.Fatalf("next plan after the cleared cache: %v pre=%d want %d", err, dst.pre, want)
 	}
+}
+
+func retainedCapacityPlannedExclusion(t *testing.T, malformed bool) {
+	t.Helper()
+	w, _, _ := riGenesis(t)
+	bound := retainedCapacityBoundOpV1(t, w)
+	old := rtEnvelope(t, w)
+	logicalMDBXAssert(t, old.Authority.ExcludedInvalidBranch == nil, "retained OLD exclusion is occupied")
+	before := rtImage(t, w)
+	next := old
+	next.Authority.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, FirstInvalidBlockHash: [32]byte{9}, ExactConsensusError: []byte("TX_ERR_PARSE")}
+	literal, err := next.Encode()
+	logicalMDBXAssert(t, err == nil, "encode prospective exclusion: %v", err)
+	control, err := mdbx.DecodeTreeAuthorityV1(literal)
+	logicalMDBXAssert(t, err == nil && reflect.DeepEqual(control, next), "prospective exclusion control: %v", err)
+	want := errRetainedFiniteAPIV1
+	if malformed {
+		literal = retainedCapacityCorruptPlannedSlot(t, literal)
+		want = errRetainedShapeAPIV1
+	}
+	op := *bound
+	op.Pair.Mutations = append([]mdbx.Mutation(nil), bound.Pair.Mutations...)
+	mutation := btMutation(0, []byte{2}, literal)
+	mutation.BeforePresent = true
+	op.Pair.Mutations = append(op.Pair.Mutations, mutation)
+	btSort(op.Pair.Mutations)
+	a, proof := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
+	run := retainedCapacityNativePlan(t, w, a, proof, &op)
+	logicalMDBXAssert(t, run.planErr == want, "planned exclusion returned %v, want %v", run.planErr, want)
+	logicalMDBXAssert(t, run.truth == mdbx.CommitTruthOld && run.stage == mdbx.UpdateStagePrewrite && run.index == -1 && run.err == run.planErr, "planned exclusion native refusal: %+v", run)
+	logicalMDBXAssert(t, a.active == proof && !proof.prepared, "planned exclusion prepared a proof")
+	logicalMDBXAssert(t, (proof.pre == 0) == malformed && a.valid != malformed, "planned exclusion cold pre=%d, cache=%v", proof.pre, a.valid)
+	if malformed {
+		logicalMDBXAssert(t, proof.roles == ([2]retainedRoleV1{}) && retainedCapacityClearedV1(a), "malformed plan retained prework")
+	}
+	err = a.ApplyDirectMDBX(proof, run.truth, run.stage, run.index, run.err, true)
+	logicalMDBXAssert(t, err == nil && proof.applied && a.active == nil, "apply native exclusion refusal: %v", err)
+	normal := &DirectRetainedProofV1{}
+	run = retainedCapacityNativePlan(t, w, a, normal, bound)
+	logicalMDBXAssert(t, run.planErr == nil && normal.prepared && normal.pre > 0, "valid same-owner plan after exclusion refusal: %+v/%d", run, normal.pre)
+	err = a.ApplyDirectMDBX(normal, run.truth, run.stage, run.index, run.err, true)
+	logicalMDBXAssert(t, err == nil && normal.applied && a.active == nil, "apply valid plan's native abort: %v", err)
+	replayImage := rtImage(t, w)
+	logicalMDBXAssert(t, reflect.DeepEqual(replayImage, before) && reflect.DeepEqual(rtEnvelope(t, w), old), "retained exclusion refusal published authority")
+	btReservationsReleased(t, w.owner)
+}
+
+func retainedCapacityCorruptPlannedSlot(t *testing.T, control []byte) []byte {
+	t.Helper()
+	field := []byte{0, 0, 0, 12, 'T', 'X', '_', 'E', 'R', 'R', '_', 'P', 'A', 'R', 'S', 'E'}
+	at := bytes.Index(control, field)
+	end := 22 + int(binary.BigEndian.Uint32(control[18:22]))
+	logicalMDBXAssert(t, at >= 63 && at+len(field) <= end && bytes.Count(control, field) == 1 && control[at-41] == 1, "prospective exclusion framing")
+	bad := bytes.Clone(control)
+	bad[at+4] = 'U'
+	return bad
+}
+
+func retainedCapacityNativePlan(t *testing.T, w *btWorld, owner *RetainedAccountingV1, proof *DirectRetainedProofV1, op *mdbx.TreeOperationV1) rtCommit {
+	t.Helper()
+	var run rtCommit
+	stop := errors.New("stop after retained planning")
+	err := w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
+		run.truth, run.stage, run.index, run.err = w.s.UpdateTreeV1(account, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+			run.planErr = owner.PlanDirectMDBX(proof, r, account, op)
+			if run.planErr != nil {
+				return mdbx.TreeOperationV1{}, run.planErr
+			}
+			return mdbx.TreeOperationV1{}, stop
+		})
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "retained plan account: %v", err)
+	if run.planErr == nil {
+		logicalMDBXAssert(t, run.truth == mdbx.CommitTruthOld && run.stage == mdbx.UpdateStagePrewrite && run.index == -1 && run.err == stop, "valid retained plan abort: %+v", run)
+	}
+	return run
 }
 
 func TestRetainedCapacityMDBXFinite(t *testing.T) {
@@ -1228,7 +1307,7 @@ func TestRetainedCapacityMDBXBodyWindow(t *testing.T) {
 	span := func(k mdbx.CleanupSpanKindV1, first, last uint64) []mdbx.CleanupSpanV1 {
 		return []mdbx.CleanupSpanV1{{Kind: k, GenerationID: 1, FirstHeight: first, NextHeight: first, LastHeight: last}}
 	}
-	excluded := &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, ExactConsensusError: []byte{1}}
+	excluded := &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, ExactConsensusError: []byte("TX_ERR_PARSE")}
 	for name, c := range map[string]struct {
 		spans    []mdbx.CleanupSpanV1
 		b, u     uint64
@@ -1250,10 +1329,10 @@ func TestRetainedCapacityMDBXBodyWindow(t *testing.T) {
 		}
 	}
 	read.authority.Authority.ExcludedInvalidBranch, f.planned.Authority = excluded, old
-	f.planned.Authority.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, ExactConsensusError: []byte{1}}
+	f.planned.Authority.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, ExactConsensusError: []byte("TX_ERR_PARSE")}
 	_, err := f.promiseV1()
 	logicalMDBXAssert(t, err == nil, "identical excluded tuple: %v", err)
-	f.planned.Authority.ExcludedInvalidBranch.ExactConsensusError = []byte{2}
+	f.planned.Authority.ExcludedInvalidBranch.ExactConsensusError = []byte("BLOCK_ERR_PARSE")
 	_, err = f.promiseV1()
 	logicalMDBXAssert(t, errors.Is(err, errRetainedFiniteAPIV1), "changed excluded tuple: %v", err)
 }

@@ -412,6 +412,49 @@ func treeAuthorityFixture(a StorageAuthorityV1) TreeAuthorityV1 {
 	return tree
 }
 
+func consensusTokenTree(tag byte, branch *InvalidBranchV1) TreeAuthorityV1 {
+	tree := treeIntentImage()
+	tree.Authority.ExcludedInvalidBranch = branch
+	if tag == 2 {
+		tree.SourceIntent = &TreeSourceIntentV1{Kind: 1, Payload: []byte{0x61}}
+	}
+	return tree
+}
+
+func replaceTreeAuthorityToken(t *testing.T, input []byte, legal string, bad []byte) []byte {
+	t.Helper()
+	end := 22 + int(binary.BigEndian.Uint32(input[18:22]))
+	if end > len(input)-5 {
+		t.Fatal("invalid authority frame in legal tree control")
+	}
+	inner := replaceAuthorityToken(t, input[22:end], legal, bad)
+	raw := binary.BigEndian.AppendUint32(bytes.Clone(input[:18]), uint32(len(inner)))
+	raw = append(raw, inner...)
+	raw = append(raw, input[end:]...)
+	if int(binary.BigEndian.Uint32(raw[18:22])) != len(inner) || len(raw)-22-len(inner) != len(input)-end {
+		t.Fatal("malformed replacement tree envelope framing")
+	}
+	return raw
+}
+
+func checkRawTreeConsensusToken(t *testing.T, input, bad []byte) {
+	t.Helper()
+	raw := replaceTreeAuthorityToken(t, input, "TX_ERR_PARSE", bad)
+	before := bytes.Clone(raw)
+	t.Run("copying", func(t *testing.T) {
+		got, err := DecodeTreeAuthorityV1(raw)
+		if !reflect.DeepEqual(got, TreeAuthorityV1{}) || err != errSchema || !bytes.Equal(raw, before) {
+			t.Fatalf("DecodeTreeAuthorityV1 = %#v, %v or changed input", got, err)
+		}
+	})
+	t.Run("borrowed", func(t *testing.T) {
+		wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{2}, raw, errSchema)
+		if err := inspectTreeAuthorityV1(raw); err != errSchema || !bytes.Equal(raw, before) {
+			t.Fatalf("tree inspection = %v or changed input", err)
+		}
+	})
+}
+
 func treeEnvelopeLiteral(inner []byte, source, status byte, payload []byte) []byte {
 	// Independent test framing pins every outer scalar width/order, including the
 	// absent target LAG outside REPLAY. Inner fixtures have separate literal owners.
@@ -1201,14 +1244,28 @@ func TestTreeAuthorityBoundsIsolation(t *testing.T) {
 	}
 	wantTreeAuthorityDecodeError(t, nil)
 	wantTreeAuthorityDecodeError(t, make([]byte, 66))
-	// Nested authority length may itself fit metadata while outer27 must not.
-	none := treeAuthorityFixture(modelBase(1, 0, 0))
-	none.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: make([]byte, 1048492)}
-	wantTreeAuthorityEncodeError(t, none)
+	checkTreeNestedAuthoritySize(t)
 	// Outer scalar refusal wins even when the nested cleanup count is malformed.
 	bad := bytes.Clone(maximum)
 	bad[1], bad[22+34], bad[216] = 255, 2, 255
 	wantTreeAuthorityDecodeError(t, bad)
+}
+
+func checkTreeNestedAuthoritySize(t *testing.T) {
+	t.Helper()
+	tree := treeAuthorityFixture(ordinaryAuthorityAtSize(t, 1048549))
+	exact := wantTreeAuthority(t, tree)
+	if len(exact) != 1048576 || binary.BigEndian.Uint32(exact[18:22]) != 1048549 {
+		t.Fatalf("tree cap length = %d, inner length = %d", len(exact), binary.BigEndian.Uint32(exact[18:22]))
+	}
+	tree.Authority.Ordinary.RecordedFailure.Evidence = append(tree.Authority.Ordinary.RecordedFailure.Evidence, 0x41)
+	inner := wantCodecRoundTrip(t, tree.Authority)
+	over := treeEnvelopeLiteral(inner, 0, 0, nil)
+	if len(inner) != 1048550 || len(over) != 1048577 || !bytes.Equal(over[22:len(over)-5], inner) {
+		t.Fatalf("over-cap tree length = %d, inner length = %d", len(over), len(inner))
+	}
+	wantTreeAuthorityEncodeError(t, tree)
+	wantTreeAuthorityDecodeError(t, over)
 }
 
 func TestTreeAuthorityNestedIsolation(t *testing.T) {
@@ -1582,4 +1639,19 @@ func TestTreeSourceIntentBorrowedInspection(t *testing.T) {
 		t.Fatalf("borrowed NONE/STABLE intent = %v", err)
 	}
 	wantTreeAuthorityDecodeError(t, stable)
+}
+
+func TestTreeInvalidBranchBorrowedInspection(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		tree := consensusTokenTree(2, nil)
+		if present {
+			tree.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: []byte(longestConsensusErrorToken)}
+		}
+		literal := wantTreeAuthority(t, tree)
+		var err error
+		allocs := testing.AllocsPerRun(1, func() { err = inspectTreeAuthorityV1(literal) })
+		if err != nil || allocs != 0 {
+			t.Fatalf("borrowed inspection slot present=%v, error=%v, allocations=%v", present, err, allocs)
+		}
+	}
 }

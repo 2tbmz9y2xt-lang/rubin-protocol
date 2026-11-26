@@ -98,19 +98,21 @@ func startupRawPreserved(t *testing.T, w *replayWorld, rank uint8, key, value []
 	var out ReplayStartupOutcomeV1
 	if rank == 0 {
 		evidence, probeErr := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = startupRun(w) })
+		_, schema := mdbx.DecodeStorageAuthorityV1(nil)
 		e, native := out.Err.(*mdbx.EngineError)
-		logicalMDBXAssert(t, probeErr == nil && evidence.OldPulls == ([8]uint64{}) && native && e.Class == "Integrity" && e.Operation == "get" && e.Code == -30793 && e.Diagnostic == "invalid storage authority" && e.Cause != nil, "authority full decoder before traversal: %+v/%v/%v", evidence, out.Err, probeErr)
+		logicalMDBXAssert(t, native && e.Class == "Integrity" && e.Operation == "get" && e.Code == -30793 && e.Diagnostic == "invalid storage authority" && e.Cause == schema && e.ReopenRequired, "authority decode refusal: %v", out.Err)
+		logicalMDBXAssert(t, probeErr == nil && evidence.OldGets == ([8]uint64{0: 1}) && evidence.OldPulls == ([8]uint64{}) && evidence.BeginOld == 1 && evidence.OldAborts == 1 && evidence.BeginWrite == 0 && evidence.Commits == 0, "authority read before traversal or writes: %+v/%v", evidence, probeErr)
 	} else {
 		out = startupRun(w)
 	}
 	startupTuple(t, out, false, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
 	if _, recorded := out.Err.(*mdbx.EngineError); recorded {
 		logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { t.Fatal("recorded native View callback"); return nil }) == out.Err, "recorded native cached View identity")
-		_, _, next := w.store.Update(func(*mdbx.Reader) (mdbx.Batch, error) {
+		truth, stage, next := w.store.Update(func(*mdbx.Reader) (mdbx.Batch, error) {
 			t.Fatal("recorded native Update callback")
 			return mdbx.Batch{}, nil
 		})
-		logicalMDBXAssert(t, next == out.Err, "recorded native cached Update identity")
+		logicalMDBXAssert(t, next == out.Err && stage == mdbx.UpdateStagePrewrite && truth == mdbx.CommitTruthOld, "recorded native cached Update: %v/%v/%v", truth, stage, next)
 		w.store = w.reopen()
 	} else {
 		logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { return nil }) == nil, "application positive consumed original Store")
@@ -123,7 +125,116 @@ func startupRawPreserved(t *testing.T, w *replayWorld, rank uint8, key, value []
 	return out
 }
 
+func replaceLegacyAuthorityToken(t *testing.T, control []byte, replacement string) []byte {
+	t.Helper()
+	const legal = "TX_ERR_PARSE"
+	a, err := mdbx.DecodeStorageAuthorityV1(control)
+	logicalMDBXAssert(t, err == nil && a.ExcludedInvalidBranch != nil && string(a.ExcludedInvalidBranch.ExactConsensusError) == legal, "legal exclusion control: %v", err)
+	field := binary.BigEndian.AppendUint32(nil, uint32(len(legal)))
+	field = append(field, legal...)
+	at := bytes.Index(control, field)
+	logicalMDBXAssert(t, at >= 41 && bytes.Count(control, field) == 1 && control[at-41] == 1, "exclusion field framing")
+	bad := binary.BigEndian.AppendUint32(bytes.Clone(control[:at]), uint32(len(replacement)))
+	bad = append(bad, replacement...)
+	bad = append(bad, control[at+len(field):]...)
+	end := at + 4 + len(replacement)
+	logicalMDBXAssert(t, int(binary.BigEndian.Uint32(bad[at:])) == len(replacement) && string(bad[at+4:end]) == replacement && bytes.Equal(bad[end:], control[at+len(field):]), "replacement exclusion field framing")
+	return bad
+}
+
+func startupRunCorruptToken(t *testing.T, w *replayWorld, replacement string) {
+	t.Helper()
+	w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+		a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: [32]byte{0x91}, ExactConsensusError: []byte("TX_ERR_PARSE")}
+	})
+	control, err := w.authority().Encode()
+	logicalMDBXAssert(t, err == nil, "encode legal startup exclusion: %v", err)
+	raw := replaceLegacyAuthorityToken(t, control, replacement)
+	startupRaw(t, w, 0, []byte{2}, raw)
+	startupRawPreserved(t, w, 0, []byte{2}, raw)
+}
+
+func startupTokenNativeRows(t *testing.T) {
+	for _, row := range []struct{ name, token string }{
+		{"growth suffix", "BLOCK_ERR_STATE_GROWTH_EXCEEDEDsuffix"},
+		{"growth leading space", " BLOCK_ERR_STATE_GROWTH_EXCEEDED"},
+		{"growth trailing space", "BLOCK_ERR_STATE_GROWTH_EXCEEDED "},
+		{"growth lowercase", "block_err_state_growth_exceeded"},
+		{"growth NUL", "BLOCK_ERR_STATE_GROWTH_EXCEEDED\x00"},
+		{"parse suffix", "TX_ERR_PARSEsuffix"},
+		{"near miss", "TX_ERR_SIG_HASH_INVALID"},
+		{"wrapped", "CONSENSUS_INVALID(TX_ERR_PARSE)"},
+		{"prefix", "TX_ERR_"},
+		{"lowercase", "tx_err_parse"},
+		{"leading space", " TX_ERR_PARSE"},
+		{"newline", "TX_ERR_PARSE\n"},
+		{"NUL", "TX_ERR_PARSE\x00"},
+		{"unknown", "x"},
+		{"long", string(bytes.Repeat([]byte{'x'}, 512))},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			w := startupWorld(t, 0, 0)
+			for _, g := range []uint64{1, 2} {
+				w.apply(
+					mdbx.Mutation{DBI: logicalMDBXDBIs[2], Key: logicalMDBXMust(mdbx.HeightKey(g, 0)), BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(w.hashes[0], [32]byte{}, sideWorldWork(2))},
+					mdbx.Mutation{DBI: logicalMDBXDBIs[7], Key: logicalMDBXMust(mdbx.CanonicalOwnerKey(g, w.hashes[0])), BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: mdbx.CanonicalOwnerValue(0)})
+			}
+			startupRunCorruptToken(t, w, row.token)
+		})
+	}
+	t.Run("zero length", func(t *testing.T) { startupRunCorruptToken(t, startupWorld(t, 0, 0), "") })
+}
+
+func TestConnectPublishedGenesisMDBXMalformedExclusion(t *testing.T) {
+	t.Run("legal control", func(t *testing.T) {
+		store, owner, _ := genesisMDBXBoot(t, mdbx.StorageProfilePrunedV1)
+		control := genesisExclusionControl(t, store)
+		genesisMDBXReturned(t, genesisMDBXRun(store, owner), "ACCEPTED", 2, 3, "legal exclusion")
+		genesisMDBXExpected(t, store, 1, control, "genesis preserves legal exclusion")
+	})
+	t.Run("malformed slot", func(t *testing.T) {
+		store, owner, reopen := genesisMDBXBoot(t, mdbx.StorageProfilePrunedV1)
+		control := genesisExclusionControl(t, store)
+		_, _, hash := genesisMDBXFixture()
+		w := &replayWorld{t: t, store: store, hashes: [][32]byte{hash}}
+		raw := replaceLegacyAuthorityToken(t, control, "UX_ERR_PARSE")
+		startupRaw(t, w, 0, []byte{2}, raw)
+		first := genesisMDBXRun(store, owner)
+		assertGenesisMalformedExclusion(t, first)
+		called := false
+		err := store.View(func(*mdbx.Reader) error { called = true; return nil })
+		logicalMDBXAssert(t, called && err == nil, "genesis application refusal consumed Store: %v", err)
+		second := genesisMDBXRun(store, owner)
+		assertGenesisMalformedExclusion(t, second)
+		logicalMDBXAssert(t, second.Err != first.Err, "genesis reuse returned a cached refusal")
+		startupRawImageEqual(t, w)
+		w.store = reopen()
+		startupRawImageEqual(t, w)
+	})
+}
+
+func genesisExclusionControl(t *testing.T, store *mdbx.Store) []byte {
+	t.Helper()
+	var a mdbx.StorageAuthorityV1
+	err := store.View(func(r *mdbx.Reader) (err error) { a, err = r.ReadStorageAuthorityV1(); return err })
+	logicalMDBXAssert(t, err == nil && a.Phase == 1 && a.Lifecycle == 1 && a.B == 0 && a.U == 0 && a.ActiveGenerationID == 1, "genesis exclusion prestate: %+v/%v", a, err)
+	a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: [32]byte{0x91}, ExactConsensusError: []byte("TX_ERR_PARSE")}
+	control, err := a.Encode()
+	logicalMDBXAssert(t, err == nil, "encode legal genesis exclusion: %v", err)
+	logicalMDBXSeed(t, store, mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: control})
+	return control
+}
+
+func assertGenesisMalformedExclusion(t *testing.T, out GenesisMDBXOutcome) {
+	t.Helper()
+	genesisMDBXReturned(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", 1, 1, "malformed genesis exclusion")
+	_, schema := mdbx.DecodeStorageAuthorityV1(nil)
+	failure, ok := out.Err.(*logicalStateFailure)
+	logicalMDBXAssert(t, ok && failure.kind == logicalStateFailureStoreIntegrity && failure.cause == schema, "genesis exclusion did not reach local authority decode: %v", out.Err)
+}
+
 func TestReplayStartupMDBXNativeRows(t *testing.T) {
+	t.Run("malformed exclusion", startupTokenNativeRows)
 	for _, g := range []uint64{1, 2} {
 		t.Run(fmt.Sprintf("R04 g%d repeated forward hash", g), func(t *testing.T) {
 			w := startupWorld(t, 2, 2)
@@ -212,7 +323,7 @@ func TestReplayStartupMDBXNativeRows(t *testing.T) {
 			startupRawPreserved(t, w, rank, key, value)
 		})
 	}
-	for _, shape := range []string{"missing", "truncated", "trailing", "version", "phase", "lifecycle", "pending profile", "selected", "detached", "cleanup payload", "ordinary payload", "unsupported malformed", "empty exclusion", "same generation", "zero active", "zero target generation", "next zero", "target equals next", "cursor zero", "cursor unknown", "cursor beyond tip", "cursor genesis hash", "target height zero", "target height overflow", "target work zero", "target work overflow", "profile zero", "profile unknown", "pruned B0 U13681", "pruned B1 U13680", "archive B1 U0"} {
+	for _, shape := range []string{"missing", "truncated", "trailing", "version", "phase", "lifecycle", "pending profile", "selected", "detached", "cleanup payload", "ordinary payload", "unsupported malformed", "same generation", "zero active", "zero target generation", "next zero", "target equals next", "cursor zero", "cursor unknown", "cursor beyond tip", "cursor genesis hash", "target height zero", "target height overflow", "target work zero", "target work overflow", "profile zero", "profile unknown", "pruned B0 U13681", "pruned B1 U13680", "archive B1 U0"} {
 		t.Run("R02 authority "+shape, func(t *testing.T) {
 			w := startupWorld(t, 0, 0)
 			a := w.authority()
@@ -272,14 +383,6 @@ func TestReplayStartupMDBXNativeRows(t *testing.T) {
 					binary.BigEndian.PutUint64(raw[2:10], 1)
 					binary.BigEndian.PutUint64(raw[10:18], 0)
 				},
-				"empty exclusion": func() {
-					a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: []byte("x")}
-					raw, _ = a.Encode()
-					// Remove only the token byte, preserving both following absent
-					// option tags and declaring an exact zero-length blob.
-					raw = append(raw[:276], raw[277:]...)
-					clear(raw[272:276])
-				},
 			}[shape]()
 			startupRaw(t, w, 0, []byte{2}, raw)
 			startupRawPreserved(t, w, 0, []byte{2}, raw)
@@ -288,6 +391,21 @@ func TestReplayStartupMDBXNativeRows(t *testing.T) {
 }
 
 func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
+	t.Run("malformed exclusion before phase", func(t *testing.T) {
+		for _, row := range startupOtherPhases {
+			t.Run(fmt.Sprint(row), func(t *testing.T) {
+				startupRunCorruptToken(t, startupOtherPhase(t, row.phase, row.lifecycle), "UX_ERR_PARSE")
+			})
+		}
+	})
+	t.Run("malformed exclusion before network and work", func(t *testing.T) {
+		w := startupWorld(t, 0, -1)
+		w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+			a.Replay.Target.ChainID[0] ^= 1
+			a.Replay.Target.CumulativeChainwork = [40]byte{39: 1}
+		})
+		startupRunCorruptToken(t, w, "CONSENSUS_INVALID(BLOCK_ERR_PARSE)")
+	})
 	for _, row := range []struct {
 		name           string
 		profile        mdbx.StorageProfileV1
