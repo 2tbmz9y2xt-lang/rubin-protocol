@@ -93,6 +93,135 @@ func requireReturned(t *testing.T, done <-chan error, label string) {
 	}
 }
 
+// lifecycleCall returns the result of a call bounded by the lifecycle watchdog.
+func lifecycleCall[T any](t *testing.T, label string, call func() T) T {
+	t.Helper()
+	var result T
+	done := goDone(func() { result = call() })
+	if !joinWithin(t, label, done) {
+		t.Cleanup(func() { joinWithin(t, label+" cleanup", done) })
+		t.FailNow()
+	}
+	return result
+}
+
+func TestServiceWorkLifecycleRegistrationAndReads(t *testing.T) {
+	s := lifecycleService(t)
+	t.Cleanup(func() { requireReturned(t, lifecycleClose(s), "Close") })
+	must(t, s.Start(context.Background()), "Start")
+	bound := s.listener.Addr().String()
+
+	t.Run("peer_registry_held", func(t *testing.T) {
+		s.peersMu.Lock()
+		defer s.peersMu.Unlock()
+
+		acquired := lifecycleCall(t, "acquireWork with peer registry held", func() bool {
+			got := s.acquireWork()
+			if got {
+				s.releaseWork()
+			}
+			return got
+		})
+		requireEqual(t, acquired, true, "acquired lease")
+		authorized := lifecycleCall(t, "workAuthorized with peer registry held", s.workAuthorized)
+		requireEqual(t, authorized, true, "work authorization")
+		addr := lifecycleCall(t, "Addr with peer registry held", s.Addr)
+		requireEqual(t, addr, bound, "bound address")
+	})
+	t.Run("lifecycle_held", func(t *testing.T) {
+		s.lifecycleMu.Lock()
+		defer s.lifecycleMu.Unlock()
+
+		authorized := lifecycleCall(t, "workAuthorized with lifecycle held", s.workAuthorized)
+		requireEqual(t, authorized, true, "work authorization")
+	})
+}
+
+func TestServiceWorkLifecycleClosePublishesBeforeRegistrySnapshot(t *testing.T) {
+	s := blockRetryService(t, lifecycleService(t))
+	t.Cleanup(func() { requireReturned(t, lifecycleClose(s), "Close cleanup") })
+	ctxDone := s.ctx.Done()
+	s.peersMu.Lock()
+	unlock := sync.OnceFunc(s.peersMu.Unlock)
+	defer unlock()
+	closed := lifecycleClose(s)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	observed := goDone(func() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for s.workAuthorized() {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+			}
+		}
+	})
+	t.Cleanup(func() { joinWithin(t, "workAuthorized polling cleanup", observed) })
+	requireJoined(t, "workAuthorized observing the cutoff", observed)
+	requireJoined(t, "Close canceling the Service context", ctxDone)
+	acquired := lifecycleCall(t, "acquireWork after the cutoff with peer registry held", func() bool {
+		got := s.acquireWork()
+		if got {
+			s.releaseWork()
+		}
+		return got
+	})
+	requireEqual(t, acquired, false, "acquired lease after the cutoff")
+
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned while the peer registry was held (err=%v)", err)
+	case <-time.After(lifecycleSettle):
+	}
+	unlock()
+	requireReturned(t, closed, "Close after releasing the peer registry")
+	requireClosedRejection(t, s.AnnounceBlock(nil), "AnnounceBlock after Close")
+	requireClosedRejection(t, s.Start(context.Background()), "Start after Close")
+}
+
+func TestServiceWorkLifecycleArmRetryWithRegistryHeld(t *testing.T) {
+	s := blockRetryService(t, lifecycleService(t))
+	t.Cleanup(func() { requireReturned(t, lifecycleClose(s), "Close") })
+	p, _ := blockRetryPeer(s, "lifecycle-retry-peer")
+	notify, receiveStart := make(chan struct{}), time.Now()
+	s.peersMu.Lock()
+	unlock := sync.OnceFunc(s.peersMu.Unlock)
+	defer unlock()
+
+	armed := lifecycleCall(t, "armBlockRetry with peer registry held", func() blockRetryArm {
+		return p.armBlockRetry([32]byte{0x28}, notify, receiveStart)
+	})
+	requireEqual(t, armed, blockRetryArmed, "arm result")
+	unlock()
+	slot := blockRetrySlotOf(p)
+	if slot == nil {
+		t.Fatal("the armed retry slot is missing")
+	}
+	requireJoined(t, "finishBlockRetry", goDone(p.finishBlockRetry))
+	select {
+	case <-slot.done:
+	default:
+		t.Fatal("finishBlockRetry returned before the armed retry waiter ended")
+	}
+}
+
+func TestServiceWorkLifecycleStartWithRegistryHeld(t *testing.T) {
+	s := lifecycleService(t)
+	t.Cleanup(func() { requireReturned(t, lifecycleClose(s), "Close cleanup") })
+	s.peersMu.Lock()
+	unlock := sync.OnceFunc(s.peersMu.Unlock)
+	defer unlock()
+
+	ctx := context.Background()
+	err := lifecycleCall(t, "Start with peer registry held", func() error { return s.Start(ctx) })
+	must(t, err, "Start")
+	unlock()
+	requireReturned(t, lifecycleClose(s), "Close after releasing the peer registry")
+}
+
 // waitDraining blocks until Close published the non-OPEN state, so no later assertion can pass merely because Close had not started yet.
 func waitDraining(t *testing.T, s *Service) {
 	t.Helper()
@@ -940,9 +1069,9 @@ func TestServiceWorkLifecycleConcurrentClose(t *testing.T) {
 	for i, done := range closes {
 		requireReturned(t, done, fmt.Sprintf("Close %d", i))
 	}
-	s.peersMu.RLock()
+	s.lifecycleMu.Lock()
 	shared := s.closeDone
-	s.peersMu.RUnlock()
+	s.lifecycleMu.Unlock()
 	select { // A nil shared channel is never ready, so this also fails when no completion was published.
 	case <-shared:
 	default:

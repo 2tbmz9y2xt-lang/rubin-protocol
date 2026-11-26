@@ -202,9 +202,9 @@ func TestService_StartPostListenClosedRace_ReturnsAlreadyClosed(t *testing.T) {
 	var capturedAddr string
 	serviceStartPostListenHook = func(s *Service, ln net.Listener) {
 		capturedAddr = ln.Addr().String()
-		s.peersMu.Lock()
+		s.lifecycleMu.Lock()
 		s.closed.Store(true)
-		s.peersMu.Unlock()
+		s.lifecycleMu.Unlock()
 	}
 	defer func() { serviceStartPostListenHook = prevHook }()
 
@@ -243,9 +243,9 @@ func TestService_StartPostListenStartedRace_ReturnsAlreadyStarted(t *testing.T) 
 	var capturedAddr string
 	serviceStartPostListenHook = func(s *Service, ln net.Listener) {
 		capturedAddr = ln.Addr().String()
-		s.peersMu.Lock()
+		s.lifecycleMu.Lock()
 		s.listener = existing
-		s.peersMu.Unlock()
+		s.lifecycleMu.Unlock()
 	}
 	defer func() { serviceStartPostListenHook = prevHook }()
 
@@ -266,19 +266,6 @@ func TestService_StartPostListenStartedRace_ReturnsAlreadyStarted(t *testing.T) 
 }
 
 func TestService_CloseWaitsForInFlightStartToReleaseListener(t *testing.T) {
-	// Regression test for the race Copilot flagged on the first closed-state
-	// fix: Close could snapshot s.listener as nil while an in-progress Start
-	// was paused AFTER net.Listen had already returned a bound listener but
-	// BEFORE the write-lock re-check published it. Without startWG, Close
-	// would return while that stalled local listener still held the port.
-	//
-	// The post-listen hook here simulates the pause: it spawns a Close
-	// goroutine from inside the hook body (while Start is still running),
-	// waits until that Close has reached startWG.Wait inside the Close
-	// implementation, and only then returns so Start's re-check can abort.
-	// A net.Listen attempt on the captured address immediately after Close
-	// returns must succeed — Close's startWG.Wait must have blocked until
-	// Start's local listener.Close ran.
 	s := &Service{cfg: ServiceConfig{BindAddr: "127.0.0.1:0"}}
 	serviceStartPostListenHookMu.Lock()
 	defer serviceStartPostListenHookMu.Unlock()
@@ -286,52 +273,30 @@ func TestService_CloseWaitsForInFlightStartToReleaseListener(t *testing.T) {
 	defer func() { serviceStartPostListenHook = prevHook }()
 
 	var capturedAddr string
-	closeDone := make(chan error, 1)
+	var closeResult <-chan error
 	serviceStartPostListenHook = func(s *Service, ln net.Listener) {
 		capturedAddr = ln.Addr().String()
-		// Mark the Service closed from inside the hook so Start's write-lock
-		// re-check takes the abort path when we return from the hook.
-		s.peersMu.Lock()
-		s.closed.Store(true)
-		s.peersMu.Unlock()
-		// Spawn the racing Close on a separate goroutine. It will observe
-		// closed=true in its own peersMu section (a no-op here) and then
-		// block on s.startWG.Wait() because we — the Start invocation — are
-		// still in flight, holding startWG > 0 via the top-of-Start defer.
-		go func() {
-			closeDone <- s.Close()
-		}()
-		// Give the Close goroutine a chance to schedule and reach
-		// s.startWG.Wait. 50ms is generous vs the handful of instructions
-		// it needs to get there, and the test only pays this cost once.
-		time.Sleep(50 * time.Millisecond)
-	}
+		result, exited := startClose(s)
+		closeResult = result
+		t.Cleanup(func() {
+			_ = ln.Close()
+			joinWithin(t, "Close cleanup", exited)
+		})
 
-	err := s.Start(context.Background())
-	if err == nil || err.Error() != "service already closed" {
-		t.Fatalf("Start() post-listen closed race: err=%v want %q", err, "service already closed")
-	}
-
-	select {
-	case closeErr := <-closeDone:
-		if closeErr != nil {
-			t.Fatalf("Close() returned error: %v", closeErr)
+		waitDraining(t, s)
+		select {
+		case <-exited:
+			t.Error("Close returned while Start held the listener")
+		case <-time.After(lifecycleSettle):
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatalf("Close() did not return within 3s — possible startWG deadlock")
-	}
-	if capturedAddr == "" {
-		t.Fatalf("post-listen hook did not capture the bound address")
 	}
 
-	// Strict invariant: once Close returns, the captured port must be
-	// IMMEDIATELY rebindable with zero retries. Without the startWG.Wait
-	// guard, Close would return here while Start's stalled local listener
-	// still held the port and this net.Listen would fail with EADDRINUSE.
-	rebind, bindErr := net.Listen("tcp", capturedAddr)
-	if bindErr != nil {
-		t.Fatalf("port %q still bound immediately after Close returned: %v", capturedAddr, bindErr)
-	}
+	requireClosedRejection(t, s.Start(context.Background()), "Start during Close")
+	require(t, capturedAddr != "", "post-listen hook did not capture the bound address")
+	requireReturned(t, closeResult, "Close after releasing Start")
+	var lc net.ListenConfig
+	rebind, err := lc.Listen(context.Background(), "tcp", capturedAddr)
+	must(t, err, "rebind immediately after Close")
 	_ = rebind.Close()
 }
 
@@ -352,9 +317,9 @@ func TestService_CloseSetsClosedFlag(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close() on zero-value Service: %v", err)
 	}
-	s.peersMu.RLock()
+	s.lifecycleMu.Lock()
 	closed := s.closed.Load()
-	s.peersMu.RUnlock()
+	s.lifecycleMu.Unlock()
 	if !closed {
 		t.Fatalf("Close() did not set closed=true")
 	}
