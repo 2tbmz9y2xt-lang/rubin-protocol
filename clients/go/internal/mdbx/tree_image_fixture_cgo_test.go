@@ -232,26 +232,31 @@ func tiMalformedExclusion(t *testing.T) {
 	for _, row := range []struct {
 		name        string
 		badNext     bool
+		presentOld  bool
 		badOld      bool
 		wantOldGets uint64
 	}{
-		{"legal NEXT", false, false, 1},
-		{"malformed NEXT", true, false, 0},
-		{"malformed OLD", false, true, 1},
+		{"legal NEXT", false, false, false, 1},
+		{"malformed NEXT", true, false, false, 0},
+		{"legal OLD", false, true, false, 1},
+		{"malformed OLD", false, true, true, 1},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			tiExclusionCase(t, row.badNext, row.badOld, row.wantOldGets)
+			tiExclusionCase(t, row.badNext, row.presentOld, row.badOld, row.wantOldGets)
 		})
 	}
 }
 
-func tiExclusionCase(t *testing.T, badNext, badOld bool, oldGets uint64) {
+func tiExclusionCase(t *testing.T, badNext, presentOld, badOld bool, oldGets uint64) {
 	t.Helper()
 	s, path, _ := treeNativeStore(t)
 	var legal []byte
-	if badOld {
+	if presentOld {
 		_, legal = seedLegalTreeExclusion(t, s)
-		old := replaceTreeAuthorityToken(t, legal, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
+		old := legal
+		if badOld {
+			old = replaceTreeAuthorityToken(t, legal, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
+		}
 		treeNativeSeed(t, s, 0, []byte{2}, old)
 	} else {
 		tiRankOne(t, s)
@@ -275,16 +280,16 @@ func tiExclusionCase(t *testing.T, badNext, badOld bool, oldGets uint64) {
 	})
 	got := tiReturned(t, out)
 	switch {
-	case badNext:
+	case badOld:
+		tiSchemaFailure(t, got)
+		assertCachedSlotError(t, s, got, got)
+	case badNext || presentOld:
 		tiInvalidBatch(t, got)
 		called := false
 		next := s.View(func(*Reader) error { called = true; return nil })
 		if !called || next != nil {
-			t.Fatalf("malformed IMAGE NEXT consumed Store: %v", next)
+			t.Fatalf("IMAGE batch refusal left View callback called=%v, error=%v", called, next)
 		}
-	case badOld:
-		tiSchemaFailure(t, got)
-		assertCachedSlotError(t, s, got, got)
 	default:
 		tiCensusFailure(t, got)
 		assertCachedSlotError(t, s, got, got)
