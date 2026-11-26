@@ -671,7 +671,7 @@ func testImageServiceOutcomeClose(t *testing.T) {
 			peerKeys: 3, peerKey: true, attempted: 3, starts: 3,
 			perPeer: imageUsage(0, 1, 1, 1, 0), global: imageUsage(0, 3, 3, 3, 0),
 		}, "round work retained and requester registry empty at Close")
-	})
+	})(t)
 }
 
 func assertImageRequesterDetached(t *testing.T, f *imageTestFixture, round *ImageRound) {
