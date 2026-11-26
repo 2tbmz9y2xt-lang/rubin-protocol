@@ -51,7 +51,37 @@ func TestCandidateRootFixtureFailure(t *testing.T) {
 	t.Run("get_and_abort", func(t *testing.T) { candidateFailedView(t, mdbx.SelectedDamageGetAbortEIO) })
 	t.Run("abort_after_success", func(t *testing.T) { candidateFailedView(t, mdbx.SelectedDamageAbortEIO) })
 	t.Run("binding_integrity", candidateBindingFailures)
+	t.Run("node_get_eio", candidateNodeGetIO)
 	t.Run("application_integrity", candidateApplicationFailures)
+}
+
+func candidateNodeGetIO(t *testing.T) {
+	t.Helper()
+	s := newCandidateScene(t, 5)
+	in, _ := s.body(t, 1, 1)
+	w := s.world
+	var key []byte
+	candidateView(t, w, func(r *mdbx.Reader) {
+		binding, present, err := r.ReadTreeRootBindingV1(1)
+		logicalMDBXAssert(t, err == nil && present && binding.Top.Node != nil, "CURRENT tree top: %+v/%t/%v", binding, present, err)
+		key, err = mdbx.TreeNodeKey(1, *binding.Top.Node)
+		logicalMDBXAssert(t, err == nil, "CURRENT tree top key: %v", err)
+	})
+	var selected, outer error
+	evidence, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 8, key, func() {
+		outer = w.s.View(func(r *mdbx.Reader) error {
+			root, err := DeriveCandidateUTXORootV1(r, w.owner, in)
+			selected = err
+			logicalMDBXAssert(t, root == [32]byte{}, "node I/O returned digest %x", root)
+			engine := candidateEngine(t, err, "update", "IO", 5, "error 5")
+			logicalMDBXAssert(t, engine.Cause == nil && engine.TreeObservation == nil, "node I/O changed native error: %+v", engine)
+			candidateInactiveReader(t, r)
+			return err
+		})
+	})
+	logicalMDBXAssert(t, fixtureErr == nil && evidence.Faults == 1 && evidence.NodeGets > 0, "rank-8 GET %x: %+v/%v", key, evidence, fixtureErr)
+	logicalMDBXAssert(t, any(outer) == any(selected), "node I/O changed View error: %v/%v", selected, outer)
+	candidateTerminalView(t, w, outer)
 }
 
 func candidateFailedView(t *testing.T, scenario mdbx.SelectedDamageScenario) {
@@ -533,11 +563,64 @@ func candidateNoIdentityRead(t *testing.T) {
 
 func TestCandidateRootFixtureResource(t *testing.T) {
 	t.Run("w_admit", candidateWAdmission)
+	t.Run("growth_funding", func(t *testing.T) {
+		t.Run("equal", func(t *testing.T) { candidateGrowthLive(t, false) })
+		t.Run("over", func(t *testing.T) { candidateGrowthLive(t, true) })
+	})
 	t.Run("d_live", candidateDLive)
 	t.Run("d_aggregate", candidateDAggregate)
 	t.Run("below_floor", candidateBelowFloor)
 	t.Run("next_operation", candidateNextOperation)
 	t.Run("no_write", candidateNoWrite)
+}
+
+func candidateGrowthLive(t *testing.T, over bool) {
+	t.Helper()
+	w, in, want, funding := candidateGrowthSetup(t, over)
+	next, nextRoot := candidateGrowthCoinbase(t, in, funding.parents)
+	const continuing = 127
+	var live []uint64
+	evidence, obsErr := mdbx.FixturePairReadObservation(w.s, func(site uint32) {
+		if site == 1 {
+			live = append(live, mdbx.FixtureReservationLive(w.owner))
+		}
+	}, func() {
+		err := w.owner.WithReservation(continuing, func() error {
+			candidateView(t, w, func(r *mdbx.Reader) {
+				if over {
+					candidateTxError(t, r, w.owner, in, "BLOCK_ERR_STATE_GROWTH_EXCEEDED", "logical state growth exceeded")
+				} else {
+					candidateRootOK(t, r, w.owner, in, want)
+				}
+				logicalMDBXAssert(t, mdbx.FixtureReservationLive(w.owner) == continuing, "growth result changed continuing bytes")
+				candidateGrowthPhaseBytes(t, live, uint64(len(in.Raw)), continuing, over)
+				candidateRootOK(t, r, w.owner, next, nextRoot)
+				logicalMDBXAssert(t, mdbx.FixtureReservationLive(w.owner) == continuing, "growth retry changed continuing bytes")
+			})
+			return nil
+		})
+		logicalMDBXAssert(t, err == nil && mdbx.FixtureReservationLive(w.owner) == 0, "growth continuing hold release: %v", err)
+	})
+	logicalMDBXAssert(t, obsErr == nil && evidence.Gets == uint64(len(live)) && evidence.Writes == 0, "growth native GET trace: %+v/%v", evidence, obsErr)
+}
+
+func candidateGrowthPhaseBytes(t *testing.T, live []uint64, n, continuing uint64, over bool) {
+	t.Helper()
+	logicalMDBXAssert(t, len(live) > 2, "growth native GET count %d", len(live))
+	events := uint64(8674)
+	if over {
+		events = 8691
+	}
+	w := candidateW(n, 11, 0)
+	logicalMDBXAssert(t, live[0] == continuing+w, "growth authority GET live %d, want %d", live[0], continuing+w)
+	check := continuing + w + 135192 + 48*events
+	logicalMDBXAssert(t, live[1] == check, "growth first parent GET live %d, want %d", live[1], check)
+	if !over {
+		// The final producer GET precedes digest return and the next producer call.
+		check = continuing + n + 4096 + 36*events + 288440 + 104*events
+		last := live[len(live)-1]
+		logicalMDBXAssert(t, last == check, "growth final derivation GET live %d, want %d", last, check)
+	}
 }
 
 func candidateCapacity(t *testing.T, r *mdbx.Reader, owner *mdbx.OperationReservationOwner, in CandidateRootInput) {

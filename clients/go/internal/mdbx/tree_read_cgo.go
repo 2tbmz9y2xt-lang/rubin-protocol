@@ -238,9 +238,13 @@ func candidateRootCoverageV1(p CandidateRootParentV1, body CandidateRootBodyV1, 
 	if !bytes.Equal(body.Raw[4:36], p.Parent.BlockHash[:]) {
 		return false
 	}
-	txs, _, ok := readCompactSize(body.Raw[148:])
+	txs, width, ok := readCompactSize(body.Raw[148:])
+	// Each serialized transaction occupies at least 21 bytes (RUBIN_L1_CANONICAL.md Section 5.1).
+	if !ok || txs > (n-148-width)/21 {
+		return false
+	}
 	e := uint64(body.BlockMeta.EventCount)
-	return all(ok, txs != 0, txs == uint64(body.BlockMeta.TxCount), candidateRootEventBoundV1(n, e), facts >= 0, int64(facts) <= int64(body.BlockMeta.EventCount))
+	return all(txs != 0, txs == uint64(body.BlockMeta.TxCount), candidateRootEventBoundV1(n, e), facts >= 0, int64(facts) <= int64(body.BlockMeta.EventCount))
 }
 
 // candidateRootEventBoundV1 checks the disjoint body-byte and allocation bounds.

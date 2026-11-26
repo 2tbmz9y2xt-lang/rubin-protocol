@@ -934,6 +934,7 @@ func trCandidateCoverageAdmission(t *testing.T, r *Reader, owner *OperationReser
 		{"wrong_width", func(b *CandidateRootBodyV1) { b.HeaderBytes = 116 }, nil},
 		{"wrong_linkage", func(b *CandidateRootBodyV1) { b.Raw[4] ^= 1 }, nil},
 		{"missing_callback", func(b *CandidateRootBodyV1) { b.Events = nil }, nil},
+		{"missing_transactions", func(b *CandidateRootBodyV1) { b.Raw, b.BlockMeta.EventCount = b.Raw[:149], 0 }, nil},
 		{"wrong_count", func(b *CandidateRootBodyV1) { b.BlockMeta.TxCount++ }, nil},
 		{"excess_events", func(b *CandidateRootBodyV1) { b.BlockMeta.EventCount = 0xffffffff }, nil},
 		{"excess_inputs", nil, []TreeOutpointV1{{Txid: tdTxid(1)}, {Txid: tdTxid(2)}}},
@@ -943,7 +944,11 @@ func trCandidateCoverageAdmission(t *testing.T, r *Reader, owner *OperationReser
 		t.Run(row.name, func(t *testing.T) {
 			body := original
 			body.Raw = bytes.Clone(original.Raw)
-			body.Events = func([]byte, *TreeDeltaSinkV1) error { t.Fatal("invalid coverage reached recorder"); return nil }
+			called := false
+			body.Events = func([]byte, *TreeDeltaSinkV1) error {
+				called = true
+				return errors.New("invalid coverage reached recorder")
+			}
 			if row.edit != nil {
 				row.edit(&body)
 			}
@@ -951,6 +956,9 @@ func trCandidateCoverageAdmission(t *testing.T, r *Reader, owner *OperationReser
 				mustEnvironment(t, scope.QualifyCurrentV1())
 				got, err := scope.DeriveCandidateRootV1(body, row.inputs)
 				trCandidateRefusal(t, got, err)
+				if called {
+					t.Fatal("invalid coverage reached recorder")
+				}
 				return nil
 			}))
 		})

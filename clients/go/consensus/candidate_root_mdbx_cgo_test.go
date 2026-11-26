@@ -564,7 +564,7 @@ func candidateW(n, timestamps, caps uint64) uint64 {
 
 func candidateAssertGrowthFunding(t *testing.T, n, events uint64) {
 	t.Helper()
-	w := candidateW(n, 11, 1)
+	w := candidateW(n, 11, 0)
 	r, d := 135192+48*events, 288440+104*events
 	logicalMDBXAssert(t, n <= 1048576 && w <= 163652311 && w+r <= 164204671 && n+4096+36*events+d <= 2557852,
 		"growth funding %d/%d: W=%d, R=%d, D=%d", n, events, w, r, d)
@@ -737,6 +737,21 @@ func TestCandidateRootContextConstruction(t *testing.T) {
 	var missing *candidateFreezeProvider
 	frozen, err := FreezeCandidateRootRotation(5, missing)
 	logicalMDBXAssert(t, frozen == nil && err != nil, "typed nil rotation: %+v/%v", frozen, err)
+	empty, populated := NewNativeSuiteSet(), DefaultRotationProvider{}.NativeCreateSuites(5)
+	for _, row := range []struct {
+		name          string
+		create, spend *NativeSuiteSet
+	}{
+		{"empty_create", empty, populated},
+		{"empty_spend", populated, empty},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			rotation := &nativeSuiteAvailabilityRotation{create: row.create, spend: row.spend}
+			got, err := FreezeCandidateRootRotation(5, rotation)
+			logicalMDBXAssert(t, got == nil, "empty suite set returned a frozen context")
+			irFailureV1(t, err, logicalStateFailureLocalInvariant, "unresolved candidate suite context")
+		})
+	}
 	t.Run("deployment_read", candidateFrozenDeployment)
 	t.Run("copied_cap", candidateCopiedCap)
 }

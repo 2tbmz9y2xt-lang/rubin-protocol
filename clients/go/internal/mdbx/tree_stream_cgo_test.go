@@ -1773,6 +1773,7 @@ func TestTreeStreamSurfaceV1(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("public surface %v want %v", got, want)
 	}
+	tsCandidateSurfaceV1(t)
 	for i, v := range []TreeUndoEffectV1{UndoWriteOrReuseV1, UndoTransientV1, UndoCompareV1, UndoCompareDeleteV1, UndoSourceRetainV1, UndoSourceDeleteV1} {
 		if int(v) != i+1 {
 			t.Fatalf("Undo encoding %d=%d", i, v)
@@ -1798,6 +1799,54 @@ func TestTreeStreamSurfaceV1(t *testing.T) {
 	}
 	if n := uint64(unsafe.Sizeof(treeDescV1{})); n != 104 || n > 128 {
 		t.Fatalf("descriptor size%d", n)
+	}
+}
+
+func tsCandidateSurfaceV1(t *testing.T) {
+	t.Helper()
+	tsCandidateFieldsV1(t, reflect.TypeFor[CandidateRootParentV1](), map[string]reflect.Type{
+		"DatabaseID": reflect.TypeFor[[32]byte](), "Generation": reflect.TypeFor[uint64](),
+		"Height": reflect.TypeFor[uint64](), "Parent": reflect.TypeFor[TreeEndpointV1](),
+	})
+	tsCandidateFieldsV1(t, reflect.TypeFor[CandidateRootBodyV1](), map[string]reflect.Type{
+		"Raw": reflect.TypeFor[[]byte](), "HeaderBytes": reflect.TypeFor[uint16](),
+		"BlockMeta": reflect.TypeFor[TreeBlockV1](), "Events": reflect.TypeFor[func([]byte, *TreeDeltaSinkV1) error](),
+	})
+	scope := reflect.TypeFor[*CandidateRootScopeV1]()
+	tsCandidateFieldsV1(t, scope.Elem(), nil)
+	want := map[string]reflect.Type{
+		"QualifyCurrentV1":          reflect.TypeFor[func(*CandidateRootScopeV1) error](),
+		"WithCandidateValidationV1": reflect.TypeFor[func(*CandidateRootScopeV1, uint64, uint64, func(func() error) error) error](),
+		"WithCandidateCensusV1":     reflect.TypeFor[func(*CandidateRootScopeV1, func() error) error](),
+		"WithCandidateFactsV1":      reflect.TypeFor[func(*CandidateRootScopeV1, uint64, uint32, func(func() error, func() error, func() error) error) error](),
+		"DeriveCandidateRootV1":     reflect.TypeFor[func(*CandidateRootScopeV1, CandidateRootBodyV1, []TreeOutpointV1) ([32]byte, error)](),
+	}
+	if scope.Elem().NumMethod() != 0 || scope.NumMethod() != len(want) || scope.ConvertibleTo(reflect.TypeFor[*OperationAccount]()) {
+		t.Fatalf("candidate scope public method sets: %v/%v", scope.Elem().NumMethod(), scope.NumMethod())
+	}
+	for i := 0; i < scope.NumMethod(); i++ {
+		method := scope.Method(i)
+		if method.Type != want[method.Name] {
+			t.Fatalf("candidate scope public method %s: %v", method.Name, method.Type)
+		}
+	}
+}
+
+func tsCandidateFieldsV1(t *testing.T, shape reflect.Type, want map[string]reflect.Type) {
+	t.Helper()
+	got := make(map[string]reflect.Type)
+	for _, field := range reflect.VisibleFields(shape) {
+		if field.IsExported() {
+			got[field.Name] = field.Type
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%v public fields: %v, want %v", shape, got, want)
+	}
+	for name, typ := range want {
+		if got[name] != typ {
+			t.Fatalf("%v public field %s: %v, want %v", shape, name, got[name], typ)
+		}
 	}
 }
 

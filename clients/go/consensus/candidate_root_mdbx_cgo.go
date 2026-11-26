@@ -47,7 +47,7 @@ func FreezeCandidateRootRotation(height uint64, provider RotationProvider) (*Can
 		height: height, haveCreate: true, haveSpend: true,
 		create: provider.NativeCreateSuites(height).Clone(), spend: provider.NativeSpendSuites(height).Clone(),
 	}
-	if surface.create == nil || surface.spend == nil {
+	if surface.create.Len() == 0 || surface.spend.Len() == 0 {
 		return nil, localLogicalStateFailure("unresolved candidate suite context")
 	}
 	rotation := RotationProvider(surface)
