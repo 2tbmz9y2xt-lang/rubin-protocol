@@ -9,6 +9,7 @@ import (
 	"net"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1163,14 +1164,21 @@ func testImageRetiredSourceAllocations(t *testing.T) {
 	ctx := t.Context()
 	t.Run("round", func(t *testing.T) {
 		config := f.config(imageTestLimits(), 0)
-		requireRetiredImageSourceRefusal(t, func() (*ImageRound, error) {
+		requireImageSourceRefusalNoAlloc(t, "retired source constructor", func() (*ImageRound, error) {
 			return f.s.BeginImageRound(ctx, config)
 		})
 	})
 	t.Run("probe round", func(t *testing.T) {
 		config := imageProbeConfig(f, f.clock.add(0), imageTestLimits(), 0)
-		requireRetiredImageSourceRefusal(t, func() (*ImageRound, error) {
+		requireImageSourceRefusalNoAlloc(t, "retired source constructor", func() (*ImageRound, error) {
 			return f.s.BeginImageProbeRound(ctx, config)
+		})
+	})
+	t.Run("live identifier bound", func(t *testing.T) {
+		config := f.config(imageTestLimits(), liveIndex)
+		config.SourceIDs = slices.Repeat(config.SourceIDs, 9)
+		requireImageSourceRefusalNoAlloc(t, "live identifier bound", func() (*ImageRound, error) {
+			return f.s.BeginImageRound(ctx, config)
 		})
 	})
 	round := f.round(t, imageTestLimits(), liveIndex)
@@ -1180,12 +1188,12 @@ func testImageRetiredSourceAllocations(t *testing.T) {
 	f.requireFrames(t, liveIndex, "live registration frames", expectedImageQuery(1, 1), expectedImageQuery(2, 2))
 }
 
-func requireRetiredImageSourceRefusal(t *testing.T, begin func() (*ImageRound, error)) {
+func requireImageSourceRefusalNoAlloc(t *testing.T, label string, begin func() (*ImageRound, error)) {
 	t.Helper()
 	var got imageBegin
 	allocations := testing.AllocsPerRun(100, func() { got.round, got.err = begin() })
-	requireEqual(t, got, imageBegin{err: errImageSourceSet}, "retired source constructor")
-	requireEqual(t, allocations, 0, "retired source constructor allocations")
+	requireEqual(t, got, imageBegin{err: errImageSourceSet}, label)
+	requireEqual(t, allocations, 0, label+" allocations")
 }
 
 func testImageLiveSourceBound(t *testing.T) {
