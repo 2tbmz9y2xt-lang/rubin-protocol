@@ -138,12 +138,12 @@ func checkRejectedConsensusToken(t *testing.T, bad []byte, raw bool) {
 	a.ExcludedInvalidBranch = &InvalidBranchV1{7, modelHash(72), bad}
 	before := treeInputSnapshot(t, a)
 	t.Run("validate", func(t *testing.T) {
-		if err := ValidateStorageAuthorityV1(a); err != errSchema || !bytes.Equal(treeInputSnapshot(t, a), before) {
+		if err := ValidateStorageAuthorityV1(a); any(err) != any(errSchema) || !bytes.Equal(treeInputSnapshot(t, a), before) {
 			t.Fatalf("ValidateStorageAuthorityV1 = %v or changed input", err)
 		}
 	})
 	t.Run("encode storage", func(t *testing.T) {
-		if got, err := a.Encode(); got != nil || err != errSchema || !bytes.Equal(treeInputSnapshot(t, a), before) {
+		if got, err := a.Encode(); got != nil || any(err) != any(errSchema) || !bytes.Equal(treeInputSnapshot(t, a), before) {
 			t.Fatalf("storage Encode len=%d, error=%v or changed input", len(got), err)
 		}
 	})

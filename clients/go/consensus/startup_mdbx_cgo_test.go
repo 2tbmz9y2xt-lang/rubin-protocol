@@ -118,7 +118,7 @@ func startupAlreadyVerified(t *testing.T, w *replayWorld) {
 	repeat := startupRun(w)
 	startupTuple(t, repeat, false, 0, "")
 	assertRefusal := func(err error) {
-		e, ok := err.(*mdbx.EngineError)
+		e, ok := any(err).(*mdbx.EngineError)
 		logicalMDBXAssert(t, ok && e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "canonical owner index is already verified" && e.Cause == nil && !e.ReopenRequired, "already verified refusal: %v", err)
 	}
 	assertRefusal(repeat.Err)
@@ -197,8 +197,10 @@ func checkDeclaredStorageErrorCode(t *testing.T, spec *ast.ValueSpec, seen map[s
 			t.Fatalf("ErrorCode %s has invalid or duplicate literal %q: %v", spec.Names[i].Name, code, err)
 		}
 		seen[code] = true
-		a := mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 2, Phase: 1, Lifecycle: 1,
-			ExcludedInvalidBranch: &mdbx.InvalidBranchV1{ExactConsensusError: []byte(code)}}
+		a := mdbx.StorageAuthorityV1{
+			Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 2, Phase: 1, Lifecycle: 1,
+			ExcludedInvalidBranch: &mdbx.InvalidBranchV1{ExactConsensusError: []byte(code)},
+		}
 		raw, err := a.Encode()
 		if err != nil {
 			t.Fatalf("ErrorCode %s cannot encode: %v", code, err)

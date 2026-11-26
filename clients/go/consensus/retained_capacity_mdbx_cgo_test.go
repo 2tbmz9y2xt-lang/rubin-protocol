@@ -615,8 +615,8 @@ func retainedCapacityPlannedExclusion(t *testing.T, malformed bool) {
 	btSort(op.Pair.Mutations)
 	a, proof := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
 	run := retainedCapacityNativePlan(t, w, a, proof, &op)
-	logicalMDBXAssert(t, run.planErr == want, "planned exclusion returned %v, want %v", run.planErr, want)
-	logicalMDBXAssert(t, run.truth == mdbx.CommitTruthOld && run.stage == mdbx.UpdateStagePrewrite && run.index == -1 && run.err == run.planErr, "planned exclusion native refusal: %+v", run)
+	logicalMDBXAssert(t, any(run.planErr) == any(want), "planned exclusion returned %v, want %v", run.planErr, want)
+	logicalMDBXAssert(t, run.truth == mdbx.CommitTruthOld && run.stage == mdbx.UpdateStagePrewrite && run.index == -1 && any(run.err) == any(run.planErr), "planned exclusion native refusal: %+v", run)
 	logicalMDBXAssert(t, a.active == proof && !proof.prepared, "planned exclusion prepared a proof")
 	logicalMDBXAssert(t, (proof.pre == 0) == malformed && a.valid != malformed, "planned exclusion cold pre=%d, cache=%v", proof.pre, a.valid)
 	if malformed {
@@ -661,7 +661,7 @@ func retainedCapacityNativePlan(t *testing.T, w *btWorld, owner *RetainedAccount
 	})
 	logicalMDBXAssert(t, err == nil, "retained plan account: %v", err)
 	if run.planErr == nil {
-		logicalMDBXAssert(t, run.truth == mdbx.CommitTruthOld && run.stage == mdbx.UpdateStagePrewrite && run.index == -1 && run.err == stop, "valid retained plan abort: %+v", run)
+		logicalMDBXAssert(t, run.truth == mdbx.CommitTruthOld && run.stage == mdbx.UpdateStagePrewrite && run.index == -1 && any(run.err) == any(stop), "valid retained plan abort: %+v", run)
 	}
 	return run
 }

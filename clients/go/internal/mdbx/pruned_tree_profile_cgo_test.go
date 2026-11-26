@@ -405,7 +405,12 @@ func prunedTreeFundingPair(t *testing.T, s *Store, owner *OperationReservationOw
 			return s.View(func(r *Reader) error {
 				var run prunedTreeRun
 				op, err := prunedTreePlan(account, input, true, tip, &run, errors.New("stale tip"))(r)
-				if err != nil || run.decision != "" || !reflect.DeepEqual(op, TreeOperationV1{Pair: want}) {
+				pair := op.Pair
+				pairOnly := op.Primitives == nil && op.Proof == nil && op.HeaderSlot == nil
+				plainPair := pair.PrepaidReadBytes == 0 && pair.EntryInventory == nil && pair.ContextConsulted == nil &&
+					!pair.PreserveReplayObservations && pair.ObsoleteDeletes == nil && pair.ObsoleteConsulted == nil && pair.LargeConsulted == nil
+				matchesRows := reflect.DeepEqual(pair.Mutations, want.Mutations) && reflect.DeepEqual(pair.Consulted, want.Consulted)
+				if err != nil || run.decision != "" || !pairOnly || !plainPair || !matchesRows {
 					t.Fatalf("read-window pair = %+v/%v", op, err)
 				}
 				if ctxTreePC(op) != 541 || reservationLive(owner) != 541 {

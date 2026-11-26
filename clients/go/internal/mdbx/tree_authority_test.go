@@ -465,13 +465,13 @@ func checkRawTreeConsensusToken(t *testing.T, input, bad []byte) {
 	before := bytes.Clone(raw)
 	t.Run("copying", func(t *testing.T) {
 		got, err := DecodeTreeAuthorityV1(raw)
-		if !reflect.DeepEqual(got, TreeAuthorityV1{}) || err != errSchema || !bytes.Equal(raw, before) {
+		if !reflect.DeepEqual(got, TreeAuthorityV1{}) || any(err) != any(errSchema) || !bytes.Equal(raw, before) {
 			t.Fatalf("DecodeTreeAuthorityV1 = %#v, %v or changed input", got, err)
 		}
 	})
 	t.Run("borrowed", func(t *testing.T) {
 		wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{2}, raw, errSchema)
-		if err := inspectTreeAuthorityV1(raw); err != errSchema || !bytes.Equal(raw, before) {
+		if err := inspectTreeAuthorityV1(raw); any(err) != any(errSchema) || !bytes.Equal(raw, before) {
 			t.Fatalf("tree inspection = %v or changed input", err)
 		}
 	})
