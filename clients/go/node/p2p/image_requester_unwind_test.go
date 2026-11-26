@@ -566,7 +566,7 @@ func testImageUnwindAfterFailedWrite(t *testing.T, tc imageFailedWriteUnwindCase
 	unwound := f.goRecovered(round, requestCtx, 0, 1)
 	requireChannelClosed(t, stall.entered, "failed write of the unwinding request")
 	inst := f.instance(1)
-	done := make(chan struct{})
+	done, closeReady := make(chan struct{}), make(chan error, 1)
 	defer close(done)
 	var stallB *imageStall
 	var heldB <-chan imageResult
@@ -583,12 +583,12 @@ func testImageUnwindAfterFailedWrite(t *testing.T, tc imageFailedWriteUnwindCase
 		heldB = f.goRequest(round, t.Context(), tc.holder, 2)
 		f.waitAdmitted(t, tc.holder, uint64(2-tc.holder), "second holder")
 	}
-	if tc.holder == 1 {
+	switch tc.holder {
+	case 1:
 		requireChannelClosed(t, stallB.entered, "write of the second holder")
-	} else if tc.holder == 0 {
+	case 0:
 		synctest.Wait()
 	}
-	closeReady := make(chan error, 1)
 	observedClose := f.observeUnwindClose(round, closeReady, closing, stallB, done)
 	stall.release <- errImageScriptedWrite
 	if tc.holder == 0 {
