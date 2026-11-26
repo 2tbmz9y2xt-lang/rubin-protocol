@@ -802,6 +802,7 @@ func TestTreeRootReadCandidate(t *testing.T) {
 	t.Run("scope_ceiling", trCandidateCeiling)
 	t.Run("scope_expiry", trCandidateExpiry)
 	t.Run("scope_unwind", trCandidateUnwind)
+	t.Run("option_bearing_authority", trCandidateOrdinaryAuthority)
 	t.Run("control_layout", func(t *testing.T) {
 		fixed := unsafe.Sizeof(candidateRootScopeStateV1{}) + unsafe.Sizeof(operationAccountState{}) +
 			4*unsafe.Sizeof(operationHold{}) + 512
@@ -814,6 +815,31 @@ func TestTreeRootReadCandidate(t *testing.T) {
 			t.Fatal("candidate root descriptor or native workspace width changed")
 		}
 	})
+}
+
+func trCandidateOrdinaryAuthority(t *testing.T) {
+	s, owner, selection, _, _ := trCandidateSetup(t)
+	authority := treeAuthorityFixture(modelOrdinary(3, 1, 2, 1, 1, 0, 0))
+	encoded, err := authority.Encode()
+	mustEnvironment(t, err)
+	trSeedV1(t, s, owner, 0, []byte{2}, encoded)
+	selection.Generation = 3
+	viewErr := s.View(func(r *Reader) error {
+		err := owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
+			return scope.QualifyCurrentV1()
+		})
+		if !errors.Is(err, ErrCandidateParentNotCurrent) {
+			t.Fatalf("legal ordinary authority selected %v, want stale parent", err)
+		}
+		value, found, readErr := r.Get(TreeSchemaV1DBIs()[0], []byte{2})
+		if readErr != nil || !found || !bytes.Equal(value, encoded) {
+			t.Fatalf("Reader after stale selection: %x/%t/%v", value, found, readErr)
+		}
+		return err
+	})
+	if !errors.Is(viewErr, ErrCandidateParentNotCurrent) {
+		t.Fatalf("View replaced stale result: %v", viewErr)
+	}
 }
 
 func trCandidateSetup(t *testing.T) (*Store, *OperationReservationOwner, CandidateRootParentV1, CandidateRootBodyV1, [32]byte) {
@@ -999,7 +1025,10 @@ func trCandidateExpiry(t *testing.T) {
 		for _, invalid := range []*CandidateRootScopeV1{nil, {}, escaped} {
 			got, err := invalid.DeriveCandidateRootV1(body, nil)
 			trCandidateRefusal(t, got, err)
-			err = invalid.WithCandidateValidationV1(402653185, 149, nil)
+			err = invalid.WithCandidateValidationV1(402653185, 149, func(func() error) error {
+				t.Fatal("invalid scope lent a reservation")
+				return nil
+			})
 			if !errors.Is(err, errOperationReservationInput) {
 				t.Fatalf("expired scope/capacity order: %v", err)
 			}

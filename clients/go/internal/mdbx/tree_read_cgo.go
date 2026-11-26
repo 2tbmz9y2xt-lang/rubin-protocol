@@ -170,6 +170,11 @@ func (r *Reader) candidateActiveGenerationV1() (uint64, error) {
 		return 0, err
 	}
 	var control authorityDecodeControl
+	control.ordinary.Cursor = &control.cursor
+	control.ordinary.CapturedSelectedSide = &control.selected
+	control.ordinary.CarriedCleanup = &control.cleanup
+	control.ordinary.RecordedFailure = &control.failure
+	control.failure.FailedBlockHash = &control.hash
 	var inspection authorityInspection
 	authority, err := decodeTreeAuthorityV1(value.value, &control, &inspection)
 	if err != nil {

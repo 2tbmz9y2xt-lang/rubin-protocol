@@ -316,7 +316,9 @@ func candidateWorkDrift(t *testing.T) {
 	evidence, err := mdbx.FixtureSelectedDamage(s.world.s, s.world.owner, mdbx.SelectedDamageGetEIO, 1, btUTXOKey(1, s.other), func() {
 		candidateView(t, s.world, func(r *mdbx.Reader) {
 			candidateRootStale(t, r, s.world, old)
+			logicalMDBXAssert(t, mdbx.FixtureReservationLive(s.world.owner) == 0, "stale result retained bytes")
 			candidateRootOK(t, r, s.world.owner, in, want)
+			logicalMDBXAssert(t, mdbx.FixtureReservationLive(s.world.owner) == 0, "candidate retry retained bytes")
 		})
 	})
 	candidateUnreached(t, evidence, err)
@@ -706,9 +708,10 @@ func candidateNextOperation(t *testing.T) {
 		var entered uint64
 		fill := uint64(805306368) - candidateW(uint64(len(in.Raw)), 5, 0) + 1
 		err := candidateFill(owner, fill, &entered, func() error {
-			candidateCapacity(t, r, owner, in)
-			candidateCapacity(t, r, owner, in)
-			logicalMDBXAssert(t, mdbx.FixtureReservationLive(owner) == fill, "refusal changed competing owner")
+			for range 2 {
+				candidateCapacity(t, r, owner, in)
+				logicalMDBXAssert(t, mdbx.FixtureReservationLive(owner) == fill, "refusal changed competing owner")
+			}
 			return nil
 		})
 		logicalMDBXAssert(t, err == nil && mdbx.FixtureReservationLive(owner) == 0, "competing release: %v", err)
@@ -722,9 +725,19 @@ func candidateNoWrite(t *testing.T) {
 	in, want := s.body(t, 1, 1)
 	w := s.world
 	evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
-		candidateView(t, w, func(r *mdbx.Reader) { candidateRootOK(t, r, w.owner, in, want) })
+		const continuing = 127
+		err := w.owner.WithReservation(continuing, func() error {
+			candidateView(t, w, func(r *mdbx.Reader) {
+				for range 2 {
+					candidateRootOK(t, r, w.owner, in, want)
+					logicalMDBXAssert(t, mdbx.FixtureReservationLive(w.owner) == continuing, "candidate changed continuing bytes")
+				}
+			})
+			return nil
+		})
+		logicalMDBXAssert(t, err == nil && mdbx.FixtureReservationLive(w.owner) == 0, "continuing hold release: %v", err)
 	})
-	logicalMDBXAssert(t, err == nil && evidence.BeginOld == 1 && evidence.OldGets[0] == 3 && evidence.NodeGets > 0 && evidence.OldAborts == 1,
+	logicalMDBXAssert(t, err == nil && evidence.BeginOld == 1 && evidence.OldGets[0] == 6 && evidence.NodeGets > 0 && evidence.OldAborts == 1,
 		"candidate native read path: %+v/%v", evidence, err)
 	candidateNoNativeWrite(t, evidence)
 }

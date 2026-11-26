@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"maps"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 
 type candidateScene struct {
 	world   *btWorld
+	seed    blockTreeRequestV1
 	parent  mdbx.TreeEndpointV1
 	entries map[Outpoint]UtxoEntry
 	funding Outpoint
@@ -36,7 +38,7 @@ func newCandidateScene(t *testing.T, height uint64) candidateScene {
 		a:             btEntry(1000, 0, cov, height-1, false),
 		b:             btEntry(2000, 0, cov, height-1, false),
 	}
-	return candidateScene{w, seed.Endpoint, entries, a, b, key, cov}
+	return candidateScene{w, seed, seed.Endpoint, entries, a, b, key, cov}
 }
 
 func candidateInput(t *testing.T, raw []byte, parent mdbx.TreeEndpointV1) CandidateRootInput {
@@ -121,8 +123,6 @@ func TestCandidateRootResult(t *testing.T) {
 	s := newCandidateScene(t, 5)
 	full, want := s.body(t, 2, 20)
 	coinbase, coinbaseWant := s.body(t, 0, 1)
-	short, shortWant := s.body(t, 1, 20)
-	payout, payoutWant := s.body(t, 2, 21)
 	t.Run("unsolved", func(t *testing.T) { candidateUnsolved(t, s, full, want) })
 	t.Run("header_tail", func(t *testing.T) {
 		first, second := full, full
@@ -143,12 +143,45 @@ func TestCandidateRootResult(t *testing.T) {
 	})
 	t.Run("membership", func(t *testing.T) { candidateMembership(t, s) })
 	t.Run("variant", func(t *testing.T) {
-		logicalMDBXAssert(t, shortWant != want && payoutWant != want, "candidate variants share an oracle digest")
-		candidateView(t, s.world, func(r *mdbx.Reader) {
-			candidateRootOK(t, r, s.world.owner, short, shortWant)
-			candidateRootOK(t, r, s.world.owner, payout, payoutWant)
-		})
+		t.Run("payout", func(t *testing.T) { candidateVariant(t, s, full, want, 21, 2) })
+		t.Run("without_last_spend", func(t *testing.T) { candidateVariant(t, s, full, want, 20, 1) })
 	})
+}
+
+func candidateVariant(t *testing.T, s candidateScene, in CandidateRootInput, original [32]byte, payout uint64, spends int) {
+	t.Helper()
+	txs := candidateFullSpends(t, in.Raw)
+	in.Raw, _ = candidateFrame(t, s.parent, payout, txs[:spends]...)
+	final := maps.Clone(s.entries)
+	delete(final, s.funding)
+	frame, err := ParseInitial148BlockBytes(in.Raw)
+	logicalMDBXAssert(t, err == nil, "candidate variant frame: %v", err)
+	final[Outpoint{Txid: frame.Txids[0]}] = btEntry(payout, 0, validP2PKCovenantData(), 5, true)
+	value := uint64(990)
+	if spends == 2 {
+		value = 980
+	}
+	final[Outpoint{Txid: testTxID(t, txs[spends-1])}] = btEntry(value, 0, s.cov, 5, false)
+	want := canonicalUTXORoot(final)
+	logicalMDBXAssert(t, want != original, "candidate variant has the original oracle digest")
+	candidateView(t, s.world, func(r *mdbx.Reader) { candidateRootOK(t, r, s.world.owner, in, want) })
+}
+
+func candidateFullSpends(t *testing.T, raw []byte) [2][]byte {
+	t.Helper()
+	logicalMDBXAssert(t, len(raw) >= 149 && raw[148] == 3, "candidate variant requires three framed transactions")
+	offset := 149
+	_, _, _, _, err := parseBlockTx(raw, &offset)
+	logicalMDBXAssert(t, err == nil, "candidate variant coinbase: %v", err)
+	var spends [2][]byte
+	for i := range spends {
+		start := offset
+		_, _, _, _, err := parseBlockTx(raw, &offset)
+		logicalMDBXAssert(t, err == nil, "candidate variant spend %d: %v", i, err)
+		spends[i] = raw[start:offset]
+	}
+	logicalMDBXAssert(t, offset == len(raw), "candidate variant trailing bytes")
+	return spends
 }
 
 func candidateUnsolved(t *testing.T, s candidateScene, in CandidateRootInput, want [32]byte) {
@@ -197,14 +230,46 @@ func candidateUnchanged(t *testing.T, s candidateScene, in CandidateRootInput, w
 	logicalMDBXAssert(t, err == nil, "candidate prestate: %v", err)
 	raw := bytes.Clone(in.Raw)
 	candidateView(t, s.world, func(r *mdbx.Reader) {
+		rows := candidateParentSnapshot(t, r, s.seed)
 		candidateRootOK(t, r, s.world.owner, in, want)
 		candidateRootOK(t, r, s.world.owner, in, want)
+		tip, err := r.CanonicalTipV1(s.seed.Generation)
+		logicalMDBXAssert(t, err == nil && tip != nil && tip.Height == s.parent.Height && tip.BlockHash == s.parent.BlockHash, "canonical tip after candidate calls: %+v/%v", tip, err)
+		for _, row := range rows {
+			candidateReadExact(t, r, row.rank, row.key, row.value)
+		}
 		candidateAssertParentRows(t, r, s)
 	})
 	after, err := s.world.s.Inspect()
 	logicalMDBXAssert(t, err == nil && before.RecentTxnID == after.RecentTxnID && before.DBIs == after.DBIs, "candidate mutated store: %v", err)
 	initial148Unchanged(t, in.Raw, raw)
 	btReservationsReleased(t, s.world.owner)
+}
+
+type candidateRowSnapshot struct {
+	rank        uint8
+	key, value []byte
+}
+
+func candidateParentSnapshot(t *testing.T, r *mdbx.Reader, seed blockTreeRequestV1) []candidateRowSnapshot {
+	t.Helper()
+	tip, err := mdbx.HeightKey(seed.Generation, seed.Height)
+	logicalMDBXAssert(t, err == nil, "snapshot tip key: %v", err)
+	index, err := mdbx.CanonicalOwnerKey(seed.Generation, seed.Block)
+	logicalMDBXAssert(t, err == nil, "snapshot owner key: %v", err)
+	rows := []candidateRowSnapshot{
+		{rank: 0, key: []byte{0}}, {rank: 0, key: []byte{1}}, {rank: 0, key: []byte{2}}, {rank: 0, key: []byte{3}},
+		{rank: 0, key: btMeta(16, 1)}, {rank: 0, key: btMeta(16, 2)}, {rank: 0, key: btMeta(17, 1)}, {rank: 0, key: btMeta(17, 2)},
+		{rank: 2, key: tip}, {rank: 3, key: seed.Block[:]}, {rank: 4, key: seed.Block[:]},
+		{rank: 5, key: mdbx.UndoManifestKey(seed.Block)}, {rank: 7, key: index},
+	}
+	for i := range rows {
+		row := &rows[i]
+		value, found, err := r.Get(mdbx.TreeSchemaV1DBIs()[row.rank], row.key)
+		logicalMDBXAssert(t, err == nil && found, "snapshot row %d/%x: %t/%v", row.rank, row.key, found, err)
+		row.value = value
+	}
+	return rows
 }
 
 func candidateAssertParentRows(t *testing.T, r *mdbx.Reader, s candidateScene) {
@@ -271,25 +336,43 @@ func TestCandidateRootOrder(t *testing.T) {
 	}
 	t.Run("transaction_before_subsidy", func(t *testing.T) { candidateSpendOrder(t, s) })
 	t.Run("subsidy_before_law", func(t *testing.T) { candidateSubsidyBeforeLaw(t) })
+	t.Run("da_bytes", func(t *testing.T) { candidateDABytes(t, s, false) })
+	t.Run("timestamp_before_da_bytes", func(t *testing.T) { candidateDABytes(t, s, true) })
 }
 
 func candidateHeaderCases(t *testing.T, s candidateScene) []candidateOrderCase {
 	t.Helper()
 	in, _ := s.body(t, 0, 1)
-	target, link, merkle := bytes.Clone(in.Raw), bytes.Clone(in.Raw), bytes.Clone(in.Raw)
+	target, link := bytes.Clone(in.Raw), bytes.Clone(in.Raw)
 	target[76], target[4] = 0x7f, target[4]^1
 	link[4], link[36] = link[4]^1, link[36]^1
-	wrong := coinbaseTxWithOutputs(5, []testOutput{{value: 1, covenantType: 0, covenantData: validP2PKCovenantData()}})
-	witness := initial148BlockFrame(t, [][]byte{wrong}, func(h *initial148BlockHead) { h.parent, h.timestamp = s.parent.BlockHash, blockStepsMedian })
-	copy(merkle, witness)
+	witness := candidateWitnessFault(t, s, nil)
+	merkle := bytes.Clone(witness)
 	merkle[36] ^= 1
+	commit := initial148BlockWitnessCommit(t)
+	wrong := commit
+	wrong[0] ^= 1
 	return []candidateOrderCase{
 		{"trailing_bytes", append(target, 0), "BLOCK_ERR_PARSE", "trailing bytes after tx list"},
 		{"target", target, "BLOCK_ERR_TARGET_INVALID", "target mismatch"},
 		{"linkage", link, "BLOCK_ERR_LINKAGE_INVALID", "prev_block_hash mismatch"},
 		{"merkle", merkle, "BLOCK_ERR_MERKLE_INVALID", "merkle_root mismatch"},
 		{"witness", witness, "BLOCK_ERR_WITNESS_COMMITMENT", "coinbase witness commitment missing or duplicated"},
+		{"witness_wrong_bytes", candidateWitnessFault(t, s, [][32]byte{wrong}), "BLOCK_ERR_WITNESS_COMMITMENT", "coinbase witness commitment missing or duplicated"},
+		{"witness_duplicate", candidateWitnessFault(t, s, [][32]byte{commit, commit}), "BLOCK_ERR_WITNESS_COMMITMENT", "coinbase witness commitment missing or duplicated"},
 	}
+}
+
+func candidateWitnessFault(t *testing.T, s candidateScene, commits [][32]byte) []byte {
+	t.Helper()
+	outs := []testOutput{{value: 1, covenantType: 0, covenantData: validP2PKCovenantData()}}
+	for i := range commits {
+		outs = append(outs, testOutput{covenantType: 2, covenantData: commits[i][:]})
+	}
+	cb := coinbaseTxWithOutputs(5, outs)
+	return initial148BlockFrame(t, [][]byte{cb}, func(h *initial148BlockHead) {
+		h.parent, h.timestamp = s.parent.BlockHash, blockStepsMedian
+	})
 }
 
 func candidateBlockResourceCases(t *testing.T, s candidateScene) []candidateOrderCase {
@@ -315,6 +398,35 @@ func candidateBlockResourceCases(t *testing.T, s candidateScene) []candidateOrde
 		{"incomplete", frame(blockStepsCommit(a, 2, blockStepsDAOut([32]byte{3})), good), "BLOCK_ERR_DA_INCOMPLETE", "DA chunk count mismatch"},
 		{"payload", frame(invalidPayload, good), "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID", "payload commitment mismatch"},
 	}
+}
+
+func candidateDABytes(t *testing.T, s candidateScene, old bool) {
+	t.Helper()
+	chunks := blockStepsDABytes(32_000_001)
+	cb := initial148BlockCoinbase(t, chunks...)
+	var payload int
+	weight := blockStepsWeight(t, cb)
+	for _, raw := range chunks {
+		chunk, _, _, _, err := ParseTx(raw)
+		logicalMDBXAssert(t, err == nil, "DA byte fixture parse: %v", err)
+		payload += len(chunk.DaPayload)
+		weight += blockStepsWeight(t, raw)
+	}
+	first, _, _, _, err := ParseTx(chunks[0])
+	logicalMDBXAssert(t, err == nil && sha3.Sum256(first.DaPayload) != first.DaChunkCore.ChunkHash && payload == 32_000_001 && weight < 68_000_000,
+		"DA byte fixture payload/weight/hash: %d/%d/%v", payload, weight, err)
+	raw := initial148BlockFrame(t, append([][]byte{cb}, chunks...), func(h *initial148BlockHead) { h.parent = s.parent.BlockHash })
+	code, diagnostic := ErrorCode("BLOCK_ERR_WEIGHT_EXCEEDED"), "DA bytes exceeded"
+	if old {
+		binary.LittleEndian.PutUint64(raw[68:76], blockStepsMedian)
+		code, diagnostic = "BLOCK_ERR_TIMESTAMP_OLD", "timestamp <= MTP median"
+	}
+	in := candidateInput(t, raw, s.parent)
+	next, want := s.body(t, 0, 1)
+	candidateView(t, s.world, func(r *mdbx.Reader) {
+		candidateTxError(t, r, s.world.owner, in, code, diagnostic)
+		candidateRootOK(t, r, s.world.owner, next, want)
+	})
 }
 
 func candidateSpendOrder(t *testing.T, s candidateScene) {
@@ -549,6 +661,7 @@ func candidateNonincrease(t *testing.T) {
 func TestCandidateRootAdmission(t *testing.T) {
 	s := newCandidateScene(t, 5)
 	in, want := s.body(t, 0, 1)
+	t.Run("non_tree_reader", func(t *testing.T) { candidateOrdinaryReader(t, s, in) })
 	for _, row := range []struct {
 		name string
 		edit func(*CandidateRootInput)
@@ -582,6 +695,24 @@ func TestCandidateRootAdmission(t *testing.T) {
 			})
 		})
 	}
+}
+
+func candidateOrdinaryReader(t *testing.T, s candidateScene, in CandidateRootInput) {
+	t.Helper()
+	store, err := mdbx.Create(filepath.Join(t.TempDir(), "ordinary"), s.world.cfg)
+	logicalMDBXAssert(t, err == nil, "ordinary store: %v", err)
+	t.Cleanup(func() { _ = store.Close() })
+	err = store.View(func(r *mdbx.Reader) error {
+		root, err := DeriveCandidateUTXORootV1(r, s.world.owner, in)
+		engine, ok := err.(*mdbx.EngineError)
+		logicalMDBXAssert(t, root == [32]byte{} && ok && engine != nil && engine.Operation == "get" &&
+			engine.Class == "InvalidInput" && engine.Code == 22 && engine.Diagnostic == "tree Reader required",
+			"ordinary Reader admission %x/%v", root, err)
+		got, found, err := r.Get(mdbx.SchemaV2DBIs()[0], []byte{0})
+		logicalMDBXAssert(t, err == nil && found && bytes.Equal(got, []byte{0, 0, 0, 2}), "ordinary Reader after refusal: %x/%t/%v", got, found, err)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "ordinary View after refusal: %v", err)
 }
 
 func TestCandidateRootContextConstruction(t *testing.T) {
