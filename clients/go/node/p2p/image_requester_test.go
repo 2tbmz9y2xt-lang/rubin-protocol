@@ -213,6 +213,12 @@ func newImageTestFixtureAt(t *testing.T, sessions int, start time.Time) *imageTe
 		req := f.lockRequester()
 		defer req.mu.Unlock()
 		for _, inst := range req.current {
+			if !inst.published {
+				if !t.Failed() {
+					t.Error("unpublished instance still registered at cleanup")
+				}
+				continue
+			}
 			req.retireLocked(inst, context.Canceled)
 		}
 	})
