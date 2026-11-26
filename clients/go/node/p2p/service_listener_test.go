@@ -202,9 +202,9 @@ func TestService_StartPostListenClosedRace_ReturnsAlreadyClosed(t *testing.T) {
 	var capturedAddr string
 	serviceStartPostListenHook = func(s *Service, ln net.Listener) {
 		capturedAddr = ln.Addr().String()
-		s.peersMu.Lock()
+		s.lifecycleMu.Lock()
 		s.closed.Store(true)
-		s.peersMu.Unlock()
+		s.lifecycleMu.Unlock()
 	}
 	defer func() { serviceStartPostListenHook = prevHook }()
 
@@ -243,9 +243,9 @@ func TestService_StartPostListenStartedRace_ReturnsAlreadyStarted(t *testing.T) 
 	var capturedAddr string
 	serviceStartPostListenHook = func(s *Service, ln net.Listener) {
 		capturedAddr = ln.Addr().String()
-		s.peersMu.Lock()
+		s.lifecycleMu.Lock()
 		s.listener = existing
-		s.peersMu.Unlock()
+		s.lifecycleMu.Unlock()
 	}
 	defer func() { serviceStartPostListenHook = prevHook }()
 
@@ -266,19 +266,11 @@ func TestService_StartPostListenStartedRace_ReturnsAlreadyStarted(t *testing.T) 
 }
 
 func TestService_CloseWaitsForInFlightStartToReleaseListener(t *testing.T) {
-	// Regression test for the race Copilot flagged on the first closed-state
-	// fix: Close could snapshot s.listener as nil while an in-progress Start
-	// was paused AFTER net.Listen had already returned a bound listener but
-	// BEFORE the write-lock re-check published it. Without startWG, Close
-	// would return while that stalled local listener still held the port.
+	// Close waits for Start to release a bound listener when the lifecycle
+	// re-check refuses to publish it.
 	//
-	// The post-listen hook here simulates the pause: it spawns a Close
-	// goroutine from inside the hook body (while Start is still running),
-	// waits until that Close has reached startWG.Wait inside the Close
-	// implementation, and only then returns so Start's re-check can abort.
-	// A net.Listen attempt on the captured address immediately after Close
-	// returns must succeed — Close's startWG.Wait must have blocked until
-	// Start's local listener.Close ran.
+	// The post-listen hook starts Close before Start re-checks publication.
+	// The captured address is reusable immediately after Close returns.
 	s := &Service{cfg: ServiceConfig{BindAddr: "127.0.0.1:0"}}
 	serviceStartPostListenHookMu.Lock()
 	defer serviceStartPostListenHookMu.Unlock()
@@ -289,15 +281,11 @@ func TestService_CloseWaitsForInFlightStartToReleaseListener(t *testing.T) {
 	closeDone := make(chan error, 1)
 	serviceStartPostListenHook = func(s *Service, ln net.Listener) {
 		capturedAddr = ln.Addr().String()
-		// Mark the Service closed from inside the hook so Start's write-lock
-		// re-check takes the abort path when we return from the hook.
-		s.peersMu.Lock()
+		// Mark the Service closed so Start refuses publication after the hook.
+		s.lifecycleMu.Lock()
 		s.closed.Store(true)
-		s.peersMu.Unlock()
-		// Spawn the racing Close on a separate goroutine. It will observe
-		// closed=true in its own peersMu section (a no-op here) and then
-		// block on s.startWG.Wait() because we — the Start invocation — are
-		// still in flight, holding startWG > 0 via the top-of-Start defer.
+		s.lifecycleMu.Unlock()
+		// Close publishes the flag under lifecycleMu, then waits for Start.
 		go func() {
 			closeDone <- s.Close()
 		}()
@@ -352,9 +340,9 @@ func TestService_CloseSetsClosedFlag(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close() on zero-value Service: %v", err)
 	}
-	s.peersMu.RLock()
+	s.lifecycleMu.Lock()
 	closed := s.closed.Load()
-	s.peersMu.RUnlock()
+	s.lifecycleMu.Unlock()
 	if !closed {
 		t.Fatalf("Close() did not set closed=true")
 	}

@@ -23,7 +23,7 @@ const (
 
 // serviceStartPostListenHook is a test-only hook. When non-nil, Start invokes
 // it after net.Listen succeeds and before the authoritative closed/started
-// re-check under peersMu. Tests must install it only in single-threaded
+// re-check under lifecycleMu. Tests must install it only in single-threaded
 // scenarios and restore it before returning.
 var serviceStartPostListenHook func(*Service, net.Listener)
 
@@ -55,23 +55,12 @@ func isAcceptLoopTerminal(ctx context.Context, err error) bool {
 	return false
 }
 
-// Start begins accepting inbound P2P connections and launches the accept /
-// reconnect goroutines. A Service instance is single-use: after Close has
-// returned, Start must NOT be called again on the same Service — it will
-// return "service already closed" rather than silently creating a second
-// listener or reviving the shut-down goroutines. Construct a fresh Service
-// for a fresh lifecycle.
+// Start publishes a listener and launches the accept and reconnect loops.
+// Once Close sets the closed flag, Start returns "service already closed".
 //
-// Lifecycle transitions (dormant → running → closed) are linearized under
-// peersMu. The entry check, startWG registration, and the post-net.Listen
-// authoritative publish all take the write lock; Close takes the same
-// lock to transition closed. This gives two invariants: (1) startWG.Add
-// only happens when closed=false, so Close's startWG.Wait cannot race
-// a concurrent Add (which would panic sync.WaitGroup), and (2) an
-// observed successful Start return implies the Service is running — if
-// a concurrent Close ran between net.Listen and the re-check, the
-// freshly created listener is closed and Start returns the dormant
-// error instead of publishing.
+// Start checks the closed flag under lifecycleMu when registering and again
+// when publishing the listener. If Close sets the flag between the two
+// checks, Start closes its local listener and returns "service already closed".
 func (s *Service) Start(ctx context.Context) error {
 	if s == nil {
 		return errors.New("nil service")
@@ -101,10 +90,8 @@ func (s *Service) Start(ctx context.Context) error {
 }
 
 func (s *Service) registerStart() error {
-	// Register this Start invocation with startWG atomically with the
-	// dormant/started check, under the same peersMu that guards closed.
-	s.peersMu.Lock()
-	defer s.peersMu.Unlock()
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	if s.closed.Load() {
 		return errors.New("service already closed")
 	}
@@ -117,25 +104,26 @@ func (s *Service) registerStart() error {
 
 func (s *Service) publishListener(ctx context.Context, listener net.Listener) error {
 	newCtx, cancel := context.WithCancel(ctx)
-	s.peersMu.Lock()
+	boundAddr := listener.Addr().String()
+	s.lifecycleMu.Lock()
 	if s.closed.Load() {
-		s.peersMu.Unlock()
+		s.lifecycleMu.Unlock()
 		cancel()
 		_ = listener.Close()
 		return errors.New("service already closed")
 	}
 	if s.listener != nil {
-		s.peersMu.Unlock()
+		s.lifecycleMu.Unlock()
 		cancel()
 		_ = listener.Close()
 		return errors.New("service already started")
 	}
 	s.listener = listener
-	s.boundAddr = listener.Addr().String()
+	s.boundAddr = boundAddr
 	s.ctx = newCtx
 	s.cancel = cancel
 	s.loopWG.Add(2)
-	s.peersMu.Unlock()
+	s.lifecycleMu.Unlock()
 
 	go s.acceptLoop()
 	go s.reconnectLoop(s.ctx)
@@ -168,7 +156,7 @@ func (s *Service) startOutboundPeers() {
 // under a concurrent Start race. It does so by first marking the Service
 // closed and then waiting on startWG: an in-progress Start that has already
 // returned from net.Listen but not yet published into s.listener will
-// observe the closed flag in its write-lock re-check and close the freshly
+// observe the closed flag in its lifecycle re-check and close the freshly
 // created listener on its own before returning. Close's subsequent
 // startWG.Wait blocks until that cleanup is done, so the listener snapshot
 // below always reflects final state — either a published listener that
@@ -184,40 +172,28 @@ func (s *Service) Close() error {
 	if s == nil {
 		return nil
 	}
-	// Phase 1: publish the closed flag so any in-progress Start observes
-	// it on its write-lock re-check and aborts with "service already
-	// closed", closing its local listener before returning. Publishing it under peersMu is also
-	// the registration cutoff acquireWork documents, so no lease can appear after the
-	// loopWG.Wait below has begun. The first Close to reach this section owns the single
-	// teardown and publishes closeDone; a later Close waits for that one completion.
-	s.peersMu.Lock()
+	// Shut off registration and publish the shared completion in one
+	// lifecycle section. A later Close waits for that completion.
+	s.lifecycleMu.Lock()
 	if s.closeDone != nil {
 		joined := s.closeDone
-		s.peersMu.Unlock()
+		s.lifecycleMu.Unlock()
 		<-joined
 		return nil
 	}
 	s.closed.Store(true)
 	closeDone := make(chan struct{})
 	s.closeDone = closeDone
-	s.peersMu.Unlock()
+	s.lifecycleMu.Unlock()
 	defer close(closeDone)
 
-	// Phase 2: wait for every in-progress Start to return. After this
-	// wait, s.listener is in its final state — either published by a
-	// Start call that won the race and returned nil, or still nil
-	// because every Start either failed the fast-path check or aborted
-	// in the write-lock re-check and cleaned up its own local listener.
+	// Wait for in-progress Start calls to publish or close their listeners.
 	s.startWG.Wait()
 
-	// Phase 3: snapshot cancel + listener and drive the rest of the
-	// shutdown sequence. The snapshot is stable because no Start is in
-	// flight anymore, and any future Start will return "service already
-	// closed" immediately without touching either field.
-	s.peersMu.Lock()
+	s.lifecycleMu.Lock()
 	cancel := s.cancel
 	listener := s.listener
-	s.peersMu.Unlock()
+	s.lifecycleMu.Unlock()
 
 	if cancel != nil {
 		cancel()
@@ -251,9 +227,9 @@ func (s *Service) Addr() string {
 	if s == nil {
 		return ""
 	}
-	s.peersMu.RLock()
+	s.lifecycleMu.Lock()
 	bound := s.boundAddr
-	s.peersMu.RUnlock()
+	s.lifecycleMu.Unlock()
 	if bound != "" {
 		return bound
 	}
