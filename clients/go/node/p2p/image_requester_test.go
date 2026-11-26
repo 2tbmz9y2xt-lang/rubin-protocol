@@ -2004,7 +2004,10 @@ func testImageCallbackAfterRetirement(t *testing.T) {
 	req, ran, leases := f.lockRequester(), make(chan int, 1), f.leases()
 	unlock := sync.OnceFunc(req.mu.Unlock)
 	defer unlock()
-	waitImageMutexWaiter(t, &req.mu, func() { go func() { ran <- ctx.endAndRun(context.Canceled) }() })
+	must(t, waitImageMutexWaiter(&req.mu, func() error {
+		go func() { ran <- ctx.endAndRun(context.Canceled) }()
+		return nil
+	}), "park the request context callback")
 	req.retireLocked(inst, errImageExpired)
 	reads := f.clock.readCount()
 	unlock()
@@ -2016,12 +2019,21 @@ func testImageCallbackAfterRetirement(t *testing.T) {
 	f.requireUsage(t, round, 0, imageUsage(0, 1, 1, 1, 0), imageUsage(0, 1, 1, 1, 0), "after the callback")
 }
 
-func waitImageMutexWaiter(t *testing.T, mu *sync.Mutex, start func()) {
-	t.Helper()
+func waitImageMutexWaiter(mu *sync.Mutex, start func() error) error {
 	state := (*int32)(unsafe.Pointer(mu))
-	requireEqual(t, atomic.LoadInt32(state), int32(1), "requester mutex state locked with no waiter")
-	start()
-	imageSpin(t, func() bool { return atomic.LoadInt32(state)>>3 != 0 }, "Request ctx callback waiting for the requester mutex")
+	if got := atomic.LoadInt32(state); got != 1 {
+		return fmt.Errorf("requester mutex state %d, want locked with no waiter (1)", got)
+	}
+	if err := start(); err != nil {
+		return err
+	}
+	for yields := 0; atomic.LoadInt32(state)>>3 == 0; yields++ {
+		if yields == 1<<24 {
+			return errors.New("request context callback did not wait for the requester mutex within 16777216 yields")
+		}
+		runtime.Gosched()
+	}
+	return nil
 }
 
 func testImageStaleCallback(t *testing.T, roundCtx bool) {
@@ -2033,11 +2045,20 @@ func testImageStaleCallback(t *testing.T, roundCtx bool) {
 		next = f.round(t, limits, 0, 1, 2)
 	}
 	stale := f.admitted(t, round, ctx, 0, 1, 1)
+	setup := make(chan error, 1)
 	f.clock.cancelOnRead(func() {
-		waitImageMutexWaiter(t, &f.s.imageRequester.mu, func() { requireEqual(t, c.endAndRun(context.Canceled), 1, "stale ctx functions") })
+		setup <- waitImageMutexWaiter(&f.s.imageRequester.mu, func() error {
+			if ran := c.endAndRun(context.Canceled); ran != 1 {
+				return fmt.Errorf("stale context functions run %d, want 1", ran)
+			}
+			return nil
+		})
 	})
 	reads := f.clock.readCount()
-	f.admitted(t, next, context.Background(), 1, 1, 1)
+	pending := f.goRequest(next, context.Background(), 1, 1)
+	must(t, awaitImageResult(t, setup, "stale callback setup"), "park the stale callback")
+	requireImageResult(t, awaitImageResult(t, pending, "replacement request"), 1, 1, nil, "replacement request")
+	require(t, f.instance(1) != nil, "replacement request has no current instance")
 	synctest.Wait()
 	require(t, f.clock.readCount() == reads+2 && c.applierErrs == 0, "stale callback: clock reads %d->%d, its ctx Err calls %d, want only the replacement's 2 reads and none", reads, f.clock.readCount(), c.applierErrs)
 	f.refused(t, next, context.Background(), 2, 1, errImageAssignmentCurrent)
