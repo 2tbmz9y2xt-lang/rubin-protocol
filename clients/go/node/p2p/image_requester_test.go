@@ -2532,22 +2532,28 @@ func (f *imageTestFixture) holdPeersOnNextRead(at time.Time) (held <-chan struct
 
 func testImageRequestWithPeersLocked(t *testing.T, offset time.Duration, wantErr error) {
 	f := newImageTestFixture(t, 1)
+	var requestReads atomic.Int32
+	f.s.cfg.Now = func() time.Time {
+		if imageCalledFrom(".(*ImageRound).Request") {
+			requestReads.Add(1)
+		}
+		return f.clock.Now()
+	}
 	deadline := f.clock.Now().Add(time.Hour)
 	round := f.round(t, imageTestLimits(), 0)
-	reads := f.clock.readCount()
 	held, release := f.holdPeersOnNextRead(deadline.Add(offset))
 	defer release()
 	got := awaitImageResult(t, f.goRequest(round, context.Background(), 0, 1), "request with the peers lock held")
 	require(t, isClosed(held), "request returned before the clock hook acquired the peers lock")
 	if wantErr == nil {
 		requireImageResult(t, got, 1, 1, nil, "request before the round deadline")
-		requireEqual(t, f.clock.readCount()-reads, 2, "admission and pre-write clock reads")
+		requireEqual(t, requestReads.Load(), 2, "admission and pre-write clock reads")
 		f.requireFrames(t, 0, "frame before unlock", expectedImageQuery(1, 1))
 		requireEqual(t, len(f.wires[0].bytes()), wireHeaderSize+120, "bytes written before unlock")
 		return
 	}
 	requireQueryResult(t, got, consensus.UTXOImageQuery{}, wantErr, "request at the round deadline")
-	requireEqual(t, f.clock.readCount()-reads, 1, "refused request clock reads")
+	requireEqual(t, requestReads.Load(), 1, "refused request clock reads")
 	requireEqual(t, len(f.wires[0].bytes()), 0, "bytes written by the refusal")
 	release()
 	next := f.round(t, imageTestLimits(), 0)
