@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha3"
 	"errors"
 	"fmt"
 	"maps"
@@ -165,7 +166,6 @@ func (w *imageWire) armStallAfter(skip int) *imageStall {
 	return stall
 }
 
-func (w *imageWire) drop(n int)    { w.mu.Lock(); w.sent = w.sent[n:]; w.mu.Unlock() }
 func (w *imageWire) bytes() []byte { w.mu.Lock(); defer w.mu.Unlock(); return bytes.Clone(w.sent) }
 
 type imageTestFixture struct {
@@ -1451,34 +1451,55 @@ func testImageEndDuringWrite(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			stall, pending := f.stalledRequest(t, round, ctx, 0, 1)
+			defer close(stall.release)
 			inst := f.instance(1)
-			wantEnd, globalDuring := error(context.Canceled), imageUsage(0, 1, 1, 1, 120)
+			wantEnd := error(context.Canceled)
 			if tc.pass {
-				wantEnd, globalDuring = errImageExpired, imageUsage(1, 1, 2, 2, 120)
+				wantEnd = errImageExpired
 				f.clock.set(t0.Add(10*time.Second + time.Nanosecond))
-				f.admitted(t, round, context.Background(), 1, 1, 1)
+				requireImageResult(t, f.request(round, context.Background(), 1, 1), 1, 1, nil, "replacement during the write")
 			} else {
 				cancel()
 			}
 			f.waitRetired(t, inst, wantEnd, "end during the write")
-			f.requireUsage(t, round, 0, imageUsage(0, 1, 1, 1, 120), globalDuring, "during the write")
-			f.refused(t, round, context.Background(), 0, 2, errImageLimit)
+			requireQueryResult(t, f.request(round, context.Background(), 0, 2), consensus.UTXOImageQuery{}, errImageLimit, "next request on the stalled session")
 			if !tc.pass {
-				f.admitted(t, round, context.Background(), 1, 1, 1)
+				requireImageResult(t, f.request(round, context.Background(), 1, 1), 1, 1, nil, "replacement during the write")
 			}
+			sibling := f.instance(1)
+			require(t, sibling != nil && sibling.session == f.peers[1], "replacement is not current on session 1")
+			f.requireOwners(t, round, 0, imageOwners{
+				ids: 2, current: 1, idKeys: 2, peerKeys: 2, peerKey: true, attempted: 2, starts: 1,
+				perPeer: imageUsage(0, 1, 1, 1, 120), global: imageUsage(1, 1, 2, 2, 120),
+			}, "during the write")
+			f.requireFaultsKept(t, []imageFault{{}, {}}, "during the write")
+			requireEqual(t, len(f.wires[0].bytes()), 0, "bytes written by the stalled session")
+			f.requireFrames(t, 1, "replacement during the write", expectedImageQuery(1, 1))
 			stall.release <- tc.writeErr
 			requireImageResult(t, awaitImageResult(t, pending, "written request"), 1, 1, nil, "after the write")
-			f.requireEnd(t, inst, wantEnd, "after the write")
-			f.requireUsage(t, round, 0, imageUsage(0, 1, 1, 1, 0), imageUsage(1, 1, 2, 2, 0), "after the write")
+			firstFault := f.fault(0)
+			var wantNextErr error
+			current := 1
 			if tc.writeErr != nil {
-				f.requireFault(t, 0, 1, tc.writeErr.Error(), "after the failed write")
-				f.requireFrames(t, 0, "after the failed write")
-				f.failedOnClosed(t, round, 0, 2, 2)
+				wantNextErr, current = net.ErrClosed, 0
+			}
+			requireImageResult(t, f.request(round, context.Background(), 0, 2), 2, 2, wantNextErr, "next request after the write")
+			f.requireEnd(t, inst, wantEnd, "after the write")
+			f.requireOwners(t, round, 0, imageOwners{
+				ids: 3, current: 1 + current, idKeys: 2, peerKeys: 2, peerKey: true, attempted: 3, starts: 2,
+				perPeer: imageUsage(uint64(current), 2, 2, 2, 0), global: imageUsage(uint64(1+current), 2, 3, 3, 0),
+			}, "after the next request")
+			requireEqual(t, f.instance(1), sibling, "replacement after the next request")
+			requireEqual(t, f.instance(2) != nil, current == 1, "next request remains current")
+			if tc.writeErr != nil {
+				requireEqual(t, firstFault, imageFault{closes: 1, lastError: tc.writeErr.Error()}, "after the first failed write")
+				f.requireFault(t, 0, 2, net.ErrClosed.Error(), "after the write on the closed connection")
+				requireEqual(t, len(f.wires[0].bytes()), 0, "bytes written by the two failed writes")
 				return
 			}
-			f.requireFault(t, 0, 0, "", "after the write")
-			f.requireFrames(t, 0, "after the write", expectedImageQuery(1, 1))
-			f.admitted(t, round, context.Background(), 0, 2, 2)
+			requireEqual(t, firstFault, imageFault{}, "after the first write")
+			f.requireFault(t, 0, 0, "", "after the next write")
+			f.requireFrames(t, 0, "after the two writes", expectedImageQuery(1, 1), expectedImageQuery(2, 2))
 		}))
 	}
 	t.Run("round ctx canceled during the write", inImageBubble(func(t *testing.T) {
@@ -1867,10 +1888,27 @@ func testImageFailedWrite(t *testing.T) {
 			}
 			f.wires[0].armStallAfter(skip).release <- errImageScriptedWrite
 			requireImageResult(t, f.request(round, c, 0, 1), 1, 1, errImageScriptedWrite, "failed write")
-			require(t, free, "writeMu held in the post-write section of the failed write")
 			requireImageResult(t, inHook, 2, 2, nil, "request on the same session in the close hook")
-			f.wires[0].drop(skip * wireHeaderSize)
-			f.requireFrames(t, 0, "after the close hook", expectedImageQuery(2, 2))
+			require(t, free, "writeMu held in the post-write section of the failed write")
+			cfg := f.s.cfg.PeerRuntimeConfig
+			reader, magic := bytes.NewReader(f.wires[0].bytes()), networkMagic(cfg.Network)
+			if skip != 0 {
+				header, err := readFrameHeader(reader, magic, cfg.MaxMessageSize)
+				must(t, err, "readFrameHeader for the failed write")
+				require(t, isImageRequestCommand(header.Command), "failed write header command = %q, want getutxoimg", header.Command)
+				requireEqual(t, header.Size, uint32(120), "failed write header payload size")
+				payload, ok := consensus.EncodeUTXOImageRequest(expectedImageQuery(1, 1))
+				require(t, ok, "first expected query does not encode")
+				checksum := sha3.Sum256(payload[:])
+				requireEqual(t, header.Checksum, [4]byte(checksum[:4]), "failed write header payload checksum")
+			}
+			frame, err := readFrame(reader, magic, cfg.MaxMessageSize)
+			must(t, err, "readFrame for the request in the close hook")
+			require(t, isImageRequestCommand(frame.Command), "close hook frame command = %q, want getutxoimg", frame.Command)
+			q, ok := consensus.DecodeUTXOImageRequest(frame.Payload)
+			require(t, ok, "close hook request payload does not decode")
+			requireEqual(t, q, expectedImageQuery(2, 2), "query written in the close hook")
+			requireEqual(t, reader.Len(), 0, "bytes after the close hook frame")
 			f.requireFault(t, 0, 1, errImageScriptedWrite.Error(), "after the failed write")
 		})
 	}
@@ -1951,10 +1989,12 @@ func testImageCallbackAfterRetirement(t *testing.T) {
 	round := f.roundCtx(t, roundC, imageTestLimits(math.MaxInt64, math.MaxInt64), 0)
 	inst := f.admitted(t, round, ctx, 0, 1, 1)
 	req, ran, leases := f.lockRequester(), make(chan int, 1), f.leases()
+	unlock := sync.OnceFunc(req.mu.Unlock)
+	defer unlock()
 	waitImageMutexWaiter(t, &req.mu, func() { go func() { ran <- ctx.endAndRun(context.Canceled) }() })
 	req.retireLocked(inst, errImageExpired)
 	reads := f.clock.readCount()
-	req.mu.Unlock()
+	unlock()
 	requireEqual(t, awaitImageResult(t, ran, "Request ctx functions"), 1, "Request ctx functions run")
 	imageSpin(t, func() bool { return f.leases() == leases }, "Service lease release by the Request ctx callback")
 	require(t, f.clock.readCount() == reads && ctx.applierErrs == 0 && roundC.applierErrs == 0, "callback after the retirement: clock reads %d->%d, Request ctx and round ctx Err calls %d and %d, want none", reads, f.clock.readCount(), ctx.applierErrs, roundC.applierErrs)
@@ -2072,15 +2112,26 @@ func testImageSourceBound(t *testing.T) {
 	grown := after.TotalAlloc - before.TotalAlloc
 	require(t, round == nil && errors.Is(err, errImageSourceSet) && grown < backing && grown < uint64(len(config.SourceIDs)), "round=%v err=%v allocated %d bytes, want fewer than the %d source ids and the %d-byte backing array", round != nil, err, grown, len(config.SourceIDs), backing)
 	f.requireFaultsKept(t, faults, "source refusal")
-	buffer, round := func() (weak.Pointer[byte], *ImageRound) {
+	buffer, round, shared := func() (weak.Pointer[byte], *ImageRound, bool) {
 		large := f.ids[0] + strings.Repeat("x", 64<<20)
-		round, err := f.begin(context.Background(), ImageRoundConfig{Anchor: imageTestAnchor, SourceIDs: []string{large[:len(f.ids[0])]}, Limits: imageTestLimits()})
+		sourceID := large[:len(f.ids[0])]
+		round, err := f.s.BeginImageRound(context.Background(), ImageRoundConfig{Anchor: imageTestAnchor, SourceIDs: []string{sourceID}, Limits: imageTestLimits()})
 		must(t, err, "BeginImageRound with a source id inside a 64 MiB string")
-		return weak.Make(unsafe.StringData(large)), round
+		require(t, round != nil, "BeginImageRound returned a nil round")
+		f.admitted(t, round, context.Background(), 0, 1, 1)
+		requireEqual(t, len(round.sources), 1, "captured source count")
+		var shared bool
+		for capturedID, session := range round.sources {
+			requireEqual(t, capturedID, sourceID, "captured source id")
+			requireEqual(t, session, f.peers[0], "captured source session")
+			shared = unsafe.StringData(capturedID) == unsafe.StringData(sourceID)
+		}
+		return weak.Make(unsafe.StringData(large)), round, shared
 	}()
 	runtime.GC()
 	require(t, buffer.Value() == nil, "the round keeps the 64 MiB buffer of its source id")
-	f.admitted(t, round, context.Background(), 0, 1, 1)
+	require(t, !shared, "captured source id shares the input buffer")
+	runtime.KeepAlive(round)
 }
 
 func testImageSourceDecision(t *testing.T) {
