@@ -206,9 +206,9 @@ func testImageUnwindPending(t *testing.T, perPeer bool) {
 	f.requireRequesterFree(t)
 	nextC := f.goRequest(round, context.Background(), session, 3)
 	f.waitAdmitted(t, session, idB+1, "request C")
-	f.refused(t, round, context.Background(), session, 4, errImageLimit)
 	per, global := f.usage(round, session)
 	requireEqual(t, [2]uint64{per[unitPendingNetworkBytes], global[unitPendingNetworkBytes]}, [2]uint64{240, 240}, "pending bytes on holder B's session and globally")
+	f.refused(t, round, context.Background(), session, 4, errImageLimit)
 	stallB.release <- nil
 	requireImageResult(t, awaitImageResult(t, heldB, "holder B"), idB, 2, nil, "holder B")
 	requireImageResult(t, awaitImageResult(t, nextC, "request C"), idB+1, 3, nil, "request C")
@@ -526,6 +526,9 @@ func testImageUnwindAfterFailedWrite(t *testing.T, tc imageFailedWriteUnwindCase
 		heldB = f.goRequest(round, t.Context(), tc.holder, 2)
 		f.waitAdmitted(t, tc.holder, uint64(2-tc.holder), "second holder")
 	}
+	if tc.holder == 1 {
+		requireChannelClosed(t, stallB.entered, "write of the second holder")
+	}
 	done := make(chan struct{})
 	defer close(done)
 	var waitWrite <-chan struct{}
@@ -538,9 +541,6 @@ func testImageUnwindAfterFailedWrite(t *testing.T, tc imageFailedWriteUnwindCase
 		requireImageResult(t, awaitImageResult(t, heldB, "second holder"), 2, 2, net.ErrClosed, "second holder")
 	}
 	requireImageUnwindReport(t, unwound, tc.goexit)
-	if tc.holder == 1 {
-		requireChannelClosed(t, stallB.entered, "write of the second holder")
-	}
 	f.requireRequesterFree(t)
 	requireUnwindWritePrefix(t, f.wires[0], tc.skip*wireHeaderSize)
 	f.requireFailedUnwindClose(t, observedClose, tc.holder, leases)
@@ -616,9 +616,12 @@ func (f *imageTestFixture) finishFailedWriteUnwind(t *testing.T, round *ImageRou
 	f.requireCurrentAfterUnwind(t, round, inst, [2]uint64{1, current})
 	requireEqual(t, c.unwindFunctionCount(), 1, "registered functions after the failed write unwind")
 	f.refused(t, round, context.Background(), 1, 1, errImageAssignmentCurrent)
-	if holder != 0 {
-		f.clock.add(24*time.Hour + time.Nanosecond)
-		f.admitted(t, round, context.Background(), 1, 1, nextID)
-		f.requireEnd(t, inst, errImageExpired, "failed write instance after the next admission")
+	if holder == 0 {
+		per, global := f.usage(round, 0)
+		requireEqual(t, [2]uint64{per[unitPendingNetworkBytes], global[unitPendingNetworkBytes]}, [2]uint64{}, "pending bytes on the closing session and globally after the next request")
+		return
 	}
+	f.clock.add(24*time.Hour + time.Nanosecond)
+	f.admitted(t, round, context.Background(), 1, 1, nextID)
+	f.requireEnd(t, inst, errImageExpired, "failed write instance after the next admission")
 }
