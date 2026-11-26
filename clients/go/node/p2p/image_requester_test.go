@@ -119,6 +119,8 @@ type imageWire struct {
 	sent      []byte
 	stall     *imageStall
 	stallSkip int
+	panicNext any
+	panicSkip int
 	closed    <-chan struct{}
 }
 
@@ -132,17 +134,28 @@ func (w *imageWire) write(b []byte) (int, error) {
 		return 0, net.ErrClosed
 	}
 	w.mu.Lock()
-	stall := w.stall
+	stall, value := w.stall, w.panicNext
+	if w.panicSkip > 0 {
+		w.panicSkip, value = w.panicSkip-1, nil
+	} else {
+		w.panicNext = nil
+	}
 	if w.stallSkip > 0 {
 		w.stallSkip, stall = w.stallSkip-1, nil
 	} else {
 		w.stall = nil
 	}
 	w.mu.Unlock()
+	if value != nil {
+		panic(value)
+	}
 	if stall != nil {
 		close(stall.entered)
 		select {
 		case err := <-stall.release:
+			if err == errImageWritePanic { //nolint:errorlint // The sentinel itself selects the panic.
+				panic(imageUnwindSentinel)
+			}
 			if err != nil {
 				return 0, err
 			}
