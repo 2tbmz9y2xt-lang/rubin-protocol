@@ -8,9 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/parser"
 	"go/token"
-	"strconv"
+	"go/types"
 	"strings"
 	"testing"
 
@@ -117,17 +118,19 @@ func startupAlreadyVerified(t *testing.T, w *replayWorld) {
 	t.Helper()
 	repeat := startupRun(w)
 	startupTuple(t, repeat, false, 0, "")
-	assertRefusal := func(err error) {
-		e, ok := any(err).(*mdbx.EngineError)
-		logicalMDBXAssert(t, ok && e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "canonical owner index is already verified" && e.Cause == nil && !e.ReopenRequired, "already verified refusal: %v", err)
-	}
-	assertRefusal(repeat.Err)
+	startupVerifiedError(t, repeat.Err)
 	err, cached := w.store.StartupVerifyCanonicalV1(func(*mdbx.Reader) (mdbx.StartupCanonicalCompletionV1, error) {
 		t.Fatal("verified store entered the verification callback")
 		return mdbx.StartupCanonicalNotCompleteV1, nil
 	})
-	assertRefusal(err)
+	startupVerifiedError(t, err)
 	logicalMDBXAssert(t, !cached, "already verified refusal became terminal")
+}
+
+func startupVerifiedError(t *testing.T, err error) {
+	t.Helper()
+	e, ok := err.(*mdbx.EngineError)
+	logicalMDBXAssert(t, ok && e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "canonical owner index is already verified" && e.Cause == nil && !e.ReopenRequired, "already verified refusal: %v", err)
 }
 
 var startupOtherPhases = [...]struct{ phase, lifecycle uint8 }{{1, 1}, {1, 2}, {2, 1}, {2, 2}, {4, 2}}
@@ -158,57 +161,68 @@ func startupOtherPhase(t *testing.T, phase, lifecycle uint8) *replayWorld {
 }
 
 func TestConsensusErrorCodeStorageAdmission(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "errors.go", nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatal(err)
+	scope := storageErrorCodeScope(t)
+	codeType, ok := scope.Lookup("ErrorCode").(*types.TypeName)
+	if !ok {
+		t.Fatal("missing ErrorCode type in errors.go")
 	}
 	seen := make(map[string]bool)
-	for _, decl := range file.Decls {
-		group, ok := decl.(*ast.GenDecl)
-		if !ok || group.Tok != token.CONST {
+	for _, name := range scope.Names() {
+		declared, ok := scope.Lookup(name).(*types.Const)
+		if !ok || !types.Identical(declared.Type(), codeType.Type()) {
 			continue
 		}
-		for _, spec := range group.Specs {
-			constant := spec.(*ast.ValueSpec)
-			typeName, ok := constant.Type.(*ast.Ident)
-			if !ok || typeName.Name != "ErrorCode" {
-				continue
-			}
-			checkDeclaredStorageErrorCode(t, constant, seen)
+		value := declared.Val()
+		if value.Kind() != constant.String {
+			t.Fatalf("ErrorCode %s has non-string value %s", name, value)
 		}
+		checkDeclaredStorageErrorCode(t, name, constant.StringVal(value), seen)
 	}
 	if len(seen) != 50 {
 		t.Fatalf("distinct ErrorCode literals = %d, want 50", len(seen))
 	}
 }
 
-func checkDeclaredStorageErrorCode(t *testing.T, spec *ast.ValueSpec, seen map[string]bool) {
+func storageErrorCodeScope(t *testing.T) *types.Scope {
 	t.Helper()
-	if len(spec.Values) != len(spec.Names) {
-		t.Fatalf("ErrorCode declarations lack literal values: %v", spec.Names)
+	files := token.NewFileSet()
+	file, err := parser.ParseFile(files, "errors.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i, value := range spec.Values {
-		literal, ok := value.(*ast.BasicLit)
-		if !ok || literal.Kind != token.STRING {
-			t.Fatalf("ErrorCode %s lacks a string literal", spec.Names[i].Name)
+	declarations := make([]ast.Decl, 0, len(file.Decls))
+	for _, decl := range file.Decls {
+		group, ok := decl.(*ast.GenDecl)
+		if ok && (group.Tok == token.TYPE || group.Tok == token.CONST) {
+			declarations = append(declarations, decl)
 		}
-		code, err := strconv.Unquote(literal.Value)
-		if err != nil || seen[code] {
-			t.Fatalf("ErrorCode %s has invalid or duplicate literal %q: %v", spec.Names[i].Name, code, err)
-		}
-		seen[code] = true
-		a := mdbx.StorageAuthorityV1{
-			Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 2, Phase: 1, Lifecycle: 1,
-			ExcludedInvalidBranch: &mdbx.InvalidBranchV1{ExactConsensusError: []byte(code)},
-		}
-		raw, err := a.Encode()
-		if err != nil {
-			t.Fatalf("ErrorCode %s cannot encode: %v", code, err)
-		}
-		got, err := mdbx.DecodeStorageAuthorityV1(raw)
-		if err != nil || got.ExcludedInvalidBranch == nil || string(got.ExcludedInvalidBranch.ExactConsensusError) != code {
-			t.Fatalf("ErrorCode %s did not round-trip: %+v, %v", code, got.ExcludedInvalidBranch, err)
-		}
+	}
+	file.Decls, file.Imports = declarations, nil
+	config := types.Config{}
+	pkg, err := config.Check(file.Name.Name, files, []*ast.File{file}, nil)
+	if err != nil {
+		t.Fatalf("type-check declarations in errors.go: %v", err)
+	}
+	return pkg.Scope()
+}
+
+func checkDeclaredStorageErrorCode(t *testing.T, name, code string, seen map[string]bool) {
+	t.Helper()
+	if seen[code] {
+		t.Fatalf("ErrorCode %s has duplicate value %q", name, code)
+	}
+	seen[code] = true
+	a := mdbx.StorageAuthorityV1{
+		Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 2, Phase: 1, Lifecycle: 1,
+		ExcludedInvalidBranch: &mdbx.InvalidBranchV1{ExactConsensusError: []byte(code)},
+	}
+	raw, err := a.Encode()
+	if err != nil {
+		t.Fatalf("ErrorCode %s cannot encode %q: %v", name, code, err)
+	}
+	got, err := mdbx.DecodeStorageAuthorityV1(raw)
+	if err != nil || got.ExcludedInvalidBranch == nil || string(got.ExcludedInvalidBranch.ExactConsensusError) != code {
+		t.Fatalf("ErrorCode %s did not round-trip %q: %+v, %v", name, code, got.ExcludedInvalidBranch, err)
 	}
 }
 

@@ -154,6 +154,38 @@ func startupRunCorruptToken(t *testing.T, w *replayWorld, replacement string) {
 	startupRawPreserved(t, w, 0, []byte{2}, raw)
 }
 
+func TestReplayStartupMDBXHealthyExclusion(t *testing.T) {
+	w := startupWorld(t, 0, 0)
+	slot := mdbx.InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: [32]byte{0x91}, ExactConsensusError: []byte("TX_ERR_PARSE")}
+	for _, hash := range w.hashes {
+		logicalMDBXAssert(t, hash != slot.FirstInvalidBlockHash, "exclusion overlaps a verified index hash")
+	}
+	a := w.authority()
+	a.ExcludedInvalidBranch = &slot
+	control, err := a.Encode()
+	logicalMDBXAssert(t, err == nil, "encode legal startup exclusion: %v", err)
+	bad := replaceLegacyAuthorityToken(t, control, "UX_ERR_PARSE")
+	key := []byte{2}
+	startupRaw(t, w, 0, key, control)
+	w.store = w.reopen()
+	startupRawImageEqual(t, w)
+	startupTuple(t, startupRun(w), true, 1, "")
+
+	var repeat ReplayStartupOutcomeV1
+	evidence, probeErr := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
+		repeat = startupRun(w)
+	})
+	startupTuple(t, repeat, false, 0, "")
+	startupVerifiedError(t, repeat.Err)
+	logicalMDBXAssert(t, probeErr == nil && evidence == (mdbx.SelectedDamageEvidence{}), "already verified repeat reached native work: %+v/%v", evidence, probeErr)
+	w.store = w.reopen()
+	startupRawImageEqual(t, w)
+
+	startupRaw(t, w, 0, key, bad)
+	startupRawImageEqual(t, w)
+	startupRawPreserved(t, w, 0, key, bad)
+}
+
 func startupTokenNativeRows(t *testing.T) {
 	for _, row := range []struct{ name, token string }{
 		{"growth suffix", "BLOCK_ERR_STATE_GROWTH_EXCEEDEDsuffix"},

@@ -1330,13 +1330,34 @@ func TestRetainedCapacityMDBXBodyWindow(t *testing.T) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
-	read.authority.Authority.ExcludedInvalidBranch, f.planned.Authority = excluded, old
-	f.planned.Authority.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, ExactConsensusError: []byte("TX_ERR_PARSE")}
-	_, err := f.promiseV1()
-	logicalMDBXAssert(t, err == nil, "identical excluded tuple: %v", err)
-	f.planned.Authority.ExcludedInvalidBranch.ExactConsensusError = []byte("BLOCK_ERR_PARSE")
-	_, err = f.promiseV1()
-	logicalMDBXAssert(t, errors.Is(err, errRetainedFiniteAPIV1), "changed excluded tuple: %v", err)
+	for _, row := range []struct {
+		name, stored, changed string
+		width                 int
+	}{
+		{"slot error bytes", "TX_ERR_PARSE", "BLOCK_ERR_PARSE", 0},
+		{"slot error bytes equal width", "BLOCK_ERR_WEIGHT_EXCEEDED", "BLOCK_ERR_LINKAGE_INVALID", 25},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			prior, next := *excluded, *excluded
+			prior.ExactConsensusError, next.ExactConsensusError = []byte(row.stored), []byte(row.stored)
+			read.authority.Authority.ExcludedInvalidBranch, f.planned.Authority = &prior, old
+			f.planned.Authority.ExcludedInvalidBranch = &next
+			stored, err := read.authority.Authority.Encode()
+			logicalMDBXAssert(t, err == nil, "stored excluded tuple cannot encode: %v", err)
+			_, err = f.planned.Authority.Encode()
+			logicalMDBXAssert(t, err == nil, "identical excluded tuple cannot encode: %v", err)
+			_, err = f.promiseV1()
+			logicalMDBXAssert(t, err == nil, "identical excluded tuple: %v", err)
+			next.ExactConsensusError = []byte(row.changed)
+			changed, err := f.planned.Authority.Encode()
+			logicalMDBXAssert(t, err == nil, "changed excluded tuple cannot encode: %v", err)
+			if row.width != 0 {
+				logicalMDBXAssert(t, len(prior.ExactConsensusError) == row.width && len(next.ExactConsensusError) == row.width && len(stored) == len(changed), "excluded tuple widths differ")
+			}
+			_, err = f.promiseV1()
+			logicalMDBXAssert(t, err == errRetainedFiniteAPIV1, "changed excluded tuple: %v", err)
+		})
+	}
 }
 
 // Span-order residual: a decodable authority holds at most one SIDE span

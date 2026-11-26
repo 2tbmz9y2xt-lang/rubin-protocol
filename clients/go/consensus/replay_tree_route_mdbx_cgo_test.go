@@ -1563,6 +1563,23 @@ func TestReplayWholeTargetContext(t *testing.T) {
 	}
 }
 
+func TestReplayWholeTargetContextSlotErrorBytesEqualWidth(t *testing.T) {
+	stored := rtWhole()
+	stored.Authority.ExcludedInvalidBranch = rtTuple(12, 0x12, "BLOCK_ERR_WEIGHT_EXCEEDED")
+	w := rtNew(t, stored)
+	before := rtImage(t, w)
+	input := rtEnvelope(t, w)
+	slot := input.Authority.ExcludedInvalidBranch
+	logicalMDBXAssert(t, slot != nil && string(slot.ExactConsensusError) == "BLOCK_ERR_WEIGHT_EXCEEDED", "stored exclusion slot = %+v", slot)
+	current, err := input.Encode()
+	logicalMDBXAssert(t, err == nil && len(slot.ExactConsensusError) == 25, "stored exclusion envelope premise: %v", err)
+	slot.ExactConsensusError = []byte("BLOCK_ERR_LINKAGE_INVALID")
+	changed, err := input.Encode()
+	logicalMDBXAssert(t, err == nil && len(slot.ExactConsensusError) == 25 && len(current) == len(changed) && !bytes.Equal(current, changed), "changed exclusion envelope premise: %v", err)
+	run := rtWholePlan(t, w, rtWholeInput(input, ReplayTargetConversionTargetLocalV1, nil), nil)
+	rtWholeRefused(t, w, before, run, "STALE_LOCAL_PLAN", "equal-width slot error bytes")
+}
+
 // H3: the caller's tuple bytes, hash and height mutated after the planner returned (before the Batch is committed)
 // change neither the planned literal nor the stored slot. The planner encodes the envelope before it returns, so the
 // Batch carries only that encoded copy; this row fails if the returned literal shares the caller's bytes.

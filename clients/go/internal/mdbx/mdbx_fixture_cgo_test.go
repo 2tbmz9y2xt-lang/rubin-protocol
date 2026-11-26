@@ -3469,13 +3469,10 @@ func TestNativeUpdateUnknownImages(t *testing.T) {
 }
 
 func TestPrunedProfileMalformed(t *testing.T) {
-	for _, name := range []string{"absent", "empty", "short", "tag-payload", "canonical-width", "malformed exclusion"} {
+	for _, name := range []string{"absent", "empty", "short", "tag-payload", "canonical-width"} {
 		t.Run(name, func(t *testing.T) {
 			s, path, cfg := consultedStore(t)
 			a := modelBase(2, 0, 0)
-			if name == "malformed exclusion" {
-				a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte("TX_ERR_PARSE")}
-			}
 			encoded, err := a.Encode()
 			mustEnvironment(t, err)
 			tip, key := &AuthorityPointV1{}, []byte{2}
@@ -3488,9 +3485,6 @@ func TestPrunedProfileMalformed(t *testing.T) {
 			case "tag-payload":
 				value = append([]byte(nil), encoded...)
 				value[34], value[36] = 9, 9
-			case "malformed exclusion":
-				wantCodecRoundTrip(t, a)
-				value = replaceAuthorityToken(t, encoded, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
 			case "canonical-width":
 				mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: dbi, key: key, value: encoded}))
 				dbi, key, value = readDBIsLiteral()[2], make([]byte, 16), make([]byte, 103)
@@ -3512,8 +3506,6 @@ func TestPrunedProfileMalformed(t *testing.T) {
 				return nil
 			}))
 			owner := bootstrapOwner(t)
-			inspection, err := s.Inspect()
-			mustEnvironment(t, err)
 			out := s.SelectPrunedProfileV1(true, tip, owner)
 			diagnostic, cause := "invalid pruned profile authority", error(errSchema)
 			if name == "canonical-width" {
@@ -3534,9 +3526,6 @@ func TestPrunedProfileMalformed(t *testing.T) {
 			reopened, openErr := Open(path, cfg)
 			mustEnvironment(t, openErr)
 			defer func() { _ = reopened.Close() }()
-			if name == "malformed exclusion" {
-				assertLegacyExclusionImage(t, reopened, value, inspection)
-			}
 			mustEnvironment(t, reopened.View(func(reader *Reader) error {
 				image := updateImage{}
 				if name != "absent" {
@@ -3553,6 +3542,53 @@ func TestPrunedProfileMalformed(t *testing.T) {
 			}))
 		})
 	}
+	t.Run("malformed exclusion", prunedProfileMalformedExclusion)
+}
+
+func prunedProfileMalformedExclusion(t *testing.T) {
+	t.Helper()
+	a := modelBase(byte(StorageProfileArchiveV1), 0, 0)
+	a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte("TX_ERR_PARSE")}
+	tip := &AuthorityPointV1{BlockHash: modelHash(41)}
+	s, path, cfg, rows := prunedStore(t, a, tip, modelWork(false))
+	image, counts := prunedImage(t, s, rows), bootstrapCounts(t, s, "archive exclusion")
+	control := bytes.Clone(image[0])
+	bad := replaceAuthorityToken(t, control, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
+	owner := bootstrapOwner(t)
+	out := s.SelectPrunedProfileV1(true, tip, owner)
+	want := a
+	want.ActiveProfile = StorageProfilePrunedV1
+	if out.Err != nil || out.Decision != "" || out.Truth != CommitTruthNew || out.Stage != UpdateStageCommitMayHaveCrossed || !reflect.DeepEqual(out.Authority, &want) {
+		t.Fatalf("legal pruned profile exclusion = %+v", out)
+	}
+	image[0][1] = byte(StorageProfilePrunedV1)
+	if !reflect.DeepEqual(prunedImage(t, s, rows), image) || bootstrapCounts(t, s, "pruned exclusion") != counts {
+		t.Fatal("legal pruned profile exclusion changed the prepared rows")
+	}
+
+	mustEnvironment(t, FixtureSeedRawRow(s, 0, []byte{2}, bad))
+	image[0] = bad
+	if !reflect.DeepEqual(prunedImage(t, s, rows), image) || bootstrapCounts(t, s, "malformed exclusion") != counts {
+		t.Fatal("malformed pruned profile exclusion preimage drifted")
+	}
+	inspection, err := s.Inspect()
+	mustEnvironment(t, err)
+	out = s.SelectPrunedProfileV1(true, tip, owner)
+	bootstrapRefusal(t, "malformed pruned profile exclusion", out.Truth, out.Err, EngineIntegrity, operationGet, codeInvalid, "invalid pruned profile authority", errSchema, true)
+	if out.Stage != UpdateStagePrewrite || out.Decision != "" || out.Authority != nil {
+		t.Fatalf("malformed pruned profile exclusion = %+v", out)
+	}
+	again := s.SelectPrunedProfileV1(true, tip, owner)
+	if !sameError(again.Err, out.Err) || again.Truth != out.Truth || again.Stage != out.Stage || again.Decision != out.Decision || again.Authority != nil {
+		t.Fatalf("cached pruned profile exclusion = %+v", again)
+	}
+	assertCachedSlotError(t, s, out.Err, out.Err)
+	prunedReleased(t, owner)
+	reopened, err := Open(path, cfg)
+	mustEnvironment(t, err)
+	defer func() { _ = reopened.Close() }()
+	assertLegacyExclusionImage(t, reopened, bad, inspection)
+	prunedUnchanged(t, reopened, rows, image, "malformed pruned profile exclusion")
 }
 
 func TestPrunedProfileNativeImages(t *testing.T) {
