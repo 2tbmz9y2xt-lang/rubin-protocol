@@ -23,30 +23,9 @@ type imageSession struct {
 	lastID    uint64
 }
 
-// imageSourcesLive bounds the requested list by live identifiers and checks its entries before allocation.
-func (req *imageRequester) imageSourcesLive(ids []string, peers map[string]*peer) bool {
-	req.mu.Lock()
-	defer req.mu.Unlock()
-	live := 0
-	for _, p := range peers {
-		if p != nil && !p.imageRetired {
-			live++
-		}
-	}
-	if len(ids) > live {
-		return false
-	}
-	for _, id := range ids {
-		if p := peers[id]; p == nil || p.imageRetired {
-			return false
-		}
-	}
-	return true
-}
-
 func checkImageSourcesLocked(sources map[string]*peer) error {
 	for _, p := range sources {
-		if p.imageRetired {
+		if p.imageRetired.Load() {
 			return errImageSourceSet
 		}
 	}
@@ -252,12 +231,12 @@ func (s *Service) retireImagePeer(p *peer) {
 	}
 	req.mu.Lock()
 	defer req.mu.Unlock()
-	if p.imageRetired {
+	if p.imageRetired.Load() {
 		return
 	}
 	session := p.imageSession
 	if session == nil {
-		p.imageRetired = true
+		p.imageRetired.Store(true)
 		return
 	}
 	req.detachImageSessionLocked(session)
@@ -286,7 +265,7 @@ func (req *imageRequester) retireImageOwnerLocked(s *Service, reason error, matc
 }
 
 func (req *imageRequester) detachImageSessionLocked(session *imageSession) {
-	session.transport.imageRetired = true
+	session.transport.imageRetired.Store(true)
 	session.transport, session.lastID = nil, 0
 	delete(req.sessions, session)
 }

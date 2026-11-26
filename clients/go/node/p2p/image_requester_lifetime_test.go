@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"math"
 	"net"
 	"reflect"
@@ -38,8 +39,11 @@ func TestImageRequesterLifetime(t *testing.T) {
 	t.Run("passive receive during join", testImagePassiveReceiveJoin)
 	t.Run("exact registration", testImageExitAtQuota)
 	t.Run("registration exit before retry join", testImageExitBeforeRetryJoin)
+	t.Run("announcement exit before diagnostics", testImageAnnouncementExitBeforePublish)
+	t.Run("read exit before diagnostics", testImageReadExitBeforePublish)
 	t.Run("same address replacement", testImageReplacementRetainsNoPeer)
 	t.Run("exit before first capture", testImageExitBeforeCapture)
+	t.Run("retired source refusal allocations", testImageRetiredSourceAllocations)
 	t.Run("source bound counts live aliases", testImageLiveSourceBound)
 	t.Run("terminal context hooks", testImageTerminalHooks)
 	t.Run("caller context after service close", testImageTerminalServiceRetention)
@@ -868,14 +872,17 @@ const (
 )
 
 type imageExitingWorker struct {
-	announcing <-chan struct{}
-	fail       func()
-	done       <-chan struct{}
-	wire       *imageWire
+	round *ImageRound
+	fail  func()
+	done  <-chan struct{}
+	wire  *imageWire
 }
 
-func startImageExitingWorker(t *testing.T, f *imageTestFixture) imageExitingWorker {
+func startImageExitingWorker(t *testing.T, f *imageTestFixture, command string) imageExitingWorker {
 	t.Helper()
+	f.s.reconnectMu.Lock()
+	resume := sync.OnceFunc(f.s.reconnectMu.Unlock)
+	defer resume()
 	local, remote := net.Pipe()
 	conn := newBlockRetryConn(endpointConn{Conn: local, remote: stubAddr(imageWorkerAddr)})
 	t.Cleanup(func() { _ = remote.Close() })
@@ -883,9 +890,23 @@ func startImageExitingWorker(t *testing.T, f *imageTestFixture) imageExitingWork
 	failWrite := sync.OnceFunc(func() { close(fail) })
 	t.Cleanup(failWrite)
 	wire := &imageWire{closed: conn.closed}
-	conn.writeHook = imageExitingWorkerWrites(local, wire, announcing, fail)
+	conn.writeHook = imageExitingWorkerWrites(local, wire, command, announcing, fail)
 	done := startImagePipeWorker(t, f.s, conn, remote)
-	return imageExitingWorker{announcing: announcing, fail: failWrite, done: done, wire: wire}
+	waitUntil(t, func() bool { return f.serviceEntry(imageWorkerAddr) != nil }, "peer registration")
+	config := ImageRoundConfig{Anchor: imageTestAnchor, Limits: imageTestLimits(), SourceIDs: []string{imageWorkerAddr}}
+	round, err := f.begin(t.Context(), config)
+	must(t, err, "capture the actual peer")
+	got := requestWithin(lifecycleWatchdog, round, t.Context(), imageWorkerAddr, 1, imageTestByteLimit)
+	requireImageResult(t, got, 1, 1, nil, "request before the first announcement")
+	resume()
+	if command == "getblocks" {
+		cfg := f.s.cfg.PeerRuntimeConfig
+		frame, err := readFrame(remote, networkMagic(cfg.Network), cfg.MaxMessageSize)
+		must(t, err, "read the first announcement")
+		requireEqual(t, frame.Command, "sendcmpct", "announcement before the block request")
+	}
+	requireChannelClosed(t, announcing, "target announcement write")
+	return imageExitingWorker{round: round, fail: failWrite, done: done, wire: wire}
 }
 
 func startImagePipeWorker(t *testing.T, s *Service, local, remote net.Conn) <-chan struct{} {
@@ -899,7 +920,7 @@ func startImagePipeWorker(t *testing.T, s *Service, local, remote net.Conn) <-ch
 	return done
 }
 
-func imageExitingWorkerWrites(conn net.Conn, wire *imageWire, announcing chan<- struct{}, fail <-chan struct{}) func([]byte) (int, error) {
+func imageExitingWorkerWrites(conn net.Conn, wire *imageWire, terminalCommand string, announcing chan<- struct{}, fail <-chan struct{}) func([]byte) (int, error) {
 	imagePayload := false
 	return func(b []byte) (int, error) {
 		if imagePayload {
@@ -908,7 +929,7 @@ func imageExitingWorkerWrites(conn net.Conn, wire *imageWire, announcing chan<- 
 		}
 		if len(b) == wireHeaderSize {
 			command := b[4:16]
-			if bytes.Equal(bytes.TrimRight(command, "\x00"), []byte("sendcmpct")) {
+			if string(bytes.TrimRight(command, "\x00")) == terminalCommand {
 				close(announcing)
 				<-fail
 				return 0, errImageScriptedWrite
@@ -924,24 +945,14 @@ func imageExitingWorkerWrites(conn net.Conn, wire *imageWire, announcing chan<- 
 
 func testImageExitAtQuota(t *testing.T) {
 	f := newImageTestFixture(t, 0)
-	f.s.reconnectMu.Lock()
-	resume := sync.OnceFunc(f.s.reconnectMu.Unlock)
-	defer resume()
-	worker := startImageExitingWorker(t, f)
-	waitUntil(t, func() bool { return f.serviceEntry(imageWorkerAddr) != nil }, "peer registration")
+	worker := startImageExitingWorker(t, f, "sendcmpct")
 	old := f.serviceEntry(imageWorkerAddr)
 	config := ImageRoundConfig{Anchor: imageTestAnchor, Limits: imageTestLimits(), SourceIDs: []string{imageWorkerAddr}}
-	round, err := f.begin(t.Context(), config)
-	must(t, err, "capture the actual peer")
-	got := requestWithin(lifecycleWatchdog, round, t.Context(), imageWorkerAddr, 1, imageTestByteLimit)
-	requireImageResult(t, got, 1, 1, nil, "request before the first announcement")
-	resume()
-	requireChannelClosed(t, worker.announcing, "first announcement write")
 	release := sync.OnceFunc(f.s.lockPeerQuotaKey(imageWorkerHost))
 	defer release()
 	worker.fail()
 	requireParked(t, "actual worker at exit quota lock", peerExitFrames...)
-	checkImageExitAtQuota(t, f, round, config, old)
+	checkImageExitAtQuota(t, f, worker.round, config, old)
 	release()
 	requireChannelClosed(t, worker.done, "connection worker exit")
 	requireEqual(t, len(worker.wire.bytes()), wireHeaderSize+120, "admitted wire length")
@@ -996,6 +1007,59 @@ func testImageExitBeforeRetryJoin(t *testing.T) {
 	release()
 	requireChannelClosed(t, worker, "peer worker joins the retry")
 	requireChannelClosed(t, slot.done, "retry lease released")
+}
+
+func testImageAnnouncementExitBeforePublish(t *testing.T) {
+	for _, command := range []string{"sendcmpct", "getblocks"} {
+		t.Run(command, func(t *testing.T) {
+			f := newImageTestFixture(t, 0)
+			worker := startImageExitingWorker(t, f, command)
+			current := f.serviceEntry(imageWorkerAddr)
+			checkImageExitBeforePublish(t, f.s, worker.round, worker.fail)
+			requireChannelClosed(t, worker.done, "connection worker exit")
+			requireEqual(t, current.snapshotState().LastError, errImageScriptedWrite.Error(), "announcement failure diagnostic")
+		})
+	}
+}
+
+type imageReadFailureConn struct{ net.Conn }
+
+func (c imageReadFailureConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if errors.Is(err, io.EOF) {
+		err = io.ErrUnexpectedEOF
+	}
+	return n, err
+}
+
+func testImageReadExitBeforePublish(t *testing.T) {
+	f := newImageTestFixture(t, 0)
+	s := blockRetryService(t, f.s)
+	s.cfg.PeerRuntimeConfig.ReadDeadline = 0
+	local, remote := net.Pipe()
+	defer func() { _ = remote.Close() }()
+	conn := imageReadFailureConn{endpointConn{Conn: local, remote: stubAddr(imageWorkerAddr)}}
+	worker := startImagePipeWorker(t, s, conn, remote)
+	round := admitImageToPlainPeer(t, f, remote)
+	current := f.serviceEntry(imageWorkerAddr)
+	requireParked(t, "worker waiting for a frame", "[select", "net.(*pipe).read(", "p2p.(*peer).run(")
+	checkImageExitBeforePublish(t, s, round, func() { must(t, remote.Close(), "end the frame read") })
+	requireChannelClosed(t, worker, "connection worker exit")
+	requireEqual(t, current.snapshotState().LastError, io.ErrUnexpectedEOF.Error(), "read failure diagnostic")
+}
+
+func checkImageExitBeforePublish(t *testing.T, s *Service, round *ImageRound, trigger func()) {
+	t.Helper()
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+	trigger()
+	requireParked(t, "worker waiting to publish peer diagnostics", "[sync.RWMutex.RLock", "p2p.(*Service).publishPeerStateIfOwner(", "p2p.(*Service).handleConn(")
+	wait, cancel := context.WithCancel(t.Context())
+	cancel()
+	requireImageTake(t, round, wait, 1, expectedImageQuery(1, 1), errImageDisconnected, "result before peer diagnostics")
+	got := requestWithin(lifecycleWatchdog, round, t.Context(), imageWorkerAddr, 2, imageTestByteLimit)
+	requireQueryResult(t, got, consensus.UTXOImageQuery{}, errImageDisconnected, "request before peer diagnostics")
+	requireImageAbsent(t, round, t.Context(), 1, errImageNoAssignment)
 }
 
 func admitImageToPlainPeer(t *testing.T, f *imageTestFixture, remote net.Conn) *ImageRound {
@@ -1080,6 +1144,48 @@ func testImageExitBeforeCapture(t *testing.T) {
 	require(t, !created, "retired source acquired a registration identity")
 	release()
 	requireChannelClosed(t, done, "peer cleanup")
+}
+
+func testImageRetiredSourceAllocations(t *testing.T) {
+	const liveIndex = 5
+	f := newImageTestFixture(t, liveIndex+1)
+	for _, p := range f.peers[:liveIndex] {
+		done := make(chan struct{})
+		t.Cleanup(func() { requireChannelClosed(t, done, "retired peer cleanup") })
+		holdPeerExit(t, f.s, p.addr())
+		go func() { defer close(done); f.s.unregisterPeer(p) }()
+		waitForPeerQuotaLockRefs(t, f.s, p.daQuotaIdentity, 2)
+	}
+	f.s.peersMu.RLock()
+	mapped := len(f.s.peers)
+	f.s.peersMu.RUnlock()
+	requireEqual(t, mapped, 12, "mapped identifiers during peer cleanup")
+	ctx := t.Context()
+	t.Run("round", func(t *testing.T) {
+		config := f.config(imageTestLimits(), 0)
+		requireRetiredImageSourceRefusal(t, func() (*ImageRound, error) {
+			return f.s.BeginImageRound(ctx, config)
+		})
+	})
+	t.Run("probe round", func(t *testing.T) {
+		config := imageProbeConfig(f, f.clock.add(0), imageTestLimits(), 0)
+		requireRetiredImageSourceRefusal(t, func() (*ImageRound, error) {
+			return f.s.BeginImageProbeRound(ctx, config)
+		})
+	})
+	round := f.round(t, imageTestLimits(), liveIndex)
+	requireImageResult(t, f.request(round, ctx, liveIndex, 1), 1, 1, nil, "request on the live registration")
+	probe := checkImageProbeBegin(t, f, ctx, imageProbeConfig(f, f.clock.add(0), imageTestLimits(), liveIndex), nil)
+	checkImageProbe(t, probe, ctx, f.ids[liveIndex], 2, imageTestByteLimit, [32]byte{0x42}, expectedImageQuery(2, 2), nil)
+	f.requireFrames(t, liveIndex, "live registration frames", expectedImageQuery(1, 1), expectedImageQuery(2, 2))
+}
+
+func requireRetiredImageSourceRefusal(t *testing.T, begin func() (*ImageRound, error)) {
+	t.Helper()
+	var got imageBegin
+	allocations := testing.AllocsPerRun(100, func() { got.round, got.err = begin() })
+	requireEqual(t, got, imageBegin{err: errImageSourceSet}, "retired source constructor")
+	requireEqual(t, allocations, 0, "retired source constructor allocations")
 }
 
 func testImageLiveSourceBound(t *testing.T) {

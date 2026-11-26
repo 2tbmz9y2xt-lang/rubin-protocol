@@ -137,9 +137,9 @@ type peerQuotaLock struct {
 type peer struct {
 	conn    net.Conn
 	service *Service
-	// The requester mutex guards the exact registration's capture and retirement.
+	// The requester mutex guards capture and retirement. Source observation reads imageRetired under peersMu.
 	imageSession *imageSession
-	imageRetired bool
+	imageRetired atomic.Bool
 
 	stateMu sync.Mutex
 	state   node.PeerState

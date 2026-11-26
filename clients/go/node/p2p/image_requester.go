@@ -254,8 +254,8 @@ type imageRoundUsage struct {
 
 // BeginImageRound admits an acquisition round under one Service lease. Refusals, in order, return a nil round and fault
 // no peer: errServiceClosed, errImageNilContext, errImageRequestDomain for a height above 0xffffffff, errImagePolicy
-// for a zero limit or nonpositive duration, errImageSourceSet for an empty list, more IDs than Service.peers entries
-// (before any table sized by the list) or an ID with no entry or naming a listed connection; then, after its one clock
+// for a zero limit or nonpositive duration, errImageSourceSet for an empty list, more IDs than live peer identifiers
+// (before any table sized by the list) or an unknown, retired or duplicate source; then, after its one clock
 // read, errServiceClosed once Close has moved the Service out of OPEN, errImagePolicy for an inexact RD or a nonzero
 // NotBefore outside now's clock domain, and errImageBackoff when now is before a nonzero NotBefore. A done ctx is
 // captured, not refused (RUBIN_L1_P2P_AUX.md Sections 6.6 and 7.5).
@@ -364,21 +364,41 @@ func checkImageRoundConfig(ctx context.Context, anchor ImageAnchor, limits Image
 	return nil
 }
 
-// resolveImageSources copies Service.peers in one read section and resolves ids against the copy after it.
+// resolveImageSources observes the requested live peers in one read section and copies their names after it.
 func (s *Service) resolveImageSources(ids []string) (map[string]*peer, error) {
 	if len(ids) == 0 {
 		return nil, errImageSourceSet
 	}
 	s.peersMu.RLock()
-	peers := make(map[string]*peer, len(s.peers))
-	for id, session := range s.peers {
-		peers[id] = session
-	}
-	s.peersMu.RUnlock()
-	if len(ids) > len(peers) || !s.imageRequester.imageSourcesLive(ids, peers) {
+	if len(ids) > len(s.peers) || !imageSourcesLive(ids, s.peers) {
+		s.peersMu.RUnlock()
 		return nil, errImageSourceSet
 	}
-	return imageSources(ids, peers)
+	observed := make(map[string]*peer, len(ids))
+	for _, id := range ids {
+		observed[id] = s.peers[id]
+	}
+	s.peersMu.RUnlock()
+	return imageSources(ids, observed)
+}
+
+// imageSourcesLive bounds the requested list by live identifiers and checks its entries before allocation.
+func imageSourcesLive(ids []string, peers map[string]*peer) bool {
+	live := 0
+	for _, p := range peers {
+		if p != nil && !p.imageRetired.Load() {
+			live++
+		}
+	}
+	if len(ids) > live {
+		return false
+	}
+	for _, id := range ids {
+		if p := peers[id]; p == nil || p.imageRetired.Load() {
+			return false
+		}
+	}
+	return true
 }
 
 // imageSources keys each resolved connection by a copy of its ID; more IDs than entries refuse before any allocation.

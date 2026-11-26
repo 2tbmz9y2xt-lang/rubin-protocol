@@ -28,12 +28,8 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 		return err
 	}
 	state, err := performHandshake(
-		s.ctx,
-		conn,
-		s.cfg.PeerRuntimeConfig,
-		localVersion,
-		s.cfg.SyncConfig.ChainID,
-		s.cfg.GenesisHash,
+		s.ctx, conn, s.cfg.PeerRuntimeConfig,
+		localVersion, s.cfg.SyncConfig.ChainID, s.cfg.GenesisHash,
 	)
 	if err != nil {
 		return err
@@ -66,6 +62,7 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 		return err
 	}
 	if err := current.run(s.ctx); err != nil && s.ctx.Err() == nil {
+		s.retireImagePeer(current)
 		current.applyPostHandshakeDisconnectError(err)
 		return err
 	}
@@ -74,10 +71,12 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 
 func (s *Service) sendPostHandshakeAnnouncements(current *peer) error {
 	if err := current.advertiseLocalCompactMode(); err != nil {
+		s.retireImagePeer(current)
 		current.setLastError(err.Error())
 		return err
 	}
 	if err := s.requestBlocksIfBehind(current); err != nil {
+		s.retireImagePeer(current)
 		current.setLastError(err.Error())
 		return err
 	}
