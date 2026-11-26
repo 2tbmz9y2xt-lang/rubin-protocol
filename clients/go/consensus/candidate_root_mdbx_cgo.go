@@ -67,11 +67,9 @@ func candidateProviderPresent(provider RotationProvider) bool {
 		return false
 	}
 	value := reflect.ValueOf(provider)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice:
-		return !value.IsNil()
-	}
-	return true
+	kind := value.Kind()
+	nilable := kind == reflect.Chan || kind == reflect.Func || kind == reflect.Map || kind == reflect.Pointer || kind == reflect.Slice
+	return !nilable || !value.IsNil()
 }
 
 // CandidateRootInput borrows the final immutable body and selected parent context.

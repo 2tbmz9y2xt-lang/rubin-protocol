@@ -247,7 +247,7 @@ func candidateUnchanged(t *testing.T, s candidateScene, in CandidateRootInput, w
 }
 
 type candidateRowSnapshot struct {
-	rank        uint8
+	rank       uint8
 	key, value []byte
 }
 
@@ -258,10 +258,19 @@ func candidateParentSnapshot(t *testing.T, r *mdbx.Reader, seed blockTreeRequest
 	index, err := mdbx.CanonicalOwnerKey(seed.Generation, seed.Block)
 	logicalMDBXAssert(t, err == nil, "snapshot owner key: %v", err)
 	rows := []candidateRowSnapshot{
-		{rank: 0, key: []byte{0}}, {rank: 0, key: []byte{1}}, {rank: 0, key: []byte{2}}, {rank: 0, key: []byte{3}},
-		{rank: 0, key: btMeta(16, 1)}, {rank: 0, key: btMeta(16, 2)}, {rank: 0, key: btMeta(17, 1)}, {rank: 0, key: btMeta(17, 2)},
-		{rank: 2, key: tip}, {rank: 3, key: seed.Block[:]}, {rank: 4, key: seed.Block[:]},
-		{rank: 5, key: mdbx.UndoManifestKey(seed.Block)}, {rank: 7, key: index},
+		{rank: 0, key: []byte{0}},
+		{rank: 0, key: []byte{1}},
+		{rank: 0, key: []byte{2}},
+		{rank: 0, key: []byte{3}},
+		{rank: 0, key: btMeta(16, 1)},
+		{rank: 0, key: btMeta(16, 2)},
+		{rank: 0, key: btMeta(17, 1)},
+		{rank: 0, key: btMeta(17, 2)},
+		{rank: 2, key: tip},
+		{rank: 3, key: seed.Block[:]},
+		{rank: 4, key: seed.Block[:]},
+		{rank: 5, key: mdbx.UndoManifestKey(seed.Block)},
+		{rank: 7, key: index},
 	}
 	for i := range rows {
 		row := &rows[i]
@@ -704,8 +713,9 @@ func candidateOrdinaryReader(t *testing.T, s candidateScene, in CandidateRootInp
 	t.Cleanup(func() { _ = store.Close() })
 	err = store.View(func(r *mdbx.Reader) error {
 		root, err := DeriveCandidateUTXORootV1(r, s.world.owner, in)
-		engine, ok := err.(*mdbx.EngineError)
-		logicalMDBXAssert(t, root == [32]byte{} && ok && engine != nil && engine.Operation == "get" &&
+		var engine *mdbx.EngineError
+		ok := errors.As(err, &engine)
+		logicalMDBXAssert(t, root == [32]byte{} && ok && engine != nil && any(err) == any(engine) && engine.Operation == "get" &&
 			engine.Class == "InvalidInput" && engine.Code == 22 && engine.Diagnostic == "tree Reader required",
 			"ordinary Reader admission %x/%v", root, err)
 		got, found, err := r.Get(mdbx.SchemaV2DBIs()[0], []byte{0})

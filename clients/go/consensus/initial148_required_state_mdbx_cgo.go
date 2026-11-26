@@ -50,12 +50,13 @@ func withInitial148RequiredStateV1(reader *mdbx.Reader, account *mdbx.OperationA
 	if err := reader.CheckTreeRootReadV1(account, mdbx.TreeRootReadV1{Primitive: request.Primitive, Parent: request.Parent}); err != nil {
 		return err
 	}
-	events := uint64(request.Source.coverage.BlockMeta.EventCount)
+	eventCount := request.Source.coverage.BlockMeta.EventCount
+	events := uint64(eventCount)
 	if events > (math.MaxUint64-135192)/48 || events > uint64(math.MaxInt)/36 {
 		return localLogicalStateFailure("required state bound exceeds integer domain")
 	}
 	return account.WithReservation(135192+48*events, func() error {
-		scope := newInitial148RequiredScopeV1(reader, request.Primitive.Generation, request.Primitive.Height, int(events))
+		scope := newInitial148RequiredScopeV1(reader, request.Primitive.Generation, request.Primitive.Height, int(eventCount))
 		defer func() {
 			scope.expireV1()
 			account, request = nil, initial148RequiredRequestV1{}

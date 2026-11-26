@@ -585,8 +585,8 @@ func candidateWAdmission(t *testing.T) {
 
 func candidateDLive(t *testing.T) {
 	for _, tc := range []struct {
-		name                string
-		spends              int
+		name                  string
+		spends                int
 		get, events, keyBytes uint64
 	}{{"present_keys", 1, 8, 3, 108}, {"no_present_keys", 0, 5, 1, 0}} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -641,7 +641,7 @@ func candidateBindingIO(t *testing.T, w *btWorld, in CandidateRootInput, atGet u
 
 type candidateAggregateProbe struct {
 	gets, live, inside, after, entered uint64
-	err                               error
+	err                                error
 }
 
 func (p *candidateAggregateProbe) observe(owner *mdbx.OperationReservationOwner, limit, expected, excess uint64, site uint32) {

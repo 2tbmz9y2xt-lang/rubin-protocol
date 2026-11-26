@@ -240,7 +240,7 @@ func candidateRootCoverageV1(p CandidateRootParentV1, body CandidateRootBodyV1, 
 	}
 	txs, _, ok := readCompactSize(body.Raw[148:])
 	e := uint64(body.BlockMeta.EventCount)
-	return all(ok, txs != 0, txs == uint64(body.BlockMeta.TxCount), candidateRootEventBoundV1(n, e), uint64(facts) <= e)
+	return all(ok, txs != 0, txs == uint64(body.BlockMeta.TxCount), candidateRootEventBoundV1(n, e), facts >= 0, int64(facts) <= int64(body.BlockMeta.EventCount))
 }
 
 // candidateRootEventBoundV1 checks the disjoint body-byte and allocation bounds.
