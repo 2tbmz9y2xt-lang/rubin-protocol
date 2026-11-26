@@ -406,6 +406,13 @@ func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 		})
 		startupRunCorruptToken(t, w, "CONSENSUS_INVALID(BLOCK_ERR_PARSE)")
 	})
+	t.Run("malformed exclusion before target work", func(t *testing.T) {
+		w := startupWorld(t, 0, -1)
+		w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+			a.Replay.Target.CumulativeChainwork = [40]byte{39: 1}
+		})
+		startupRunCorruptToken(t, w, "CONSENSUS_INVALID(BLOCK_ERR_PARSE)")
+	})
 	for _, row := range []struct {
 		name           string
 		profile        mdbx.StorageProfileV1

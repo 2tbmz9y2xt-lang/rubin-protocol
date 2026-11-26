@@ -95,11 +95,11 @@ func tiAbortName(mode uint32, consumed bool) string {
 // tiProbe runs call under SelectedDamageProbeOnly. The returned function requires one
 // ORIGINAL OLD begin and abort with no write or read transaction, delete, commit or fault,
 // and gets meta DBI gets on ORIGINAL OLD.
-func tiProbe(t *testing.T, s *Store, o *OperationReservationOwner, gets uint64, call func()) func() {
+func tiProbe(t *testing.T, s *Store, o *OperationReservationOwner, gets uint64, call func()) (SelectedDamageEvidence, func()) {
 	t.Helper()
 	evidence, err := FixtureSelectedDamage(s, o, SelectedDamageProbeOnly, 0, nil, call)
 	mustEnvironment(t, err)
-	return func() {
+	return evidence, func() {
 		t.Helper()
 		if evidence.BeginOld != 1 || evidence.BeginWrite != 0 || evidence.BeginRead != 0 || evidence.Deletes != 0 || evidence.Commits != 0 || evidence.Faults != 0 || evidence.OldAborts != 1 {
 			t.Fatalf("native evidence %+v", evidence)
@@ -118,7 +118,8 @@ func tiProbe(t *testing.T, s *Store, o *OperationReservationOwner, gets uint64, 
 func tiNative(t *testing.T, s *Store, o *OperationReservationOwner, mode uint32, rank uint8, key []byte, gets uint64, call func()) func() {
 	t.Helper()
 	if mode == 0 {
-		return tiProbe(t, s, o, gets, call)
+		_, check := tiProbe(t, s, o, gets, call)
+		return check
 	}
 	var calls uint32
 	evidence := ctxTreeFault(t, s, mode, rank, key, func() { call(); calls = fixtureLargeNativeCalls() })
@@ -266,7 +267,7 @@ func tiExclusionCase(t *testing.T, badNext, badOld bool, oldGets uint64) {
 		p.Authority = replaceTreeAuthorityToken(t, legal, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
 	}
 	var out tiOutcome
-	native := tiProbe(t, s, o, oldGets, func() {
+	evidence, native := tiProbe(t, s, o, oldGets, func() {
 		out = tiCall(s, o, LaneOperation, 0, func(*Reader) (TreeImagePublicationV1, error) {
 			plans++
 			return p, nil
@@ -289,6 +290,9 @@ func tiExclusionCase(t *testing.T, badNext, badOld bool, oldGets uint64) {
 		assertCachedSlotError(t, s, got, got)
 	}
 	native()
+	if evidence.OldGets != ([8]uint64{0: oldGets}) || evidence.OldPulls != ([8]uint64{}) || evidence.NodeGets != 0 || evidence.NodePulls != 0 {
+		t.Fatalf("IMAGE exclusion read frontier = %+v", evidence)
+	}
 	if plans != 1 || replays != 0 || reservationLive(o) != 0 {
 		t.Fatalf("IMAGE exclusion plans=%d, replays=%d, live=%d", plans, replays, reservationLive(o))
 	}

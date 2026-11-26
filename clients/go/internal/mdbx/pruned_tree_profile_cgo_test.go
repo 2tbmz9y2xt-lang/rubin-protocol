@@ -131,12 +131,12 @@ func prunedTreeOpenUnchanged(t *testing.T, s *Store, before []byte, marker strin
 func prunedTreeConsumed(t *testing.T, s *Store, out PrunedTreeProfileOutcomeV1, owner *OperationReservationOwner) {
 	t.Helper()
 	prunedTreeRefusal(t, out, "latched tuple")
-	if s.state != storeCLOSED {
-		t.Fatalf("latched store state %s", s.state)
-	}
 	again := s.SelectPrunedTreeProfileV1(true, nil, owner)
 	if !sameError(again.Err, out.Err) || again.Truth != CommitTruthOld || again.Stage != UpdateStagePrewrite {
 		t.Fatalf("latched reuse: %+v", again)
+	}
+	if s.state != storeCLOSED {
+		t.Fatalf("latched store state %s", s.state)
 	}
 }
 

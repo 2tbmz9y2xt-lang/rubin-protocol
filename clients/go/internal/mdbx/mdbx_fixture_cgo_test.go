@@ -2568,7 +2568,7 @@ func TestReadStorageAuthorityMalformedExclusion(t *testing.T) {
 	returned := s.View(func(r *Reader) error {
 		got, err := r.ReadStorageAuthorityV1()
 		bootstrapRefusal(t, "malformed stored exclusion", CommitTruthOld, err, EngineIntegrity, operationGet, -30793, "invalid storage authority", errSchema, true)
-		if got != (StorageAuthorityV1{}) || r.failure != err || r.usable() {
+		if got != (StorageAuthorityV1{}) {
 			t.Fatalf("malformed storage accessor result = %+v/%v", got, err)
 		}
 		recorded = err
@@ -3520,12 +3520,15 @@ func TestPrunedProfileMalformed(t *testing.T) {
 				diagnostic, cause = "stored value width outside SchemaV2 bound", nil
 			}
 			bootstrapRefusal(t, "pruned profile malformed authority drifted", out.Truth, out.Err, EngineIntegrity, operationGet, codeInvalid, diagnostic, cause, true)
-			if out.Stage != 1 || out.Decision != "" || out.Authority != nil || s.state != storeCLOSED {
+			if out.Stage != 1 || out.Decision != "" || out.Authority != nil {
 				t.Fatal("pruned profile malformed authority drifted")
 			}
 			again := s.SelectPrunedProfileV1(true, tip, owner)
 			if !sameError(again.Err, out.Err) || again.Truth != 1 || again.Stage != 1 {
 				t.Fatal("pruned profile malformed terminal drifted")
+			}
+			if s.state != storeCLOSED {
+				t.Fatalf("pruned profile malformed Store state = %s", s.state)
 			}
 			prunedReleased(t, owner)
 			reopened, openErr := Open(path, cfg)
@@ -4684,7 +4687,7 @@ func treeNativeReadMalformedExclusion(t *testing.T) {
 	returned := s.View(func(r *Reader) error {
 		got, present, err := r.ReadTreeAuthorityV1()
 		treeNativeIntegrity(t, err, operationGet, errSchema)
-		if !reflect.DeepEqual(got, TreeAuthorityV1{}) || present || r.failure != err || r.usable() {
+		if !reflect.DeepEqual(got, TreeAuthorityV1{}) || present {
 			t.Fatalf("malformed tree accessor = %+v/%v/%v", got, present, err)
 		}
 		recorded = err

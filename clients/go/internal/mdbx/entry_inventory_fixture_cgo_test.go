@@ -80,7 +80,8 @@ func eifMalformedExclusion(t *testing.T, badOld, badNext bool, authorityGets uin
 	})
 	mustEnvironment(t, err)
 	result.tuple(t, 1, 1, -1)
-	if result.err != refused || evidence.BeginOld != 1 || evidence.OldGets != ([8]uint64{0: authorityGets}) || evidence.OldPulls != ([8]uint64{}) || evidence.OldAborts != 1 || evidence.BeginWrite != 0 || evidence.Commits != 0 {
+	readsMatch := evidence.OldGets == ([8]uint64{0: authorityGets}) && evidence.OldPulls == ([8]uint64{}) && evidence.NodeGets == 0 && evidence.NodePulls == 0
+	if result.err != refused || evidence.BeginOld != 1 || !readsMatch || evidence.OldAborts != 1 || evidence.BeginWrite != 0 || evidence.Commits != 0 {
 		t.Fatalf("ENTRY exclusion read frontier = %+v/%v", evidence, result.err)
 	}
 	after, err := x.s.Inspect()
