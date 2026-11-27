@@ -1652,6 +1652,7 @@ type imageHookCtx struct {
 	done                             chan struct{}
 	err                              error
 	errCalls, applierErrs            int
+	doneCalls, valueCalls            atomic.Int64
 	funcs                            map[*func()]struct{}
 	onAfterFunc, onStop, onSecondErr func()
 }
@@ -1660,8 +1661,19 @@ func newImageHookCtx() *imageHookCtx {
 	return &imageHookCtx{done: make(chan struct{}), funcs: make(map[*func()]struct{})}
 }
 func (c *imageHookCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (c *imageHookCtx) Done() <-chan struct{}       { return c.done }
-func (c *imageHookCtx) Value(any) any               { return nil }
+func (c *imageHookCtx) Done() <-chan struct{} {
+	c.doneCalls.Add(1)
+	return c.done
+}
+func (c *imageHookCtx) Value(any) any {
+	c.valueCalls.Add(1)
+	return nil
+}
+func (c *imageHookCtx) readCounts() [3]int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return [3]int64{c.doneCalls.Load(), int64(c.errCalls), c.valueCalls.Load()}
+}
 func (c *imageHookCtx) Err() error {
 	c.mu.Lock()
 	c.errCalls++

@@ -834,6 +834,8 @@ func testImageTerminalHooks(t *testing.T) {
 	for _, terminal := range []string{"peer exit", "round close", "service close", "receive pass"} {
 		t.Run(terminal, inImageBubble(func(t *testing.T) { checkImageTerminalHooks(t, terminal) }))
 	}
+	t.Run("Done notification after service close", inImageBubble(testImageDoneNotificationAfterClose))
+	t.Run("Done closes during registration", testImageDoneDuringRegistration)
 }
 
 func testImageTerminalObservationUnwind(t *testing.T) {
@@ -969,12 +971,8 @@ func checkImageTerminalHooks(t *testing.T, terminal string) {
 	requireEqual(t, inst.timer.Stop(), false, "directly owned timer stopped at retirement")
 }
 
-func imageContextReads(ctx, owner *imageHookCtx) [2]int {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	owner.mu.Lock()
-	defer owner.mu.Unlock()
-	return [2]int{ctx.errCalls, owner.errCalls}
+func imageContextReads(ctx, owner *imageHookCtx) [2][3]int64 {
+	return [2][3]int64{ctx.readCounts(), owner.readCounts()}
 }
 
 func checkImageInertHooks(t *testing.T, f *imageTestFixture, round *ImageRound, terminal string, ctx, owner *imageHookCtx) {
@@ -986,11 +984,55 @@ func checkImageInertHooks(t *testing.T, f *imageTestFixture, round *ImageRound, 
 		session, want, callReads = 1, errImageAssignmentCurrent, 1
 	}
 	before := f.clock.readCount()
+	contextReads := imageContextReads(ctx, owner)
 	callbacks := [2]int{ctx.endAndRun(context.Canceled), owner.endAndRun(context.Canceled)}
 	synctest.Wait()
 	requireQueryResult(t, f.request(round, t.Context(), session, 1), consensus.UTXOImageQuery{}, want, "Request after delayed callbacks")
 	requireEqual(t, callbacks, [2]int{1, 1}, "retained external callbacks")
+	requireEqual(t, imageContextReads(ctx, owner), contextReads, "caller context Done, Err and Value reads with inert callbacks")
 	requireEqual(t, f.clock.readCount(), before+callReads, "clock reads with inert callbacks")
+}
+
+func testImageDoneNotificationAfterClose(t *testing.T) {
+	f, round := newImageRound(t, 1, 0)
+	ctx := newImageHookCtx()
+	caller := struct{ context.Context }{Context: ctx}
+	inst := f.admitted(t, round, caller, 0, 1, 1)
+	synctest.Wait()
+	requireReturned(t, lifecycleClose(f.s), "Close before the Done notification")
+	contextReads, clockReads := ctx.readCounts(), f.clock.readCount()
+	ctx.end(errImageRequestEnd)
+	synctest.Wait()
+	requireQueryResult(t, f.request(round, caller, 0, 1), consensus.UTXOImageQuery{}, errServiceClosed, "Request after the Done notification")
+	requireEqual(t, ctx.readCounts(), contextReads, "caller context Done, Err and Value reads after the Done notification")
+	requireEqual(t, f.clock.readCount(), clockReads, "clock reads after the Done notification")
+	requireEqual(t, inst.ref.Load(), (*imageInstance)(nil), "callback reference after the Done notification")
+}
+
+func testImageDoneDuringRegistration(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		goexit bool
+	}{{"panic", false}, {"Goexit", true}} {
+		t.Run(tc.name, inImageBubble(func(t *testing.T) {
+			f, round := newImageRound(t, 1, 0)
+			parent := newImageHookCtx()
+			unwind := imageUnwinder(tc.goexit)
+			caller := &imageUnwindHookCtx{
+				imageHookCtx: parent,
+				onDone:       func() { parent.end(errImageRequestEnd) },
+				onErr: func() {
+					if imageCalledFrom("context.(*cancelCtx).propagateCancel") {
+						unwind()
+					}
+				},
+			}
+			report := awaitImageResult(t, f.goRecovered(round, caller, 0, 1), "request interrupted during cancellation registration")
+			got := f.request(round, t.Context(), 0, 2)
+			requireImageResult(t, got, 1, 2, nil, "request ID after synchronous context observation")
+			requireImageUnwindValue(t, report, tc.goexit)
+		}))
+	}
 }
 
 func testImageTerminalServiceRetention(t *testing.T) {

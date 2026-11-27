@@ -594,6 +594,64 @@ func (r *ImageRound) usageFor(session *imageSession) *imageUnitVector {
 	return &imageUnitVector{}
 }
 
+type imageCancelLookup struct {
+	key, value any
+}
+
+// imageCancelSignal schedules cancellation from a captured Done channel.
+type imageCancelSignal struct {
+	source context.Context
+	done   <-chan struct{}
+	lookup atomic.Pointer[imageCancelLookup]
+}
+
+func (c *imageCancelSignal) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *imageCancelSignal) Done() <-chan struct{}       { return c.done }
+
+// Err preserves synchronous observation before the scheduler looks up the parent.
+func (c *imageCancelSignal) Err() error {
+	if c.lookup.Load() == nil {
+		return c.source.Err()
+	}
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+// Value saves the scheduler's parent lookup before it installs a callback.
+func (c *imageCancelSignal) Value(key any) any {
+	if lookup := c.lookup.Load(); lookup != nil {
+		if key == lookup.key {
+			return lookup.value
+		}
+		return nil
+	}
+	value := c.source.Value(key)
+	c.lookup.Store(&imageCancelLookup{key: key, value: value})
+	return value
+}
+
+type imageAfterFuncer interface {
+	AfterFunc(func()) func() bool
+}
+
+type imageAfterFuncSignal struct {
+	*imageCancelSignal
+	imageAfterFuncer
+}
+
+// afterImageCancel retains the parent's optional scheduling and stop hooks.
+func afterImageCancel(ctx context.Context, f func()) func() bool {
+	signal := &imageCancelSignal{source: ctx, done: ctx.Done()}
+	if scheduler, ok := ctx.(imageAfterFuncer); ok {
+		return context.AfterFunc(imageAfterFuncSignal{signal, scheduler}, f)
+	}
+	return context.AfterFunc(signal, f)
+}
+
 // commitLocked arms the ctx callbacks and the timer, each holding only inst.ref, then charges, allocates, registers and
 // marks; an unwind while arming leaves no effect and clears inst.ref, so the armed callbacks find no instance.
 func (r *ImageRound) commitLocked(inst *imageInstance, now time.Time) {
@@ -606,8 +664,8 @@ func (r *ImageRound) commitLocked(inst *imageInstance, now time.Time) {
 		}
 	}()
 	onCtx := func() { applyImageEnd(ref, false) }
-	inst.stopCtx = context.AfterFunc(inst.ctx, onCtx)
-	inst.stopRound = context.AfterFunc(r.ctx, onCtx)
+	inst.stopCtx = afterImageCancel(inst.ctx, onCtx)
+	inst.stopRound = afterImageCancel(r.ctx, onCtx)
 	inst.timer = time.AfterFunc(imageTimerDuration(inst.deadline.Sub(now)), func() { applyImageEnd(ref, true) })
 	req := r.service.imageRequester
 	start := inst.query.StartKey
