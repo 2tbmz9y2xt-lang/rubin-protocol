@@ -586,14 +586,45 @@ func btCountCharge(t *testing.T) {
 					} else {
 						logicalMDBXAssert(t, prepareErr == nil && effect.Primitive.Coverage.BlockMeta.TxCount == 1, "exact preparation grant: %v", prepareErr)
 					}
-					logicalMDBXAssert(t, a.WithReservation(remaining, func() error { return nil }) == nil, "preparation grant not released exactly")
-					logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(a.WithReservation(remaining+1, func() error { return nil })), "enclosing grant changed")
+					btChargeReleased(t, a, remaining)
 					return nil
 				})
 			})
 		})
 		logicalMDBXAssert(t, err == nil, "charge scenario: %v", err)
 	}
+	t.Run("stored", func(t *testing.T) {
+		request := r
+		request.BodyKind, request.Raw = 2, nil
+		err := w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+			return a.WithReservation(mdbx.TreeLaneMaxBytes-4824, func() error {
+				return w.s.View(func(reader *mdbx.Reader) error {
+					var source blockTreeSourceV1
+					err := a.WithReservation(1, func() error {
+						effect, prepareErr := prepareBlockTreeEffectV1(&source, reader, a, request)
+						logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(prepareErr) && reflect.ValueOf(effect).IsZero() && reflect.ValueOf(source).IsZero(), "below stored preparation grant: %T %v", prepareErr, prepareErr)
+						btChargeReleased(t, a, 4823)
+						return nil
+					})
+					if err != nil {
+						return err
+					}
+					effect, prepareErr := prepareBlockTreeEffectV1(&source, reader, a, request)
+					btFailure(t, prepareErr, logicalStateFailureStoreIntegrity, "required block tree source is absent")
+					logicalMDBXAssert(t, reflect.ValueOf(effect).IsZero() && reflect.ValueOf(source).IsZero(), "absent body published source/effect")
+					btChargeReleased(t, a, 4824)
+					return nil
+				})
+			})
+		})
+		logicalMDBXAssert(t, err == nil, "stored charge scenario: %v", err)
+	})
+}
+
+func btChargeReleased(t *testing.T, a *mdbx.OperationAccount, remaining uint64) {
+	t.Helper()
+	logicalMDBXAssert(t, a.WithReservation(remaining, func() error { return nil }) == nil, "preparation grant not released exactly")
+	logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(a.WithReservation(remaining+1, func() error { return nil })), "enclosing grant changed")
 }
 
 type btSyntaxCase struct {
@@ -759,15 +790,24 @@ func btDelta(t *testing.T) {
 	for _, row := range []struct {
 		name      string
 		tx, event uint32
-	}{{"tx-count", 2, 1}, {"event-count", 1, 2}, {"event-refusal", 1, 0}} {
+	}{{"tx-count", 2, 1}, {"event-count", 1, 2}, {"event-refusal", 1, 0}, {"stored-begin", 1, 1}} {
 		t.Run(row.name, func(t *testing.T) {
 			w := btNew(t)
+			req := request
+			if row.name == "stored-begin" {
+				w.pair(t, btMutation(3, req.Block[:], req.Raw[:148]), btMutation(4, req.Block[:], req.Raw))
+				req.BodyKind, req.Raw = 2, nil
+			}
 			var primary error
-			result, _, observed := w.run(t, []blockTreeRequestV1{request}, func(_ []blockTreeEffectV1, sources []*btObserved, op *mdbx.TreeOperationV1) {
+			result, _, observed := w.run(t, []blockTreeRequestV1{req}, func(_ []blockTreeEffectV1, sources []*btObserved, op *mdbx.TreeOperationV1) {
 				meta := &op.Primitives[0].Coverage.BlockMeta
 				meta.TxCount, meta.EventCount = row.tx, row.event
 				source := sources[0]
 				source.before = func(p mdbx.TreePositionV1, r *mdbx.Reader, sink *mdbx.TreeDeltaSinkV1) error {
+					if row.name == "stored-begin" {
+						primary = btStoredBegin(t, source.source, p, r, sink, uint64(len(request.Raw)))
+						return primary
+					}
 					primary = source.source.TreeDeltaV1(p, r, sink)
 					if row.event != 0 {
 						btFailure(t, primary, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
@@ -775,9 +815,7 @@ func btDelta(t *testing.T) {
 					}
 					latched := sink.EventV1(mdbx.TreeEventV1{Kind: mdbx.TreeEventCreateV1})
 					logicalMDBXAssert(t, primary != nil && any(primary) == any(latched), "source error %T %v differs from latched event error %T %v", primary, primary, latched, latched)
-					var engine *mdbx.EngineError
-					logicalMDBXAssert(t, errors.As(primary, &engine) && engine.Operation == "update" && engine.Class == mdbx.EngineInvalidInput &&
-						engine.Code == 22 && engine.Diagnostic == "invalid tree delta" && engine.Cause == nil && engine.TreeObservation == nil && !engine.ReopenRequired, "event refusal: %T %+v", primary, primary)
+					btDeltaInvalid(t, primary)
 					return primary
 				}
 			})
@@ -788,6 +826,33 @@ func btDelta(t *testing.T) {
 			logicalMDBXAssert(t, !entered && any(cached) == any(primary), "cached source error = %v, View entered=%t", cached, entered)
 		})
 	}
+}
+
+func btStoredBegin(t *testing.T, source *blockTreeSourceV1, p mdbx.TreePositionV1, reader *mdbx.Reader, sink *mdbx.TreeDeltaSinkV1, length uint64) error {
+	t.Helper()
+	meta := source.coverage.BlockMeta
+	logicalMDBXAssert(t, sink.BeginV1(meta) == nil, "stored source initial Begin")
+	var primary error
+	visits := 0
+	err := reader.VisitLargeImageV1(mdbx.LargeImageSelectorV1{Kind: mdbx.LargeImageBlockBodyV1, Hash: source.coverage.Block}, func(row mdbx.LargeImageRowV1) error {
+		visits++
+		logicalMDBXAssert(t, row.Present() && row.Length() == length, "selected stored row present=%t length=%d want=%d", row.Present(), row.Length(), length)
+		primary = source.TreeDeltaV1(p, reader, sink)
+		btDeltaInvalid(t, primary)
+		latched := sink.BeginV1(meta)
+		logicalMDBXAssert(t, any(latched) == any(primary), "next Begin error %T %v, want original %v", latched, latched, primary)
+		return primary
+	})
+	logicalMDBXAssert(t, visits == 1 && any(err) == any(primary), "stored visit returned %T %v, visits=%d", err, err, visits)
+	return err
+}
+
+func btDeltaInvalid(t *testing.T, err error) {
+	t.Helper()
+	var engine *mdbx.EngineError
+	logicalMDBXAssert(t, errors.As(err, &engine) && engine != nil && any(err) == any(engine) &&
+		engine.Operation == "update" && engine.Class == mdbx.EngineInvalidInput && engine.Code == 22 && engine.Diagnostic == "invalid tree delta" &&
+		engine.Cause == nil && engine.TreeObservation == nil && !engine.ReopenRequired, "native delta refusal: %T %+v", err, err)
 }
 
 func btLayout(t *testing.T) {
