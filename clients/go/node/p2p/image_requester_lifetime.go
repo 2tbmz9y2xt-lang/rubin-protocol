@@ -139,13 +139,13 @@ func (req *imageRequester) completeImageEndLocked(inst *imageInstance, end error
 	inst.round.wakeImageWaitersLocked()
 }
 
-// detachImageInstanceLocked releases logical ownership and stops the directly owned timer.
+// detachImageInstanceLocked releases logical ownership and stops the owned end signals.
 func (req *imageRequester) detachImageInstanceLocked(inst *imageInstance, end error) {
 	inst.timer.Stop()
 	inst.retired, inst.end = true, end
 	delete(req.current, imageKey{inst.round.anchor, inst.query.StartKey})
 	inst.round.release(inst.session, unitCurrentAssignments, 1)
-	inst.ref.Store(nil)
+	inst.revokeEndNotifications()
 }
 
 // recordOutcomeLocked appends in admission order because the next assignment for a start

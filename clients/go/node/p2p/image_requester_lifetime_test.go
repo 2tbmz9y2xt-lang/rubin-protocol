@@ -842,6 +842,7 @@ func testImageTerminalHooks(t *testing.T) {
 		t.Run(terminal, inImageBubble(func(t *testing.T) { checkImageTerminalHooks(t, terminal) }))
 	}
 	t.Run("Done notification after service close", inImageBubble(testImageDoneNotificationAfterClose))
+	t.Run("Done notifications stop on close", testImageDoneSignalsStopOnClose)
 	t.Run("Done closes during registration", testImageDoneDuringRegistration)
 	t.Run("custom AfterFunc scheduling cause", testImageAfterFuncHandoffCause)
 }
@@ -1015,6 +1016,29 @@ func testImageDoneNotificationAfterClose(t *testing.T) {
 	requireEqual(t, ctx.readCounts(), contextReads, "caller context Done, Err and Value reads after the Done notification")
 	requireEqual(t, f.clock.readCount(), clockReads, "clock reads after the Done notification")
 	requireEqual(t, inst.ref.Load(), (*imageInstance)(nil), "callback reference after the Done notification")
+}
+
+func testImageDoneSignalsStopOnClose(t *testing.T) {
+	for _, terminal := range []string{"round close", "service close"} {
+		t.Run(terminal, inImageBubble(func(t *testing.T) {
+			f := newImageTestFixture(t, 1)
+			ctx := newImageHookCtx()
+			defer ctx.end(context.Canceled)
+			caller := struct{ context.Context }{Context: ctx}
+			round := f.roundCtx(t, caller, imageTestLimits(), 0)
+			inst := f.admitted(t, round, caller, 0, 1, 1)
+			synctest.Wait()
+
+			if terminal == "round close" {
+				round.Close()
+			} else {
+				requireReturned(t, lifecycleClose(f.s), "Close with open Done notifications")
+			}
+			requireImageTerminalOutcome(t, round, terminal)
+			requireEqual(t, inst.stopCtx(), false, "request Done notification still stoppable after close")
+			requireEqual(t, inst.stopRound(), false, "round Done notification still stoppable after close")
+		}))
+	}
 }
 
 func testImageDoneDuringRegistration(t *testing.T) {

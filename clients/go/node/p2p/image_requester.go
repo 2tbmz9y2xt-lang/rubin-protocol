@@ -174,7 +174,7 @@ func newImageRequester() *imageRequester {
 }
 
 // imageInstance is one admitted assignment; round is its value copy of the admitting round. Its mutable fields are
-// guarded by imageRequester.mu; ref is the end appliers' only path to it and retirement clears it last.
+// guarded by imageRequester.mu; ref is the end appliers' only path to it and retirement clears it.
 type imageInstance struct {
 	round            ImageRound
 	session          *imageSession
@@ -186,6 +186,7 @@ type imageInstance struct {
 	end              error
 	stopCtx          func() bool
 	stopRound        func() bool
+	signalStops      [2]func() bool
 	timer            *time.Timer
 	pendingHeld      bool
 	published        bool
@@ -655,30 +656,34 @@ func (c imageAfterFuncSignal) AfterFunc(f func()) func() bool {
 	return func() bool { return false }
 }
 
-// afterImageCancel transfers registration data to the assignment's stop handle.
-func afterImageCancel(ctx context.Context, f func()) func() bool {
+// afterImageCancel returns the ordinary stop and the stop for the Go notification alone.
+func afterImageCancel(ctx context.Context, f func()) (func() bool, func() bool) {
 	parent, signal := imageCancellationContext(ctx)
 	defer func() {
 		signal.lookup.Store(&imageDetachedLookup)
 		signal.source = nil
 		signal.stopCaller = nil
 	}()
-	stop := context.AfterFunc(parent, f)
-	lookup, stopCaller := signal.lookup.Load(), signal.stopCaller
-	if lookup == nil {
-		return stop
-	}
-	return func() bool {
-		stopped := func() bool {
+	goStop := context.AfterFunc(parent, f)
+	signalStop := goStop
+	if lookup := signal.lookup.Load(); lookup != nil && lookup != &imageDetachedLookup {
+		signalStop = func() bool {
 			signal.lookup.Store(lookup)
 			defer signal.lookup.Store(&imageDetachedLookup)
-			return stop()
-		}()
-		if stopped && stopCaller != nil {
-			stopCaller()
+			return goStop()
 		}
-		return stopped
 	}
+	stopCaller := signal.stopCaller
+	if stopCaller == nil {
+		return signalStop, signalStop
+	}
+	return func() bool {
+		if !signalStop() {
+			return false
+		}
+		stopCaller()
+		return true
+	}, signalStop
 }
 
 func imageCancellationContext(ctx context.Context) (context.Context, *imageCancelSignal) {
@@ -690,19 +695,19 @@ func imageCancellationContext(ctx context.Context) (context.Context, *imageCance
 }
 
 // commitLocked arms the ctx callbacks and the timer, each holding only inst.ref, then charges, allocates, registers and
-// marks; an unwind while arming leaves no effect and clears inst.ref, so the armed callbacks find no instance.
+// marks; an unwind while arming clears inst.ref and stops the notifications already registered.
 func (r *ImageRound) commitLocked(inst *imageInstance, now time.Time) {
 	ref := new(atomic.Pointer[imageInstance])
 	ref.Store(inst)
 	inst.ref = ref
 	defer func() {
 		if !inst.published {
-			ref.Store(nil)
+			inst.revokeEndNotifications()
 		}
 	}()
 	onCtx := func() { applyImageEnd(ref, false) }
-	inst.stopCtx = afterImageCancel(inst.ctx, onCtx)
-	inst.stopRound = afterImageCancel(r.ctx, onCtx)
+	inst.stopCtx, inst.signalStops[0] = afterImageCancel(inst.ctx, onCtx)
+	inst.stopRound, inst.signalStops[1] = afterImageCancel(r.ctx, onCtx)
 	inst.timer = time.AfterFunc(imageTimerDuration(inst.deadline.Sub(now)), func() { applyImageEnd(ref, true) })
 	req := r.service.imageRequester
 	start := inst.query.StartKey
@@ -879,5 +884,17 @@ func (req *imageRequester) retireLocked(inst *imageInstance, end error) {
 	}
 	inst.stopCtx()
 	inst.stopRound()
+	inst.signalStops = [2]func() bool{}
 	req.completeImageEndLocked(inst, end)
+}
+
+// revokeEndNotifications clears the callback reference and stops the registered Go notifications.
+func (inst *imageInstance) revokeEndNotifications() {
+	inst.ref.Store(nil)
+	for _, stop := range inst.signalStops {
+		if stop != nil {
+			stop()
+		}
+	}
+	inst.signalStops = [2]func() bool{}
 }
