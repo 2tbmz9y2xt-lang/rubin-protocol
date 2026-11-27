@@ -684,7 +684,7 @@ func (f *imageTestFixture) unwindCloseSnapshot(round *ImageRound) imageUnwindClo
 	}
 	got := imageUnwindClose{leases: f.leases()}
 	got.pending[1] = round.global[unitPendingNetworkBytes]
-	if per := round.perPeer[p]; per != nil {
+	if per := round.perPeer[p.imageSession]; per != nil {
 		got.pending[0] = per[unitPendingNetworkBytes]
 	}
 	req.mu.Unlock()
