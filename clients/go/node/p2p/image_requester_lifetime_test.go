@@ -877,13 +877,20 @@ func testImageRoundCloseObservationUnwind(t *testing.T) {
 
 type imageTerminalPanicCtx struct {
 	*imageHookCtx
-	arm <-chan struct{}
+	observe <-chan bool
+	first   chan<- int
+	index   int
 }
 
 func (c *imageTerminalPanicCtx) Err() error {
 	select {
-	case <-c.arm:
-		imageUnwinder(false)()
+	case due := <-c.observe:
+		if due {
+			c.end(errImageRequestEnd)
+			c.first <- c.index
+		} else {
+			imageUnwinder(false)()
+		}
 	default:
 	}
 	return c.imageHookCtx.Err()
@@ -891,25 +898,39 @@ func (c *imageTerminalPanicCtx) Err() error {
 
 func testImagePeerExitObservationUnwind(t *testing.T) {
 	f, round := newImageRound(t, 2, 0, 1)
-	arm := make(chan struct{}, 1)
-	ctx := &imageTerminalPanicCtx{imageHookCtx: newImageHookCtx(), arm: arm}
-	f.admitted(t, round, ctx, 0, 1, 1)
-	f.admitted(t, round, t.Context(), 1, 2, 1)
-	waiting := goTakeImage(round, t.Context(), 1)
+	observe, first := make(chan bool, 2), make(chan int, 1)
+	starts := [2]byte{1, 2}
+	var waiting [2]<-chan imageResult
+	for i, start := range starts {
+		ctx := &imageTerminalPanicCtx{imageHookCtx: newImageHookCtx(), observe: observe, first: first, index: i}
+		f.admitted(t, round, ctx, 0, start, uint64(i+1))
+		waiting[i] = goTakeImage(round, t.Context(), start)
+	}
+	f.admitted(t, round, t.Context(), 1, 3, 1)
 	synctest.Wait()
-	requireImageWaiting(t, waiting, "exiting source assignment waiter")
-	arm <- struct{}{}
-	requireImageTerminalUnwind(t, func() { f.s.unregisterPeer(f.peers[0]) }, false)
+	for _, waiter := range waiting {
+		requireImageWaiting(t, waiter, "exiting source assignment waiter")
+	}
+	requireImageTerminalUnwind(t, func() {
+		observe <- true
+		observe <- false
+		f.s.unregisterPeer(f.peers[0])
+	}, false)
+	due := awaitImageResult(t, first, "first terminal context")
+	interrupted := 1 - due
+	start := starts[interrupted]
 
-	got := f.request(round, t.Context(), 1, 1)
-	require(t, got.err == nil && got.q == expectedImageQuery(2, 1), "Request after exiting peer context unwind: query %+v, error %v", got.q, got.err)
-	requireImageResult(t, awaitImageResult(t, waiting, "exiting source outcome"), 1, 1, errImageDisconnected, "exiting source outcome")
-	requireQueryResult(t, f.request(round, t.Context(), 0, 1), consensus.UTXOImageQuery{}, errImageDisconnected, "request on retired source")
+	got := f.request(round, t.Context(), 1, start)
+	require(t, got.err == nil && got.q == expectedImageQuery(2, start), "Request after exiting peer context unwind: query %+v, error %v", got.q, got.err)
+	requireImageResult(t, awaitImageResult(t, waiting[due], "observed context outcome"), uint64(due+1), starts[due], errImageRequestEnd, "observed context outcome")
+	requireImageResult(t, awaitImageResult(t, waiting[interrupted], "interrupted context outcome"), uint64(interrupted+1), start, errImageDisconnected, "interrupted context outcome")
+	requireQueryResult(t, f.request(round, t.Context(), 0, start), consensus.UTXOImageQuery{}, errImageDisconnected, "request on retired source")
 	wait, cancel := context.WithCancel(t.Context())
 	cancel()
-	requireImageAbsent(t, round, wait, 1, context.Canceled)
-	requireImageAbsent(t, round, wait, 2, context.Canceled)
-	f.requireFrames(t, 0, "frame before peer exit", expectedImageQuery(1, 1))
+	requireImageAbsent(t, round, wait, starts[due], errImageNoAssignment)
+	requireImageAbsent(t, round, wait, start, context.Canceled)
+	requireImageAbsent(t, round, wait, 3, context.Canceled)
+	f.requireFrames(t, 0, "frames before peer exit", expectedImageQuery(1, 1), expectedImageQuery(2, 2))
 }
 
 func checkImageTerminalHooks(t *testing.T, terminal string) {
@@ -1856,13 +1877,26 @@ func testImageProbeDrain(t *testing.T) {
 }
 
 func testImageProbeDrainAtSample(t *testing.T) {
-	f := newImageTestFixture(t, 1)
+	f := newImageTestFixture(t, 2)
 	config := imageProbeConfig(f, f.clock.add(0), imageTestLimits(), 0)
 	probe := checkImageProbeBegin(t, f, t.Context(), config, nil)
+	other := f.round(t, imageTestLimits(), 1)
+	writeEntered, releaseWrite := f.holdImageFrame(t, 1, func() {})
+	defer releaseWrite()
+	write := f.goRequest(other, t.Context(), 1, 2)
+	requireChannelClosed(t, writeEntered, "independent writer")
+	before := f.owners(probe, 0)
+	requireEqual(t, before, imageOwners{ids: 1, current: 1, idKeys: 1}, "owner state before the probe sample")
 	entered, release := f.blockNextRead(func(now time.Time) time.Time { return now }, func() {})
 	send := launchImageProbe(probe, t.Context(), f.ids[0], 1, imageTestByteLimit, [32]byte{0x42})
 	closed := f.closeWhileReadHeld(t, entered, release)
 	requireQueryResult(t, awaitImageResult(t, send, "probe stopped by drain"), consensus.UTXOImageQuery{}, errServiceClosed, "probe stopped by drain")
+	requireChannelClosed(t, f.conns[1].closed, "independent connection close during drain")
+	requireStillBlocked(t, closed, "Close while independent writer is held")
+	f.requireOwners(t, probe, 0, before, "drain-won admission effects before Close returns")
+	requireEqual(t, f.lastID(0), uint64(0), "probe source ID before Close returns")
+	releaseWrite()
+	requireImageResult(t, awaitImageResult(t, write, "independent writer after drain"), 1, 2, net.ErrClosed, "independent writer after drain")
 	requireReturned(t, closed, "Close")
 	requireEqual(t, f.owners(probe, 0), imageOwners{}, "drain-won admission effects")
 	f.requireFrames(t, 0, "drain-won probe")
