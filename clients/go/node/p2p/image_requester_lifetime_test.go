@@ -42,6 +42,7 @@ func TestImageRequesterLifetime(t *testing.T) {
 	t.Run("registration exit before retry join", testImageExitBeforeRetryJoin)
 	t.Run("announcement exit before diagnostics", testImageAnnouncementExitBeforePublish)
 	t.Run("read exit before diagnostics", testImageReadExitBeforePublish)
+	t.Run("first exit with live replacement", testImageExitWithLiveReplacement)
 	t.Run("same address replacement", testImageReplacementRetainsNoPeer)
 	t.Run("exit before first capture", testImageExitBeforeCapture)
 	t.Run("retirement between snapshot and capture", testImageRetirementBetweenSnapshotAndCapture)
@@ -136,6 +137,7 @@ func testImageLocalEnds(t *testing.T) {
 	} {
 		t.Run(tc.name, inImageBubble(func(t *testing.T) { checkImageLocalEnd(t, tc) }))
 	}
+	t.Run("independent receive pass", inImageBubble(testImageIndependentReceivePass))
 }
 
 func checkImageLocalEnd(t *testing.T, tc imageLocalEndCase) {
@@ -203,6 +205,18 @@ func endImageRequestPass(t *testing.T, f *imageTestFixture, _, _ *imageHookCtx, 
 	f.admitted(t, other, ctx, 1, 1, 1)
 	ctx.endAndRun(errImageRequestEnd)
 	synctest.Wait()
+}
+
+func testImageIndependentReceivePass(t *testing.T) {
+	f, original := newImageRound(t, 2, 0)
+	other := f.round(t, imageTestLimits(), 1)
+	ctx := newImageHookCtx()
+	inst := f.admitTimerSpent(t, original, ctx, 0, 1, 1)
+	f.clock.set(inst.deadline.Add(time.Nanosecond))
+	requireImageAbsent(t, other, t.Context(), 2, errImageNoAssignment)
+	ctx.end(context.Canceled)
+	requireImageTake(t, original, t.Context(), 1, expectedImageQuery(1, 1), errImageExpired, "expiration recorded by another round's Receive")
+	requireImageAbsent(t, original, t.Context(), 1, errImageNoAssignment)
 }
 
 func testImageReceiveOrder(t *testing.T) {
@@ -1121,6 +1135,21 @@ func admitImageToPlainPeer(t *testing.T, f *imageTestFixture, remote net.Conn) *
 	return round
 }
 
+func testImageExitWithLiveReplacement(t *testing.T) {
+	f, original := newImageRound(t, 1, 0)
+	f.admitted(t, original, t.Context(), 0, 1, 1)
+	newer := f.addSession(t, f.ids[0], "192.0.2.81:9")
+	replacement := f.round(t, imageTestLimits(), newer)
+	f.admitted(t, replacement, t.Context(), newer, 2, 1)
+	wait, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	f.s.unregisterPeer(f.peers[0])
+	requireImageTake(t, replacement, wait, 2, consensus.UTXOImageQuery{}, context.Canceled, "replacement still current after original exit")
+	requireImageTake(t, original, t.Context(), 1, expectedImageQuery(1, 1), errImageDisconnected, "original registration's disconnect")
+	requireImageAbsent(t, original, t.Context(), 1, errImageNoAssignment)
+}
+
 func testImageReplacementRetainsNoPeer(t *testing.T) {
 	f, used := newImageRound(t, 1, 0)
 	unused := f.round(t, imageTestLimits(), 0)
@@ -1594,6 +1623,9 @@ func testImageProbeSampleDomain(t *testing.T) {
 	config.Limits.Global.AdmittedRequests = 1
 	probe := checkImageProbeBegin(t, f, t.Context(), config, nil)
 	requireProbeRefusal(t, f, probe, 0, 1, imageTestByteLimit, errImagePolicy)
+	config.BodyRD = config.BodyAdmissionTime
+	atCutoff := checkImageProbeBegin(t, f, t.Context(), config, nil)
+	checkImageProbe(t, atCutoff, t.Context(), f.ids[0], 1, imageTestByteLimit, [32]byte{}, consensus.UTXOImageQuery{}, errImagePolicy)
 	f.clock.set(base)
 	checkImageProbe(t, probe, t.Context(), f.ids[0], 1, imageTestByteLimit, [32]byte{}, expectedImageQuery(1, 1), nil)
 	requireProbeRefusal(t, f, probe, 0, 2, imageTestByteLimit, errImageLimit)
