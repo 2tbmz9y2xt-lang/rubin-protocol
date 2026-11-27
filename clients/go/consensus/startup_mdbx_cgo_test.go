@@ -4,13 +4,13 @@ package consensus
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"go/ast"
 	"go/build"
 	"go/constant"
+	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -171,13 +171,10 @@ func TestConsensusErrorCodeStorageAdmission(t *testing.T) {
 	}
 	seen := make(map[string]bool)
 	for _, declared := range declarations {
-		value := declared.Val()
-		if value.Kind() == constant.Unknown {
-			t.Fatalf("unresolved constant %s in errors.go", declared.Name())
-		}
 		if !types.Identical(declared.Type(), codeType.Type()) {
 			continue
 		}
+		value := declared.Val()
 		if value.Kind() != constant.String {
 			t.Fatalf("ErrorCode %s has non-string value %s", declared.Name(), value)
 		}
@@ -192,43 +189,73 @@ func TestConsensusErrorCodeStorageAdmission(t *testing.T) {
 
 func storageErrorCodeDeclarations(t *testing.T) (*types.Scope, []*types.Const) {
 	t.Helper()
-	const source = "errors.go"
+	fset := token.NewFileSet()
+	files, source := storageErrorCodeFiles(t, fset)
+	config := types.Config{
+		FakeImportC:              true,
+		DisableUnusedImportCheck: true,
+		Importer:                 storageErrorCodeImporter{source: importer.ForCompiler(fset, "source", nil)},
+		Error:                    func(error) {},
+	}
+	info := &types.Info{Defs: make(map[*ast.Ident]types.Object)}
+	pkg, _ := config.Check(source.Name.Name, fset, files, info)
+	var declarations []*types.Const
+	for node := range ast.Preorder(source) {
+		decl, ok := node.(*ast.GenDecl)
+		if !ok || decl.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range decl.Specs {
+			for _, name := range spec.(*ast.ValueSpec).Names {
+				declared, ok := info.Defs[name].(*types.Const)
+				if !ok || declared.Type() == types.Typ[types.Invalid] {
+					t.Fatalf("unresolved constant %s at %s", name.Name, fset.PositionFor(name.Pos(), false))
+				}
+				declarations = append(declarations, declared)
+			}
+		}
+	}
+	return pkg.Scope(), declarations
+}
+
+func storageErrorCodeFiles(t *testing.T, fset *token.FileSet) ([]*ast.File, *ast.File) {
+	t.Helper()
 	buildPackage, err := build.Default.ImportDir(".", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fset := token.NewFileSet()
 	var files []*ast.File
+	var source *ast.File
 	for _, name := range slices.Concat(buildPackage.GoFiles, buildPackage.CgoFiles) {
 		file, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatal(err)
 		}
 		files = append(files, file)
-	}
-	config := types.Config{
-		IgnoreFuncBodies:         true,
-		FakeImportC:              true,
-		DisableUnusedImportCheck: true,
-		Importer:                 logicalMDBXStubImporter{},
-		Error: func(err error) {
-			var diagnostic types.Error
-			if !errors.As(err, &diagnostic) || fset.PositionFor(diagnostic.Pos, false).Filename == source {
-				t.Fatalf("type-check declarations in %s: %v", source, err)
+		if name == "errors.go" {
+			source = file
+			continue
+		}
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				fn.Body = nil
 			}
-		},
-	}
-	info := &types.Info{Defs: make(map[*ast.Ident]types.Object)}
-	pkg, _ := config.Check(buildPackage.Name, fset, files, info)
-	var declarations []*types.Const
-	for _, obj := range info.Defs {
-		declared, ok := obj.(*types.Const)
-		if ok && fset.PositionFor(declared.Pos(), false).Filename == source {
-			declarations = append(declarations, declared)
 		}
 	}
-	slices.SortFunc(declarations, func(a, b *types.Const) int { return cmp.Compare(a.Pos(), b.Pos()) })
-	return pkg.Scope(), declarations
+	if source == nil {
+		t.Fatal("missing errors.go")
+	}
+	return files, source
+}
+
+type storageErrorCodeImporter struct{ source types.Importer }
+
+func (i storageErrorCodeImporter) Import(path string) (*types.Package, error) {
+	root, _, _ := strings.Cut(path, "/")
+	if strings.Contains(root, ".") {
+		return (logicalMDBXStubImporter{}).Import(path)
+	}
+	return i.source.Import(path)
 }
 
 func checkDeclaredStorageErrorCode(t *testing.T, name, code string) {
