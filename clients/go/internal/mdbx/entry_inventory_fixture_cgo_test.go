@@ -22,6 +22,7 @@ import (
 func TestEntryInventoryV1ControlsNativeOutcomes(t *testing.T) {
 	t.Run("source-frontiers", eifSourceFrontiers)
 	t.Run("positive-absence-malformation", eifPositiveFailures)
+	t.Run("malformed exclusion", eifMalformedExclusions)
 	t.Run("counter-width-root-provenance", eifControlShapes)
 	t.Run("ReadAt-and-native-disposition", eifNativeProducts)
 	t.Run("suspended-visitor-retirement", eifSuspended)
@@ -29,6 +30,90 @@ func TestEntryInventoryV1ControlsNativeOutcomes(t *testing.T) {
 	t.Run("capacity-before-native-source", eifCapacity)
 	t.Run("prepared-account-close", eifAccountClose)
 	t.Run("pre-hold-close-window", tsClosedBeforeHoldV1)
+}
+
+func eifMalformedExclusions(t *testing.T) {
+	for _, row := range []struct {
+		name            string
+		badOld, badNext bool
+		authorityGets   uint64
+	}{
+		{"OLD", true, false, 1},
+		{"NEXT", false, true, 1},
+		{"NEXT before OLD", true, true, 0},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			eifMalformedExclusion(t, row.badOld, row.badNext, row.authorityGets)
+		})
+	}
+}
+
+func eifMalformedExclusion(t *testing.T, badOld, badNext bool, authorityGets uint64) {
+	t.Helper()
+	x := eiNew(t, 1, 1, false)
+	slot := InvalidBranchV1{FirstInvalidHeight: 3, FirstInvalidBlockHash: [32]byte{9}, ExactConsensusError: []byte("TX_ERR_PARSE")}
+	x.old.Authority.ExcludedInvalidBranch = &slot
+	x.next.Authority.ExcludedInvalidBranch = &slot
+	x.storeOld(t)
+	x.retarget(t)
+	next := x.pair
+	next.Mutations = append([]Mutation(nil), next.Mutations...)
+	first := next.Mutations[0].Literal
+	mustEnvironment(t, inspectTreeAuthorityV1(x.oldBytes))
+	mustEnvironment(t, inspectTreeAuthorityV1(first))
+	if badOld {
+		x.oldBytes = replaceTreeAuthorityToken(t, x.oldBytes, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
+		treeNativeSeed(t, x.s, 0, []byte{2}, x.oldBytes)
+	}
+	if badNext {
+		next.Mutations[0].Literal = replaceTreeAuthorityToken(t, first, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
+	}
+	before, err := x.s.Inspect()
+	mustEnvironment(t, err)
+	refused := errors.New("stop after ENTRY observation")
+	var result tsResult
+	evidence, err := FixtureSelectedDamage(x.s, x.o, SelectedDamageProbeOnly, 0, []byte{2}, func() {
+		result = x.run(t, func(r *Reader, a *OperationAccount) (TreeOperationV1, error) {
+			eifCheckMalformedExclusion(t, r, a, next, x.pair, badOld, badNext)
+			return TreeOperationV1{}, refused
+		})
+	})
+	mustEnvironment(t, err)
+	result.tuple(t, 1, 1, -1)
+	readsMatch := evidence.OldGets == ([8]uint64{0: authorityGets}) && evidence.OldPulls == ([8]uint64{}) && evidence.NodeGets == 0 && evidence.NodePulls == 0
+	if result.err != refused || evidence.BeginOld != 1 || !readsMatch || evidence.OldAborts != 1 || evidence.BeginWrite != 0 || evidence.Commits != 0 {
+		t.Fatalf("ENTRY exclusion read frontier = %+v/%v", evidence, result.err)
+	}
+	after, err := x.s.Inspect()
+	mustEnvironment(t, err)
+	if after.DBIs != before.DBIs || after.RecentTxnID != before.RecentTxnID {
+		t.Fatal("ENTRY exclusion changed DBI counts")
+	}
+	x.unchanged(t)
+}
+
+func eifCheckMalformedExclusion(t *testing.T, r *Reader, account *OperationAccount, first, legal TreePairV1, badOld, badNext bool) {
+	t.Helper()
+	token, failure, err := r.PrepareEntryInventoryV1(account, first)
+	if badNext {
+		treeNativeError(t, err, "update", "InvalidInput", 22, "invalid Update Batch", nil)
+		if token != (EntryInventoryV1{}) || failure != nil {
+			t.Fatalf("malformed NEXT prepared inventory: %#v/%+v", token, failure)
+		}
+		if !badOld {
+			eiPrepare(t, r, account, legal)
+		}
+		return
+	}
+	eifFailure(t, failure, 25, 1, 0, 1, 4, 0, []byte{2}, nil)
+	if token != (EntryInventoryV1{}) || err != nil {
+		t.Fatalf("malformed OLD returned token or error: %#v/%v", token, err)
+	}
+	token, failure, err = r.PrepareEntryInventoryV1(account, legal)
+	eiInput(t, err)
+	if token != (EntryInventoryV1{}) || failure != nil {
+		t.Fatalf("registered OLD failure allowed another preparation: %#v/%+v", token, failure)
+	}
 }
 
 func eifAccountClose(t *testing.T) {

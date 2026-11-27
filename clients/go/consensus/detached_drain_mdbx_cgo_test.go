@@ -104,7 +104,7 @@ func TestDrainDetachedMDBX(t *testing.T) {
 			if name == "P11-A2b" {
 				pending := mdbx.StorageProfileV1(1)
 				a.Lifecycle, a.PendingTargetProfile, a.NextGenerationID = 2, &pending, ^uint64(0)
-				a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 7, FirstInvalidBlockHash: [32]byte{7}, ExactConsensusError: []byte{9}}
+				a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 7, FirstInvalidBlockHash: [32]byte{7}, ExactConsensusError: []byte("TX_ERR_PARSE")}
 			}
 			w := generationNew(t, a, rows...)
 			detachedCommitted(t, detachedRun(t, w), false)

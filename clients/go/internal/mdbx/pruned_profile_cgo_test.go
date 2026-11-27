@@ -261,7 +261,7 @@ func testPrunedPreservation(t *testing.T) {
 	a := modelBase(2, 0, 13682)
 	a.ActiveGenerationID, a.NextGenerationID = 7, 9
 	a.SelectedSide = modelSide(8, 9, 11, 2, 3)
-	a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 4, FirstInvalidBlockHash: modelHash(33), ExactConsensusError: []byte{0, 0xff, 0x80}}
+	a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 4, FirstInvalidBlockHash: modelHash(33), ExactConsensusError: []byte("TX_ERR_PARSE")}
 	tip := &AuthorityPointV1{Height: 15121, BlockHash: modelHash(67)}
 	s, _, _, rows := prunedStore(t, a, tip, modelWork(false))
 	other, err := HeightKey(8, 99)
@@ -404,7 +404,7 @@ func testPrunedCapacity(t *testing.T) {
 			t.Run(fmt.Sprintf("reservation/%v/%d", large, remaining), func(t *testing.T) {
 				a := modelBase(2, 0, 0)
 				if large {
-					a.ExcludedInvalidBranch = &InvalidBranchV1{ExactConsensusError: bytes.Repeat([]byte{1}, 1048492)}
+					a.ExcludedInvalidBranch = &InvalidBranchV1{ExactConsensusError: []byte(longestConsensusErrorToken)}
 				}
 				s, _, _, rows := prunedStore(t, a, nil, modelWork(false))
 				before := prunedImage(t, s, rows)
@@ -416,7 +416,7 @@ func testPrunedCapacity(t *testing.T) {
 							t.Fatal("pruned profile reservation boundary drifted")
 						}
 						prunedUnchanged(t, s, rows, before, "pruned profile reservation boundary drifted")
-					} else if out.Err != nil || out.Truth != 2 || out.Authority == nil {
+					} else if out.Err != nil || out.Truth != 2 || out.Authority == nil || !reflect.DeepEqual(out.Authority.ExcludedInvalidBranch, a.ExcludedInvalidBranch) {
 						t.Fatalf("pruned profile reservation boundary drifted: %+v", out)
 					}
 					return nil
@@ -425,29 +425,7 @@ func testPrunedCapacity(t *testing.T) {
 			})
 		}
 	}
-	for _, size := range []int{1048576, 1048577} {
-		t.Run(fmt.Sprintf("encoded/%d", size), func(t *testing.T) {
-			a := modelBase(2, 0, 13681)
-			a.ExcludedInvalidBranch = &InvalidBranchV1{ExactConsensusError: bytes.Repeat([]byte{1}, size-118)}
-			tip := &AuthorityPointV1{Height: 15120}
-			s, _, _, rows := prunedStore(t, a, tip, modelWork(false))
-			before := prunedImage(t, s, rows)
-			owner := bootstrapOwner(t)
-			out := s.SelectPrunedProfileV1(true, tip, owner)
-			if size == 1048576 {
-				if out.Err != nil || out.Authority == nil || out.Truth != 2 || len(prunedImage(t, s, rows)[0]) != 1048576 {
-					t.Fatalf("pruned profile codec capacity drifted: %+v", out)
-				}
-			} else {
-				bootstrapRefusal(t, "pruned profile codec capacity drifted", out.Truth, out.Err, EngineCapacity, operationUpdate, codeTooLarge, "Update Batch exceeds bound", nil, false)
-				if out.Authority != nil || out.Decision != "" || out.Stage != 1 {
-					t.Fatal("pruned profile codec capacity drifted")
-				}
-				prunedUnchanged(t, s, rows, before, "pruned profile codec capacity drifted")
-			}
-			prunedReleased(t, owner)
-		})
-	}
+	t.Run("largest legal authority", testPrunedLargestAuthority)
 	t.Run("entry", func(t *testing.T) {
 		out := (*Store)(nil).SelectPrunedProfileV1(true, nil, nil)
 		bootstrapRefusal(t, "nil store", out.Truth, out.Err, EngineInvalidInput, operationUpdate, codeEINVAL, "nil Store", nil, false)
@@ -461,6 +439,31 @@ func testPrunedCapacity(t *testing.T) {
 			bootstrapOpenUnchanged(t, s, "reservation before reader")
 		}
 	})
+}
+
+func testPrunedLargestAuthority(t *testing.T) {
+	a := modelBase(2, 0, 13681)
+	a.NextGenerationID, a.SelectedSide = 3, modelSide(2, 0, 1, 1, 1)
+	a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 9, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte(longestConsensusErrorToken)}
+	tip := &AuthorityPointV1{Height: 15120, BlockHash: modelHash(15120)}
+	s, _, _, rows := prunedStore(t, a, tip, modelWork(false))
+	before := prunedImage(t, s, rows)
+	if len(before[0]) != 230 {
+		t.Fatalf("largest legacy PRUNED input length = %d", len(before[0]))
+	}
+	owner := bootstrapOwner(t)
+	out := s.SelectPrunedProfileV1(true, tip, owner)
+	a.ActiveProfile, a.B, a.Phase = 1, 1, 2
+	a.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: CleanupSpanBlocksV1, GenerationID: 1}}}
+	if out.Err != nil || out.Truth != CommitTruthNew || out.Stage != UpdateStageCommitMayHaveCrossed || out.Decision != "" || !reflect.DeepEqual(out.Authority, &a) {
+		t.Fatalf("largest legacy PRUNED replacement = %+v", out)
+	}
+	after := prunedImage(t, s, rows)
+	want := wantCodecRoundTrip(t, a)
+	if len(after[0]) != 264 || len(after[0]) >= MaxMetadataBytes || !bytes.Equal(after[0], want) || !reflect.DeepEqual(before[1:], after[1:]) {
+		t.Fatalf("largest legacy PRUNED replacement bytes = %d", len(after[0]))
+	}
+	prunedReleased(t, owner)
 }
 
 func testPrunedOutcome(t *testing.T) {

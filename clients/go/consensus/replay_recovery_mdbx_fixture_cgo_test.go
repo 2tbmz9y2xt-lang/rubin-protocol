@@ -4,6 +4,7 @@ package consensus
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"reflect"
@@ -349,23 +350,47 @@ func TestReplayTreeFixtureIntentEIO(t *testing.T) {
 	}
 }
 
-// V capacity (format-3 intent): a legal envelope of exactly MaxMetadataBytes grows by the one pending-profile byte past
-// the size bound: LOCAL_RESOURCE_UNAVAILABLE(storage_capacity) at PREWRITE, no latch, the envelope row unchanged.
+// TestReplayTreeFixtureIntentCapacity commits the pending profile on the largest
+// carrier-free recovery intent with a detached suffix.
 func TestReplayTreeFixtureIntentCapacity(t *testing.T) {
 	envelope := rtPrune()
-	envelope.Authority.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, FirstInvalidBlockHash: [32]byte{9}, ExactConsensusError: []byte{1}}
-	base, err := envelope.Encode()
-	logicalMDBXAssert(t, err == nil, "base encode: %v", err)
-	envelope.Authority.ExcludedInvalidBranch.ExactConsensusError = bytes.Repeat([]byte{1}, 1+mdbx.MaxMetadataBytes-len(base))
-	full, err := envelope.Encode()
-	logicalMDBXAssert(t, err == nil && len(full) == mdbx.MaxMetadataBytes, "full encode: %d %v", len(full), err)
-	w := rtNew(t, rtPrune())
-	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, []byte{2}, full) == nil, "seed")
+	a := &envelope.Authority
+	a.B, a.U, a.NextGenerationID = 1, 13681, 6
+	a.Cleanup.Spans = []mdbx.CleanupSpanV1{
+		{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 3},
+		{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 4},
+		{Kind: mdbx.CleanupSpanBlocksV1, GenerationID: 1},
+		{Kind: mdbx.CleanupSpanUndoV1, GenerationID: 1},
+		{Kind: mdbx.CleanupSpanSideV1, GenerationID: 5},
+	}
+	a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, FirstInvalidBlockHash: [32]byte{9}, ExactConsensusError: []byte(longestStorageConsensusErrorToken)}
+	entries := make([]mdbx.DetachedSuffixEntryV1, 1440)
+	for i := range entries {
+		var hash [32]byte
+		binary.BigEndian.PutUint64(hash[24:], uint64(i+1))
+		entries[i] = mdbx.DetachedSuffixEntryV1{Height: uint64(1439 - i), Hash: hash, BlockBytesLen: 1}
+	}
+	a.DetachedSuffix = &mdbx.DetachedSuffixV1{Entries: entries, Cursor: mdbx.AuthorityPointV1{Height: 1439, BlockHash: entries[0].Hash}, EntryCount: 1440, LogicalBytes: 1440}
+	raw, err := envelope.Encode()
+	logicalMDBXAssert(t, err == nil && len(raw) == 69441, "maximal input intent envelope: %d/%v", len(raw), err)
+	w := rtNew(t, envelope)
 	image := rtImage(t, w)
 	c := rtIntent(t, w)
-	logicalMDBXAssert(t, c.planErr != nil && errors.Is(c.err, c.planErr) && reflect.ValueOf(c.plan).IsZero() && recoveryClass(c.planErr, c.plan.ReadResource) == selectedSideCapacity &&
-		c.truth == mdbx.CommitTruthOld && c.stage == mdbx.UpdateStagePrewrite, "capacity: %+v %v %v", c.plan, c.planErr, c.err)
-	logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)) && reflect.DeepEqual(rtEnvelope(t, w), envelope), "capacity: the Store latched or the image changed")
+	logicalMDBXAssert(t, c.planErr == nil && c.err == nil && c.truth == mdbx.CommitTruthNew && c.stage == mdbx.UpdateStageCommitMayHaveCrossed && c.index == -1, "intent commit: %+v", c)
+	logicalMDBXAssert(t, len(c.plan.Batch.Mutations) == 1 && len(c.plan.Batch.Consulted) == 0, "intent plan shape: %+v", c.plan)
+	mutation := c.plan.Batch.Mutations[0]
+	logicalMDBXAssert(t, mutation.DBI == mdbx.TreeSchemaV1DBIs()[0] && bytes.Equal(mutation.Key, []byte{2}) && mutation.BeforePresent && mutation.AfterKind == mdbx.AfterLiteral, "intent plan meta row changed")
+	profile := a.ActiveProfile
+	a.Lifecycle, a.PendingTargetProfile = mdbx.StorageLifecycleRecoveryRequiredV1, &profile
+	want, err := envelope.Encode()
+	logicalMDBXAssert(t, err == nil && len(want) == 69442 && len(want) < mdbx.MaxMetadataBytes, "maximal planned intent envelope: %d/%v", len(want), err)
+	logicalMDBXAssert(t, bytes.Equal(mutation.Literal, want) && reflect.DeepEqual(rtEnvelope(t, w), envelope), "intent changed preserved authority")
+	after := rtImage(t, w)
+	logicalMDBXAssert(t, len(after) == len(image), "intent durable image width changed")
+	for i := range image {
+		logicalMDBXAssert(t, i == 3 || bytes.Equal(image[i], after[i]), "intent changed durable sibling %d", i)
+	}
+	btReservationsReleased(t, w.owner)
 }
 
 // rtIllegalStablePending is a PRUNE_GC envelope whose lifecycle byte is STABLE while it carries a pending profile: the

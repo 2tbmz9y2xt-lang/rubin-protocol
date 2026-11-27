@@ -1,6 +1,7 @@
 package mdbx
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"reflect"
@@ -770,15 +771,22 @@ func TestStorageAuthorityV1Boundaries(t *testing.T) {
 		error  []byte
 		valid  bool
 	}{
-		{"invalid branch height zero", 0, []byte{1}, true},
-		{"invalid branch height max", 0xffffffff, []byte{1}, true},
-		{"invalid branch height overflow", 0x100000000, []byte{1}, false},
+		{"invalid branch height zero", 0, []byte("TX_ERR_PARSE"), true},
+		{"invalid branch height max", 0xffffffff, []byte("TX_ERR_PARSE"), true},
+		{"invalid branch height overflow", 0x100000000, []byte("TX_ERR_PARSE"), false},
 		{"invalid branch nil error", 0, nil, false},
 		{"invalid branch empty error", 0, []byte{}, false},
 	} {
 		a := modelBase(1, 0, 0)
 		a.ExcludedInvalidBranch = &InvalidBranchV1{row.height, modelHash(71), row.error}
+		before := treeInputSnapshot(t, a)
 		wantModel(t, row.name, a, row.valid)
+		if !bytes.Equal(treeInputSnapshot(t, a), before) {
+			t.Fatalf("%s changed the authority input", row.name)
+		}
+		if row.valid {
+			wantCodecRoundTrip(t, a)
+		}
 	}
 	wantModel(t, "recovery cleanup with detached", edit(modelPrune(true), func(a *StorageAuthorityV1) { a.DetachedSuffix = modelDetached(1, 1) }), true)
 	for _, pending := range []StorageProfileV1{0, 3, 255} {
@@ -832,7 +840,7 @@ func TestStorageAuthorityV1ErrorAndOwnership(t *testing.T) {
 	deep := func() StorageAuthorityV1 {
 		a := modelOrdinary(3, 1, 2, 15120, 1, 1, 13681)
 		a.Ordinary.CarriedCleanup = modelCleanup()
-		a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 7, FirstInvalidBlockHash: modelHash(72), ExactConsensusError: []byte{1, 2, 3}}
+		a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 7, FirstInvalidBlockHash: modelHash(72), ExactConsensusError: []byte("TX_ERR_PARSE")}
 		return a
 	}
 	for index, build := range []func() StorageAuthorityV1{
