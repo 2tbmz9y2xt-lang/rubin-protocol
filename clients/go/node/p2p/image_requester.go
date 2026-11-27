@@ -215,10 +215,11 @@ func (inst *imageInstance) endAt(now time.Time) error {
 }
 
 // preWriteEnd returns the recorded end of a retired instance, else endAt, else errImageRoundDeadline at or after RD.
-func (inst *imageInstance) preWriteEnd(now time.Time) error {
+func (inst *imageInstance) preWriteEnd(sample func() time.Time) error {
 	if inst.retired {
 		return inst.end
 	}
+	now := sample()
 	if err := inst.endAt(now); err != nil {
 		return err
 	}
@@ -835,7 +836,7 @@ func (r *ImageRound) endBeforeWrite(inst *imageInstance, holdsWrite bool) error 
 	req := r.service.imageRequester
 	req.mu.Lock()
 	defer req.mu.Unlock()
-	end := inst.preWriteEnd(r.service.cfg.Now())
+	end := inst.preWriteEnd(r.service.cfg.Now)
 	if end == nil {
 		if holdsWrite {
 			inst.sendPhase = imageWriting

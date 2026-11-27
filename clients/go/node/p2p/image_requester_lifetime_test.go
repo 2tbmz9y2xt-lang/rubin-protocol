@@ -346,6 +346,7 @@ func testImageTerminalEndBeforeWrite(t *testing.T) {
 	} {
 		t.Run(tc.name, inImageBubble(func(t *testing.T) { checkImageTerminalEndBeforeWrite(t, tc) }))
 	}
+	t.Run("recorded end skips clock", testImageRecordedEndSkipsPreWriteClock)
 }
 
 func checkImageTerminalEndBeforeWrite(t *testing.T, tc imageTerminalEndCase) {
@@ -385,6 +386,36 @@ func checkImageTerminalEndBeforeWrite(t *testing.T, tc imageTerminalEndCase) {
 	f.admitted(t, replacement, t.Context(), 1, 1, 1)
 	must(t, release(), "holder write")
 	f.requireFrames(t, 0, "ended before write")
+}
+
+func testImageRecordedEndSkipsPreWriteClock(t *testing.T) {
+	for _, tc := range []struct {
+		terminal string
+		end      error
+	}{{"round close", errImageRoundClosed}, {"peer exit", errImageDisconnected}} {
+		t.Run(tc.terminal, inImageBubble(func(t *testing.T) {
+			f, round := newImageRound(t, 1, 0)
+			release := f.holdWrite(t, 0)
+			defer func() { must(t, release(), "holder write") }()
+			pending := f.goRecovered(round, t.Context(), 0, 1)
+			f.waitAdmitted(t, 0, 1, "request waiting for writeMu")
+			synctest.Wait()
+			select {
+			case got := <-pending:
+				t.Fatalf("parked Request returned before the terminal end: %v", got)
+			default:
+			}
+			applyImageTerminal(f, round, tc.terminal)
+			f.unwindAtPreWriteRead(imageUnwinder(true))
+			defer f.clock.onNextRead(nil)
+			got := awaitImageResult(t, pending, "parked Request after terminal end")
+			want := imageResult{q: expectedImageQuery(1, 1), err: tc.end}
+			requireEqual(t, got, any(want), "parked Request after terminal end")
+			usage := imageUsage(0, 1, 1, 1, 0)
+			f.requireUsage(t, round, 0, usage, usage, "parked Request after terminal end")
+			f.requireFrames(t, 0, "parked Request after terminal end")
+		}))
+	}
 }
 
 func testImageRecordedEndAcrossAdapter(t *testing.T) {
@@ -1078,11 +1109,13 @@ func (c imageRetentionValueCtx) Value(any) any { return c.service }
 
 type imageRetentionAfterFuncCtx struct {
 	context.Context
-	parent *imageHookCtx
+	parent     *imageHookCtx
+	onRegister func(func())
 }
 
 func (c imageRetentionAfterFuncCtx) AfterFunc(f func()) func() bool {
 	stop := c.parent.AfterFunc(f)
+	c.onRegister(f)
 	return func() bool {
 		stopped := stop()
 		runtime.KeepAlive(c.Context)
@@ -1139,11 +1172,72 @@ func testImageTerminalServiceRetention(t *testing.T) {
 	})
 	t.Run("custom AfterFunc", func(t *testing.T) {
 		parent := newImageHookCtx()
-		checkImageTerminalServiceRetention(t, func(s *Service) context.Context {
-			return imageRetentionAfterFuncCtx{Context: context.WithValue(parent, imageRetentionKey{}, s), parent: parent}
-		})
-		requireEqual(t, parent.endAndRun(errImageRequestEnd), 1, "inert callback retained by caller context")
+		var service weak.Pointer[Service]
+		if t.Run("publish and join", inImageBubble(func(t *testing.T) {
+			f := newImageTestFixture(t, 1)
+			round := requestImageWithEarlyCancellation(t, f, parent)
+			service = closeImageServiceForRetention(t, f, round)
+		})) {
+			requireImageServiceReleased(t, service)
+			requireEqual(t, parent.endAndRun(context.Canceled), 1, "inert callback retained by caller context")
+		}
 	})
+}
+
+func requestImageWithEarlyCancellation(t *testing.T, f *imageTestFixture, parent *imageHookCtx) *ImageRound {
+	t.Helper()
+	var done <-chan struct{}
+	var parked bool
+	owner := newImageHookCtx()
+	owner.onAfterFunc = func() {
+		if parked {
+			<-done
+		}
+	}
+	parentCtx, cancel := context.WithCancelCause(context.Background())
+	cancel(imageServiceCancelError{service: f.s})
+	caller := imageRetentionAfterFuncCtx{
+		Context: imageAfterFuncCauseCtx{imageHookCtx: parent, parent: parentCtx},
+		parent:  parent,
+		onRegister: func(notify func()) {
+			parent.end(context.Canceled)
+			done, parked = runImageCallbackDuringRegistration(notify)
+		},
+	}
+	round := f.roundCtx(t, owner, imageTestLimits(), 0)
+	got := f.request(round, caller, 0, 1)
+	requireImageResult(t, got, 1, 1, context.Canceled, "Request canceled during callback registration")
+	require(t, parked, "caller callback did not reach cancellation during registration")
+	return round
+}
+
+func runImageCallbackDuringRegistration(notify func()) (<-chan struct{}, bool) {
+	done := make(chan struct{})
+	started := make(chan string, 1)
+	go func() {
+		defer close(done)
+		var stack [256]byte
+		id := bytes.Fields(stack[:runtime.Stack(stack[:], false)])[1]
+		started <- "goroutine " + string(id) + " [sync.Mutex.Lock"
+		notify()
+	}()
+	prefix := []byte(<-started)
+	stacks := make([]byte, 1<<20)
+	for range 1 << 16 {
+		n := runtime.Stack(stacks, true)
+		if n == len(stacks) {
+			return done, false
+		}
+		_, tail, found := bytes.Cut(stacks[:n], prefix)
+		if found {
+			stack, _, _ := bytes.Cut(tail, []byte("\n\n"))
+			if bytes.Contains(stack, []byte("context.(*cancelCtx).cancel(")) {
+				return done, true
+			}
+		}
+		runtime.Gosched()
+	}
+	return done, false
 }
 
 func checkImageTerminalServiceRetention(t *testing.T, caller func(*Service) context.Context) {
@@ -1152,12 +1246,22 @@ func checkImageTerminalServiceRetention(t *testing.T, caller func(*Service) cont
 	if !t.Run("publish and join", func(t *testing.T) {
 		f, round := newImageRound(t, 1, 0)
 		f.admitted(t, round, caller(f.s), 0, 1, 1)
-		requireReturned(t, lifecycleClose(f.s), "Close with registered context callback")
-		requireImageAbsent(t, round, t.Context(), 1, errServiceClosed)
-		service = weak.Make(f.s)
+		service = closeImageServiceForRetention(t, f, round)
 	}) {
 		t.FailNow()
 	}
+	requireImageServiceReleased(t, service)
+}
+
+func closeImageServiceForRetention(t *testing.T, f *imageTestFixture, round *ImageRound) weak.Pointer[Service] {
+	t.Helper()
+	requireReturned(t, lifecycleClose(f.s), "Close with registered context callback")
+	requireImageAbsent(t, round, t.Context(), 1, errServiceClosed)
+	return weak.Make(f.s)
+}
+
+func requireImageServiceReleased(t *testing.T, service weak.Pointer[Service]) {
+	t.Helper()
 	runtime.GC()
 	require(t, service.Value() == nil, "retained context callback keeps the closed Service alive")
 }
