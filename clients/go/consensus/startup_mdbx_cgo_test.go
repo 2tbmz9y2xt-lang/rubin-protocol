@@ -176,7 +176,9 @@ func TestConsensusErrorCodeStorageAdmission(t *testing.T) {
 		if value.Kind() != constant.String {
 			t.Fatalf("ErrorCode %s has non-string value %s", name, value)
 		}
-		checkDeclaredStorageErrorCode(t, name, constant.StringVal(value), seen)
+		code := constant.StringVal(value)
+		checkDeclaredStorageErrorCode(t, name, code)
+		seen[code] = true
 	}
 	if len(seen) != 50 {
 		t.Fatalf("distinct ErrorCode literals = %d, want 50", len(seen))
@@ -206,12 +208,8 @@ func storageErrorCodeScope(t *testing.T) *types.Scope {
 	return pkg.Scope()
 }
 
-func checkDeclaredStorageErrorCode(t *testing.T, name, code string, seen map[string]bool) {
+func checkDeclaredStorageErrorCode(t *testing.T, name, code string) {
 	t.Helper()
-	if seen[code] {
-		t.Fatalf("ErrorCode %s has duplicate value %q", name, code)
-	}
-	seen[code] = true
 	a := mdbx.StorageAuthorityV1{
 		Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 2, Phase: 1, Lifecycle: 1,
 		ExcludedInvalidBranch: &mdbx.InvalidBranchV1{ExactConsensusError: []byte(code)},

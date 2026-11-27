@@ -3597,7 +3597,7 @@ func TestPrunedProfileNativeImages(t *testing.T) {
 			a := modelBase(2, 0, 13682)
 			a.ActiveGenerationID, a.NextGenerationID = 7, 9
 			a.SelectedSide = modelSide(8, 9, 11, 2, 3)
-			a.ExcludedInvalidBranch = &InvalidBranchV1{ExactConsensusError: []byte("TX_ERR_PARSE")}
+			a.ExcludedInvalidBranch = &InvalidBranchV1{ExactConsensusError: []byte("BLOCK_ERR_WEIGHT_EXCEEDED")}
 			tip := &AuthorityPointV1{Height: 15121, BlockHash: modelHash(61)}
 			s, _, _, _ := prunedStore(t, a, tip, modelWork(false))
 			primary := nativeError(operationUpdate, codeENOSPC)
@@ -3630,7 +3630,7 @@ func TestPrunedProfileNativeImages(t *testing.T) {
 						changed.SelectedSide = &side
 					case "exclusion":
 						excluded := *a.ExcludedInvalidBranch
-						excluded.ExactConsensusError = []byte("BLOCK_ERR_PARSE")
+						excluded.ExactConsensusError = []byte("BLOCK_ERR_LINKAGE_INVALID")
 						changed.ExcludedInvalidBranch = &excluded
 					case "progress":
 						changed.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: 2, GenerationID: 7, LastHeight: 1, NextHeight: 1}}}
@@ -3638,6 +3638,9 @@ func TestPrunedProfileNativeImages(t *testing.T) {
 					execute[0].literal, err = changed.Encode()
 					if err != nil {
 						return err
+					}
+					if mode == "exclusion" && (len(execute[0].literal) != len(plan[0].literal) || bytes.Equal(execute[0].literal, plan[0].literal)) {
+						t.Fatal("exclusion image must differ from planned NEW at the same width")
 					}
 					requireUpdateTruth(t, s.updateNative(execute, consulted, reader.txn), CommitTruthNew, true, nil, nil)
 				}

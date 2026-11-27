@@ -1032,7 +1032,7 @@ func eiPureRelations(t *testing.T) {
 				x.next.Authority.NextGenerationID = 6
 				x.next.Authority.Ordinary.CapturedSelectedSide.GenerationID = 5
 			case "exclusion", "wrong-exclusion", "exclusion-height", "exclusion-hash", "exclusion-error":
-				x.old.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 3, FirstInvalidBlockHash: [32]byte{9}, ExactConsensusError: []byte("TX_ERR_PARSE")}
+				x.old.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 3, FirstInvalidBlockHash: [32]byte{9}, ExactConsensusError: []byte("BLOCK_ERR_WEIGHT_EXCEEDED")}
 				if mode != "wrong-exclusion" {
 					branch := *x.old.Authority.ExcludedInvalidBranch
 					x.next.Authority.ExcludedInvalidBranch = &branch
@@ -1063,7 +1063,7 @@ func eiPureRelations(t *testing.T) {
 			case "exclusion-hash":
 				x.next.Authority.ExcludedInvalidBranch.FirstInvalidBlockHash[0]++
 			case "exclusion-error":
-				x.next.Authority.ExcludedInvalidBranch.ExactConsensusError = []byte("BLOCK_ERR_PARSE")
+				x.next.Authority.ExcludedInvalidBranch.ExactConsensusError = []byte("BLOCK_ERR_LINKAGE_INVALID")
 			}
 			x.storeOld(t)
 			x.retarget(t)
