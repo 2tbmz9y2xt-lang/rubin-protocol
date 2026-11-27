@@ -648,12 +648,10 @@ type imageAfterFuncSignal struct {
 // AfterFunc drops the non-native parent lookup and saves the caller's stop separately.
 func (c imageAfterFuncSignal) AfterFunc(f func()) func() bool {
 	c.lookup.Store(&imageDetachedLookup)
-	scheduler, ok := c.source.(imageAfterFuncer)
-	if !ok {
-		panic("image requester: context does not implement AfterFunc")
+	if scheduler, ok := c.source.(imageAfterFuncer); ok {
+		stop := scheduler.AfterFunc(f)
+		c.stopCaller = func() { stop() }
 	}
-	stop := scheduler.AfterFunc(f)
-	c.stopCaller = func() { stop() }
 	return func() bool { return false }
 }
 
