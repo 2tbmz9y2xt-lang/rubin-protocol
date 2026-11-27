@@ -63,14 +63,9 @@ func replayTreeRefused(err error, want replayTreeRefusal) bool {
 	return replayTreeRefusal{e.Class, e.Operation, e.Code, e.Diagnostic, e.ReopenRequired} == want
 }
 
-// replayTreeEncode encodes a planned envelope. Every writer plans from a decoded legal envelope, and two Encode refusals
-// stay reachable from one: a retained source intent (TreeAuthorityV1.SourceIntent) copied into a planned phase where it
-// is illegal, and the metadata size limit, because DecodeTreeAuthorityV1 bounds no persisted slot error below
-// MaxMetadataBytes, so a plan that adds descriptors to a decode-legal envelope near that limit (treeEntryBatch's
-// GENESIS_REPLAY plan adds ReplayV1) can exceed it. The whole-target conversion replaces ReplayV1 and the progress by
-// CleanupV1 and the pending profile and inserts at most the caller's InvalidBranchV1 tuple into an empty slot; a size
-// refusal caused by that tuple is structural only, since the caller admits its error as exactly one Section 13 token.
-// Every refusal maps to LOCAL_RESOURCE_UNAVAILABLE(storage_capacity).
+// replayTreeEncode maps envelope encoding refusals to LOCAL_RESOURCE_UNAVAILABLE(storage_capacity).
+// A retained IMAGE source intent is inadmissible in a planned GENESIS_REPLAY envelope.
+// A qualified whole-target conversion shrinks its envelope even when it fills the exclusion slot.
 func replayTreeEncode(envelope mdbx.TreeAuthorityV1) ([]byte, error) {
 	encoded, err := envelope.Encode()
 	if err != nil {

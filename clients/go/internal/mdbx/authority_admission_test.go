@@ -2,7 +2,6 @@ package mdbx
 
 import (
 	"bytes"
-	"encoding/binary"
 	"strconv"
 	"testing"
 )
@@ -13,14 +12,9 @@ func admissionNone() []byte {
 }
 
 func admissionMaximum() []byte {
-	// NONE's 40 bytes plus InvalidBranch's height/hash/length (44 bytes).
-	b := append(admissionNone()[:37], 1)
-	b = binary.BigEndian.AppendUint64(b, 7)
-	b = append(b, make([]byte, 31)...)
-	b = append(b, 72)
-	b = binary.BigEndian.AppendUint32(b, 1_048_492)
-	b = append(b, make([]byte, 1_048_492)...)
-	return append(b, 0, 0)
+	b := make([]byte, 0, MaxMetadataBytes)
+	encodeAuthority(&b, ordinaryAuthorityAtSize(1_048_576))
+	return b
 }
 
 func TestStorageAuthorityAdmissionMetaAccepted(t *testing.T) {

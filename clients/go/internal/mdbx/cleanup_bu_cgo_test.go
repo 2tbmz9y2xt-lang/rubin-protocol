@@ -372,7 +372,7 @@ func TestCleanupBU(t *testing.T) {
 				a := cleanupAuthority(CleanupSpanBlocksV1, 0, true)
 				a.NextGenerationID = math.MaxUint64
 				*a.PendingTargetProfile = pending
-				a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 4, FirstInvalidBlockHash: modelHash(50), ExactConsensusError: []byte{1}}
+				a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 4, FirstInvalidBlockHash: modelHash(50), ExactConsensusError: []byte("TX_ERR_PARSE")}
 				s, _, hash, _ := cleanupTestStore(t, a, 0, 0)
 				truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 				if truth != CommitTruthNew || stage != UpdateStageCommitMayHaveCrossed || err != nil {
