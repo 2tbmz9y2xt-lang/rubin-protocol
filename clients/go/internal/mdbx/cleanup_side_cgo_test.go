@@ -151,7 +151,7 @@ func TestCleanupSideV1(t *testing.T) {
 		a := sideAuthority(5, 5)
 		pending := StorageProfileV1(1)
 		a.Lifecycle, a.PendingTargetProfile, a.NextGenerationID = 2, &pending, math.MaxUint64
-		a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte("invalid")}
+		a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte("TX_ERR_PARSE")}
 		_, _, rows := sideRows(2, 5)
 		s, _ := sideStore(t, a, rows...)
 		sideRun(t, s, CommitTruth(2))
