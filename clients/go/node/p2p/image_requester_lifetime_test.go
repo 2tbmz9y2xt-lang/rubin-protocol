@@ -641,30 +641,31 @@ func testImageOutcomePendingCapacity(t *testing.T) {
 
 func testImageFirstWriteError(t *testing.T) {
 	f, round := newImageRound(t, 2, 0, 1)
-	f.admitted(t, round, t.Context(), 0, 2, 1)
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx := t.Context()
+	f.admitted(t, round, ctx, 0, 2, 1)
+	wait, cancel := context.WithCancel(ctx)
 	cancel()
 	closer, outcome := make(chan imageResult, 1), make(chan imageResult, 1)
 	f.onClose(0, func() {
 		if imageCalledFrom(".(*ImageRound).Request") {
-			outcome <- takeImage(round, ctx, 1)
-			q, err := round.Request(t.Context(), f.ids[1], imageStart(1), imageTestByteLimit)
+			outcome <- takeImage(round, wait, 1)
+			q, err := round.Request(ctx, f.ids[1], imageStart(1), imageTestByteLimit)
 			closer <- imageResult{q, err}
 		}
 	})
-	stall, pending := f.stalledRequest(t, round, t.Context(), 0, 1)
+	stall, pending := f.stalledRequest(t, round, ctx, 0, 1)
 	stall.release <- errImageScriptedWrite
 	requireImageResult(t, awaitImageResult(t, pending, "failed write"), 2, 1, errImageScriptedWrite, "failed write")
 	requireQueryResult(t, awaitImageResult(t, outcome, "Receive in Close hook"), consensus.UTXOImageQuery{}, errImageNoAssignment, "failed write Receive in Close hook")
 	requireImageResult(t, awaitImageResult(t, closer, "replacement in Close hook"), 1, 1, nil, "replacement in Close hook")
-	requireImageAbsent(t, round, ctx, 1, context.Canceled)
+	requireImageAbsent(t, round, wait, 1, context.Canceled)
 	other := f.round(t, imageTestLimits(), 1)
-	f.refused(t, other, t.Context(), 1, 2, errImageAssignmentCurrent)
+	f.refused(t, other, ctx, 1, 2, errImageAssignmentCurrent)
 	f.s.unregisterPeer(f.peers[0])
-	requireImageTake(t, round, t.Context(), 2, expectedImageQuery(1, 2), errImageDisconnected, "sibling ends at session exit")
-	requireImageAbsent(t, round, t.Context(), 2, errImageNoAssignment)
+	requireImageTake(t, round, ctx, 2, expectedImageQuery(1, 2), errImageDisconnected, "sibling ends at session exit")
+	requireImageAbsent(t, round, ctx, 2, errImageNoAssignment)
 	f.s.unregisterPeer(f.peers[0])
-	requireImageAbsent(t, round, ctx, 1, context.Canceled)
+	requireImageAbsent(t, round, wait, 1, context.Canceled)
 	f.requireFault(t, 0, 1, errImageScriptedWrite.Error(), "first failed write")
 }
 
