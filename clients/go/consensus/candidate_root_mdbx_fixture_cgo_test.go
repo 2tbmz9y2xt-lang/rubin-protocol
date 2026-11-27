@@ -343,6 +343,10 @@ func candidateObserveBinding(t *testing.T, w *btWorld, in CandidateRootInput, ra
 		selected = err
 		logicalMDBXAssert(t, root == [32]byte{}, "binding integrity returned digest %x", root)
 		engine := candidateEngine(t, err, "update", "Integrity", -30796, "invalid tree native representation")
+		if rank == 0 && kind == mdbx.TreeObservationMalformedV1 {
+			_, cause := mdbx.DecodeRootBindingV1([]byte{3})
+			logicalMDBXAssert(t, cause != nil && any(engine.Cause) == any(cause), "malformed binding decoder cause: %v, want %v", engine.Cause, cause)
+		}
 		observation := engine.TreeObservation
 		logicalMDBXAssert(t, observation != nil && observation.Rank == rank && observation.Kind == kind, "candidate binding observation: %+v", observation)
 		logicalMDBXAssert(t, observation.DatabaseID == [32]byte{7} && observation.Generation == 1 && observation.Height == 5 && observation.Block == [32]byte{} &&
@@ -503,7 +507,7 @@ func candidateMatchingCursor(t *testing.T) {
 func candidateCheckMatchingTip(t *testing.T, w *btWorld, in CandidateRootInput, mode string, scenario uint8) {
 	t.Helper()
 	var selected, outer error
-	counts, err := mdbx.FixtureCanonicalTipStep(w.s, scenario, nil, nil, false, func() {
+	run := func() {
 		outer = w.s.View(func(r *mdbx.Reader) error {
 			root, err := DeriveCandidateUTXORootV1(r, w.owner, in)
 			selected = err
@@ -519,6 +523,11 @@ func candidateCheckMatchingTip(t *testing.T, w *btWorld, in CandidateRootInput, 
 			candidateInactiveReader(t, r)
 			return err
 		})
+	}
+	var counts mdbx.CanonicalTipStepFixtureEvidence
+	var err error
+	reads, readErr := mdbx.FixturePairReadObservation(w.s, nil, func() {
+		counts, err = mdbx.FixtureCanonicalTipStep(w.s, scenario, nil, nil, false, run)
 	})
 	logicalMDBXAssert(t, any(outer) == any(selected), "canonical tip View replaced selected result: %v/%v", outer, selected)
 	candidateTerminalView(t, w, outer)
@@ -526,6 +535,7 @@ func candidateCheckMatchingTip(t *testing.T, w *btWorld, in CandidateRootInput, 
 	if mode == "cursor_eio" {
 		logicalMDBXAssert(t, counts.Queries == 1 && counts.Faults == 1 && counts.Gets == 1, "canonical tip cursor fault: %+v", counts)
 	}
+	logicalMDBXAssert(t, readErr == nil && reads.Gets == 1 && reads.Writes == 0, "canonical tip failure native reads: %+v/%v", reads, readErr)
 }
 
 func candidateAuthorityIO(t *testing.T) {
