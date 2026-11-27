@@ -105,8 +105,9 @@ func requireImageTake(t *testing.T, round *ImageRound, ctx context.Context, star
 	got := awaitImageResult(t, goTakeImage(round, ctx, start), label)
 	requireQueryResult(t, got, q, want, label)
 	if slices.Contains([]error{errImageNoAssignment, errImageRoundClosed, errImageDisconnected}, want) {
-		switch got.err.(type) {
-		case interface{ Unwrap() error }, interface{ Unwrap() []error }:
+		var single interface{ Unwrap() error }
+		var multiple interface{ Unwrap() []error }
+		if errors.As(got.err, &single) || errors.As(got.err, &multiple) {
 			t.Fatalf("%s returned a receive error with Unwrap: %v", label, got.err)
 		}
 	}
