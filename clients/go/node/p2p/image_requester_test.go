@@ -1665,15 +1665,18 @@ func (c *imageHookCtx) Done() <-chan struct{} {
 	c.doneCalls.Add(1)
 	return c.done
 }
+
 func (c *imageHookCtx) Value(any) any {
 	c.valueCalls.Add(1)
 	return nil
 }
+
 func (c *imageHookCtx) readCounts() [3]int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return [3]int64{c.doneCalls.Load(), int64(c.errCalls), c.valueCalls.Load()}
 }
+
 func (c *imageHookCtx) Err() error {
 	c.mu.Lock()
 	c.errCalls++

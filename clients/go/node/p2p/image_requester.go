@@ -645,11 +645,15 @@ type imageAfterFuncSignal struct {
 
 // afterImageCancel retains the parent's optional scheduling and stop hooks.
 func afterImageCancel(ctx context.Context, f func()) func() bool {
+	return context.AfterFunc(imageCancellationContext(ctx), f)
+}
+
+func imageCancellationContext(ctx context.Context) context.Context {
 	signal := &imageCancelSignal{source: ctx, done: ctx.Done()}
 	if scheduler, ok := ctx.(imageAfterFuncer); ok {
-		return context.AfterFunc(imageAfterFuncSignal{signal, scheduler}, f)
+		return imageAfterFuncSignal{signal, scheduler}
 	}
-	return context.AfterFunc(signal, f)
+	return signal
 }
 
 // commitLocked arms the ctx callbacks and the timer, each holding only inst.ref, then charges, allocates, registers and
