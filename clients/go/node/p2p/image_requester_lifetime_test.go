@@ -146,6 +146,10 @@ func checkImageLocalEnd(t *testing.T, tc imageLocalEndCase) {
 	if tc.capD {
 		limits.RoundLifetime = 5 * time.Second
 	}
+	disconnected := tc.want == errImageDisconnected
+	if disconnected {
+		limits.Global.CurrentAssignments = 1
+	}
 	ctx, owner := newImageHookCtx(), newImageHookCtx()
 	round := f.roundCtx(t, owner, limits, 0, 1)
 	inst := f.admitted(t, round, ctx, 0, 1, 1)
@@ -161,7 +165,10 @@ func checkImageLocalEnd(t *testing.T, tc imageLocalEndCase) {
 	}
 	requireImageResult(t, awaitImageResult(t, passive, "recorded local end"), 1, 1, tc.want, "recorded local end")
 	requireImageAbsent(t, round, t.Context(), 1, errImageNoAssignment)
-	if tc.follow {
+	if disconnected {
+		requireImageResult(t, f.request(round, t.Context(), 1, 1), 1, 1, nil, "same start on live source after disconnect")
+		requireQueryResult(t, f.request(round, t.Context(), 0, 1), consensus.UTXOImageQuery{}, errImageDisconnected, "same start on disconnected source")
+	} else if tc.follow {
 		f.refused(t, round, t.Context(), 0, 1, errImageAttempted)
 		nextID := uint64(1)
 		if tc.name == "independent request pass" {
@@ -1148,6 +1155,8 @@ func testImageExitWithLiveReplacement(t *testing.T) {
 	requireImageTake(t, replacement, wait, 2, consensus.UTXOImageQuery{}, context.Canceled, "replacement still current after original exit")
 	requireImageTake(t, original, t.Context(), 1, expectedImageQuery(1, 1), errImageDisconnected, "original registration's disconnect")
 	requireImageAbsent(t, original, t.Context(), 1, errImageNoAssignment)
+	f.s.unregisterPeer(f.peers[0])
+	requireImageResult(t, f.request(replacement, t.Context(), newer, 3), 2, 3, nil, "replacement request after repeated original exit")
 }
 
 func testImageReplacementRetainsNoPeer(t *testing.T) {
