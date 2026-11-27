@@ -42,6 +42,8 @@ type candidateRootScopeStateV1 struct {
 	reader    *Reader
 	account   *OperationAccount
 	selection CandidateRootParentV1
+	rawBytes  uint64
+	rawStart  atomic.Pointer[byte]
 	status    atomic.Uint32
 }
 
@@ -52,8 +54,8 @@ const (
 	candidateDerivingV1
 )
 
-// WithCandidateRootV1 admits one parent selection and closes the account on exit.
-func (o *OperationReservationOwner) WithCandidateRootV1(r *Reader, parent CandidateRootParentV1, use func(*CandidateRootScopeV1) error) error {
+// WithCandidateRootV1 borrows one immutable body for the selected parent and closes the account on exit.
+func (o *OperationReservationOwner) WithCandidateRootV1(r *Reader, parent CandidateRootParentV1, raw []byte, use func(*CandidateRootScopeV1) error) error {
 	if o == nil || o.shared == nil || use == nil {
 		return errOperationReservationInput
 	}
@@ -64,7 +66,11 @@ func (o *OperationReservationOwner) WithCandidateRootV1(r *Reader, parent Candid
 		return treeDeltaInvalidV1()
 	}
 	return o.withAccountV1(TreeLaneMaxBytes, func(account *OperationAccount) error {
-		state := &candidateRootScopeStateV1{reader: r, account: account, selection: parent}
+		state := &candidateRootScopeStateV1{reader: r, account: account, selection: parent, rawBytes: uint64(len(raw))}
+		if len(raw) != 0 {
+			state.rawStart.Store(&raw[0])
+			defer state.rawStart.Store(nil)
+		}
 		return use(&CandidateRootScopeV1{state: state})
 	})
 }
@@ -81,11 +87,11 @@ func (s *CandidateRootScopeV1) openV1() bool {
 }
 
 // WithCandidateValidationV1 funds validation and lends its once-only retirement function.
-func (s *CandidateRootScopeV1) WithCandidateValidationV1(initial, rawBytes uint64, use func(retire func() error) error) error {
-	if !s.openV1() || rawBytes > 68_000_157 {
+func (s *CandidateRootScopeV1) WithCandidateValidationV1(initial uint64, use func(retire func() error) error) error {
+	if !s.openV1() || s.state.rawBytes > 68_000_157 {
 		return errOperationReservationInput
 	}
-	return s.state.account.WithPhaseReservationV1(initial, rawBytes+4096, use)
+	return s.state.account.WithPhaseReservationV1(initial, s.state.rawBytes+4096, use)
 }
 
 // WithCandidateCensusV1 funds the synchronous body census.
@@ -97,12 +103,12 @@ func (s *CandidateRootScopeV1) WithCandidateCensusV1(use func() error) error {
 }
 
 // WithCandidateFactsV1 funds the full consulted-state arrays and lends their retirement functions.
-func (s *CandidateRootScopeV1) WithCandidateFactsV1(rawBytes uint64, events uint32, use func(retireLookup func() error, retireLengths func() error, retireKeys func() error) error) error {
+func (s *CandidateRootScopeV1) WithCandidateFactsV1(events uint32, use func(retireLookup func() error, retireLengths func() error, retireKeys func() error) error) error {
 	if !s.openV1() || use == nil {
 		return errOperationReservationInput
 	}
 	e := uint64(events)
-	if !candidateRootEventBoundV1(rawBytes, e) {
+	if !candidateRootEventBoundV1(s.state.rawBytes, e) {
 		return errOperationReservationCapacity
 	}
 	return s.state.account.withHold(func(h *operationHold) error {
@@ -119,6 +125,9 @@ func (s *CandidateRootScopeV1) QualifyCurrentV1() error {
 		return treeDeltaInvalidV1()
 	}
 	state := s.state
+	if state.rawBytes < 149 || state.rawBytes > 68_000_157 || !state.retainsV1(state.rawBytes+4096) {
+		return treeDeltaInvalidV1()
+	}
 	if err := state.reader.qualifyCandidateParentV1(state.selection); err != nil {
 		return err
 	}
@@ -209,13 +218,21 @@ func (s *CandidateRootScopeV1) DeriveCandidateRootV1(body CandidateRootBodyV1, i
 		return [32]byte{}, treeDeltaInvalidV1()
 	}
 	state := s.state
-	if !candidateRootCoverageV1(state.selection, body, len(inputs)) {
+	if !state.candidateRootCoverageV1(body, len(inputs)) {
 		return [32]byte{}, treeDeltaInvalidV1()
 	}
 	if err := treeRootReadInputsV1(inputs); err != nil {
 		return [32]byte{}, err
 	}
-	n := treeStepBytesV1 + treeValueBytesV1 + treeNodeWorkBytesV1 + treeDescSizeV1*uint64(body.BlockMeta.EventCount)
+	events := uint64(body.BlockMeta.EventCount)
+	retained := state.rawBytes + 4096
+	if len(inputs) != 0 {
+		retained += 36 * events
+	}
+	if !state.retainsV1(retained) {
+		return [32]byte{}, treeDeltaInvalidV1()
+	}
+	n := treeStepBytesV1 + treeValueBytesV1 + treeNodeWorkBytesV1 + treeDescSizeV1*events
 	var root [32]byte
 	err := state.account.WithReservation(n, func() error {
 		budget := treeBudgetV1{held: n}
@@ -229,13 +246,21 @@ func (s *CandidateRootScopeV1) DeriveCandidateRootV1(body CandidateRootBodyV1, i
 	return root, nil
 }
 
+// retainsV1 checks bytes held by this account under the owner's lock.
+func (s *candidateRootScopeStateV1) retainsV1(bytes uint64) bool {
+	a := s.account.shared
+	a.origin.mu.Lock()
+	defer a.origin.mu.Unlock()
+	return !a.closed && a.held >= bytes
+}
+
 // candidateRootCoverageV1 bounds the candidate's body and facts before D admission.
-func candidateRootCoverageV1(p CandidateRootParentV1, body CandidateRootBodyV1, facts int) bool {
+func (s *candidateRootScopeStateV1) candidateRootCoverageV1(body CandidateRootBodyV1, facts int) bool {
 	n := uint64(len(body.Raw))
-	if !all(body.HeaderBytes == 148, n >= 149, n <= 68_000_157, body.Events != nil) {
+	if !all(body.HeaderBytes == 148, n >= 149, n <= 68_000_157, n == s.rawBytes, body.Events != nil) {
 		return false
 	}
-	if !bytes.Equal(body.Raw[4:36], p.Parent.BlockHash[:]) {
+	if &body.Raw[0] != s.rawStart.Load() || !bytes.Equal(body.Raw[4:36], s.selection.Parent.BlockHash[:]) {
 		return false
 	}
 	txs, width, ok := readCompactSize(body.Raw[148:])

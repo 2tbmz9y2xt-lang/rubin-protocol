@@ -12,8 +12,38 @@ import (
 )
 
 func TestCandidateRootFixtureOrder(t *testing.T) {
+	t.Run("transaction_before_binding", func(t *testing.T) {
+		s := newCandidateScene(t, 5)
+		in, next, want := candidateSpendOrderInputs(t, s)
+		candidateBeforeBinding(t, s.world, in, next, want, "TX_ERR_MISSING_UTXO", "utxo not found")
+	})
+	t.Run("subsidy_before_binding", func(t *testing.T) {
+		w, in, next, want := candidateSubsidyOrderInputs(t)
+		candidateBeforeBinding(t, w, in, next, want, "BLOCK_ERR_SUBSIDY_EXCEEDED", "coinbase outputs exceed subsidy+fees bound")
+	})
 	t.Run("growth_before_binding", candidateGrowthBeforeBinding)
 	t.Run("coinbase_placement", candidatePlacementBeforeReads)
+}
+
+func candidateBeforeBinding(t *testing.T, w *btWorld, in, next CandidateRootInput, want [32]byte, code ErrorCode, diagnostic string) {
+	t.Helper()
+	var outer error
+	evidence, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, btMeta(17, 1), func() {
+		outer = w.s.View(func(r *mdbx.Reader) error {
+			candidateTxError(t, r, w.owner, in, code, diagnostic)
+			return nil
+		})
+	})
+	candidateUnreached(t, evidence, fixtureErr)
+	logicalMDBXAssert(t, evidence.BeginOld == 1 && evidence.OldGets[0] == 1 && evidence.NodeGets == 0 && evidence.NodePulls == 0,
+		"validation refusal read beyond authority or reached a node: %+v", evidence)
+	candidateNoNativeWrite(t, evidence)
+	logicalMDBXAssert(t, outer == nil, "candidate View after validation refusal: %v", outer)
+	candidateView(t, w, func(r *mdbx.Reader) {
+		candidateTxError(t, r, w.owner, in, code, diagnostic)
+		candidateRootOK(t, r, w.owner, next, want)
+		candidateReadControl(t, r)
+	})
 }
 
 func candidateGrowthBeforeBinding(t *testing.T) {
@@ -169,7 +199,9 @@ func candidateReadControl(t *testing.T, r *mdbx.Reader) {
 
 func candidateNoNativeWrite(t *testing.T, evidence mdbx.SelectedDamageEvidence) {
 	t.Helper()
-	logicalMDBXAssert(t, evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0 && evidence.OldGets[4] == 0 && evidence.OldPulls[5] == 0,
+	bodyRead := evidence.OldGets[4] != 0 || evidence.OldPulls[4] != 0
+	undoRead := evidence.OldGets[5] != 0 || evidence.OldPulls[5] != 0
+	logicalMDBXAssert(t, evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0 && !bodyRead && !undoRead,
 		"candidate performed write, body or undo I/O: %+v", evidence)
 }
 
@@ -194,11 +226,14 @@ func candidateApplicationFailures(t *testing.T) {
 			s := newCandidateScene(t, 5)
 			w := s.world
 			key, value := btMeta(16, 1), row.value
+			var sourceCause error
 			if row.rank == 1 {
 				key = btUTXOKey(1, s.funding)
 				entry := s.entries[s.funding]
 				value = btValue(btFrame(entry.Value, entry.CovenantType, entry.CovenantData), entry.CreationHeight, false)
 				value[len(value)-1] = 2
+				_, sourceCause = mdbx.DecodeUTXOValue(value)
+				logicalMDBXAssert(t, sourceCause != nil && sourceCause.Error() == row.message, "consumed row decoder cause: %v", sourceCause)
 			}
 			candidateRawRow(t, w, row.rank, key, value)
 			in, _ := s.body(t, 1, 1)
@@ -207,7 +242,12 @@ func candidateApplicationFailures(t *testing.T) {
 				root, err := DeriveCandidateUTXORootV1(r, w.owner, in)
 				selected = err
 				logicalMDBXAssert(t, root == [32]byte{}, "application integrity returned digest %x", root)
-				irFailureV1(t, err, logicalStateFailureStoreIntegrity, row.message)
+				class, cause, ok := InspectCandidateRootFailure(err)
+				logicalMDBXAssert(t, ok && class == CandidateRootFailureStoreIntegrity && cause != nil && cause.Error() == row.message,
+					"candidate integrity class/cause: %v/%v, want %q", class, cause, row.message)
+				if sourceCause != nil {
+					logicalMDBXAssert(t, any(cause) == any(sourceCause), "candidate changed consumed row decoder cause: %v", cause)
+				}
 				candidateReadControl(t, r)
 				return err
 			})
@@ -317,6 +357,7 @@ func TestCandidateRootFixtureParent(t *testing.T) {
 	t.Run("different_generation_malformed_tip", func(t *testing.T) { candidateDifferentGeneration(t, "malformed_tip", 1) })
 	t.Run("different_generation_cursor_eio", func(t *testing.T) { candidateDifferentGeneration(t, "cursor_eio", 2) })
 	t.Run("matching_generation_cursor_eio", candidateMatchingCursor)
+	t.Run("unfunded_current", candidateUnfundedCurrent)
 	t.Run("authority_get_eio", candidateAuthorityIO)
 	t.Run("authority_absent_nonempty", func(t *testing.T) { candidateAuthorityIntegrity(t, nil) })
 	t.Run("authority_malformed", func(t *testing.T) { candidateAuthorityIntegrity(t, []byte{3}) })
@@ -329,6 +370,23 @@ func TestCandidateRootFixtureParent(t *testing.T) {
 	t.Run("wrong_reader_db", candidateWrongDatabase)
 	t.Run("empty_control", candidateEmptyControl)
 	t.Run("current_read", candidateNoIdentityRead)
+}
+
+func candidateUnfundedCurrent(t *testing.T) {
+	s := newCandidateScene(t, 5)
+	in, _ := s.body(t, 0, 1)
+	w := s.world
+	var selected, outer error
+	evidence, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, []byte{2}, func() {
+		outer = w.s.View(func(r *mdbx.Reader) error {
+			selected = w.owner.WithCandidateRootV1(r, in.Selection, in.Raw, (*mdbx.CandidateRootScopeV1).QualifyCurrentV1)
+			return selected
+		})
+	})
+	candidateUnreached(t, evidence, fixtureErr)
+	logicalMDBXAssert(t, evidence.BeginOld == 1 && evidence.OldGets[0] == 0, "unfunded current read authority: %+v", evidence)
+	candidateEngine(t, selected, "update", "InvalidInput", 22, "invalid tree delta")
+	logicalMDBXAssert(t, any(outer) == any(selected), "unfunded current View changed result: %v/%v", selected, outer)
 }
 
 func candidateRootStale(t *testing.T, r *mdbx.Reader, w *btWorld, in CandidateRootInput) error {

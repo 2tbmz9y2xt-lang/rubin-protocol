@@ -799,6 +799,8 @@ func BenchmarkTreeRootInputsV1(b *testing.B) {
 
 func TestTreeRootReadCandidate(t *testing.T) {
 	t.Run("admission", trCandidateAdmission)
+	t.Run("unfunded_current", trCandidateUnfundedCurrent)
+	t.Run("body_and_funding", trCandidateBodyFunding)
 	t.Run("scope_ceiling", trCandidateCeiling)
 	t.Run("facts_funding", trCandidateFacts)
 	t.Run("derivation_capacity", trCandidateDerivationCapacity)
@@ -820,15 +822,17 @@ func TestTreeRootReadCandidate(t *testing.T) {
 }
 
 func trCandidateOrdinaryAuthority(t *testing.T) {
-	s, owner, selection, _, _ := trCandidateSetup(t)
+	s, owner, selection, body, _ := trCandidateSetup(t)
 	authority := treeAuthorityFixture(modelOrdinary(3, 1, 2, 1, 1, 0, 0))
 	encoded, err := authority.Encode()
 	mustEnvironment(t, err)
 	trSeedV1(t, s, owner, 0, []byte{2}, encoded)
 	selection.Generation = 3
 	viewErr := s.View(func(r *Reader) error {
-		err := owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
-			return scope.QualifyCurrentV1()
+		err := owner.WithCandidateRootV1(r, selection, body.Raw, func(scope *CandidateRootScopeV1) error {
+			return scope.WithCandidateValidationV1(uint64(len(body.Raw))+4096, func(func() error) error {
+				return scope.QualifyCurrentV1()
+			})
 		})
 		if !errors.Is(err, ErrCandidateParentNotCurrent) {
 			t.Fatalf("legal ordinary authority selected %v, want stale parent", err)
@@ -882,17 +886,98 @@ func trCandidateAdmission(t *testing.T) {
 	mustEnvironment(t, s.View(func(r *Reader) error {
 		trCandidateParentAdmission(t, r, owner, selection)
 		trCandidateCoverageAdmission(t, r, owner, selection, body)
-		return owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
-			mustEnvironment(t, scope.QualifyCurrentV1())
+		return owner.WithCandidateRootV1(r, selection, body.Raw, func(scope *CandidateRootScopeV1) error {
 			copied := *scope
-			got, err := scope.DeriveCandidateRootV1(body, nil)
-			if err != nil || got != want {
-				t.Fatalf("native candidate %x/%v, want %x", got, err, want)
-			}
-			got, err = copied.DeriveCandidateRootV1(body, nil)
-			trCandidateRefusal(t, got, err)
-			return nil
+			return scope.WithCandidateValidationV1(uint64(len(body.Raw))+4096, func(func() error) error {
+				mustEnvironment(t, scope.QualifyCurrentV1())
+				got, err := scope.DeriveCandidateRootV1(body, nil)
+				if err != nil || got != want {
+					t.Fatalf("native candidate %x/%v, want %x", got, err, want)
+				}
+				got, err = copied.DeriveCandidateRootV1(body, nil)
+				trCandidateRefusal(t, got, err)
+				return nil
+			})
 		})
+	}))
+}
+
+func trCandidateUnfundedCurrent(t *testing.T) {
+	s, owner, selection, body, want := trCandidateSetup(t)
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		err := owner.WithCandidateRootV1(r, selection, body.Raw, func(scope *CandidateRootScopeV1) error {
+			return scope.QualifyCurrentV1()
+		})
+		trCandidateRefusal(t, [32]byte{}, err)
+		return trCandidateReuse(t, r, owner, selection, body, want)
+	}))
+}
+
+func trCandidateBodyFunding(t *testing.T) {
+	s, owner, selection, body, want := trCandidateSetup(t)
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		for _, name := range []string{"different_backing", "different_width", "unfunded_validation", "key_funding_one_byte_short"} {
+			t.Run(name, func(t *testing.T) {
+				offered := body
+				admitted := body.Raw
+				held := uint64(len(body.Raw)) + 4096
+				var inputs []TreeOutpointV1
+				switch name {
+				case "different_backing":
+					offered.Raw = bytes.Clone(body.Raw)
+				case "different_width":
+					admitted = append(bytes.Clone(body.Raw), 0)
+					offered.Raw = admitted[:len(body.Raw)]
+					held++
+				case "key_funding_one_byte_short":
+					offered.Raw = bytes.Clone(body.Raw)
+					trCandidateTwoEvents(&offered)
+					admitted = offered.Raw
+					keys := [2]TreeOutpointV1{{Txid: tdTxid(1)}}
+					inputs = keys[:1]
+					held = uint64(len(admitted)) + 4096 + 71
+				}
+				var entered bool
+				offered.Events = func(_ []byte, sink *TreeDeltaSinkV1) error {
+					entered = true
+					if offered.BlockMeta.EventCount == 2 {
+						return trCandidateRecordTwoEvents(offered.BlockMeta, sink)
+					}
+					return body.Events(body.Raw, sink)
+				}
+				unfunded := name == "unfunded_validation"
+				attempt := func() error {
+					return owner.WithCandidateRootV1(r, selection, admitted, func(scope *CandidateRootScopeV1) error {
+						derive := func() error {
+							got, err := scope.DeriveCandidateRootV1(offered, inputs)
+							if entered {
+								t.Fatal("candidate body or funding refusal reached event source")
+							}
+							trCandidateRefusal(t, got, err)
+							return nil
+						}
+						err := scope.WithCandidateValidationV1(held, func(func() error) error {
+							mustEnvironment(t, scope.QualifyCurrentV1())
+							if unfunded {
+								return nil
+							}
+							return derive()
+						})
+						if err == nil && unfunded {
+							return derive()
+						}
+						return err
+					})
+				}
+				if unfunded {
+					mustEnvironment(t, owner.WithReservation(8192, attempt))
+				} else {
+					mustEnvironment(t, attempt())
+				}
+				mustEnvironment(t, trCandidateReuse(t, r, owner, selection, body, want))
+			})
+		}
+		return nil
 	}))
 }
 
@@ -914,7 +999,7 @@ func trCandidateParentAdmission(t *testing.T, r *Reader, owner *OperationReserva
 		t.Run(row.name, func(t *testing.T) {
 			input := original
 			row.edit(&input)
-			err := owner.WithCandidateRootV1(r, input, func(*CandidateRootScopeV1) error {
+			err := owner.WithCandidateRootV1(r, input, nil, func(*CandidateRootScopeV1) error {
 				t.Fatal("invalid selection invoked callback")
 				return nil
 			})
@@ -952,14 +1037,20 @@ func trCandidateCoverageAdmission(t *testing.T, r *Reader, owner *OperationReser
 			if row.edit != nil {
 				row.edit(&body)
 			}
-			mustEnvironment(t, owner.WithCandidateRootV1(r, p, func(scope *CandidateRootScopeV1) error {
-				mustEnvironment(t, scope.QualifyCurrentV1())
-				got, err := scope.DeriveCandidateRootV1(body, row.inputs)
-				trCandidateRefusal(t, got, err)
-				if called {
-					t.Fatal("invalid coverage reached recorder")
-				}
-				return nil
+			admitted := body.Raw
+			if len(admitted) == 0 {
+				admitted = original.Raw
+			}
+			mustEnvironment(t, owner.WithCandidateRootV1(r, p, admitted, func(scope *CandidateRootScopeV1) error {
+				return scope.WithCandidateValidationV1(25_000, func(func() error) error {
+					mustEnvironment(t, scope.QualifyCurrentV1())
+					got, err := scope.DeriveCandidateRootV1(body, row.inputs)
+					trCandidateRefusal(t, got, err)
+					if called {
+						t.Fatal("invalid coverage reached recorder")
+					}
+					return nil
+				})
 			}))
 		})
 	}
@@ -969,6 +1060,18 @@ func trCandidateTwoEvents(body *CandidateRootBodyV1) {
 	body.Raw[204] = 2
 	body.Raw = append(append(body.Raw[:len(body.Raw)-6], tdFrame(1, 0, []byte{8})...), 6, 0, 0, 0, 0, 0)
 	body.BlockMeta.EventCount = 2
+}
+
+func trCandidateRecordTwoEvents(meta TreeBlockV1, sink *TreeDeltaSinkV1) error {
+	if err := sink.BeginV1(meta); err != nil {
+		return err
+	}
+	first := TreeEventV1{Kind: TreeEventCreateV1, Outpoint: TreeOutpointV1{Txid: tdTxid(37)}, FrameOffset: 205, FrameLength: 13}
+	if err := sink.EventV1(first); err != nil {
+		return err
+	}
+	second := TreeEventV1{Kind: TreeEventCreateV1, Outpoint: TreeOutpointV1{Txid: tdTxid(37), Vout: 1}, FrameOffset: 218, FrameLength: 12}
+	return sink.EventV1(second)
 }
 
 func trCandidateRefusal(t *testing.T, got [32]byte, err error) {
@@ -983,9 +1086,9 @@ func trCandidateCeiling(t *testing.T) {
 	s, owner, selection, _, _ := trCandidateSetup(t)
 	mustEnvironment(t, s.View(func(r *Reader) error {
 		for _, demand := range []uint64{154611184, 402653184, 402653185} {
-			mustEnvironment(t, owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
+			mustEnvironment(t, owner.WithCandidateRootV1(r, selection, make([]byte, 149), func(scope *CandidateRootScopeV1) error {
 				called := false
-				err := scope.WithCandidateValidationV1(demand, 149, func(retire func() error) error {
+				err := scope.WithCandidateValidationV1(demand, func(retire func() error) error {
 					called = true
 					if live := reservationLive(owner); live != demand {
 						t.Fatalf("native scope charges %d, want %d", live, demand)
@@ -1021,23 +1124,28 @@ func trCandidateExpiry(t *testing.T) {
 		reader = r
 		expired := func(*CandidateRootScopeV1) error { t.Fatal("invalid scope invoked callback"); return nil }
 		for _, invalid := range []*OperationReservationOwner{nil, {}} {
-			err := invalid.WithCandidateRootV1(r, selection, expired)
+			err := invalid.WithCandidateRootV1(r, selection, body.Raw, expired)
 			if !errors.Is(err, errOperationReservationInput) {
 				t.Fatalf("invalid reservation owner: %v", err)
 			}
 		}
 		for _, invalid := range []*Reader{nil, {}} {
-			err := owner.WithCandidateRootV1(invalid, selection, expired)
+			err := owner.WithCandidateRootV1(invalid, selection, body.Raw, expired)
 			treeNativeError(t, err, "get", "InvalidInput", 22, "Reader is not active", nil)
 		}
-		mustEnvironment(t, owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
+		mustEnvironment(t, owner.WithCandidateRootV1(r, selection, body.Raw, func(scope *CandidateRootScopeV1) error {
 			escaped = scope
-			return scope.QualifyCurrentV1()
+			return scope.WithCandidateValidationV1(uint64(len(body.Raw))+4096, func(func() error) error {
+				return scope.QualifyCurrentV1()
+			})
 		}))
+		if escaped.state.rawStart.Load() != nil {
+			t.Fatal("expired scope retained candidate body backing")
+		}
 		for _, invalid := range []*CandidateRootScopeV1{nil, {}, escaped} {
 			got, err := invalid.DeriveCandidateRootV1(body, nil)
 			trCandidateRefusal(t, got, err)
-			err = invalid.WithCandidateValidationV1(402653185, 149, func(func() error) error {
+			err = invalid.WithCandidateValidationV1(402653185, func(func() error) error {
 				t.Fatal("invalid scope lent a reservation")
 				return nil
 			})
@@ -1048,7 +1156,7 @@ func trCandidateExpiry(t *testing.T) {
 		trCandidateExpiredWork(t, r, owner, selection)
 		return trCandidateReuse(t, r, owner, selection, body, want)
 	}))
-	err := owner.WithCandidateRootV1(reader, selection, func(*CandidateRootScopeV1) error {
+	err := owner.WithCandidateRootV1(reader, selection, body.Raw, func(*CandidateRootScopeV1) error {
 		t.Fatal("expired Reader invoked callback")
 		return nil
 	})
@@ -1058,7 +1166,7 @@ func trCandidateExpiry(t *testing.T) {
 func trCandidateExpiredWork(t *testing.T, r *Reader, owner *OperationReservationOwner, selection CandidateRootParentV1) {
 	t.Helper()
 	var expired *CandidateRootScopeV1
-	mustEnvironment(t, owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
+	mustEnvironment(t, owner.WithCandidateRootV1(r, selection, make([]byte, 159), func(scope *CandidateRootScopeV1) error {
 		expired = scope
 		return nil
 	}))
@@ -1069,7 +1177,7 @@ func trCandidateExpiredWork(t *testing.T, r *Reader, owner *OperationReservation
 	if !treeSameErrorV1(err, errOperationReservationInput) {
 		t.Fatalf("expired census error %v, want invalid reservation input", err)
 	}
-	err = expired.WithCandidateFactsV1(159, 1, func(func() error, func() error, func() error) error {
+	err = expired.WithCandidateFactsV1(1, func(func() error, func() error, func() error) error {
 		t.Fatal("expired scope lent fact storage")
 		return nil
 	})
@@ -1081,27 +1189,35 @@ func trCandidateExpiredWork(t *testing.T, r *Reader, owner *OperationReservation
 
 func trCandidateFacts(t *testing.T) {
 	s, owner, selection, _, _ := trCandidateSetup(t)
+	const held = 402_653_184 - 135_240
 	mustEnvironment(t, s.View(func(r *Reader) error {
-		return owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
+		trCandidateFactAdmission(t, r, owner, selection)
+		mustEnvironment(t, owner.WithCandidateRootV1(r, selection, make([]byte, 149), func(scope *CandidateRootScopeV1) error {
+			return scope.WithCandidateValidationV1(held+1, func(func() error) error {
+				trCandidateZeroFactCharge(t, scope, owner, held+1)
+				return nil
+			})
+		}))
+		return owner.WithCandidateRootV1(r, selection, make([]byte, 160), func(scope *CandidateRootScopeV1) error {
 			const validation = 25_000_000
-			mustEnvironment(t, scope.WithCandidateValidationV1(validation, 160, func(func() error) error {
+			mustEnvironment(t, scope.WithCandidateValidationV1(validation, func(func() error) error {
 				trCandidateCensusCharge(t, scope, owner, validation)
 				return scope.QualifyCurrentV1()
 			}))
-			trCandidateFactAdmission(t, scope)
-			const held = 402_653_184 - 135_240
-			mustEnvironment(t, scope.WithCandidateValidationV1(held+1, 160, func(func() error) error {
-				err := scope.WithCandidateFactsV1(160, 1, func(func() error, func() error, func() error) error {
+			if err := scope.WithCandidateFactsV1(1, nil); !treeSameErrorV1(err, errOperationReservationInput) {
+				t.Fatalf("nil facts callback error %v, want invalid reservation input", err)
+			}
+			mustEnvironment(t, scope.WithCandidateValidationV1(held+1, func(func() error) error {
+				err := scope.WithCandidateFactsV1(1, func(func() error, func() error, func() error) error {
 					t.Fatal("unfunded facts ran the callback")
 					return nil
 				})
 				if !treeSameErrorV1(err, errOperationReservationCapacity) {
 					t.Fatalf("facts one byte short: %v, want reservation capacity", err)
 				}
-				trCandidateZeroFactCharge(t, scope, owner, held+1)
 				return nil
 			}))
-			mustEnvironment(t, scope.WithCandidateValidationV1(held, 160, func(func() error) error {
+			mustEnvironment(t, scope.WithCandidateValidationV1(held, func(func() error) error {
 				trCandidateFactCharge(t, scope, owner, held)
 				return nil
 			}))
@@ -1111,18 +1227,17 @@ func trCandidateFacts(t *testing.T) {
 	}))
 }
 
-func trCandidateFactAdmission(t *testing.T, scope *CandidateRootScopeV1) {
+func trCandidateFactAdmission(t *testing.T, r *Reader, owner *OperationReservationOwner, selection CandidateRootParentV1) {
 	t.Helper()
-	if err := scope.WithCandidateFactsV1(160, 1, nil); !treeSameErrorV1(err, errOperationReservationInput) {
-		t.Fatalf("nil facts callback error %v, want invalid reservation input", err)
-	}
 	for _, row := range []struct {
-		raw    uint64
+		raw    int
 		events uint32
 	}{{148, 0}, {159, 1}} {
-		err := scope.WithCandidateFactsV1(row.raw, row.events, func(func() error, func() error, func() error) error {
-			t.Fatalf("facts at raw width %d and %d events ran the callback", row.raw, row.events)
-			return nil
+		err := owner.WithCandidateRootV1(r, selection, make([]byte, row.raw), func(scope *CandidateRootScopeV1) error {
+			return scope.WithCandidateFactsV1(row.events, func(func() error, func() error, func() error) error {
+				t.Fatalf("facts at raw width %d and %d events ran the callback", row.raw, row.events)
+				return nil
+			})
 		})
 		if !treeSameErrorV1(err, errOperationReservationCapacity) {
 			t.Fatalf("facts at raw width %d and %d events: %v, want reservation capacity", row.raw, row.events, err)
@@ -1146,7 +1261,7 @@ func trCandidateCensusCharge(t *testing.T, scope *CandidateRootScopeV1, owner *O
 func trCandidateZeroFactCharge(t *testing.T, scope *CandidateRootScopeV1, owner *OperationReservationOwner, held uint64) {
 	t.Helper()
 	observed := errors.New("facts callback result")
-	err := scope.WithCandidateFactsV1(149, 0, func(func() error, func() error, func() error) error {
+	err := scope.WithCandidateFactsV1(0, func(func() error, func() error, func() error) error {
 		trCandidateLive(t, owner, held+135_192)
 		return observed
 	})
@@ -1159,7 +1274,7 @@ func trCandidateZeroFactCharge(t *testing.T, scope *CandidateRootScopeV1, owner 
 func trCandidateFactCharge(t *testing.T, scope *CandidateRootScopeV1, owner *OperationReservationOwner, held uint64) {
 	t.Helper()
 	called := false
-	err := scope.WithCandidateFactsV1(160, 1, func(retireLookup, retireLengths, retireKeys func() error) error {
+	err := scope.WithCandidateFactsV1(1, func(retireLookup, retireLengths, retireKeys func() error) error {
 		called = true
 		trCandidateLive(t, owner, 402_653_184)
 		mustEnvironment(t, retireLookup())
@@ -1192,10 +1307,10 @@ func trCandidateDerivationCapacity(t *testing.T) {
 			eventCalls++
 			return originalEvents(raw, sink)
 		}
-		mustEnvironment(t, owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
-			mustEnvironment(t, scope.QualifyCurrentV1())
+		mustEnvironment(t, owner.WithCandidateRootV1(r, selection, body.Raw, func(scope *CandidateRootScopeV1) error {
 			const held = 402_653_184 - 288_544 + 1
-			return scope.WithCandidateValidationV1(held, uint64(len(body.Raw)), func(func() error) error {
+			return scope.WithCandidateValidationV1(held, func(func() error) error {
+				mustEnvironment(t, scope.QualifyCurrentV1())
 				root, err := scope.DeriveCandidateRootV1(body, nil)
 				if root != ([32]byte{}) || !treeSameErrorV1(err, errOperationReservationCapacity) || eventCalls != 0 {
 					t.Fatalf("derivation one byte short: root %x, error %v, event calls %d", root, err, eventCalls)
@@ -1215,27 +1330,41 @@ func trCandidateDerivationCapacity(t *testing.T) {
 
 func trCandidateReuse(t *testing.T, r *Reader, owner *OperationReservationOwner, selection CandidateRootParentV1, body CandidateRootBodyV1, want [32]byte) error {
 	t.Helper()
-	err := owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
-		mustEnvironment(t, scope.QualifyCurrentV1())
-		root, err := scope.DeriveCandidateRootV1(body, nil)
-		if err != nil || root != want {
-			t.Fatalf("candidate after refusal: %x/%v, want %x", root, err, want)
-		}
-		return nil
+	err := owner.WithCandidateRootV1(r, selection, body.Raw, func(scope *CandidateRootScopeV1) error {
+		return scope.WithCandidateValidationV1(uint64(len(body.Raw))+4096, func(func() error) error {
+			mustEnvironment(t, scope.QualifyCurrentV1())
+			root, err := scope.DeriveCandidateRootV1(body, nil)
+			if err != nil || root != want {
+				t.Fatalf("candidate after refusal: %x/%v, want %x", root, err, want)
+			}
+			return nil
+		})
 	})
 	trCandidateLive(t, owner, 0)
 	return err
 }
 
 func trCandidateUnwind(t *testing.T) {
-	for _, goexit := range []bool{false, true} {
+	type unwindObservation struct {
+		recovered         any
+		liveBefore        uint64
+		entered, returned bool
+	}
+	const reserved = 25_000_000
+	for _, goexit := range []bool{true, false} {
 		s, owner, selection, _, _ := trCandidateSetup(t)
-		done := make(chan any, 1)
+		done := make(chan unwindObservation, 1)
 		go func() {
-			defer func() { done <- recover() }()
+			var observed unwindObservation
+			defer func() {
+				observed.recovered = recover()
+				done <- observed
+			}()
 			_ = s.View(func(r *Reader) error {
-				return owner.WithCandidateRootV1(r, selection, func(scope *CandidateRootScopeV1) error {
-					return scope.WithCandidateValidationV1(25_000_000, 149, func(func() error) error {
+				return owner.WithCandidateRootV1(r, selection, make([]byte, 149), func(scope *CandidateRootScopeV1) error {
+					return scope.WithCandidateValidationV1(reserved, func(func() error) error {
+						observed.entered = true
+						observed.liveBefore = reservationLive(owner)
 						if goexit {
 							runtime.Goexit()
 						}
@@ -1243,10 +1372,18 @@ func trCandidateUnwind(t *testing.T) {
 					})
 				})
 			})
+			observed.returned = true
 		}()
 		result := <-done
-		if (goexit && result != nil) || (!goexit && result != "candidate callback") || reservationLive(owner) != 0 {
-			t.Fatalf("candidate unwind %t: %v, live %d", goexit, result, reservationLive(owner))
+		if !result.entered || result.returned {
+			t.Fatalf("candidate unwind %t: callback entered %t, View returned %t", goexit, result.entered, result.returned)
+		}
+		if result.liveBefore != reserved {
+			t.Fatalf("candidate unwind %t: live before %d, want %d", goexit, result.liveBefore, reserved)
+		}
+		liveAfter := reservationLive(owner)
+		if (goexit && result.recovered != nil) || (!goexit && result.recovered != "candidate callback") || liveAfter != 0 {
+			t.Fatalf("candidate unwind %t: recovered %v, live after %d", goexit, result.recovered, liveAfter)
 		}
 	}
 }

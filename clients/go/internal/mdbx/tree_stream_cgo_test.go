@@ -1814,11 +1814,14 @@ func tsCandidateSurfaceV1(t *testing.T) {
 	})
 	scope := reflect.TypeFor[*CandidateRootScopeV1]()
 	tsCandidateFieldsV1(t, scope.Elem(), nil)
+	if got := reflect.TypeOf((*OperationReservationOwner).WithCandidateRootV1); got != reflect.TypeFor[func(*OperationReservationOwner, *Reader, CandidateRootParentV1, []byte, func(*CandidateRootScopeV1) error) error]() {
+		t.Fatalf("candidate owner scope method: %v", got)
+	}
 	want := map[string]reflect.Type{
 		"QualifyCurrentV1":          reflect.TypeFor[func(*CandidateRootScopeV1) error](),
-		"WithCandidateValidationV1": reflect.TypeFor[func(*CandidateRootScopeV1, uint64, uint64, func(func() error) error) error](),
+		"WithCandidateValidationV1": reflect.TypeFor[func(*CandidateRootScopeV1, uint64, func(func() error) error) error](),
 		"WithCandidateCensusV1":     reflect.TypeFor[func(*CandidateRootScopeV1, func() error) error](),
-		"WithCandidateFactsV1":      reflect.TypeFor[func(*CandidateRootScopeV1, uint64, uint32, func(func() error, func() error, func() error) error) error](),
+		"WithCandidateFactsV1":      reflect.TypeFor[func(*CandidateRootScopeV1, uint32, func(func() error, func() error, func() error) error) error](),
 		"DeriveCandidateRootV1":     reflect.TypeFor[func(*CandidateRootScopeV1, CandidateRootBodyV1, []TreeOutpointV1) ([32]byte, error)](),
 	}
 	if scope.Elem().NumMethod() != 0 || scope.NumMethod() != len(want) || scope.ConvertibleTo(reflect.TypeFor[*OperationAccount]()) {

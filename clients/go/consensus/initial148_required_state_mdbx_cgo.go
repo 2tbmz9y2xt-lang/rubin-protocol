@@ -84,7 +84,7 @@ func newInitial148RequiredScopeV1(reader *mdbx.Reader, generation, height uint64
 // withCandidateRequiredV1 validates on one bounded view and derives from its obtained keys.
 func withCandidateRequiredV1(reader *mdbx.Reader, funding *mdbx.CandidateRootScopeV1, parent mdbx.CandidateRootParentV1, raw []byte, meta mdbx.TreeBlockV1, retireValidation func() error, validate func(logicalStateView) (Uint128, error)) (initial148RootReadOutcomeV1, error) {
 	var out initial148RootReadOutcomeV1
-	err := funding.WithCandidateFactsV1(uint64(len(raw)), meta.EventCount, func(retireLookup, retireLengths, retireKeys func() error) error {
+	err := funding.WithCandidateFactsV1(meta.EventCount, func(retireLookup, retireLengths, retireKeys func() error) error {
 		scope := newInitial148RequiredScopeV1(reader, parent.Generation, parent.Height, int(meta.EventCount))
 		defer scope.expireV1()
 		generated, err := validate(&scope)

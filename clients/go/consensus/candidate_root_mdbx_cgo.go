@@ -85,6 +85,24 @@ type CandidateRootInput struct {
 	Rotation         *CandidateRootRotation
 }
 
+// CandidateRootFailureKind classifies candidate logical state failures.
+type CandidateRootFailureKind = logicalStateFailureKind
+
+const (
+	CandidateRootFailureUnavailable    = logicalStateFailureUnavailable
+	CandidateRootFailureStoreIntegrity = logicalStateFailureStoreIntegrity
+	CandidateRootFailureLocalInvariant = logicalStateFailureLocalInvariant
+)
+
+// InspectCandidateRootFailure reports the class and original cause of a direct logical state failure.
+func InspectCandidateRootFailure(err error) (CandidateRootFailureKind, error, bool) {
+	failure, ok := err.(*logicalStateFailure)
+	if !ok || failure == nil {
+		return 0, nil, false
+	}
+	return failure.kind, failure.cause, true
+}
+
 // DeriveCandidateUTXORootV1 derives the exact poststate root in the active View.
 // On error the returned root is zero. The enclosing View also reports its own outcome.
 func DeriveCandidateUTXORootV1(reader *mdbx.Reader, owner *mdbx.OperationReservationOwner, input CandidateRootInput) ([32]byte, error) {
@@ -95,7 +113,7 @@ func DeriveCandidateUTXORootV1(reader *mdbx.Reader, owner *mdbx.OperationReserva
 		return [32]byte{}, ErrInitial148BlockCapacity
 	}
 	var result initial148RootReadOutcomeV1
-	err := owner.WithCandidateRootV1(reader, input.Selection, func(scope *mdbx.CandidateRootScopeV1) error {
+	err := owner.WithCandidateRootV1(reader, input.Selection, input.Raw, func(scope *mdbx.CandidateRootScopeV1) error {
 		var err error
 		result, err = input.fundAndDeriveV1(reader, scope)
 		return err
@@ -146,7 +164,7 @@ func (in *CandidateRootInput) fundAndDeriveV1(reader *mdbx.Reader, scope *mdbx.C
 		w = math.MaxUint64
 	}
 	var out initial148RootReadOutcomeV1
-	err := scope.WithCandidateValidationV1(w, uint64(len(in.Raw)), func(retire func() error) error {
+	err := scope.WithCandidateValidationV1(w, func(retire func() error) error {
 		var err error
 		out, err = in.deriveFundedV1(reader, scope, retire)
 		return err

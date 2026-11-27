@@ -108,6 +108,8 @@ func candidateTxError(t *testing.T, r *mdbx.Reader, o *mdbx.OperationReservation
 	var tx *TxError
 	logicalMDBXAssert(t, got == [32]byte{} && errors.As(err, &tx) && tx != nil && any(err) == any(tx) && tx.Code == code && tx.Msg == diagnostic,
 		"candidate first result %x/%v, want %s/%q", got, err, code, diagnostic)
+	_, _, logical := InspectCandidateRootFailure(err)
+	logicalMDBXAssert(t, !logical, "candidate transaction error classified as logical state failure: %v", err)
 }
 
 func candidateView(t *testing.T, w *btWorld, use func(*mdbx.Reader)) {
@@ -142,10 +144,23 @@ func TestCandidateRootResult(t *testing.T) {
 		candidateView(t, s.world, func(r *mdbx.Reader) { candidateRootOK(t, r, s.world.owner, coinbase, coinbaseWant) })
 	})
 	t.Run("membership", func(t *testing.T) { candidateMembership(t, s) })
+	t.Run("active_simplicity", candidateActiveSimplicity)
 	t.Run("variant", func(t *testing.T) {
 		t.Run("payout", func(t *testing.T) { candidateVariant(t, s, full, want, 21, 2) })
 		t.Run("without_last_spend", func(t *testing.T) { candidateVariant(t, s, full, want, 20, 1) })
 	})
+}
+
+func candidateActiveSimplicity(t *testing.T) {
+	w := btNew(t)
+	f := icbH5VariantV1(t, w, icbH5OptsV1{vault: true, simplicity: 1})
+	in := candidateInput(t, f.in.Raw, f.in.Parent)
+	in.AlreadyGenerated, in.ChainID = f.in.AlreadyGenerated, f.in.ChainID
+	rotation, err := FreezeCandidateRootRotation(f.h, activeSimplicityRotation(in.ChainID, 1))
+	logicalMDBXAssert(t, err == nil, "freeze candidate Simplicity deployment: %v", err)
+	in.Rotation = rotation
+	want := icbRootV1(f.finalLeaves)
+	candidateView(t, w, func(r *mdbx.Reader) { candidateRootOK(t, r, w.owner, in, want) })
 }
 
 func candidateVariant(t *testing.T, s candidateScene, in CandidateRootInput, original [32]byte, payout uint64, spends int) {
@@ -345,6 +360,7 @@ func TestCandidateRootOrder(t *testing.T) {
 	}
 	t.Run("transaction_before_subsidy", func(t *testing.T) { candidateSpendOrder(t, s) })
 	t.Run("subsidy_before_law", func(t *testing.T) { candidateSubsidyBeforeLaw(t) })
+	t.Run("already_generated", candidateAlreadyGenerated)
 	t.Run("da_bytes", func(t *testing.T) { candidateDABytes(t, s, false) })
 	t.Run("timestamp_before_da_bytes", func(t *testing.T) { candidateDABytes(t, s, true) })
 }
@@ -440,25 +456,49 @@ func candidateDABytes(t *testing.T, s candidateScene, old bool) {
 
 func candidateSpendOrder(t *testing.T, s candidateScene) {
 	t.Helper()
+	in, next, want := candidateSpendOrderInputs(t, s)
+	candidateView(t, s.world, func(r *mdbx.Reader) {
+		candidateTxError(t, r, s.world.owner, in, "TX_ERR_MISSING_UTXO", "utxo not found")
+		candidateRootOK(t, r, s.world.owner, next, want)
+	})
+}
+
+func candidateSpendOrderInputs(t *testing.T, s candidateScene) (CandidateRootInput, CandidateRootInput, [32]byte) {
+	t.Helper()
 	first, _ := s.spend(t, 1, s.funding, 1000, 990)
 	op := Outpoint{Txid: [32]byte{0x99}}
 	second, _ := s.spend(t, 2, op, 990, 980)
 	raw, _ := candidateFrame(t, s.parent, 4_900_000_000_000_000, first, second)
 	next, want := s.body(t, 0, 1)
-	candidateView(t, s.world, func(r *mdbx.Reader) {
-		candidateTxError(t, r, s.world.owner, candidateInput(t, raw, s.parent), "TX_ERR_MISSING_UTXO", "utxo not found")
-		candidateRootOK(t, r, s.world.owner, next, want)
-	})
+	return candidateInput(t, raw, s.parent), next, want
 }
 
 func candidateSubsidyBeforeLaw(t *testing.T) {
 	t.Helper()
-	w, in, _, funding := candidateGrowthSetup(t, true)
-	in.Raw, _ = candidateFrame(t, in.Selection.Parent, 4_900_000_000_000_000, funding.spends...)
-	next, want := candidateGrowthCoinbase(t, in, funding.parents)
+	w, in, next, want := candidateSubsidyOrderInputs(t)
 	candidateView(t, w, func(r *mdbx.Reader) {
 		candidateTxError(t, r, w.owner, in, "BLOCK_ERR_SUBSIDY_EXCEEDED", "coinbase outputs exceed subsidy+fees bound")
 		candidateRootOK(t, r, w.owner, next, want)
+	})
+}
+
+func candidateSubsidyOrderInputs(t *testing.T) (*btWorld, CandidateRootInput, CandidateRootInput, [32]byte) {
+	t.Helper()
+	w, in, _, funding := candidateGrowthSetup(t, true)
+	in.Raw, _ = candidateFrame(t, in.Selection.Parent, 4_900_000_000_000_000, funding.spends...)
+	next, want := candidateGrowthCoinbase(t, in, funding.parents)
+	return w, in, next, want
+}
+
+func candidateAlreadyGenerated(t *testing.T) {
+	s := newCandidateScene(t, 2)
+	in, _ := s.body(t, 0, 4_672_999_694)
+	next, want := s.body(t, 0, 4_672_999_693)
+	in.AlreadyGenerated = Uint128{Lo: 4_673_004_150}
+	next.AlreadyGenerated = in.AlreadyGenerated
+	candidateView(t, s.world, func(r *mdbx.Reader) {
+		candidateTxError(t, r, s.world.owner, in, "BLOCK_ERR_SUBSIDY_EXCEEDED", "coinbase outputs exceed subsidy+fees bound")
+		candidateRootOK(t, r, s.world.owner, next, want)
 	})
 }
 
@@ -696,7 +736,9 @@ func TestCandidateRootAdmission(t *testing.T) {
 				root, err := DeriveCandidateUTXORootV1(r, s.world.owner, bad)
 				logicalMDBXAssert(t, root == [32]byte{}, "invalid context returned digest %x", root)
 				if row.want == nil {
-					irFailureV1(t, err, logicalStateFailureLocalInvariant, "invalid candidate validation context")
+					class, cause, ok := InspectCandidateRootFailure(err)
+					logicalMDBXAssert(t, ok && class == CandidateRootFailureLocalInvariant && cause != nil && cause.Error() == "invalid candidate validation context",
+						"candidate validation class/cause: %v/%v", class, cause)
 				} else {
 					logicalMDBXAssert(t, any(err) == any(row.want), "candidate admission returned %v, want %v", err, row.want)
 				}
@@ -789,11 +831,15 @@ func candidateCopiedCap(t *testing.T) {
 	t.Helper()
 	s := newCandidateScene(t, 20001)
 	in, want := s.body(t, 0, 1)
-	rows := []CandidateRootCapRow{{ChainID: [32]byte{1}, ActivationHeight: 20002}}
+	rows := []CandidateRootCapRow{{ChainID: [32]byte{1}, ActivationHeight: 20001}}
 	registry, err := NewCandidateRootCapRegistry(rows)
 	logicalMDBXAssert(t, err == nil, "ordered cap configuration: %v", err)
-	rows[0].ActivationHeight = 20000
+	rows[0].ActivationHeight = 20002
 	in.CapRegistry, in.ChainID = registry, [32]byte{1}
 	irCounterV1(t, s.world, 1649267441664+1, 25200003)
-	candidateView(t, s.world, func(r *mdbx.Reader) { candidateRootOK(t, r, s.world.owner, in, want) })
+	candidateView(t, s.world, func(r *mdbx.Reader) {
+		candidateTxError(t, r, s.world.owner, in, "BLOCK_ERR_STATE_CAP_EXCEEDED", "logical state cap exceeded")
+		in.ChainID = [32]byte{2}
+		candidateRootOK(t, r, s.world.owner, in, want)
+	})
 }

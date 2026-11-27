@@ -1269,10 +1269,10 @@ func (*OperationAccount) WithReservation(uint64,func()error)error{return nil}
 type CandidateRootParentV1 struct{DatabaseID [32]byte; Generation,Height uint64; Parent TreeEndpointV1}
 type CandidateRootBodyV1 struct{Raw []byte; HeaderBytes uint16; BlockMeta TreeBlockV1; Events func([]byte,*TreeDeltaSinkV1)error}
 type CandidateRootScopeV1 struct{}
-func (*OperationReservationOwner) WithCandidateRootV1(*Reader,CandidateRootParentV1,func(*CandidateRootScopeV1)error)error{return nil}
-func (*CandidateRootScopeV1) WithCandidateValidationV1(uint64,uint64,func(func()error)error)error{return nil}
+func (*OperationReservationOwner) WithCandidateRootV1(*Reader,CandidateRootParentV1,[]byte,func(*CandidateRootScopeV1)error)error{return nil}
+func (*CandidateRootScopeV1) WithCandidateValidationV1(uint64,func(func()error)error)error{return nil}
 func (*CandidateRootScopeV1) WithCandidateCensusV1(func()error)error{return nil}
-func (*CandidateRootScopeV1) WithCandidateFactsV1(uint64,uint32,func(func()error,func()error,func()error)error)error{return nil}
+func (*CandidateRootScopeV1) WithCandidateFactsV1(uint32,func(func()error,func()error,func()error)error)error{return nil}
 func (*CandidateRootScopeV1) QualifyCurrentV1()error{return nil}
 func (*CandidateRootScopeV1) DeriveCandidateRootV1(CandidateRootBodyV1,[]TreeOutpointV1)([32]byte,error){return [32]byte{},nil}
 func IsOperationReservationCapacity(error)bool{return false}
