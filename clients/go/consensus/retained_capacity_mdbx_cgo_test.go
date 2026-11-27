@@ -592,29 +592,64 @@ func TestRetainedCapacityMDBXPlanOrder(t *testing.T) {
 func retainedCapacityPlannedExclusion(t *testing.T, malformed bool) {
 	t.Helper()
 	w, _, _ := riGenesis(t)
-	bound := retainedCapacityBoundOpV1(t, w)
-	old := rtEnvelope(t, w)
-	logicalMDBXAssert(t, old.Authority.ExcludedInvalidBranch == nil, "retained OLD exclusion is occupied")
-	before := rtImage(t, w)
+	retainedCapacityWithGrant(t, w, func(first *mdbx.OperationAccount) {
+		op := retainedCapacityBoundOpV1(t, w)
+		old := rtEnvelope(t, w)
+		logicalMDBXAssert(t, old.Authority.ExcludedInvalidBranch == nil, "retained OLD exclusion is occupied")
+		before := rtImage(t, w)
+		retainedCapacitySetPlannedSlot(t, op, old, malformed)
+		a := NewRetainedAccountingV1(DefaultLimitsV1())
+		retainedCapacityWithGrant(t, w, func(retry *mdbx.OperationAccount) {
+			bound := retainedCapacityBoundOpV1(t, w)
+			retainedCapacityRejectPlannedSlot(t, w, first, a, op, malformed)
+			normal := &DirectRetainedProofV1{}
+			run := retainedCapacityNativePlan(t, w, retry, a, normal, bound)
+			logicalMDBXAssert(t, run.planErr == nil && normal.prepared && normal.pre > 0, "valid same-owner plan after exclusion refusal: %+v/%d", run, normal.pre)
+			err := a.ApplyDirectMDBX(normal, run.truth, run.stage, run.index, run.err, false)
+			logicalMDBXAssert(t, err == nil && normal.applied && a.active == nil, "apply valid plan's native abort: %v", err)
+		})
+		replayImage := rtImage(t, w)
+		logicalMDBXAssert(t, reflect.DeepEqual(replayImage, before) && reflect.DeepEqual(rtEnvelope(t, w), old), "retained exclusion refusal published authority")
+	})
+	btReservationsReleased(t, w.owner)
+}
+
+func retainedCapacityWithGrant(t *testing.T, w *btWorld, body func(*mdbx.OperationAccount)) {
+	t.Helper()
+	err := w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
+		return account.WithReservation(8192, func() error {
+			body(account)
+			return nil
+		})
+	})
+	logicalMDBXAssert(t, err == nil, "retained caller reservation: %v", err)
+}
+
+func retainedCapacitySetPlannedSlot(t *testing.T, op *mdbx.TreeOperationV1, old mdbx.TreeAuthorityV1, malformed bool) {
+	t.Helper()
 	next := old
 	next.Authority.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, FirstInvalidBlockHash: [32]byte{9}, ExactConsensusError: []byte("TX_ERR_PARSE")}
 	literal, err := next.Encode()
 	logicalMDBXAssert(t, err == nil, "encode prospective exclusion: %v", err)
 	control, err := mdbx.DecodeTreeAuthorityV1(literal)
 	logicalMDBXAssert(t, err == nil && reflect.DeepEqual(control, next), "prospective exclusion control: %v", err)
-	want := errRetainedFiniteAPIV1
 	if malformed {
 		literal = retainedCapacityCorruptPlannedSlot(t, literal)
-		want = errRetainedShapeAPIV1
 	}
-	op := *bound
-	op.Pair.Mutations = append([]mdbx.Mutation(nil), bound.Pair.Mutations...)
 	mutation := btMutation(0, []byte{2}, literal)
 	mutation.BeforePresent = true
 	op.Pair.Mutations = append(op.Pair.Mutations, mutation)
 	btSort(op.Pair.Mutations)
-	a, proof := NewRetainedAccountingV1(DefaultLimitsV1()), &DirectRetainedProofV1{}
-	run := retainedCapacityNativePlan(t, w, a, proof, &op)
+}
+
+func retainedCapacityRejectPlannedSlot(t *testing.T, w *btWorld, account *mdbx.OperationAccount, a *RetainedAccountingV1, op *mdbx.TreeOperationV1, malformed bool) {
+	t.Helper()
+	want := errRetainedFiniteAPIV1
+	if malformed {
+		want = errRetainedShapeAPIV1
+	}
+	proof := &DirectRetainedProofV1{}
+	run := retainedCapacityNativePlan(t, w, account, a, proof, op)
 	logicalMDBXAssert(t, any(run.planErr) == any(want), "planned exclusion returned %v, want %v", run.planErr, want)
 	logicalMDBXAssert(t, run.truth == mdbx.CommitTruthOld && run.stage == mdbx.UpdateStagePrewrite && run.index == -1 && any(run.err) == any(run.planErr), "planned exclusion native refusal: %+v", run)
 	logicalMDBXAssert(t, a.active == proof && !proof.prepared, "planned exclusion prepared a proof")
@@ -622,16 +657,8 @@ func retainedCapacityPlannedExclusion(t *testing.T, malformed bool) {
 	if malformed {
 		logicalMDBXAssert(t, proof.roles == ([2]retainedRoleV1{}) && retainedCapacityClearedV1(a), "malformed plan retained prework")
 	}
-	err = a.ApplyDirectMDBX(proof, run.truth, run.stage, run.index, run.err, false)
+	err := a.ApplyDirectMDBX(proof, run.truth, run.stage, run.index, run.err, false)
 	logicalMDBXAssert(t, err == nil && proof.applied && a.active == nil, "apply native exclusion refusal: %v", err)
-	normal := &DirectRetainedProofV1{}
-	run = retainedCapacityNativePlan(t, w, a, normal, bound)
-	logicalMDBXAssert(t, run.planErr == nil && normal.prepared && normal.pre > 0, "valid same-owner plan after exclusion refusal: %+v/%d", run, normal.pre)
-	err = a.ApplyDirectMDBX(normal, run.truth, run.stage, run.index, run.err, false)
-	logicalMDBXAssert(t, err == nil && normal.applied && a.active == nil, "apply valid plan's native abort: %v", err)
-	replayImage := rtImage(t, w)
-	logicalMDBXAssert(t, reflect.DeepEqual(replayImage, before) && reflect.DeepEqual(rtEnvelope(t, w), old), "retained exclusion refusal published authority")
-	btReservationsReleased(t, w.owner)
 }
 
 func retainedCapacityCorruptPlannedSlot(t *testing.T, control []byte) []byte {
@@ -645,21 +672,17 @@ func retainedCapacityCorruptPlannedSlot(t *testing.T, control []byte) []byte {
 	return bad
 }
 
-func retainedCapacityNativePlan(t *testing.T, w *btWorld, owner *RetainedAccountingV1, proof *DirectRetainedProofV1, op *mdbx.TreeOperationV1) rtCommit {
+func retainedCapacityNativePlan(t *testing.T, w *btWorld, account *mdbx.OperationAccount, owner *RetainedAccountingV1, proof *DirectRetainedProofV1, op *mdbx.TreeOperationV1) rtCommit {
 	t.Helper()
 	var run rtCommit
 	stop := errors.New("stop after retained planning")
-	err := w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
-		run.truth, run.stage, run.index, run.err = w.s.UpdateTreeV1(account, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
-			run.planErr = owner.PlanDirectMDBX(proof, r, account, op)
-			if run.planErr != nil {
-				return mdbx.TreeOperationV1{}, run.planErr
-			}
-			return mdbx.TreeOperationV1{}, stop
-		})
-		return nil
+	run.truth, run.stage, run.index, run.err = w.s.UpdateTreeV1(account, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+		run.planErr = owner.PlanDirectMDBX(proof, r, account, op)
+		if run.planErr != nil {
+			return mdbx.TreeOperationV1{}, run.planErr
+		}
+		return mdbx.TreeOperationV1{}, stop
 	})
-	logicalMDBXAssert(t, err == nil, "retained plan account: %v", err)
 	if run.planErr == nil {
 		logicalMDBXAssert(t, run.truth == mdbx.CommitTruthOld && run.stage == mdbx.UpdateStagePrewrite && run.index == -1 && any(run.err) == any(stop), "valid retained plan abort: %+v", run)
 	}
