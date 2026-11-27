@@ -14,6 +14,11 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -190,11 +195,11 @@ func TestConsensusErrorCodeStorageAdmission(t *testing.T) {
 func storageErrorCodeDeclarations(t *testing.T) (*types.Scope, []*types.Const) {
 	t.Helper()
 	fset := token.NewFileSet()
-	files, source := storageErrorCodeFiles(t, fset)
+	files, source, imports := storageErrorCodeFiles(t, fset)
 	config := types.Config{
 		FakeImportC:              true,
 		DisableUnusedImportCheck: true,
-		Importer:                 storageErrorCodeImporter{source: importer.ForCompiler(fset, "source", nil)},
+		Importer:                 storageErrorCodeImporter(t, fset, imports),
 		Error:                    func(error) {},
 	}
 	info := &types.Info{Defs: make(map[*ast.Ident]types.Object)}
@@ -208,7 +213,7 @@ func storageErrorCodeDeclarations(t *testing.T) (*types.Scope, []*types.Const) {
 		for _, spec := range decl.Specs {
 			for _, name := range spec.(*ast.ValueSpec).Names {
 				declared, ok := info.Defs[name].(*types.Const)
-				if !ok || declared.Type() == types.Typ[types.Invalid] {
+				if !ok || declared.Val().Kind() == constant.Unknown {
 					t.Fatalf("unresolved constant %s at %s", name.Name, fset.PositionFor(name.Pos(), false))
 				}
 				declarations = append(declarations, declared)
@@ -218,7 +223,7 @@ func storageErrorCodeDeclarations(t *testing.T) (*types.Scope, []*types.Const) {
 	return pkg.Scope(), declarations
 }
 
-func storageErrorCodeFiles(t *testing.T, fset *token.FileSet) ([]*ast.File, *ast.File) {
+func storageErrorCodeFiles(t *testing.T, fset *token.FileSet) ([]*ast.File, *ast.File, []string) {
 	t.Helper()
 	buildPackage, err := build.Default.ImportDir(".", 0)
 	if err != nil {
@@ -245,17 +250,33 @@ func storageErrorCodeFiles(t *testing.T, fset *token.FileSet) ([]*ast.File, *ast
 	if source == nil {
 		t.Fatal("missing errors.go")
 	}
-	return files, source
+	return files, source, buildPackage.Imports
 }
 
-type storageErrorCodeImporter struct{ source types.Importer }
-
-func (i storageErrorCodeImporter) Import(path string) (*types.Package, error) {
-	root, _, _ := strings.Cut(path, "/")
-	if strings.Contains(root, ".") {
-		return (logicalMDBXStubImporter{}).Import(path)
+func storageErrorCodeImporter(t *testing.T, fset *token.FileSet, imports []string) types.Importer {
+	t.Helper()
+	imports = slices.DeleteFunc(imports, func(path string) bool { return path == "C" })
+	args := append([]string{"list", "-deps", "-export", "-f", `{{if .Export}}{{.ImportPath}}{{"\t"}}{{.Export}}{{end}}`}, imports...)
+	cmd := exec.CommandContext(t.Context(), filepath.Join(runtime.GOROOT(), "bin", "go"), args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list dependency export data: %v\n%s", err, &stderr)
 	}
-	return i.source.Import(path)
+	files := make(map[string]string)
+	for line := range strings.SplitSeq(string(output), "\n") {
+		if path, file, ok := strings.Cut(line, "\t"); ok {
+			files[path] = file
+		}
+	}
+	return importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
+		file, ok := files[path]
+		if !ok {
+			return nil, fmt.Errorf("missing export data for %q", path)
+		}
+		return os.Open(file)
+	})
 }
 
 func checkDeclaredStorageErrorCode(t *testing.T, name, code string) {

@@ -131,12 +131,17 @@ func prunedTreeOpenUnchanged(t *testing.T, s *Store, before []byte, marker strin
 func prunedTreeConsumed(t *testing.T, s *Store, out PrunedTreeProfileOutcomeV1, owner *OperationReservationOwner) {
 	t.Helper()
 	prunedTreeRefusal(t, out, "latched tuple")
+	if s.state != storeCLOSED {
+		t.Fatalf("latched store state %s", s.state)
+	}
+	prunedTreeRetry(t, s, out, owner)
+}
+
+func prunedTreeRetry(t *testing.T, s *Store, out PrunedTreeProfileOutcomeV1, owner *OperationReservationOwner) {
+	t.Helper()
 	again := s.SelectPrunedTreeProfileV1(true, nil, owner)
 	if !sameError(again.Err, out.Err) || again.Truth != CommitTruthOld || again.Stage != UpdateStagePrewrite {
 		t.Fatalf("latched reuse: %+v", again)
-	}
-	if s.state != storeCLOSED {
-		t.Fatalf("latched store state %s", s.state)
 	}
 }
 
@@ -385,7 +390,11 @@ func prunedTreeReadWindow(t *testing.T, remaining uint64) {
 	if !treeSameErrorV1(out.Err, errOperationReservationCapacity) {
 		t.Fatalf("native read-window capacity refusal = %+v", out)
 	}
-	prunedTreeConsumed(t, s, out, funded)
+	prunedTreeRefusal(t, out, "latched tuple")
+	prunedTreeRetry(t, s, out, funded)
+	if s.state != storeCLOSED {
+		t.Fatalf("latched store state %s", s.state)
+	}
 	s = tsReopen(t, s, path)
 	if !bytes.Equal(prunedTreeImage(t, s), before) {
 		t.Fatal("native read-window refusal changed durable OLD")

@@ -3512,15 +3512,12 @@ func TestPrunedProfileMalformed(t *testing.T) {
 				diagnostic, cause = "stored value width outside SchemaV2 bound", nil
 			}
 			bootstrapRefusal(t, "pruned profile malformed authority drifted", out.Truth, out.Err, EngineIntegrity, operationGet, codeInvalid, diagnostic, cause, true)
-			if out.Stage != 1 || out.Decision != "" || out.Authority != nil {
+			if out.Stage != 1 || out.Decision != "" || out.Authority != nil || s.state != storeCLOSED {
 				t.Fatal("pruned profile malformed authority drifted")
 			}
 			again := s.SelectPrunedProfileV1(true, tip, owner)
 			if !sameError(again.Err, out.Err) || again.Truth != 1 || again.Stage != 1 {
 				t.Fatal("pruned profile malformed terminal drifted")
-			}
-			if s.state != storeCLOSED {
-				t.Fatalf("pruned profile malformed Store state = %s", s.state)
 			}
 			prunedReleased(t, owner)
 			reopened, openErr := Open(path, cfg)
