@@ -814,6 +814,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	var listed struct{ GoFiles, CgoFiles, IgnoredGoFiles, TestGoFiles []string }
 	out, err := exec.CommandContext(t.Context(), "go", "list", "-e", "-json", ".").Output()
 	logicalMDBXAssert(t, err == nil && json.Unmarshal(out, &listed) == nil, "go list: %v", err)
+	candidateBuildCensus(t, listed.GoFiles, listed.TestGoFiles, listed.IgnoredGoFiles)
 	logicalMDBXAssert(t, slices.Contains(listed.GoFiles, "journal_source_export_mdbx_cgo.go") && slices.Contains(listed.TestGoFiles, "journal_source_export_mdbx_cgo_test.go"), "journal source ordinary build membership")
 	for _, name := range []string{"journal_source_export_mdbx_cgo.go", "journal_source_export_mdbx_cgo_test.go"} {
 		source, readErr := os.ReadFile(name)
@@ -869,6 +870,9 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	sources := slices.Concat(listed.GoFiles, listed.CgoFiles, listed.IgnoredGoFiles)
 	// IgnoredGoFiles also lists these exact rubin_mdbx_fixture-tagged test files; they are test code, not non-test sources.
 	sources = slices.DeleteFunc(sources, func(name string) bool {
+		if name == "candidate_root_mdbx_fixture_cgo_test.go" {
+			return true
+		}
 		if name == "retained_image_mdbx_fixture_cgo_test.go" || name == "retained_capacity_mdbx_fixture_cgo_test.go" {
 			return true
 		}
@@ -881,7 +885,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		for _, spec := range parsed.Imports {
 			if strings.HasSuffix(spec.Path.Value, `/internal/mdbx"`) {
 				imports++
-				if name == "retained_image_mdbx_cgo.go" || name == "retained_artifact_mdbx_cgo.go" || name == "retained_charge.go" {
+				if name == "retained_image_mdbx_cgo.go" || name == "retained_artifact_mdbx_cgo.go" || name == "retained_charge.go" || name == "candidate_root_mdbx_cgo.go" {
 					continue
 				}
 				logicalMDBXAssert(t, name == "replay_pair_mdbx_cgo.go" || name == "initial148_first_genesis_mdbx_cgo.go" || name == "initial148_complete_block_mdbx_cgo.go" || name == "retained_capacity_mdbx_cgo.go" || name == "initial148_required_state_mdbx_cgo.go" || name == "block_tree_source_mdbx_cgo.go" || name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go" || name == "archive_profile_mdbx_cgo.go" || name == "cleanup_generation_mdbx_cgo.go" || name == "detached_drain_mdbx_cgo.go" || name == "replay_entry_mdbx_cgo.go" || name == "replay_recovery_mdbx_cgo.go" || name == "replay_path_mdbx_cgo.go" || name == "canonical_undo_mdbx_cgo.go" || name == "startup_mdbx_cgo.go" || name == "replay_step_mdbx_cgo.go" || name == "replay_header148_mdbx_cgo.go" || name == "replay_qualifier148_mdbx_cgo.go" || name == "replay_tree_route_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
@@ -889,7 +893,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		}
 		files = append(files, parsed)
 	}
-	logicalMDBXAssert(t, imports == 23, "bridge lost dormancy: %d non-test internal/mdbx imports, want 23", imports)
+	logicalMDBXAssert(t, imports == 24, "bridge lost dormancy: %d non-test internal/mdbx imports, want 24", imports)
 	native := startupCensusNative(t)
 	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{native: native}}
 	consensusPackage, _ := config.Check("consensus", fset, files, info)
@@ -970,6 +974,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	}
 	startupCensusUses(t, fset, files, info, parents, native)
 	blockTreeCensusUsesV1(t, fset, files, info, native)
+	candidateRootCensusUses(t, fset, info, native, consensusPackage)
 	// Resolve dormant public uses in the actual node and command packages too.
 	// The existing incomplete-import checker remains deliberately tolerant of
 	// unrelated types, while every protected spelling must resolve nonvacuously.
@@ -992,6 +997,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 			checker := &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{native: native, consensus: consensusPackage}}
 			_, _ = checker.Check(name, fset, parsed, uses)
 			public := consensusPackage.Scope().Lookup("VerifyPersistedReplayStartupMDBX")
+			candidate := consensusPackage.Scope().Lookup("DeriveCandidateUTXORootV1")
 			step := consensusPackage.Scope().Lookup("NewReplayStepOwner148V1")
 			stepOwner := consensusPackage.Scope().Lookup("ReplayStepOwnerV1")
 			logicalMDBXAssert(t, step != nil && stepOwner != nil, "STEP consumer census unresolved producer")
@@ -1008,6 +1014,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 					if uses.Uses[id] == public {
 						t.Fatalf("startup lost dormancy: node/cmd public consumer at %s", fset.Position(id.Pos()))
 					}
+					logicalMDBXAssert(t, uses.Uses[id] != candidate && id.Name != "DeriveCandidateUTXORootV1", "candidate root production consumer at %s", fset.Position(id.Pos()))
 					logicalMDBXAssert(t, uses.Uses[id] != step && uses.Uses[id] != stepMethod, "STEP lost dormancy: node/cmd consumer at %s", fset.Position(id.Pos()))
 					if id.Name == "NewReplayStepOwner148V1" || id.Name == "StepReplayMDBX" {
 						logicalMDBXAssert(t, uses.Defs[id] != nil || uses.Uses[id] != nil, "STEP census unresolved use at %s", fset.Position(id.Pos()))
@@ -1020,6 +1027,83 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func candidateBuildCensus(t *testing.T, goFiles, tests, ignored []string) {
+	t.Helper()
+	const source, test, fixture = "candidate_root_mdbx_cgo.go", "candidate_root_mdbx_cgo_test.go", "candidate_root_mdbx_fixture_cgo_test.go"
+	logicalMDBXAssert(t, slices.Contains(goFiles, source) && slices.Contains(tests, test), "candidate ordinary build membership")
+	for _, name := range []string{source, test, fixture} {
+		content, err := os.ReadFile(name)
+		logicalMDBXAssert(t, err == nil, "candidate build constraint read %s: %v", name, err)
+		expression, err := constraint.Parse(strings.SplitN(string(content), "\n", 2)[0])
+		want := logicalMDBXConstraint
+		if name == fixture {
+			want = "rubin_mdbx_fixture && " + want
+		}
+		logicalMDBXAssert(t, err == nil && expression.String() == want, "candidate build constraint %s: %v/%v", name, expression, err)
+	}
+	logicalMDBXAssert(t, slices.Contains(ignored, fixture) != slices.Contains(tests, fixture), "candidate fixture build membership")
+	tagged, err := exec.CommandContext(t.Context(), "go", "list", "-e", "-json", "-tags=rubin_mdbx_fixture", ".").Output()
+	var selected struct{ TestGoFiles []string }
+	logicalMDBXAssert(t, err == nil && json.Unmarshal(tagged, &selected) == nil && slices.Contains(selected.TestGoFiles, fixture), "candidate tagged fixture build: %v", err)
+	for _, flags := range [][]string{nil, {"-tags=rubin_mdbx_fixture"}} {
+		args := append([]string{"list", "-e", "-json"}, flags...)
+		cmd := exec.CommandContext(t.Context(), "go", append(args, ".")...)
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		output, err := cmd.Output()
+		var listed struct{ GoFiles, IgnoredGoFiles, TestGoFiles []string }
+		logicalMDBXAssert(t, err == nil && json.Unmarshal(output, &listed) == nil && slices.Contains(listed.GoFiles, "initial148_block.go"), "no-cgo frame selection %v: %v", flags, err)
+		for _, name := range []string{source, test, fixture} {
+			logicalMDBXAssert(t, slices.Contains(listed.IgnoredGoFiles, name) && !slices.Contains(listed.TestGoFiles, name), "candidate no-cgo membership %s/%v", name, flags)
+		}
+		candidateNoFallback(t, listed.GoFiles)
+	}
+}
+
+func candidateNoFallback(t *testing.T, files []string) {
+	t.Helper()
+	for _, name := range files {
+		parsed, err := parser.ParseFile(token.NewFileSet(), name, nil, parser.SkipObjectResolution)
+		logicalMDBXAssert(t, err == nil, "candidate no-cgo source %s: %v", name, err)
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			if id, ok := node.(*ast.Ident); ok {
+				logicalMDBXAssert(t, id.Name != "DeriveCandidateUTXORootV1" && id.Name != "CandidateRootInput", "candidate no-cgo surface in %s", name)
+			}
+			return true
+		})
+	}
+}
+
+func candidateRootCensusUses(t *testing.T, fset *token.FileSet, info *types.Info, native, consensusPackage *types.Package) {
+	t.Helper()
+	const producer = "candidate_root_mdbx_cgo.go"
+	entry := consensusPackage.Scope().Lookup("DeriveCandidateUTXORootV1")
+	logicalMDBXAssert(t, entry != nil && fset.Position(entry.Pos()).Filename == producer, "candidate public definition")
+	owners := map[types.Object]string{}
+	for _, spec := range [][3]string{
+		{"OperationReservationOwner", "WithCandidateRootV1", producer},
+		{"CandidateRootScopeV1", "WithCandidateValidationV1", producer},
+		{"CandidateRootScopeV1", "QualifyCurrentV1", producer},
+		{"CandidateRootScopeV1", "WithCandidateCensusV1", "block_tree_source_mdbx_cgo.go"},
+		{"CandidateRootScopeV1", "WithCandidateFactsV1", "initial148_required_state_mdbx_cgo.go"},
+		{"CandidateRootScopeV1", "DeriveCandidateRootV1", "initial148_required_state_mdbx_cgo.go"},
+	} {
+		method, _, _ := types.LookupFieldOrMethod(types.NewPointer(native.Scope().Lookup(spec[0]).Type()), true, native, spec[1])
+		logicalMDBXAssert(t, method != nil, "candidate native method %s.%s", spec[0], spec[1])
+		owners[method] = spec[2]
+	}
+	uses := map[types.Object]int{}
+	for id, object := range info.Uses {
+		logicalMDBXAssert(t, object != entry && id.Name != entry.Name(), "candidate public consumer at %s", fset.Position(id.Pos()))
+		if file, ok := owners[object]; ok {
+			logicalMDBXAssert(t, fset.Position(id.Pos()).Filename == file, "candidate native method %s used at %s", id.Name, fset.Position(id.Pos()))
+			uses[object]++
+		}
+	}
+	for method := range owners {
+		logicalMDBXAssert(t, uses[method] == 1, "candidate native use %s count %d", method.Name(), uses[method])
 	}
 }
 
@@ -1060,6 +1144,7 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 	composer := "initial148_complete_block_mdbx_cgo.go"
 	composed := initial148CompleteCensusDefinitionsV1(t, fset, files, info, composer)
 	replayComposer := "replay_pair_mdbx_cgo.go"
+	candidate := "candidate_root_mdbx_cgo.go"
 	replayComposed := map[types.Object]bool{}
 	for id, object := range info.Defs {
 		if object != nil && fset.Position(id.Pos()).Filename == replayComposer {
@@ -1111,10 +1196,13 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 	for id, object := range info.Uses {
 		filename := fset.Position(id.Pos()).Filename
 		if definitions[object] {
-			logicalMDBXAssert(t, filename == owned || filename == required || filename == composer || filename == "replay_pair_mdbx_cgo.go" || filename == "initial148_first_genesis_mdbx_cgo.go" || filename == "replay_step_mdbx_cgo.go", "block source lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
+			candidateUse := filename == candidate && (id.Name == "candidateTreeCensusV1" || id.Name == "withCandidateRequiredV1" || id.Name == "initial148RootReadOutcomeV1")
+			logicalMDBXAssert(t, candidateUse || filename == owned || filename == required || filename == composer || filename == "replay_pair_mdbx_cgo.go" || filename == "initial148_first_genesis_mdbx_cgo.go" || filename == "replay_step_mdbx_cgo.go", "block source lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
 		}
 		if composed[object] {
-			logicalMDBXAssert(t, filename == composer || filename == "replay_pair_mdbx_cgo.go" || filename == "initial148_first_genesis_mdbx_cgo.go" || filename == "replay_step_mdbx_cgo.go", "complete block lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
+			candidateUse := filename == candidate && slices.Contains([]string{"initial148FrozenRotationV1", "initial148ValidationTariffV1", "initial148ConnectFrameV1", "initial148ExpectedGeneratedV1", "initial148CheckCapV1"}, id.Name)
+			candidateUse = candidateUse || filename == required && id.Name == "initial148SelectedReadV1"
+			logicalMDBXAssert(t, candidateUse || filename == composer || filename == "replay_pair_mdbx_cgo.go" || filename == "initial148_first_genesis_mdbx_cgo.go" || filename == "replay_step_mdbx_cgo.go", "complete block lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
 		}
 		if replayComposed[object] {
 			logicalMDBXAssert(t, filename == replayComposer || filename == "replay_step_mdbx_cgo.go", "replay pair lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
@@ -1178,6 +1266,15 @@ type Store struct{}
 type OperationReservationOwner struct{}
 type OperationAccount struct{}
 func (*OperationAccount) WithReservation(uint64,func()error)error{return nil}
+type CandidateRootParentV1 struct{DatabaseID [32]byte; Generation,Height uint64; Parent TreeEndpointV1}
+type CandidateRootBodyV1 struct{Raw []byte; HeaderBytes uint16; BlockMeta TreeBlockV1; Events func([]byte,*TreeDeltaSinkV1)error}
+type CandidateRootScopeV1 struct{}
+func (*OperationReservationOwner) WithCandidateRootV1(*Reader,CandidateRootParentV1,[]byte,func(*CandidateRootScopeV1)error)error{return nil}
+func (*CandidateRootScopeV1) WithCandidateValidationV1(uint64,func(func()error)error)error{return nil}
+func (*CandidateRootScopeV1) WithCandidateCensusV1(func()error)error{return nil}
+func (*CandidateRootScopeV1) WithCandidateFactsV1(uint32,func(func()error,func()error,func()error)error)error{return nil}
+func (*CandidateRootScopeV1) QualifyCurrentV1()error{return nil}
+func (*CandidateRootScopeV1) DeriveCandidateRootV1(CandidateRootBodyV1,[]TreeOutpointV1)([32]byte,error){return [32]byte{},nil}
 func IsOperationReservationCapacity(error)bool{return false}
 type DBI struct{Name string; Rank uint8; Flags uint32}
 type AfterKind uint8

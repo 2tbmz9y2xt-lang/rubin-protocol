@@ -515,21 +515,21 @@ func btCompactCases(t *testing.T) {
 	for _, n := range []uint64{0, 1, 252, 253, 65535, 65536, math.MaxUint32, 4294967296, math.MaxUint64} {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {
 			raw := btCompact(n)
-			c := blockTreeCursorV1{raw: raw, length: uint64(len(raw)), source: &blockTreeSourceV1{}}
+			c := blockTreeCursorV1{raw: raw, length: uint64(len(raw))}
 			got := c.compactV1(math.MaxUint64)
 			logicalMDBXAssert(t, got == n && c.err == nil && c.off == uint64(len(raw)), "CompactSize %x = %d/%d/%v", raw, got, c.off, c.err)
 		})
 	}
 	for _, raw := range [][]byte{{}, {253}, {253, 252, 0}, {254, 255, 255, 0, 0}, {255, 255, 255, 255, 255, 0, 0, 0, 0}, {255, 0}, {254, 0, 0, 1}} {
-		c := blockTreeCursorV1{raw: raw, length: uint64(len(raw)), source: &blockTreeSourceV1{}}
+		c := blockTreeCursorV1{raw: raw, length: uint64(len(raw))}
 		c.compactV1(math.MaxUint64)
 		btFailure(t, c.err, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
 	}
-	c := blockTreeCursorV1{raw: []byte{2}, length: 1, source: &blockTreeSourceV1{}}
+	c := blockTreeCursorV1{raw: []byte{2}, length: 1}
 	c.compactV1(1)
 	btFailure(t, c.err, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
 	for _, offset := range []uint64{1, math.MaxUint64} {
-		c := blockTreeCursorV1{raw: []byte{0}, length: 1, off: offset, source: &blockTreeSourceV1{}}
+		c := blockTreeCursorV1{raw: []byte{0}, length: 1, off: offset}
 		c.skipV1(math.MaxUint64)
 		btFailure(t, c.err, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
 	}

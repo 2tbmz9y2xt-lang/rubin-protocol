@@ -113,6 +113,7 @@ func TestInitial148CompleteBlockTariffCensus(t *testing.T) {
 		{"connect work", unsafe.Sizeof(blockInputViewConnectWork{}), 192},
 		{"connect result", unsafe.Sizeof(connectBlockInputViewResult{}), 64},
 		{"spent source", unsafe.Sizeof(blockSpentInputSource{}), 80},
+		{"required key", unsafe.Sizeof(mdbx.TreeOutpointV1{}), 36},
 		{"queue", unsafe.Sizeof(SigCheckQueue{}), 56},
 		{"view state", unsafe.Sizeof(blockInputViewState{}), 40},
 	}
@@ -120,6 +121,13 @@ func TestInitial148CompleteBlockTariffCensus(t *testing.T) {
 		logicalMDBXAssert(t, row.got == row.want, "census %s size=%d want=%d", row.name, row.got, row.want)
 	}
 	logicalMDBXAssert(t, unsafe.Sizeof(step12DARecord{}) == 56, "DA record size")
+}
+
+func TestCandidateRootRetainedLayout(t *testing.T) {
+	fixed := 3*unsafe.Sizeof(CandidateRootInput{}) + 2*unsafe.Sizeof(mdbx.CandidateRootParentV1{}) +
+		2*unsafe.Sizeof(mdbx.CandidateRootBodyV1{}) + unsafe.Sizeof(initial148RequiredScopeV1{}) +
+		4*unsafe.Sizeof(initial148RootReadOutcomeV1{}) + 1024
+	logicalMDBXAssert(t, fixed <= 4096, "retained candidate control layout %d > 4096", fixed)
 }
 
 // TestInitial148CompleteBlockTariffMetadata lists every simultaneous current-
