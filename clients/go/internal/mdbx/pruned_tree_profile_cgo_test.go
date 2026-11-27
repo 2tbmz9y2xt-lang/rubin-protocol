@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -132,6 +134,11 @@ func prunedTreeConsumed(t *testing.T, s *Store, out PrunedTreeProfileOutcomeV1, 
 	if s.state != storeCLOSED {
 		t.Fatalf("latched store state %s", s.state)
 	}
+	prunedTreeRetry(t, s, out, owner)
+}
+
+func prunedTreeRetry(t *testing.T, s *Store, out PrunedTreeProfileOutcomeV1, owner *OperationReservationOwner) {
+	t.Helper()
 	again := s.SelectPrunedTreeProfileV1(true, nil, owner)
 	if !sameError(again.Err, out.Err) || again.Truth != CommitTruthOld || again.Stage != UpdateStagePrewrite {
 		t.Fatalf("latched reuse: %+v", again)
@@ -355,21 +362,73 @@ func TestPrunedTreeProfileReadFundingV1(t *testing.T) {
 	}
 	prunedTreeRefusal(t, out, "literal input before Encode")
 	prunedTreeOpenUnchanged(t, s, before, "literal input before Encode")
-	// A larger legal OLD makes ordinary H the reached refusal after input and PC.
-	a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 9, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: bytes.Repeat([]byte{1}, 2048)}
-	s, path, o := prunedTreeSeed(t, a)
-	r = tsRun(t, s, o, LaneOperation, TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: prunedTreeLagKey(), AfterKind: 2, Literal: root}}}})
-	r.tuple(t, 2, 3, -1)
-	mustEnvironment(t, r.err)
-	before = prunedTreeBytes(t, s)
-	out = s.SelectPrunedTreeProfileV1(true, nil, reservationFilled(t, uint64(436+4*len(before)-1)))
-	if !treeSameErrorV1(out.Err, errOperationReservationCapacity) || out.Truth != 1 || out.Stage != 1 || out.Authority != nil || out.Decision != "" || s.state != storeCLOSED {
-		t.Fatal("engine H refusal consumes after successful input/PC", out, s.state)
+	for _, remaining := range []uint64{1595, 1596} {
+		t.Run(fmt.Sprint(remaining), func(t *testing.T) { prunedTreeReadWindow(t, remaining) })
+	}
+}
+
+func prunedTreeReadWindow(t *testing.T, remaining uint64) {
+	t.Helper()
+	a, s, path, owner, tip := prunedTreeLargeScene(t, 4320)
+	before := prunedTreeImage(t, s)
+	old := prunedTreeBytes(t, s)
+	want := prunedTreeLargestReplacement(a, 4320)
+	next := wantTreeAuthority(t, want)
+	if len(old) != 257 || len(next) != 291 {
+		t.Fatalf("read-window authority lengths = %d/%d", len(old), len(next))
+	}
+	prunedTreeFundingPair(t, s, owner, tip, next)
+	if builder, copied, window := 1000+250+len(next), 2*(250+len(next)), 2*len(old); builder != 1541 || copied != 1082 || copied+window != 1596 {
+		t.Fatalf("read-window funding = %d/%d/%d", builder, copied, window)
+	}
+	funded := reservationFilled(t, remaining)
+	out := s.SelectPrunedTreeProfileV1(true, tip, funded)
+	if remaining == 1596 {
+		assertPrunedTreeLargestCommit(t, s, out, want, next)
+		return
+	}
+	if !treeSameErrorV1(out.Err, errOperationReservationCapacity) {
+		t.Fatalf("native read-window capacity refusal = %+v", out)
+	}
+	prunedTreeRefusal(t, out, "latched tuple")
+	prunedTreeRetry(t, s, out, funded)
+	if s.state != storeCLOSED {
+		t.Fatalf("latched store state %s", s.state)
 	}
 	s = tsReopen(t, s, path)
-	if !bytes.Equal(prunedTreeBytes(t, s), before) {
-		t.Fatal("engine H refusal durable OLD")
+	if !bytes.Equal(prunedTreeImage(t, s), before) {
+		t.Fatal("native read-window refusal changed durable OLD")
 	}
+}
+
+func prunedTreeFundingPair(t *testing.T, s *Store, owner *OperationReservationOwner, tip *AuthorityPointV1, next []byte) {
+	t.Helper()
+	dbis := TreeSchemaV1DBIs()
+	key := binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, 1), tip.Height)
+	want := TreePairV1{
+		Mutations: []Mutation{{DBI: dbis[0], Key: []byte{2}, BeforePresent: true, AfterKind: AfterLiteral, Literal: next}},
+		Consulted: []ConsultedRow{{DBI: dbis[0], Key: prunedTreeLagKey()}, {DBI: dbis[2], Key: key}},
+	}
+	mustEnvironment(t, owner.WithOperation(LaneOperation, func(account *OperationAccount) error {
+		return account.withHold(func(input *operationHold) error {
+			return s.View(func(r *Reader) error {
+				var run prunedTreeRun
+				op, err := prunedTreePlan(account, input, true, tip, &run, errors.New("stale tip"))(r)
+				pair := op.Pair
+				pairOnly := op.Primitives == nil && op.Proof == nil && op.HeaderSlot == nil
+				plainPair := pair.PrepaidReadBytes == 0 && pair.EntryInventory == nil && pair.ContextConsulted == nil &&
+					!pair.PreserveReplayObservations && pair.ObsoleteDeletes == nil && pair.ObsoleteConsulted == nil && pair.LargeConsulted == nil
+				matchesRows := reflect.DeepEqual(pair.Mutations, want.Mutations) && reflect.DeepEqual(pair.Consulted, want.Consulted)
+				if err != nil || run.decision != "" || !pairOnly || !plainPair || !matchesRows {
+					t.Fatalf("read-window pair = %+v/%v", op, err)
+				}
+				if ctxTreePC(op) != 541 || reservationLive(owner) != 541 {
+					t.Fatalf("read-window copy=%d, retained input=%d", ctxTreePC(op), reservationLive(owner))
+				}
+				return nil
+			})
+		})
+	}))
 }
 
 // TestPrunedTreeProfileMissingBinding is R10 (Capacity's nil-tip follow-up covers U=0);
@@ -381,54 +440,65 @@ func TestPrunedTreeProfileMissingBinding(t *testing.T) {
 	prunedTreeLatched(t, s, path, out, before, "missing pruned tree profile root binding", o)
 }
 
-// TestPrunedTreeProfileSizeBound is R11 (the tip row is paired with its rank-7
-// owner row, as the canonical pairing rule requires): the BLOCKS span (34 encoded bytes) moves
-// an Encode-accepted envelope past MaxMetadataBytes-27; one byte less commits. With p=4881
-// the replacement is also invalid (R9), and D12 refuses validity before size.
+// TestPrunedTreeProfileSizeBound commits the largest legal replacement and
+// keeps OLD when the BLOCKS span exceeds the PRUNED promise.
 func TestPrunedTreeProfileSizeBound(t *testing.T) {
-	for _, row := range []struct {
-		over bool
-		p    uint64
-	}{{false, 4320}, {true, 4320}, {true, 4881}} {
-		// authoritySize before the call: 40 + 44 + len(error); after: +1+9+24.
-		n := MaxMetadataBytes - 27 - 84 - 34
-		if row.over {
-			n++
+	t.Run("largest legal replacement", func(t *testing.T) {
+		a, s, _, owner, tip := prunedTreeLargeScene(t, 4320)
+		want := prunedTreeLargestReplacement(a, 4320)
+		next := wantTreeAuthority(t, want)
+		assertPrunedTreeLargestCommit(t, s, s.SelectPrunedTreeProfileV1(true, tip, owner), want, next)
+	})
+	t.Run("span exceeds promise", func(t *testing.T) {
+		_, s, _, owner, tip := prunedTreeLargeScene(t, 4881)
+		before := prunedTreeImage(t, s)
+		out := s.SelectPrunedTreeProfileV1(true, tip, owner)
+		treeNativeError(t, out.Err, operationUpdate, EngineLocalInvariant, -30779, "invalid pruned tree profile replacement", nil)
+		prunedTreeRefusal(t, out, "invalid replacement")
+		mustEnvironment(t, s.View(func(*Reader) error { return nil }))
+		bootstrapOpenUnchanged(t, s, "invalid replacement")
+		if !bytes.Equal(prunedTreeImage(t, s), before) {
+			t.Fatal("invalid PRUNED replacement changed OLD")
 		}
-		a := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 18561)
-		a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 20001, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: bytes.Repeat([]byte{1}, n)}
-		s, _, o := prunedTreeSeed(t, a)
-		tip := &AuthorityPointV1{Height: 20000, BlockHash: modelHash(20000)}
-		key, err := HeightKey(1, 20000)
-		mustEnvironment(t, err)
-		dbis := TreeSchemaV1DBIs()
-		op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{
-			{DBI: dbis[0], Key: prunedTreeLagKey(), AfterKind: AfterLiteral, Literal: prunedTreeBindingBytes(t, &row.p)},
-			{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: ChainValue(tip.BlockHash, [32]byte{}, modelWork(false))},
-			{DBI: dbis[7], Key: append(binary.BigEndian.AppendUint64(nil, 1), tip.BlockHash[:]...), AfterKind: AfterLiteral, Literal: binary.BigEndian.AppendUint64(nil, 20000)},
-		}}}
-		r := tsRun(t, s, o, LaneOperation, op)
-		r.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
-		mustEnvironment(t, r.err)
-		before := prunedTreeBytes(t, s)
-		out := s.SelectPrunedTreeProfileV1(true, tip, o)
-		if !row.over {
-			if out.Err != nil || out.Truth != CommitTruthNew || out.Authority == nil || len(prunedTreeBytes(t, s)) != MaxMetadataBytes {
-				t.Fatalf("R11 control at the bound: %+v", out)
-			}
-			continue
-		}
-		if row.p == 4881 {
-			treeNativeError(t, out.Err, operationUpdate, EngineLocalInvariant, codeProblem, "invalid pruned tree profile replacement", nil)
-			prunedTreeRefusal(t, out, "R11 validity before size")
-			prunedTreeOpenUnchanged(t, s, before, "R11 validity before size")
-			continue
-		}
-		bootstrapRefusal(t, "R11 size bound", out.Truth, out.Err, EngineCapacity, operationUpdate, codeTooLarge, "Update Batch exceeds bound", nil, false)
-		if out.Stage != UpdateStagePrewrite || out.Authority != nil || out.Decision != "" {
-			t.Fatalf("R11 size bound: %+v", out)
-		}
-		prunedTreeOpenUnchanged(t, s, before, "R11 size bound")
+	})
+}
+
+func prunedTreeLargeScene(t *testing.T, lagHeight uint64) (TreeAuthorityV1, *Store, string, *OperationReservationOwner, *AuthorityPointV1) {
+	t.Helper()
+	a := prunedTreeEnvelope(StorageProfileArchiveV1, StoragePhaseNoneV1, StorageLifecycleStableV1, 18561)
+	a.Authority.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 20001, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte(longestConsensusErrorToken)}
+	a.Authority.SelectedSide = modelSide(3, 19000, 19001, 1, 117)
+	s, path, owner := prunedTreeSeed(t, a)
+	tip := &AuthorityPointV1{Height: 20000, BlockHash: modelHash(20000)}
+	key := binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, 1), tip.Height)
+	dbis := TreeSchemaV1DBIs()
+	op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{
+		{DBI: dbis[0], Key: prunedTreeLagKey(), AfterKind: AfterLiteral, Literal: prunedTreeBindingBytes(t, &lagHeight)},
+		{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: ChainValue(tip.BlockHash, [32]byte{}, modelWork(false))},
+		{DBI: dbis[7], Key: append(binary.BigEndian.AppendUint64(nil, 1), tip.BlockHash[:]...), AfterKind: AfterLiteral, Literal: binary.BigEndian.AppendUint64(nil, tip.Height)},
+	}}}
+	result := tsRun(t, s, owner, LaneOperation, op)
+	result.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	mustEnvironment(t, result.err)
+	if old := prunedTreeBytes(t, s); len(old) != 257 {
+		t.Fatalf("largest tree authority length = %d", len(old))
+	}
+	return a, s, path, owner, tip
+}
+
+func prunedTreeLargestReplacement(a TreeAuthorityV1, last uint64) TreeAuthorityV1 {
+	a.Authority.ActiveProfile, a.Authority.B, a.Authority.Phase = StorageProfilePrunedV1, 4881, StoragePhasePruneGCV1
+	a.Authority.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: CleanupSpanBlocksV1, GenerationID: 1, LastHeight: last}}}
+	return a
+}
+
+func assertPrunedTreeLargestCommit(t *testing.T, s *Store, out PrunedTreeProfileOutcomeV1, want TreeAuthorityV1, next []byte) {
+	t.Helper()
+	if out.Err != nil || out.Truth != CommitTruthNew || out.Stage != UpdateStageCommitMayHaveCrossed || out.Decision != "" || !reflect.DeepEqual(out.Authority, &want) {
+		t.Fatalf("largest tree PRUNED replacement = %+v", out)
+	}
+	if len(next) != 291 || len(next) >= MaxMetadataBytes || !bytes.Equal(prunedTreeBytes(t, s), next) {
+		t.Fatalf("largest tree PRUNED replacement length = %d or bytes changed", len(next))
 	}
 }
 

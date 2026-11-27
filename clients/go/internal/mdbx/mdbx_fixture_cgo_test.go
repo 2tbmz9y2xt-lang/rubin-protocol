@@ -2387,6 +2387,7 @@ func cleanupOutcomeRefused(t *testing.T, store *Store, cleanup error) {
 }
 
 func TestCleanupBURawEvidence(t *testing.T) {
+	t.Run("malformed exclusion", cleanupMalformedExclusion)
 	for _, row := range []struct {
 		name, diagnostic string
 		kind             CleanupSpanKindV1
@@ -2515,6 +2516,101 @@ func TestCleanupBURawEvidence(t *testing.T) {
 		cleanupWantAuthority(t, reopened, a)
 		consultedRequireImage(t, reopened, readDBIsLiteral()[5], manifest, manifestValue, true, "cleanup manifest changed after refusal")
 	})
+}
+
+func cleanupMalformedExclusion(t *testing.T) {
+	a := cleanupAuthority(CleanupSpanBlocksV1, 0, false)
+	a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte("TX_ERR_PARSE")}
+	t.Run("legal control", func(t *testing.T) {
+		s, _, _, _ := cleanupTestStore(t, a, 0, 0)
+		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
+		if truth != CommitTruthNew || stage != UpdateStageCommitMayHaveCrossed || err != nil {
+			t.Fatalf("legal cleanup exclusion: %v/%v/%v", truth, stage, err)
+		}
+	})
+	t.Run("raw slot", func(t *testing.T) {
+		s, path, hash, body := cleanupTestStore(t, a, 0, 0)
+		cfg := s.config
+		bad, before := seedMalformedLegacyExclusion(t, s, a)
+		owner := bootstrapOwner(t)
+		truth, stage, err := s.CleanupBUV1(owner)
+		bootstrapRefusal(t, "malformed cleanup exclusion", truth, err, EngineIntegrity, operationGet, -30793, "invalid cleanup authority", errSchema, true)
+		if stage != UpdateStagePrewrite {
+			t.Fatalf("cleanup exclusion stage = %v", stage)
+		}
+		repeatTruth, repeatStage, repeatErr := s.CleanupBUV1(owner)
+		if repeatTruth != truth || repeatStage != stage || repeatErr != err {
+			t.Fatalf("cleanup exclusion repeat = %v/%v/%v", repeatTruth, repeatStage, repeatErr)
+		}
+		reopened, openErr := Open(path, cfg)
+		mustEnvironment(t, openErr)
+		defer func() { _ = reopened.Close() }()
+		assertLegacyExclusionImage(t, reopened, bad, before)
+		consultedRequireImage(t, reopened, readDBIsLiteral()[4], hash[:], body, true, "cleanup exclusion changed body")
+	})
+}
+
+func TestReadStorageAuthorityMalformedExclusion(t *testing.T) {
+	s, path, cfg := consultedStore(t)
+	a := modelBase(1, 0, 0)
+	a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte("TX_ERR_PARSE")}
+	control := wantCodecRoundTrip(t, a)
+	mustEnvironment(t, FixtureSeedRawRow(s, 0, []byte{2}, control))
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		got, err := r.ReadStorageAuthorityV1()
+		if err != nil || !reflect.DeepEqual(got, a) {
+			t.Fatalf("legal stored exclusion = %+v/%v", got, err)
+		}
+		return nil
+	}))
+	bad, before := seedMalformedLegacyExclusion(t, s, a)
+	var recorded error
+	returned := s.View(func(r *Reader) error {
+		got, err := r.ReadStorageAuthorityV1()
+		bootstrapRefusal(t, "malformed stored exclusion", CommitTruthOld, err, EngineIntegrity, operationGet, -30793, "invalid storage authority", errSchema, true)
+		if got != (StorageAuthorityV1{}) {
+			t.Fatalf("malformed storage accessor result = %+v/%v", got, err)
+		}
+		recorded = err
+		return err
+	})
+	assertCachedSlotError(t, s, returned, recorded)
+	reopened, err := Open(path, cfg)
+	mustEnvironment(t, err)
+	defer func() { _ = reopened.Close() }()
+	assertLegacyExclusionImage(t, reopened, bad, before)
+}
+
+func seedMalformedLegacyExclusion(t *testing.T, s *Store, a StorageAuthorityV1) ([]byte, Inspection) {
+	t.Helper()
+	control := wantCodecRoundTrip(t, a)
+	bad := replaceAuthorityToken(t, control, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
+	mustEnvironment(t, FixtureSeedRawRow(s, 0, []byte{2}, bad))
+	before, err := s.Inspect()
+	mustEnvironment(t, err)
+	return bad, before
+}
+
+func assertCachedSlotError(t *testing.T, s *Store, returned, recorded error) {
+	t.Helper()
+	next := s.View(func(*Reader) error {
+		t.Fatal("Store with recorded slot refusal entered the next View")
+		return nil
+	})
+	if recorded == nil || returned != recorded || next != recorded || s.state != storeCLOSED {
+		t.Fatalf("recorded slot error = %v, returned = %v, next = %v", recorded, returned, next)
+	}
+}
+
+func assertLegacyExclusionImage(t *testing.T, s *Store, raw []byte, before Inspection) {
+	t.Helper()
+	equal, err := FixtureRawRowEqual(s, 0, []byte{2}, raw)
+	mustEnvironment(t, err)
+	after, err := s.Inspect()
+	mustEnvironment(t, err)
+	if !equal || after.DBIs != before.DBIs || after.RecentTxnID != before.RecentTxnID {
+		t.Fatal("raw authority refusal changed durable image")
+	}
 }
 
 func TestCleanupBUNativeImages(t *testing.T) {
@@ -3443,6 +3539,53 @@ func TestPrunedProfileMalformed(t *testing.T) {
 			}))
 		})
 	}
+	t.Run("malformed exclusion", prunedProfileMalformedExclusion)
+}
+
+func prunedProfileMalformedExclusion(t *testing.T) {
+	t.Helper()
+	a := modelBase(byte(StorageProfileArchiveV1), 0, 0)
+	a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte("TX_ERR_PARSE")}
+	tip := &AuthorityPointV1{BlockHash: modelHash(41)}
+	s, path, cfg, rows := prunedStore(t, a, tip, modelWork(false))
+	image, counts := prunedImage(t, s, rows), bootstrapCounts(t, s, "archive exclusion")
+	control := bytes.Clone(image[0])
+	bad := replaceAuthorityToken(t, control, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
+	owner := bootstrapOwner(t)
+	out := s.SelectPrunedProfileV1(true, tip, owner)
+	want := a
+	want.ActiveProfile = StorageProfilePrunedV1
+	if out.Err != nil || out.Decision != "" || out.Truth != CommitTruthNew || out.Stage != UpdateStageCommitMayHaveCrossed || !reflect.DeepEqual(out.Authority, &want) {
+		t.Fatalf("legal pruned profile exclusion = %+v", out)
+	}
+	image[0][1] = byte(StorageProfilePrunedV1)
+	if !reflect.DeepEqual(prunedImage(t, s, rows), image) || bootstrapCounts(t, s, "pruned exclusion") != counts {
+		t.Fatal("legal pruned profile exclusion changed the prepared rows")
+	}
+
+	mustEnvironment(t, FixtureSeedRawRow(s, 0, []byte{2}, bad))
+	image[0] = bad
+	if !reflect.DeepEqual(prunedImage(t, s, rows), image) || bootstrapCounts(t, s, "malformed exclusion") != counts {
+		t.Fatal("malformed pruned profile exclusion preimage drifted")
+	}
+	inspection, err := s.Inspect()
+	mustEnvironment(t, err)
+	out = s.SelectPrunedProfileV1(true, tip, owner)
+	bootstrapRefusal(t, "malformed pruned profile exclusion", out.Truth, out.Err, EngineIntegrity, operationGet, codeInvalid, "invalid pruned profile authority", errSchema, true)
+	if out.Stage != UpdateStagePrewrite || out.Decision != "" || out.Authority != nil {
+		t.Fatalf("malformed pruned profile exclusion = %+v", out)
+	}
+	again := s.SelectPrunedProfileV1(true, tip, owner)
+	if !sameError(again.Err, out.Err) || again.Truth != out.Truth || again.Stage != out.Stage || again.Decision != out.Decision || again.Authority != nil {
+		t.Fatalf("cached pruned profile exclusion = %+v", again)
+	}
+	assertCachedSlotError(t, s, out.Err, out.Err)
+	prunedReleased(t, owner)
+	reopened, err := Open(path, cfg)
+	mustEnvironment(t, err)
+	defer func() { _ = reopened.Close() }()
+	assertLegacyExclusionImage(t, reopened, bad, inspection)
+	prunedUnchanged(t, reopened, rows, image, "malformed pruned profile exclusion")
 }
 
 func TestPrunedProfileNativeImages(t *testing.T) {
@@ -3451,7 +3594,7 @@ func TestPrunedProfileNativeImages(t *testing.T) {
 			a := modelBase(2, 0, 13682)
 			a.ActiveGenerationID, a.NextGenerationID = 7, 9
 			a.SelectedSide = modelSide(8, 9, 11, 2, 3)
-			a.ExcludedInvalidBranch = &InvalidBranchV1{ExactConsensusError: []byte{4}}
+			a.ExcludedInvalidBranch = &InvalidBranchV1{ExactConsensusError: []byte("BLOCK_ERR_WEIGHT_EXCEEDED")}
 			tip := &AuthorityPointV1{Height: 15121, BlockHash: modelHash(61)}
 			s, _, _, _ := prunedStore(t, a, tip, modelWork(false))
 			primary := nativeError(operationUpdate, codeENOSPC)
@@ -3484,7 +3627,7 @@ func TestPrunedProfileNativeImages(t *testing.T) {
 						changed.SelectedSide = &side
 					case "exclusion":
 						excluded := *a.ExcludedInvalidBranch
-						excluded.ExactConsensusError = []byte{5}
+						excluded.ExactConsensusError = []byte("BLOCK_ERR_LINKAGE_INVALID")
 						changed.ExcludedInvalidBranch = &excluded
 					case "progress":
 						changed.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: 2, GenerationID: 7, LastHeight: 1, NextHeight: 1}}}
@@ -3492,6 +3635,9 @@ func TestPrunedProfileNativeImages(t *testing.T) {
 					execute[0].literal, err = changed.Encode()
 					if err != nil {
 						return err
+					}
+					if mode == "exclusion" && (len(execute[0].literal) != len(plan[0].literal) || bytes.Equal(execute[0].literal, plan[0].literal)) {
+						t.Fatal("exclusion image must differ from planned NEW at the same width")
 					}
 					requireUpdateTruth(t, s.updateNative(execute, consulted, reader.txn), CommitTruthNew, true, nil, nil)
 				}
@@ -4469,6 +4615,7 @@ func TestTreeNativeTypedPointsAndProvenance(t *testing.T) {
 }
 
 func TestTreeNativeTypedCorruption(t *testing.T) {
+	t.Run("authority malformed exclusion", treeNativeReadMalformedExclusion)
 	for _, defect := range []string{"root foreign", "root version", "root width132", "root width329", "authority shape", "authority empty", "evidence missing", "evidence empty", "evidence malformed", "evidence hash", "evidence database", "evidence current", "evidence lag"} {
 		t.Run(defect, func(t *testing.T) {
 			store, _, identity := treeNativeStore(t)
@@ -4555,6 +4702,51 @@ func TestTreeNativeTypedCorruption(t *testing.T) {
 			}
 			treeNativeZeroResources(t, store)
 		})
+	}
+}
+
+func treeNativeReadMalformedExclusion(t *testing.T) {
+	s, path, _ := treeNativeStore(t)
+	want, raw := seedLegalTreeExclusion(t, s)
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		got, present, err := r.ReadTreeAuthorityV1()
+		if err != nil || !present || !reflect.DeepEqual(got, want) {
+			t.Fatalf("legal tree exclusion = %+v/%v/%v", got, present, err)
+		}
+		return nil
+	}))
+	bad := replaceTreeAuthorityToken(t, raw, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
+	treeNativeSeed(t, s, 0, []byte{2}, bad)
+	before, err := os.ReadFile(filepath.Join(path, "mdbx.dat"))
+	mustEnvironment(t, err)
+	var recorded error
+	returned := s.View(func(r *Reader) error {
+		got, present, err := r.ReadTreeAuthorityV1()
+		treeNativeIntegrity(t, err, operationGet, errSchema)
+		if !reflect.DeepEqual(got, TreeAuthorityV1{}) || present {
+			t.Fatalf("malformed tree accessor = %+v/%v/%v", got, present, err)
+		}
+		recorded = err
+		return err
+	})
+	assertCachedSlotError(t, s, returned, recorded)
+	assertTreeExclusionFile(t, path, before)
+}
+
+func seedLegalTreeExclusion(t *testing.T, s *Store) (TreeAuthorityV1, []byte) {
+	t.Helper()
+	tree := consensusTokenTree(2, &InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: modelHash(9), ExactConsensusError: []byte("TX_ERR_PARSE")})
+	raw := wantTreeAuthority(t, tree)
+	treeNativeSeed(t, s, 0, []byte{2}, raw)
+	return tree, raw
+}
+
+func assertTreeExclusionFile(t *testing.T, path string, before []byte) {
+	t.Helper()
+	after, err := os.ReadFile(filepath.Join(path, "mdbx.dat"))
+	mustEnvironment(t, err)
+	if !bytes.Equal(after, before) {
+		t.Fatal("malformed tree authority changed durable bytes")
 	}
 }
 
@@ -5016,6 +5208,7 @@ func TestTreeNativeReachedMalformedKey(t *testing.T) {
 
 func TestTreeNativeRecognitionVersionAndOldBoundary(t *testing.T) {
 	t.Run("authority envelope version", treeNativeRecognitionAuthorityVersion)
+	t.Run("authority malformed exclusion", treeNativeOpenMalformedExclusion)
 	for _, version := range [][]byte{nil, {0}, {0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 1}, {0, 0, 0, 4}, {0, 0, 0, 3, 0}} {
 		t.Run(fmt.Sprintf("version%x", version), func(t *testing.T) {
 			store, path, identity := treeNativeStore(t)
@@ -5060,12 +5253,34 @@ func TestTreeNativeRecognitionVersionAndOldBoundary(t *testing.T) {
 	mustEnvironment(t, historical.Close())
 }
 
+func treeNativeOpenMalformedExclusion(t *testing.T) {
+	s, path, identity := treeNativeStore(t)
+	_, raw := seedLegalTreeExclusion(t, s)
+	mustEnvironment(t, s.Close())
+	legal, err := OpenTreeV1(path, environmentConfig(), identity)
+	mustEnvironment(t, err)
+	t.Cleanup(func() { _ = legal.Close() })
+	bad := replaceTreeAuthorityToken(t, raw, "TX_ERR_PARSE", []byte("UX_ERR_PARSE"))
+	treeNativeSeed(t, legal, 0, []byte{2}, bad)
+	mustEnvironment(t, legal.Close())
+	before, err := os.ReadFile(filepath.Join(path, "mdbx.dat"))
+	mustEnvironment(t, err)
+	opened, err := OpenTreeV1(path, environmentConfig(), identity)
+	if opened != nil {
+		t.Cleanup(func() { _ = opened.Close() })
+	}
+	treeNativeIntegrity(t, err, operationOpen, errSchema)
+	if opened != nil {
+		t.Fatal("malformed opened tree authority published Store")
+	}
+	assertTreeExclusionFile(t, path, before)
+}
+
 func treeNativeRecognitionAuthorityVersion(t *testing.T) {
 	t.Helper()
 	store, path, identity := treeNativeStore(t)
 	value := treeNativeAuthorityBytes(t, 0, 0)
-	// Keep a legal raw width and every control valid; only the envelope
-	// version is invalid, so the factory's authority decoder owns refusal.
+	// The tag-2 envelope lacks its required carrier.
 	value[0] = 2
 	treeNativeSeed(t, store, 0, []byte{2}, value)
 	mustEnvironment(t, store.Close())

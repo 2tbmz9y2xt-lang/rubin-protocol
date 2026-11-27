@@ -10,6 +10,193 @@ import (
 	"testing"
 )
 
+const longestConsensusErrorToken = "TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN"
+
+func TestInvalidBranchConsensusErrorTokens(t *testing.T) {
+	// RUBIN_L1_CANONICAL.md Section 13.
+	tokens := []string{
+		"TX_ERR_PARSE",
+		"TX_ERR_VALUE_CONSERVATION",
+		"TX_ERR_TX_NONCE_INVALID",
+		"TX_ERR_SEQUENCE_INVALID",
+		"TX_ERR_NONCE_REPLAY",
+		"TX_ERR_SIG_INVALID",
+		"TX_ERR_SIG_ALG_INVALID",
+		"TX_ERR_SIGHASH_TYPE_INVALID",
+		"TX_ERR_SIG_NONCANONICAL",
+		"TX_ERR_TIMELOCK_NOT_MET",
+		"TX_ERR_WITNESS_OVERFLOW",
+		"TX_ERR_COVENANT_TYPE_INVALID",
+		"TX_ERR_VAULT_MALFORMED",
+		"TX_ERR_VAULT_PARAMS_INVALID",
+		"TX_ERR_VAULT_KEYS_NOT_CANONICAL",
+		"TX_ERR_VAULT_WHITELIST_NOT_CANONICAL",
+		"TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN",
+		"TX_ERR_VAULT_OWNER_AUTH_REQUIRED",
+		"TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN",
+		"TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN",
+		"TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED",
+		"TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE",
+		"TX_ERR_SIMPLICITY_ENVELOPE_TOO_LARGE",
+		"TX_ERR_SIMPLICITY_CMR_MISMATCH",
+		"TX_ERR_SIMPLICITY_DECODE",
+		"TX_ERR_SIMPLICITY_JET_DISALLOWED",
+		"TX_ERR_SIMPLICITY_BUDGET_EXCEEDED",
+		"TX_ERR_SIMPLICITY_REJECTED",
+		"TX_ERR_MISSING_UTXO",
+		"TX_ERR_COINBASE_IMMATURE",
+		"BLOCK_ERR_LINKAGE_INVALID",
+		"BLOCK_ERR_MERKLE_INVALID",
+		"BLOCK_ERR_WITNESS_COMMITMENT",
+		"BLOCK_ERR_POW_INVALID",
+		"BLOCK_ERR_TARGET_INVALID",
+		"BLOCK_ERR_TIMESTAMP_OLD",
+		"BLOCK_ERR_TIMESTAMP_FUTURE",
+		"BLOCK_ERR_COINBASE_INVALID",
+		"BLOCK_ERR_SUBSIDY_EXCEEDED",
+		"BLOCK_ERR_STATE_CAP_EXCEEDED",
+		"BLOCK_ERR_STATE_GROWTH_EXCEEDED",
+		"BLOCK_ERR_UTXO_ROOT_MISMATCH",
+		"BLOCK_ERR_WEIGHT_EXCEEDED",
+		"BLOCK_ERR_ANCHOR_BYTES_EXCEEDED",
+		"BLOCK_ERR_DA_INCOMPLETE",
+		"BLOCK_ERR_DA_CHUNK_HASH_INVALID",
+		"BLOCK_ERR_DA_SET_INVALID",
+		"BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID",
+		"BLOCK_ERR_DA_BATCH_EXCEEDED",
+		"BLOCK_ERR_PARSE",
+	}
+	t.Run("absent", func(t *testing.T) { checkAcceptedConsensusToken(t, nil) })
+	for _, token := range tokens {
+		t.Run(token, func(t *testing.T) {
+			branch := &InvalidBranchV1{7, modelHash(72), []byte(token)}
+			checkAcceptedConsensusToken(t, branch)
+		})
+	}
+}
+
+func checkAcceptedConsensusToken(t *testing.T, branch *InvalidBranchV1) {
+	t.Helper()
+	a := modelBase(1, 0, 0)
+	a.ExcludedInvalidBranch = branch
+	before := treeInputSnapshot(t, a)
+	if err := ValidateStorageAuthorityV1(a); err != nil {
+		t.Fatalf("ValidateStorageAuthorityV1 = %v, want success", err)
+	}
+	encoded, err := a.Encode()
+	if err != nil {
+		t.Fatalf("encode legal storage token: %v", err)
+	}
+	decoded, err := DecodeStorageAuthorityV1(encoded)
+	if err != nil || !reflect.DeepEqual(decoded, a) {
+		t.Fatalf("decode legal storage token: %+v/%v", decoded, err)
+	}
+	reencoded, err := decoded.Encode()
+	if err != nil || !bytes.Equal(reencoded, encoded) {
+		t.Fatalf("storage token round-trip changed bytes: %v", err)
+	}
+	if !bytes.Equal(treeInputSnapshot(t, a), before) {
+		t.Fatal("storage authority input changed")
+	}
+	for _, tag := range []byte{1, 2} {
+		checkAcceptedTreeConsensusToken(t, tag, branch)
+	}
+}
+
+func TestInvalidBranchConsensusErrorRejections(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		bad  []byte
+	}{
+		{"nil", nil},
+		{"empty", []byte{}},
+		{"suffix", []byte("TX_ERR_PARSEsuffix")},
+		{"leading space", []byte(" TX_ERR_PARSE")},
+		{"trailing space", []byte("TX_ERR_PARSE ")},
+		{"newline", []byte("TX_ERR_PARSE\n")},
+		{"NUL", []byte("TX_ERR_PARSE\x00")},
+		{"lowercase", []byte("tx_err_parse")},
+		{"prefix", []byte("TX_ERR_")},
+		{"near miss", []byte("TX_ERR_SIG_HASH_INVALID")},
+		{"wrapped", []byte("CONSENSUS_INVALID(TX_ERR_PARSE)")},
+		{"concatenated", []byte("TX_ERR_PARSEBLOCK_ERR_PARSE")},
+		{"growth constant", []byte("MAX_BLOCK_NET_STATE_GROWTH_BYTES")},
+		{"DA constant", []byte("MAX_DA_BATCHES_PER_BLOCK")},
+		{"column heading", []byte("Error Code")},
+		{"binary", []byte{1}},
+		{"long", bytes.Repeat([]byte{'x'}, 512)},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			checkRejectedConsensusToken(t, row.bad, row.name != "empty")
+		})
+	}
+}
+
+func checkRejectedConsensusToken(t *testing.T, bad []byte, raw bool) {
+	t.Helper()
+	a := modelBase(1, 0, 0)
+	a.ExcludedInvalidBranch = &InvalidBranchV1{7, modelHash(72), bad}
+	before := treeInputSnapshot(t, a)
+	t.Run("validate", func(t *testing.T) {
+		if err := ValidateStorageAuthorityV1(a); any(err) != any(errSchema) || !bytes.Equal(treeInputSnapshot(t, a), before) {
+			t.Fatalf("ValidateStorageAuthorityV1 = %v or changed input", err)
+		}
+	})
+	t.Run("encode storage", func(t *testing.T) {
+		if got, err := a.Encode(); got != nil || any(err) != any(errSchema) || !bytes.Equal(treeInputSnapshot(t, a), before) {
+			t.Fatalf("storage Encode len=%d, error=%v or changed input", len(got), err)
+		}
+	})
+	for _, tag := range []byte{1, 2} {
+		t.Run("encode tree tag "+strconv.Itoa(int(tag)), func(t *testing.T) {
+			wantTreeAuthorityEncodeError(t, consensusTokenTree(tag, a.ExcludedInvalidBranch))
+		})
+	}
+	if raw {
+		checkRawConsensusToken(t, bad)
+	}
+}
+
+func checkRawConsensusToken(t *testing.T, bad []byte) {
+	t.Helper()
+	legal := &InvalidBranchV1{7, modelHash(72), []byte("TX_ERR_PARSE")}
+	t.Run("decode storage", func(t *testing.T) {
+		a := modelBase(1, 0, 0)
+		a.ExcludedInvalidBranch = legal
+		input := wantCodecRoundTrip(t, a)
+		wantCodecDecodeError(t, replaceAuthorityToken(t, input, "TX_ERR_PARSE", bad))
+	})
+	for _, tag := range []byte{1, 2} {
+		t.Run("decode tree tag "+strconv.Itoa(int(tag)), func(t *testing.T) {
+			input := wantTreeAuthority(t, consensusTokenTree(tag, legal))
+			checkRawTreeConsensusToken(t, input, bad)
+		})
+	}
+}
+
+func TestInvalidBranchRawSameWidth(t *testing.T) {
+	checkRawConsensusToken(t, []byte("UX_ERR_PARSE"))
+}
+
+// replaceAuthorityToken changes only the framed token of a legal authority literal.
+func replaceAuthorityToken(t *testing.T, input []byte, legal string, replacement []byte) []byte {
+	t.Helper()
+	field := binary.BigEndian.AppendUint32(nil, uint32(len(legal)))
+	field = append(field, legal...)
+	at := bytes.Index(input, field)
+	if at < 41 || bytes.Count(input, field) != 1 || input[at-41] != 1 {
+		t.Fatal("legal token field missing, ambiguous or absent")
+	}
+	raw := binary.BigEndian.AppendUint32(bytes.Clone(input[:at]), uint32(len(replacement)))
+	raw = append(raw, replacement...)
+	raw = append(raw, input[at+len(field):]...)
+	end := at + 4 + len(replacement)
+	if int(binary.BigEndian.Uint32(raw[at:])) != len(replacement) || !bytes.Equal(raw[at+4:end], replacement) || !bytes.Equal(raw[end:], input[at+len(field):]) {
+		t.Fatal("malformed replacement token framing")
+	}
+	return raw
+}
+
 type codecLiteralCase struct {
 	name string
 	a    StorageAuthorityV1
@@ -80,7 +267,7 @@ func codecLiteralCases(t *testing.T) []codecLiteralCase {
 	replay := modelReplay(2)
 	copy(replay.Replay.Target.ChainID[:], mustCodecHex(t, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"))
 	replay.Replay.Cursor.Height, replay.Replay.Cursor.BlockHash = 1, modelHash(14)
-	replay.ExcludedInvalidBranch = &InvalidBranchV1{7, modelHash(72), []byte{0, 0xff, 0x80}}
+	replay.ExcludedInvalidBranch = &InvalidBranchV1{7, modelHash(72), []byte("TX_ERR_PARSE")}
 	ordinary := modelOrdinary(3, 1, 2, 15120, 1, 1, 13681)
 	ordinary.Ordinary.CarriedCleanup = modelCleanup()
 	hash := ordinary.Ordinary.NewSuffix[1].BlockHash
@@ -97,7 +284,7 @@ func codecLiteralCases(t *testing.T) []codecLiteralCase {
 			"000001"+"0000000000000002"+"0000000000000008"+"00000000000005a8"+codecZeros(48)+"00000000000005a8"+codecZeros(78)+"01"+"059f"+"000000000000059f"+
 			"00")},
 		{"prune-recovery", pruneRecovery, mustCodecHex(t, "01010000000000000001000000000000357100000000000000010000000000000002020201020000000000000001000000000000000000000000000000000000000000000000010200000100010000000000000007000000000000000000000000000000000000000000000000000000000000000100000000000000010000000000000007000000000000000000000000000000000000000000000000000000000000000100010000000000000001")},
-		{"replay-recovery", replay, mustCodecHex(t, "010100000000000000000000000000000000000000000000000100000000000000030302020000000000000002000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000d000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000001020000000000000001000000000000000000000000000000000000000000000000000000000000000e0001000000000000000700000000000000000000000000000000000000000000000000000000000000480000000300ff800000")},
+		{"replay-recovery", replay, mustCodecHex(t, "010100000000000000000000000000000000000000000000000100000000000000030302020000000000000002000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000d000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000001020000000000000001000000000000000000000000000000000000000000000000000000000000000e0001000000000000000700000000000000000000000000000000000000000000000000000000000000480000000c54585f4552525f50415253450000")},
 		{"ordinary-recovery", ordinary, mustCodecHex(t, "01010000000000000001000000000000357100000000000000010000000000000003040203010000000000003b1000000000000000000000000000000000000000000000000000000000000007d00000000000003b1100000000000000000000000000000000000000000000000000000000000007d100010000000000003b1000000000000000000000000000000000000000000000000000000000000003e800020000000000003b1000000000000000000000000000000000000000000000000000000000000007d00000000000003b1100000000000000000000000000000000000000000000000000000000000007d10100000000000000020000000000003b0f0000000000003b1100000000000000000000000000000000000000000000000000000000000007d10000000000000000000000000000000000000000000000000000000000000000000000000000000100020000000000000002010102000000000000000100000000000000000000000000000000000000000000000001010100000000000000000000000000000000000000000000000000000000000007d1000000030031ff00000002804100000000")},
 		{"ordinary-absent-options", modelOrdinary(1, 1, 1, 1, 1, 0, 0), mustCodecHex(t, ordinaryC1Hex())},
 		{"archive-none", modelBase(2, 0, 0), mustCodecHex(t, "01020000000000000000000000000000000000000000000000010000000000000002010100000000")},
@@ -216,8 +403,8 @@ func TestStorageAuthorityV1CodecLiterals(t *testing.T) {
 		{"invalid-option", 3, 231, "01"},
 		{"invalid-height", 3, 232, "0000000000000007"},
 		{"invalid-hash", 3, 240, "0000000000000000000000000000000000000000000000000000000000000048"},
-		{"invalid-blob-length", 3, 272, "00000003"},
-		{"invalid-blob", 3, 276, "00ff80"},
+		{"invalid-blob-length", 3, 272, "0000000c"},
+		{"invalid-blob", 3, 276, "54585f4552525f5041525345"},
 		{"pending-option", 2, 70, "01"},
 		{"pending-profile", 2, 71, "02"},
 		{"detached-option", 2, 74, "01"},
@@ -625,37 +812,51 @@ func TestStorageAuthorityV1CodecBounds(t *testing.T) {
 		{"detached option", 174, modelDetachedAuthority()},
 		{"pending and detached options", 175, rows[2].a},
 	} {
-		t.Run(row.name+" exact cap", func(t *testing.T) {
-			payload := MaxMetadataBytes - row.baseSize - 44
-			row.a.ExcludedInvalidBranch = &InvalidBranchV1{7, modelHash(72), make([]byte, payload)}
-			if b := wantCodecRoundTrip(t, row.a); len(b) != MaxMetadataBytes {
-				t.Fatalf("size = %d", len(b))
-			}
-			row.a.ExcludedInvalidBranch.ExactConsensusError = make([]byte, payload+1)
-			if got, err := row.a.Encode(); got != nil || !exactErr(err) {
-				t.Fatalf("cap+1 Encode = len %d, %v", len(got), err)
+		t.Run(row.name+" with longest token", func(t *testing.T) {
+			row.a.ExcludedInvalidBranch = &InvalidBranchV1{7, modelHash(72), []byte(longestConsensusErrorToken)}
+			if b := wantCodecRoundTrip(t, row.a); len(b) != row.baseSize+84 {
+				t.Fatalf("size = %d, want %d", len(b), row.baseSize+84)
 			}
 		})
 	}
-	exact := modelBase(1, 0, 0)
-	exact.ExcludedInvalidBranch = &InvalidBranchV1{7, modelHash(72), make([]byte, 1_048_492)}
+	t.Run("ordinary evidence cap", checkStandaloneAuthoritySize)
+}
+
+func ordinaryAuthorityAtSize(size int) StorageAuthorityV1 {
+	a := modelOrdinary(3, 1, 2, 15120, 1, 1, 13681)
+	a.Ordinary.CarriedCleanup = modelCleanup()
+	hash := a.Ordinary.NewSuffix[1].BlockHash
+	// The 436-byte ordinary literal contributes 434 bytes without evidence;
+	// the exclusion tuple with a 40-byte token contributes 84 more.
+	a.Ordinary.RecordedFailure = &RecordedFailureV1{1, &hash, []byte{0, 0x31, 0xff}, bytes.Repeat([]byte{0x80}, size-518)}
+	a.ExcludedInvalidBranch = &InvalidBranchV1{7, modelHash(72), []byte(longestConsensusErrorToken)}
+	return a
+}
+
+func checkStandaloneAuthoritySize(t *testing.T) {
+	t.Helper()
+	const maxSize, evidenceLenOffset = 1_048_576, 426
+	exact := ordinaryAuthorityAtSize(maxSize)
 	b := wantCodecRoundTrip(t, exact)
-	if len(b) != 1_048_576 {
-		t.Fatalf("exact cap size = %d", len(b))
+	if len(b) != maxSize || binary.BigEndian.Uint32(b[evidenceLenOffset:]) != maxSize-518 {
+		t.Fatalf("exact cap size = %d, evidence length = %d", len(b), binary.BigEndian.Uint32(b[evidenceLenOffset:]))
 	}
-	over := modelBase(1, 0, 0)
-	over.ExcludedInvalidBranch = &InvalidBranchV1{7, modelHash(72), bytes.Repeat([]byte{0x80}, 1_048_493)}
-	expectedOver := modelBase(1, 0, 0)
-	expectedOver.ExcludedInvalidBranch = &InvalidBranchV1{7, modelHash(72), bytes.Repeat([]byte{0x80}, 1_048_493)}
+	over := ordinaryAuthorityAtSize(maxSize + 1)
+	expectedOver := ordinaryAuthorityAtSize(maxSize + 1)
+	end := evidenceLenOffset + 4 + maxSize - 518
+	manual := append(bytes.Clone(b[:end]), 0x80)
+	manual = append(manual, b[end:]...)
+	binary.BigEndian.PutUint32(manual[evidenceLenOffset:], maxSize+1-518)
+	if len(manual) != maxSize+1 || binary.BigEndian.Uint32(manual[evidenceLenOffset:]) != maxSize+1-518 {
+		t.Fatalf("over-cap size = %d, evidence length = %d", len(manual), binary.BigEndian.Uint32(manual[evidenceLenOffset:]))
+	}
 	if ValidateStorageAuthorityV1(over) != nil {
-		t.Fatal("oversized witness must remain scalar-valid")
+		t.Fatal("over-cap authority failed scalar validation")
 	}
 	got, err := over.Encode()
 	if got != nil || !exactErr(err) || !reflect.DeepEqual(over, expectedOver) {
-		t.Fatalf("cap+1 Encode = %x, %v; input mutated=%v", got, err, !reflect.DeepEqual(over, expectedOver))
+		t.Fatalf("cap+1 Encode len=%d, error=%v; input mutated=%v", len(got), err, !reflect.DeepEqual(over, expectedOver))
 	}
-	manual := append(append([]byte(nil), b...), 0)
-	binary.BigEndian.PutUint32(manual[78:], 1_048_493)
 	wantCodecDecodeError(t, manual)
 }
 
