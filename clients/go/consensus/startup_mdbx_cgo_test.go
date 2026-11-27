@@ -17,8 +17,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -257,7 +255,7 @@ func storageErrorCodeImporter(t *testing.T, fset *token.FileSet, imports []strin
 	t.Helper()
 	imports = slices.DeleteFunc(imports, func(path string) bool { return path == "C" })
 	args := append([]string{"list", "-deps", "-export", "-f", `{{if .Export}}{{.ImportPath}}{{"\t"}}{{.Export}}{{end}}`}, imports...)
-	cmd := exec.CommandContext(t.Context(), filepath.Join(runtime.GOROOT(), "bin", "go"), args...)
+	cmd := exec.CommandContext(t.Context(), "go", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
