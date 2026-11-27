@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"io"
@@ -49,6 +50,7 @@ func TestImageRequesterLifetime(t *testing.T) {
 	t.Run("retired source refusal allocations", testImageRetiredSourceAllocations)
 	t.Run("source bound counts live aliases", testImageLiveSourceBound)
 	t.Run("terminal context hooks", testImageTerminalHooks)
+	t.Run("terminal observation unwind", testImageTerminalObservationUnwind)
 	t.Run("caller context after service close", testImageTerminalServiceRetention)
 	t.Run("probe deadlines", testImageProbeDeadlines)
 	t.Run("probe constructor refusals", testImageProbeConstructor)
@@ -828,6 +830,86 @@ func testImageTerminalHooks(t *testing.T) {
 	for _, terminal := range []string{"peer exit", "round close", "service close", "receive pass"} {
 		t.Run(terminal, inImageBubble(func(t *testing.T) { checkImageTerminalHooks(t, terminal) }))
 	}
+}
+
+func testImageTerminalObservationUnwind(t *testing.T) {
+	t.Run("round close clock Goexit", inImageBubble(testImageRoundCloseObservationUnwind))
+	t.Run("peer exit context panic", inImageBubble(testImagePeerExitObservationUnwind))
+}
+
+func requireImageTerminalUnwind(t *testing.T, run func(), goexit bool) {
+	t.Helper()
+	done := make(chan any, 1)
+	go func() {
+		report := any(imageGoexit)
+		defer func() { done <- cmp.Or(recover(), report) }()
+		run()
+		report = nil
+	}()
+	requireImageUnwindValue(t, awaitImageResult(t, done, "terminal observation unwind"), goexit)
+}
+
+func testImageRoundCloseObservationUnwind(t *testing.T) {
+	f, round := newImageRound(t, 2, 0)
+	other := f.round(t, imageTestLimits(), 1)
+	f.admitted(t, round, t.Context(), 0, 1, 1)
+	release := f.holdWrite(t, 0)
+	defer func() { must(t, release(), "holder write") }()
+	queued := f.goRequest(round, t.Context(), 0, 2)
+	f.waitAdmitted(t, 0, 2, "queued request")
+	waiting := goTakeImage(round, t.Context(), 1)
+	synctest.Wait()
+	requireImageWaiting(t, queued, "request waiting for writeMu")
+	requireImageWaiting(t, waiting, "assigned start waiter")
+	f.clock.onReadFrom(".(*ImageRound).Close", func(now time.Time) time.Time {
+		imageUnwinder(true)()
+		return now
+	})
+	requireImageTerminalUnwind(t, round.Close, true)
+
+	got := f.request(other, t.Context(), 1, 1)
+	require(t, got.err == nil && got.q == expectedImageQuery(1, 1), "Request after closing round clock unwind: query %+v, error %v", got.q, got.err)
+	requireImageResult(t, f.request(other, t.Context(), 1, 2), 2, 2, nil, "queued start available after round close")
+	requireImageResult(t, awaitImageResult(t, queued, "queued request after round close"), 2, 2, errImageRoundClosed, "queued request after round close")
+	requireQueryResult(t, awaitImageResult(t, waiting, "waiter after round close"), consensus.UTXOImageQuery{}, errImageRoundClosed, "waiter after round close")
+	f.requireFrames(t, 0, "frames after round close", expectedImageQuery(1, 1))
+}
+
+type imageTerminalPanicCtx struct {
+	*imageHookCtx
+	arm <-chan struct{}
+}
+
+func (c *imageTerminalPanicCtx) Err() error {
+	select {
+	case <-c.arm:
+		imageUnwinder(false)()
+	default:
+	}
+	return c.imageHookCtx.Err()
+}
+
+func testImagePeerExitObservationUnwind(t *testing.T) {
+	f, round := newImageRound(t, 2, 0, 1)
+	arm := make(chan struct{}, 1)
+	ctx := &imageTerminalPanicCtx{imageHookCtx: newImageHookCtx(), arm: arm}
+	f.admitted(t, round, ctx, 0, 1, 1)
+	f.admitted(t, round, t.Context(), 1, 2, 1)
+	waiting := goTakeImage(round, t.Context(), 1)
+	synctest.Wait()
+	requireImageWaiting(t, waiting, "exiting source assignment waiter")
+	arm <- struct{}{}
+	requireImageTerminalUnwind(t, func() { f.s.unregisterPeer(f.peers[0]) }, false)
+
+	got := f.request(round, t.Context(), 1, 1)
+	require(t, got.err == nil && got.q == expectedImageQuery(2, 1), "Request after exiting peer context unwind: query %+v, error %v", got.q, got.err)
+	requireImageResult(t, awaitImageResult(t, waiting, "exiting source outcome"), 1, 1, errImageDisconnected, "exiting source outcome")
+	requireQueryResult(t, f.request(round, t.Context(), 0, 1), consensus.UTXOImageQuery{}, errImageDisconnected, "request on retired source")
+	wait, cancel := context.WithCancel(t.Context())
+	cancel()
+	requireImageAbsent(t, round, wait, 1, context.Canceled)
+	requireImageAbsent(t, round, wait, 2, context.Canceled)
+	f.requireFrames(t, 0, "frame before peer exit", expectedImageQuery(1, 1))
 }
 
 func checkImageTerminalHooks(t *testing.T, terminal string) {

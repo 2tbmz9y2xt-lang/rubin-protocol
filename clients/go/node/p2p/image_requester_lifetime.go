@@ -246,7 +246,19 @@ func (s *Service) retireImagePeer(p *peer) {
 }
 
 // retireImageOwnerLocked uses one clock sample for the matching instances and prefers an already due end.
+// An interrupted observation retires the remaining matching instances with reason.
 func (req *imageRequester) retireImageOwnerLocked(s *Service, reason error, matches func(*imageInstance) bool) {
+	finished := false
+	defer func() {
+		if finished {
+			return
+		}
+		for _, inst := range req.current {
+			if matches(inst) {
+				req.completeImageEndLocked(inst, reason)
+			}
+		}
+	}()
 	var now time.Time
 	sampled := false
 	for _, inst := range req.current {
@@ -262,6 +274,7 @@ func (req *imageRequester) retireImageOwnerLocked(s *Service, reason error, matc
 		}
 		req.completeImageEndLocked(inst, end)
 	}
+	finished = true
 }
 
 func (req *imageRequester) detachImageSessionLocked(session *imageSession) {
