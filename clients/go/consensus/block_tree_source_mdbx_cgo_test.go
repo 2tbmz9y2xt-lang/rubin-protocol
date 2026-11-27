@@ -439,6 +439,7 @@ func TestBlockTreeSourceV1(t *testing.T) {
 	t.Run("compact-owners", btCompactOwners)
 	t.Run("complete-span-truncation", btSpanTruncation)
 	t.Run("count-charge", btCountCharge)
+	t.Run("delta", btDelta)
 	t.Run("layout", btLayout)
 	t.Run("captured-fields", btCaptured)
 }
@@ -752,9 +753,47 @@ func btDaLimitCases() []btSyntaxCase {
 	return rows
 }
 
+func btDelta(t *testing.T) {
+	tx := btTransaction(1, 0, nil, [][]byte{btFrame(1, 0, nil)}, nil, []byte{0}, nil)
+	request := btRequest(btBody(148, 1, [32]byte{}, tx), 1)
+	for _, row := range []struct {
+		name      string
+		tx, event uint32
+	}{{"tx-count", 2, 1}, {"event-count", 1, 2}, {"event-refusal", 1, 0}} {
+		t.Run(row.name, func(t *testing.T) {
+			w := btNew(t)
+			var primary error
+			result, _, observed := w.run(t, []blockTreeRequestV1{request}, func(_ []blockTreeEffectV1, sources []*btObserved, op *mdbx.TreeOperationV1) {
+				meta := &op.Primitives[0].Coverage.BlockMeta
+				meta.TxCount, meta.EventCount = row.tx, row.event
+				source := sources[0]
+				source.before = func(p mdbx.TreePositionV1, r *mdbx.Reader, sink *mdbx.TreeDeltaSinkV1) error {
+					primary = source.source.TreeDeltaV1(p, r, sink)
+					if row.event != 0 {
+						btFailure(t, primary, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
+						return primary
+					}
+					latched := sink.EventV1(mdbx.TreeEventV1{Kind: mdbx.TreeEventCreateV1})
+					logicalMDBXAssert(t, primary != nil && any(primary) == any(latched), "source error %T %v differs from latched event error %T %v", primary, primary, latched, latched)
+					var engine *mdbx.EngineError
+					logicalMDBXAssert(t, errors.As(primary, &engine) && engine.Operation == "update" && engine.Class == mdbx.EngineInvalidInput &&
+						engine.Code == 22 && engine.Diagnostic == "invalid tree delta" && engine.Cause == nil && engine.TreeObservation == nil && !engine.ReopenRequired, "event refusal: %T %+v", primary, primary)
+					return primary
+				}
+			})
+			result.want(t, 1, 1, 0)
+			logicalMDBXAssert(t, primary != nil && any(result.err) == any(primary) && observed[0].calls == ([3]int{0, 1, 0}), "native source result %v, calls %v", result.err, observed[0].calls)
+			entered := false
+			cached := w.s.View(func(*mdbx.Reader) error { entered = true; return nil })
+			logicalMDBXAssert(t, !entered && any(cached) == any(primary), "cached source error = %v, View entered=%t", cached, entered)
+		})
+	}
+}
+
 func btLayout(t *testing.T) {
 	fixed := 1024 + unsafe.Sizeof(blockTreeSourceV1{}) + unsafe.Sizeof(blockTreeRequestV1{}) + unsafe.Sizeof(blockTreeEffectV1{}) +
-		unsafe.Sizeof(mdbx.LargeImageRowV1{}) + unsafe.Sizeof(treebody.Source{}) + unsafe.Sizeof(treebody.Census{}) + 256
+		unsafe.Sizeof(mdbx.LargeImageRowV1{}) + unsafe.Sizeof(treebody.Source{}) + unsafe.Sizeof(treebody.Census{}) +
+		unsafe.Sizeof(treebody.Event{}) + unsafe.Sizeof(mdbx.TreeEventV1{}) + 256
 	logicalMDBXAssert(t, fixed <= 3072, "fixed source/control live layout = %d > 3072", fixed)
 }
 

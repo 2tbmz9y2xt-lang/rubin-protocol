@@ -191,6 +191,38 @@ func TestScanFailures(t *testing.T) {
 			t.Fatalf("first row error on %d output reads = %v (framing=%t), want original %v", visits, err, census.Malformed, want)
 		}
 	})
+	core, _ := fixtureCore(0, [32]byte{})
+	raw := append(fixtureBlock(116, 1, [32]byte{}), core...)
+	witness := uint64(len(raw))
+	raw = append(raw, 0)
+	payload := uint64(len(raw))
+	raw = append(raw, 0)
+	for _, row := range []struct {
+		name   string
+		offset uint64
+	}{{"witness", witness}, {"payload", payload}} {
+		t.Run(row.name, func(t *testing.T) {
+			readErr, createErr := errors.New("transaction tail read"), errors.New("early create")
+			source := Source{Window: make([]byte, 64), Length: uint64(len(raw)), ReadAt: func(dst []byte, off uint64) (int, error) {
+				n := copy(dst, raw[off:off+uint64(len(dst))])
+				if off == row.offset {
+					return n, readErr
+				}
+				return n, nil
+			}}
+			creates := 0
+			census, err := Scan(source, 116, 1, func(e Event) error {
+				if e.Kind == EventCreate {
+					creates++
+					return createErr
+				}
+				return nil
+			})
+			if any(err) != any(readErr) || census.Malformed || creates != 0 {
+				t.Fatalf("tail read at %d returned %v (framing=%t), creates=%d", row.offset, err, census.Malformed, creates)
+			}
+		})
+	}
 	t.Run("emit_before_bad_witness", func(t *testing.T) {
 		first, _, _ := fixtureTransaction(0, [32]byte{})
 		raw := append(fixtureBlock(116, 2, [32]byte{}), first...)
