@@ -174,7 +174,7 @@ func TestArchiveProfile(t *testing.T) {
 	selected := modelBase(1, 0, 0)
 	selected.NextGenerationID, selected.SelectedSide = 3, modelSide(2, 0, 3, 3, 3)
 	exclusion := modelBase(1, 0, 0)
-	exclusion.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 4, FirstInvalidBlockHash: modelHash(33), ExactConsensusError: []byte{0, 255, 128}}
+	exclusion.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: 4, FirstInvalidBlockHash: modelHash(33), ExactConsensusError: []byte("TX_ERR_PARSE")}
 	for _, row := range []struct {
 		name string
 		a    StorageAuthorityV1

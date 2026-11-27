@@ -170,7 +170,7 @@ func TestCleanupGenerationMDBX(t *testing.T) {
 					pending = 2
 				}
 				a.Lifecycle, a.PendingTargetProfile, a.NextGenerationID = 2, &pending, ^uint64(0)
-				a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 3, FirstInvalidBlockHash: [32]byte{9}, ExactConsensusError: []byte{7}}
+				a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 3, FirstInvalidBlockHash: [32]byte{9}, ExactConsensusError: []byte("TX_ERR_PARSE")}
 			}
 			w := generationNew(t, a, rows...)
 			if len(rows) != 0 {
