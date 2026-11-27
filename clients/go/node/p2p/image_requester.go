@@ -60,12 +60,9 @@ type ImageUnits struct {
 	HolderBytes         uint64
 }
 
-// ImageLimits are the per-peer and round-global limits and the durations a round captures (RUBIN_L1_P2P_AUX.md
-// Section 6.5). A Request is admitted only when its round's own usage plus the charge fits every limit without
-// overflow; a release decrements the admitting round. D = min(now + AttemptLifetime, RD) is fixed at admission. A done
-// ctx, a done round ctx or now after D ends an assignment once, recorded in that precedence as the ctx error, the round
-// ctx error or errImageExpired, by its Request, a later Request's pass, its ctx callbacks or its deadline timer, which
-// acts only after D and is not re-armed (RUBIN_L1_P2P_AUX.md Section 7.5).
+// ImageLimits holds the positive per-peer and round limits and durations captured by a round.
+// Admission checks prospective charges without overflow and fixes D at min(start + AttemptLifetime, RD)
+// (RUBIN_L1_P2P_AUX.md Sections 6.5 and 7.5).
 type ImageLimits struct {
 	PerPeer         ImageUnits
 	Global          ImageUnits
@@ -83,6 +80,15 @@ type ImageRoundConfig struct {
 	SourceIDs []string
 	Limits    ImageLimits
 	NotBefore time.Time
+}
+
+// ImageProbeRoundConfig supplies the original admission time, deadline and IMAGE limits of a body round.
+type ImageProbeRoundConfig struct {
+	Anchor            ImageAnchor
+	SourceIDs         []string
+	Limits            ImageLimits
+	BodyAdmissionTime time.Time
+	BodyRD            time.Time
 }
 
 const (
@@ -147,38 +153,55 @@ type imageKey struct {
 
 type imageAttemptKey struct {
 	start   [36]byte
-	session *peer
+	session *imageSession
 }
 
-// imageRequester is the Service-wide registry: the last request ID per session and the current assignment per anchor
-// and start. Guarded by mu.
+// imageRequester holds captured live sessions and the current assignment per anchor and start.
+// The Service closes drain when it publishes DRAINING. The registry is guarded by mu.
 type imageRequester struct {
-	mu      sync.Mutex
-	lastID  map[*peer]uint64
-	current map[imageKey]*imageInstance
+	mu       sync.Mutex
+	sessions map[*imageSession]struct{}
+	current  map[imageKey]*imageInstance
+	drain    chan struct{}
 }
 
 func newImageRequester() *imageRequester {
-	return &imageRequester{lastID: make(map[*peer]uint64), current: make(map[imageKey]*imageInstance)}
+	return &imageRequester{
+		sessions: make(map[*imageSession]struct{}),
+		current:  make(map[imageKey]*imageInstance),
+		drain:    make(chan struct{}),
+	}
 }
 
 // imageInstance is one admitted assignment; round is its value copy of the admitting round. Its mutable fields are
-// guarded by imageRequester.mu; ref is the end appliers' only path to it and retirement clears it last.
+// guarded by imageRequester.mu; ref is the end appliers' only path to it and retirement clears it.
 type imageInstance struct {
-	round       ImageRound
-	session     *peer
-	ctx         context.Context
-	query       consensus.UTXOImageQuery
-	deadline    time.Time
-	retired     bool
-	end         error
-	stopCtx     func() bool
-	stopRound   func() bool
-	timer       *time.Timer
-	pendingHeld bool
-	published   bool
-	ref         *atomic.Pointer[imageInstance]
+	round            ImageRound
+	session          *imageSession
+	ctx              context.Context
+	query            consensus.UTXOImageQuery
+	expectedBodyHash [32]byte
+	deadline         time.Time
+	retired          bool
+	end              error
+	stopCtx          func() bool
+	stopRound        func() bool
+	signalStops      [2]func() bool
+	timer            *time.Timer
+	pendingHeld      bool
+	published        bool
+	ref              *atomic.Pointer[imageInstance]
+	sendPhase        imageSendPhase
+	staged           *imageOutcome
 }
+
+type imageSendPhase uint8
+
+const (
+	imageBeforeWrite imageSendPhase = iota
+	imageWriting
+	imageSent
+)
 
 // endAt returns the ctx error, else the round ctx error, else errImageExpired when now is after D, else nil.
 func (inst *imageInstance) endAt(now time.Time) error {
@@ -192,10 +215,11 @@ func (inst *imageInstance) endAt(now time.Time) error {
 }
 
 // preWriteEnd returns the recorded end of a retired instance, else endAt, else errImageRoundDeadline at or after RD.
-func (inst *imageInstance) preWriteEnd(now time.Time) error {
+func (inst *imageInstance) preWriteEnd(sample func() time.Time) error {
 	if inst.retired {
 		return inst.end
 	}
+	now := sample()
 	if err := inst.endAt(now); err != nil {
 		return err
 	}
@@ -205,37 +229,35 @@ func (inst *imageInstance) preWriteEnd(now time.Time) error {
 	return nil
 }
 
-// ImageRound is one admitted acquisition round, shared by its value copies. The currency decision under the session's
-// writeMu right before the write is the frame's last check: an ended assignment, or now at RD, gets no frame and the
-// admitted query with its end; an end applied during the write leaves the admitted query and nil; a failed write
-// retires the assignment and returns the admitted query and its error (RUBIN_L1_P2P_AUX.md Section 7.5), then, with no
-// mutex held, sets it as the session's last error and closes the connection once (RUBIN_L1_P2P_AUX.md Section 2.1). An
-// unwind after admission releases writeMu and the pending request bytes once each, retires nothing and propagates
-// (RUBIN_L1_P2P_AUX.md Section 5); an unwind of the retirement after a failed write still sets that write error as the
-// session's last error and closes the connection once (RUBIN_L1_P2P_AUX.md Section 2.1). An anchor and start have at
-// most one current assignment across the Service (RUBIN_L1_P2P_AUX.md Section 7.5).
+// ImageRound shares its assignments, accounting and local outcomes with its value copies.
+// An anchor and start have at most one current assignment across the Service (RUBIN_L1_P2P_AUX.md Section 7.5).
 type ImageRound struct {
 	service       *Service
 	ctx           context.Context
 	anchor        ImageAnchor
 	limits        ImageLimits
-	sources       map[string]*peer
+	sources       map[string]*imageSession
+	admissionTime time.Time
 	roundDeadline time.Time
+	probe         bool
 	*imageRoundUsage
 }
 
 // imageRoundUsage is the mutable state shared by every value copy of a round, guarded by the requester mutex.
 type imageRoundUsage struct {
 	global    imageUnitVector
-	perPeer   map[*peer]*imageUnitVector
+	perPeer   map[*imageSession]*imageUnitVector
 	attempted map[imageAttemptKey]struct{}
 	starts    map[[36]byte]struct{}
+	closed    bool
+	wake      chan struct{}
+	outcomes  map[[36]byte][]*imageOutcome
 }
 
 // BeginImageRound admits an acquisition round under one Service lease. Refusals, in order, return a nil round and fault
 // no peer: errServiceClosed, errImageNilContext, errImageRequestDomain for a height above 0xffffffff, errImagePolicy
-// for a zero limit or nonpositive duration, errImageSourceSet for an empty list, more IDs than Service.peers entries
-// (before any table sized by the list) or an ID with no entry or naming a listed connection; then, after its one clock
+// for a zero limit or nonpositive duration, errImageSourceSet for an empty list, more IDs than live peer identifiers
+// (before any table sized by the list) or an unknown, retired or duplicate source; then, after its one clock
 // read, errServiceClosed once Close has moved the Service out of OPEN, errImagePolicy for an inexact RD or a nonzero
 // NotBefore outside now's clock domain, and errImageBackoff when now is before a nonzero NotBefore. A done ctx is
 // captured, not refused (RUBIN_L1_P2P_AUX.md Sections 6.6 and 7.5).
@@ -244,11 +266,17 @@ func (s *Service) BeginImageRound(ctx context.Context, config ImageRoundConfig) 
 		return nil, errServiceClosed
 	}
 	defer s.releaseWork()
-	if err := checkImageRoundConfig(ctx, config); err != nil {
+	if err := checkImageRoundConfig(ctx, config.Anchor, config.Limits); err != nil {
 		return nil, err
 	}
 	sources, err := s.resolveImageSources(config.SourceIDs)
 	if err != nil {
+		return nil, err
+	}
+	req := s.imageRequester
+	req.mu.Lock()
+	defer req.mu.Unlock()
+	if err := checkImageSourcesLocked(sources); err != nil {
 		return nil, err
 	}
 	now := s.cfg.Now()
@@ -259,13 +287,56 @@ func (s *Service) BeginImageRound(ctx context.Context, config ImageRoundConfig) 
 	if err != nil {
 		return nil, err
 	}
-	return &ImageRound{
+	round := ImageRound{service: s, ctx: ctx, anchor: config.Anchor, limits: config.Limits, admissionTime: now, roundDeadline: roundDeadline}
+	return req.captureImageRoundLocked(round, sources), nil
+}
+
+// BeginImageProbeRound captures the existing body round's context, sources, times and IMAGE limits
+// (RUBIN_L1_P2P_AUX.md Section 7.8).
+func (s *Service) BeginImageProbeRound(ctx context.Context, config ImageProbeRoundConfig) (*ImageRound, error) {
+	if !s.acquireWork() {
+		return nil, errServiceClosed
+	}
+	defer s.releaseWork()
+	if err := checkImageRoundConfig(ctx, config.Anchor, config.Limits); err != nil {
+		return nil, err
+	}
+	admission, deadline := config.BodyAdmissionTime, config.BodyRD
+	if hasMonotonicReading(admission) != hasMonotonicReading(deadline) || admission.After(deadline) {
+		return nil, errImagePolicy
+	}
+	sources, err := s.resolveImageSources(config.SourceIDs)
+	if err != nil {
+		return nil, err
+	}
+	round := ImageRound{
 		service: s, ctx: ctx, anchor: config.Anchor, limits: config.Limits,
-		sources: sources, roundDeadline: roundDeadline, imageRoundUsage: &imageRoundUsage{
-			perPeer: make(map[*peer]*imageUnitVector), attempted: make(map[imageAttemptKey]struct{}),
-			starts: make(map[[36]byte]struct{}),
-		},
-	}, nil
+		admissionTime: admission, roundDeadline: deadline, probe: true,
+	}
+	req := s.imageRequester
+	req.mu.Lock()
+	defer req.mu.Unlock()
+	if err := checkImageSourcesLocked(sources); err != nil {
+		return nil, err
+	}
+	return req.captureImageRoundLocked(round, sources), nil
+}
+
+// captureImageRoundLocked captures stable identities for the validated source entries.
+func (req *imageRequester) captureImageRoundLocked(round ImageRound, sources map[string]*peer) *ImageRound {
+	round.sources = make(map[string]*imageSession, len(sources))
+	for id, p := range sources {
+		if p.imageSession == nil {
+			p.imageSession = &imageSession{transport: p}
+			req.sessions[p.imageSession] = struct{}{}
+		}
+		round.sources[id] = p.imageSession
+	}
+	round.imageRoundUsage = &imageRoundUsage{
+		perPeer: make(map[*imageSession]*imageUnitVector), attempted: make(map[imageAttemptKey]struct{}),
+		starts: make(map[[36]byte]struct{}),
+	}
+	return &round
 }
 
 // roundAdmission returns RD or the clock-domain and NotBefore refusal of now (RUBIN_L1_P2P_AUX.md Section 6.6).
@@ -281,33 +352,55 @@ func roundAdmission(now time.Time, config ImageRoundConfig) (time.Time, error) {
 	return roundDeadline, nil
 }
 
-func checkImageRoundConfig(ctx context.Context, config ImageRoundConfig) error {
+func checkImageRoundConfig(ctx context.Context, anchor ImageAnchor, limits ImageLimits) error {
 	if ctx == nil {
 		return errImageNilContext
 	}
-	if config.Anchor.Height > imageMaxHeight {
+	if anchor.Height > imageMaxHeight {
 		return errImageRequestDomain
 	}
-	limits := config.Limits
-	if !positiveUnits(limits.PerPeer.vector()) || !positiveUnits(limits.Global.vector()) ||
-		limits.AttemptLifetime <= 0 || limits.RoundLifetime <= 0 || limits.Backoff <= 0 {
+	positiveDurations := limits.AttemptLifetime > 0 && limits.RoundLifetime > 0 && limits.Backoff > 0
+	if !positiveDurations || !positiveUnits(limits.PerPeer.vector()) || !positiveUnits(limits.Global.vector()) {
 		return errImagePolicy
 	}
 	return nil
 }
 
-// resolveImageSources copies Service.peers in one read section and resolves ids against the copy after it.
+// resolveImageSources observes the requested live peers in one read section and copies their names after it.
 func (s *Service) resolveImageSources(ids []string) (map[string]*peer, error) {
 	if len(ids) == 0 {
 		return nil, errImageSourceSet
 	}
 	s.peersMu.RLock()
-	peers := make(map[string]*peer, len(s.peers))
-	for id, session := range s.peers {
-		peers[id] = session
+	if len(ids) > len(s.peers) || !imageSourcesLive(ids, s.peers) {
+		s.peersMu.RUnlock()
+		return nil, errImageSourceSet
+	}
+	observed := make(map[string]*peer, len(ids))
+	for _, id := range ids {
+		observed[id] = s.peers[id]
 	}
 	s.peersMu.RUnlock()
-	return imageSources(ids, peers)
+	return imageSources(ids, observed)
+}
+
+// imageSourcesLive bounds the requested list by live identifiers and checks its entries before allocation.
+func imageSourcesLive(ids []string, peers map[string]*peer) bool {
+	live := 0
+	for _, p := range peers {
+		if p != nil && !p.imageRetired.Load() {
+			live++
+		}
+	}
+	if len(ids) > live {
+		return false
+	}
+	for _, id := range ids {
+		if p := peers[id]; p == nil || p.imageRetired.Load() {
+			return false
+		}
+	}
+	return true
 }
 
 // imageSources keys each resolved connection by a copy of its ID; more IDs than entries refuse before any allocation.
@@ -328,42 +421,57 @@ func imageSources(ids []string, peers map[string]*peer) (map[string]*peer, error
 	return sources, nil
 }
 
-// Request admits one assignment for start on sourceID and writes its getutxoimg frame, holding one Service lease until
-// it returns. Admission, the only request-ID allocator, arms its ctx callbacks and timer before it charges, allocates
-// or registers and is all-or-nothing: a refusal, with a zero query, or an unwind while arming adds no ID, registry
-// entry, charge or mark, faults no peer and retires only ended assignments. Refusals, in order: errServiceClosed,
-// errImageNilContext, the ctx's then the round ctx's Err(), errImageUnknownSource, errImageRequestDomain; under the
-// requester mutex after the clock read dating admission, errServiceClosed, the two Err() reads, then after the pass
-// errImageRoundDeadline, errImagePolicy for an inexact D, errImageAssignmentCurrent, errImageAttempted, errImageLimit,
-// errImageIDExhausted (RUBIN_L1_P2P_AUX.md Section 7.5).
+// Request admits an ordinary assignment and sends its frame under one Service lease.
+// Admission refusal returns a zero query. After admission the call returns the admitted query and send result
+// (RUBIN_L1_P2P_AUX.md Sections 2.1 and 7.5).
 func (r *ImageRound) Request(ctx context.Context, sourceID string, start [36]byte, byteLimit uint32) (consensus.UTXOImageQuery, error) {
+	return r.request(ctx, sourceID, imageRequest{start: start, byteLimit: byteLimit})
+}
+
+// Probe admits a body-round assignment for the by-value expected body hash and sends the ordinary image request frame
+// (RUBIN_L1_P2P_AUX.md Section 7.8).
+func (r *ImageRound) Probe(ctx context.Context, sourceID string, start [36]byte, byteLimit uint32, expectedBodyHash [32]byte) (consensus.UTXOImageQuery, error) {
+	return r.request(ctx, sourceID, imageRequest{start: start, byteLimit: byteLimit, probe: true, expectedBodyHash: expectedBodyHash})
+}
+
+type imageRequest struct {
+	start            [36]byte
+	byteLimit        uint32
+	probe            bool
+	expectedBodyHash [32]byte
+}
+
+func (r *ImageRound) request(ctx context.Context, sourceID string, attempt imageRequest) (consensus.UTXOImageQuery, error) {
 	round := *r
 	s := round.service
 	if !s.acquireWork() {
 		return consensus.UTXOImageQuery{}, errServiceClosed
 	}
 	defer s.releaseWork()
-	inst, payload, err := round.admit(ctx, sourceID, start, byteLimit)
+	inst, transport, payload, err := round.admit(ctx, sourceID, attempt)
 	if err != nil {
 		return consensus.UTXOImageQuery{}, err
 	}
-	return inst.query, inst.round.send(inst, payload)
+	return inst.query, inst.round.send(inst, transport, payload)
 }
 
-// checkRequest runs the refusals that need no registry state.
-func (r *ImageRound) checkRequest(ctx context.Context, sourceID string, byteLimit uint32) (*peer, error) {
-	if ctx == nil {
-		return nil, errImageNilContext
-	}
-	if err := r.doneErr(ctx); err != nil {
-		return nil, err
+// checkRequestLocked refuses the closed round, source, mode and wire domain before the admission sample.
+func (r *ImageRound) checkRequestLocked(sourceID string, attempt imageRequest) (*imageSession, error) {
+	if r.closed {
+		return nil, errImageRoundClosed
 	}
 	session := r.sources[sourceID]
 	if session == nil {
 		return nil, errImageUnknownSource
 	}
-	probe := consensus.UTXOImageQuery{RequestID: 1, Height: r.anchor.Height, ByteLimit: byteLimit}
-	if _, ok := consensus.EncodeUTXOImageRequest(probe); !ok {
+	if session.transport == nil {
+		return nil, errImageDisconnected
+	}
+	if r.probe != attempt.probe {
+		return nil, errImageRoundMode
+	}
+	query := consensus.UTXOImageQuery{RequestID: 1, Height: r.anchor.Height, ByteLimit: attempt.byteLimit}
+	if _, ok := consensus.EncodeUTXOImageRequest(query); !ok {
 		return nil, errImageRequestDomain
 	}
 	return session, nil
@@ -377,62 +485,83 @@ func (r *ImageRound) doneErr(ctx context.Context) error {
 	return r.ctx.Err()
 }
 
-func (r *ImageRound) admit(ctx context.Context, sourceID string, start [36]byte, byteLimit uint32) (*imageInstance, [imageRequestBytes]byte, error) {
+// admit linearizes one assignment after its clock sample, OPEN read and ordered refusal checks.
+func (r *ImageRound) admit(ctx context.Context, sourceID string, attempt imageRequest) (*imageInstance, *peer, [imageRequestBytes]byte, error) {
 	var payload [imageRequestBytes]byte
-	session, err := r.checkRequest(ctx, sourceID, byteLimit)
-	if err != nil {
-		return nil, payload, err
+	if ctx == nil {
+		return nil, nil, payload, errImageNilContext
+	}
+	if err := r.doneErr(ctx); err != nil {
+		return nil, nil, payload, err
 	}
 	req := r.service.imageRequester
 	req.mu.Lock()
 	defer req.mu.Unlock()
+	session, err := r.checkRequestLocked(sourceID, attempt)
+	if err != nil {
+		return nil, nil, payload, err
+	}
 	now := r.service.cfg.Now()
 	if !r.service.workAuthorized() {
-		return nil, payload, errServiceClosed
+		return nil, nil, payload, errServiceClosed
 	}
 	if err := r.doneErr(ctx); err != nil {
-		return nil, payload, err
+		return nil, nil, payload, err
 	}
 	for _, current := range req.current {
 		req.retireIfEndedLocked(current, now)
 	}
-	inst, err := r.prepareLocked(ctx, now, session, start, byteLimit)
+	inst, err := r.prepareLocked(ctx, now, session, attempt)
 	if err != nil {
-		return nil, payload, err
+		return nil, nil, payload, err
 	}
 	r.commitLocked(inst, now)
 	// The ID is at least 1 and the height and byte limit passed their checks.
 	payload, _ = consensus.EncodeUTXOImageRequest(inst.query)
-	return inst, payload, nil
+	return inst, session.transport, payload, nil
 }
 
 // prepareLocked runs the checks after the pass in order and builds the instance without mutating owner state.
-func (r *ImageRound) prepareLocked(ctx context.Context, now time.Time, session *peer, start [36]byte, byteLimit uint32) (*imageInstance, error) {
-	if !now.Before(r.roundDeadline) {
-		return nil, errImageRoundDeadline
-	}
-	deadline, ok := exactDeadline(now, r.limits.AttemptLifetime)
-	if !ok {
-		return nil, errImagePolicy
-	}
-	if err := r.checkAssignableLocked(session, start); err != nil {
+func (r *ImageRound) prepareLocked(ctx context.Context, now time.Time, session *imageSession, attempt imageRequest) (*imageInstance, error) {
+	deadline, err := r.attemptDeadline(now)
+	if err != nil {
 		return nil, err
 	}
-	last := r.service.imageRequester.lastID[session]
+	if err := r.checkAssignableLocked(session, attempt.start); err != nil {
+		return nil, err
+	}
+	last := session.lastID
 	if last == imageMaxRequestID {
 		return nil, errImageIDExhausted
 	}
-	if deadline.After(r.roundDeadline) {
-		deadline = r.roundDeadline
-	}
 	query := consensus.UTXOImageQuery{
 		RequestID: last + 1, Height: r.anchor.Height, BlockHash: r.anchor.BlockHash,
-		Root: r.anchor.Root, StartKey: start, ByteLimit: byteLimit,
+		Root: r.anchor.Root, StartKey: attempt.start, ByteLimit: attempt.byteLimit,
 	}
-	return &imageInstance{round: *r, session: session, ctx: ctx, query: query, deadline: deadline}, nil
+	return &imageInstance{
+		round: *r, session: session, ctx: ctx, query: query, deadline: deadline, expectedBodyHash: attempt.expectedBodyHash,
+	}, nil
 }
 
-func (r *ImageRound) checkAssignableLocked(session *peer, start [36]byte) error {
+// attemptDeadline checks the original clock domain, cutoff and exact sum before capping the attempt.
+func (r *ImageRound) attemptDeadline(now time.Time) (time.Time, error) {
+	if r.probe && hasMonotonicReading(now) != hasMonotonicReading(r.admissionTime) {
+		return time.Time{}, errImagePolicy
+	}
+	if !now.Before(r.roundDeadline) {
+		return time.Time{}, errImageRoundDeadline
+	}
+	deadline, ok := exactDeadline(now, r.limits.AttemptLifetime)
+	if !ok {
+		return time.Time{}, errImagePolicy
+	}
+	if deadline.After(r.roundDeadline) {
+		return r.roundDeadline, nil
+	}
+	return deadline, nil
+}
+
+func (r *ImageRound) checkAssignableLocked(session *imageSession, start [36]byte) error {
 	if _, busy := r.service.imageRequester.current[imageKey{r.anchor, start}]; busy {
 		return errImageAssignmentCurrent
 	}
@@ -460,27 +589,126 @@ func (r *ImageRound) admissionDelta(start [36]byte) (imageUnitVector, imageUnitV
 	return perPeer, global
 }
 
-func (r *ImageRound) usageFor(session *peer) *imageUnitVector {
+func (r *ImageRound) usageFor(session *imageSession) *imageUnitVector {
 	if usage := r.perPeer[session]; usage != nil {
 		return usage
 	}
 	return &imageUnitVector{}
 }
 
+type imageCancelLookup struct {
+	key, value any
+}
+
+var imageDetachedLookup imageCancelLookup
+
+// imageCancelSignal schedules cancellation from a captured Done channel.
+type imageCancelSignal struct {
+	source     context.Context
+	done       <-chan struct{}
+	lookup     atomic.Pointer[imageCancelLookup]
+	stopCaller func()
+}
+
+func (c *imageCancelSignal) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *imageCancelSignal) Done() <-chan struct{}       { return c.done }
+
+// Err preserves synchronous observation before the scheduler looks up the parent.
+func (c *imageCancelSignal) Err() error {
+	if c.lookup.Load() == nil {
+		return c.source.Err()
+	}
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+// Value saves the scheduler's parent lookup before it installs a callback.
+func (c *imageCancelSignal) Value(key any) any {
+	if lookup := c.lookup.Load(); lookup != nil {
+		if key == lookup.key {
+			return lookup.value
+		}
+		return nil
+	}
+	value := c.source.Value(key)
+	c.lookup.Store(&imageCancelLookup{key: key, value: value})
+	return value
+}
+
+type imageAfterFuncer interface {
+	AfterFunc(func()) func() bool
+}
+
+type imageAfterFuncSignal struct {
+	*imageCancelSignal
+}
+
+// AfterFunc drops the non-native parent lookup and saves the caller's stop separately.
+func (c imageAfterFuncSignal) AfterFunc(f func()) func() bool {
+	c.lookup.Store(&imageDetachedLookup)
+	if scheduler, ok := c.source.(imageAfterFuncer); ok {
+		stop := scheduler.AfterFunc(f)
+		c.stopCaller = func() { stop() }
+	}
+	return func() bool { return false }
+}
+
+// afterImageCancel returns the ordinary stop and the stop for the Go notification alone.
+func afterImageCancel(ctx context.Context, f func()) (func() bool, func() bool) {
+	parent, signal := imageCancellationContext(ctx)
+	defer func() {
+		signal.lookup.Store(&imageDetachedLookup)
+		signal.source = nil
+		signal.stopCaller = nil
+	}()
+	goStop := context.AfterFunc(parent, f)
+	signalStop := goStop
+	if lookup := signal.lookup.Load(); lookup != nil && lookup != &imageDetachedLookup {
+		signalStop = func() bool {
+			signal.lookup.Store(lookup)
+			defer signal.lookup.Store(&imageDetachedLookup)
+			return goStop()
+		}
+	}
+	stopCaller := signal.stopCaller
+	if stopCaller == nil {
+		return signalStop, signalStop
+	}
+	return func() bool {
+		if !signalStop() {
+			return false
+		}
+		stopCaller()
+		return true
+	}, signalStop
+}
+
+func imageCancellationContext(ctx context.Context) (context.Context, *imageCancelSignal) {
+	signal := &imageCancelSignal{source: ctx, done: ctx.Done()}
+	if _, ok := ctx.(imageAfterFuncer); ok {
+		return imageAfterFuncSignal{signal}, signal
+	}
+	return signal, signal
+}
+
 // commitLocked arms the ctx callbacks and the timer, each holding only inst.ref, then charges, allocates, registers and
-// marks; an unwind while arming leaves no effect and clears inst.ref, so the armed callbacks find no instance.
+// marks; an unwind while arming clears inst.ref and stops the notifications already registered.
 func (r *ImageRound) commitLocked(inst *imageInstance, now time.Time) {
 	ref := new(atomic.Pointer[imageInstance])
 	ref.Store(inst)
 	inst.ref = ref
 	defer func() {
 		if !inst.published {
-			ref.Store(nil)
+			inst.revokeEndNotifications()
 		}
 	}()
 	onCtx := func() { applyImageEnd(ref, false) }
-	inst.stopCtx = context.AfterFunc(inst.ctx, onCtx)
-	inst.stopRound = context.AfterFunc(r.ctx, onCtx)
+	inst.stopCtx, inst.signalStops[0] = afterImageCancel(inst.ctx, onCtx)
+	inst.stopRound, inst.signalStops[1] = afterImageCancel(r.ctx, onCtx)
 	inst.timer = time.AfterFunc(imageTimerDuration(inst.deadline.Sub(now)), func() { applyImageEnd(ref, true) })
 	req := r.service.imageRequester
 	start := inst.query.StartKey
@@ -489,7 +717,7 @@ func (r *ImageRound) commitLocked(inst *imageInstance, now time.Time) {
 	r.perPeer[inst.session] = usage
 	usage.add(perPeer)
 	r.global.add(global)
-	req.lastID[inst.session] = inst.query.RequestID
+	inst.session.lastID = inst.query.RequestID
 	req.current[imageKey{r.anchor, start}] = inst
 	r.attempted[imageAttemptKey{start, inst.session}] = struct{}{}
 	r.starts[start] = struct{}{}
@@ -530,15 +758,13 @@ func applyImageEnd(ref *atomic.Pointer[imageInstance], byTimer bool) {
 	req.retireIfEndedLocked(inst, now)
 }
 
-// send runs writeRequest and releases the pending request bytes once more when it unwinds.
-func (r *ImageRound) send(inst *imageInstance, payload [imageRequestBytes]byte) error {
+// send resolves any staged outcome after writeRequest returns or unwinds.
+func (r *ImageRound) send(inst *imageInstance, transport *peer, payload [imageRequestBytes]byte) (err error) {
 	returned := false
 	defer func() {
-		if !returned {
-			r.releasePending(inst)
-		}
+		r.finishSend(inst, returned && err == nil)
 	}()
-	err := r.writeRequest(inst, payload)
+	err = r.writeRequest(inst, transport, payload)
 	returned = true
 	return err
 }
@@ -559,30 +785,44 @@ func (inst *imageInstance) releasePendingLocked() {
 	}
 }
 
-// writeRequest takes the currency decision while waiting for writeMu and under it, then writes with only the frame
-// deadlines (RUBIN_L1_P2P_AUX.md Section 2.1).
-func (r *ImageRound) writeRequest(inst *imageInstance, payload [imageRequestBytes]byte) error {
-	session := inst.session
-	stop := func() (bool, error) {
-		end := r.endBeforeWrite(inst)
-		return end != nil, end
-	}
-	if acquired, end := session.lockWriteUnless(stop); !acquired {
+// writeRequest writes only after the currency decision under writeMu
+// (RUBIN_L1_P2P_AUX.md Section 2.1).
+func (r *ImageRound) writeRequest(inst *imageInstance, transport *peer, payload [imageRequestBytes]byte) error {
+	if acquired, end := r.lockImageWrite(inst, transport); !acquired {
 		return end
 	}
-	writeErr := writeImageFrame(session, payload)
+	writeErr := writeImageFrame(transport, payload)
 	if writeErr != nil {
-		defer r.closeAfterFailedWrite(inst, writeErr)
+		defer r.closeAfterFailedWrite(inst, transport, writeErr)
 	}
 	return r.finishWrite(inst, writeErr)
 }
 
+// lockImageWrite can refuse while waiting. Only the check with writeMu held can authorize a write.
+func (r *ImageRound) lockImageWrite(inst *imageInstance, transport *peer) (acquired bool, err error) {
+	for !transport.writeMu.TryLock() {
+		if end := r.endBeforeWrite(inst, false); end != nil {
+			return false, end
+		}
+		time.Sleep(time.Millisecond)
+	}
+	defer func() {
+		if !acquired {
+			transport.writeMu.Unlock()
+		}
+	}()
+	if end := r.endBeforeWrite(inst, true); end != nil {
+		return false, end
+	}
+	return true, nil
+}
+
 // closeAfterFailedWrite releases pending bytes still held, records writeErr as the session's last error and closes the
 // connection once, with no mutex held (RUBIN_L1_P2P_AUX.md Section 2.1).
-func (r *ImageRound) closeAfterFailedWrite(inst *imageInstance, writeErr error) {
+func (r *ImageRound) closeAfterFailedWrite(inst *imageInstance, transport *peer, writeErr error) {
 	r.releasePending(inst)
-	inst.session.setLastError(writeErr.Error())
-	_ = inst.session.conn.Close()
+	transport.setLastError(writeErr.Error())
+	_ = transport.conn.Close()
 }
 
 // writeImageFrame writes the request frame with writeMu held and releases writeMu when the write returns or unwinds.
@@ -591,14 +831,16 @@ func writeImageFrame(session *peer, payload [imageRequestBytes]byte) error {
 	return session.writePostHandshakeFrame(messageGetUTXOImage, payload[:], time.Time{})
 }
 
-// endBeforeWrite returns nil while the instance may be written, else retires it, releases its pending bytes and
-// returns its end.
-func (r *ImageRound) endBeforeWrite(inst *imageInstance) error {
+// endBeforeWrite records write authorization with writeMu held. A refusal releases the pending bytes.
+func (r *ImageRound) endBeforeWrite(inst *imageInstance, holdsWrite bool) error {
 	req := r.service.imageRequester
 	req.mu.Lock()
 	defer req.mu.Unlock()
-	end := inst.preWriteEnd(r.service.cfg.Now())
+	end := inst.preWriteEnd(r.service.cfg.Now)
 	if end == nil {
+		if holdsWrite {
+			inst.sendPhase = imageWriting
+		}
 		return nil
 	}
 	req.retireLocked(inst, end)
@@ -615,6 +857,7 @@ func (r *ImageRound) finishWrite(inst *imageInstance, writeErr error) error {
 	if inst.retired {
 		writeErr = nil
 	} else if writeErr != nil {
+		inst.sendPhase = imageBeforeWrite
 		req.retireLocked(inst, writeErr)
 	}
 	inst.releasePendingLocked()
@@ -622,7 +865,7 @@ func (r *ImageRound) finishWrite(inst *imageInstance, writeErr error) error {
 }
 
 // release subtracts amount of unit from r's usage on session and from r's global usage.
-func (r *ImageRound) release(session *peer, unit int, amount uint64) {
+func (r *ImageRound) release(session *imageSession, unit int, amount uint64) {
 	r.perPeer[session][unit] -= amount
 	r.global[unit] -= amount
 }
@@ -642,9 +885,17 @@ func (req *imageRequester) retireLocked(inst *imageInstance, end error) {
 	}
 	inst.stopCtx()
 	inst.stopRound()
-	inst.timer.Stop()
-	inst.retired, inst.end = true, end
-	delete(req.current, imageKey{inst.round.anchor, inst.query.StartKey})
-	inst.round.release(inst.session, unitCurrentAssignments, 1)
+	inst.signalStops = [2]func() bool{}
+	req.completeImageEndLocked(inst, end)
+}
+
+// revokeEndNotifications clears the callback reference and stops the registered Go notifications.
+func (inst *imageInstance) revokeEndNotifications() {
 	inst.ref.Store(nil)
+	for _, stop := range inst.signalStops {
+		if stop != nil {
+			stop()
+		}
+	}
+	inst.signalStops = [2]func() bool{}
 }

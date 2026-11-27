@@ -28,12 +28,8 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 		return err
 	}
 	state, err := performHandshake(
-		s.ctx,
-		conn,
-		s.cfg.PeerRuntimeConfig,
-		localVersion,
-		s.cfg.SyncConfig.ChainID,
-		s.cfg.GenesisHash,
+		s.ctx, conn, s.cfg.PeerRuntimeConfig,
+		localVersion, s.cfg.SyncConfig.ChainID, s.cfg.GenesisHash,
 	)
 	if err != nil {
 		return err
@@ -58,14 +54,16 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 	}
 	defer current.releaseCompactOutstandingLease() // runs after finishBlockRetry: a released charge wakes retry slots waiting on the budget
 	defer s.unregisterPeer(current)
-	defer current.finishBlockRetry() // runs first: the retry waiter is joined before unregistration
+	defer current.finishBlockRetry()
+	defer s.retireImagePeer(current)
 
 	s.cfg.SyncEngine.RecordBestKnownHeight(state.RemoteVersion.BestHeight)
 	if err := s.sendPostHandshakeAnnouncements(current); err != nil {
 		return err
 	}
 	if err := current.run(s.ctx); err != nil && s.ctx.Err() == nil {
-		current.applyPostHandshakeDisconnectError(err)
+		defer current.applyPostHandshakeDisconnectError(err)
+		s.retireImagePeer(current)
 		return err
 	}
 	return nil
@@ -73,11 +71,13 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 
 func (s *Service) sendPostHandshakeAnnouncements(current *peer) error {
 	if err := current.advertiseLocalCompactMode(); err != nil {
-		current.setLastError(err.Error())
+		defer func() { current.setLastError(err.Error()) }()
+		s.retireImagePeer(current)
 		return err
 	}
 	if err := s.requestBlocksIfBehind(current); err != nil {
-		current.setLastError(err.Error())
+		defer func() { current.setLastError(err.Error()) }()
+		s.retireImagePeer(current)
 		return err
 	}
 	if err := current.send(messageGetAddr, nil); err != nil {
@@ -132,6 +132,7 @@ func (s *Service) unregisterPeer(p *peer) {
 	if s == nil || p == nil {
 		return
 	}
+	s.retireImagePeer(p)
 	addr := p.addr()
 	// An empty daQuotaIdentity (no IP endpoint) never owned DA quota: no key lock, no lock row, no
 	// DA cleanup; ordinary removal still happens exactly once.
