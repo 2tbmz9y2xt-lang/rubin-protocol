@@ -62,8 +62,8 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 		return err
 	}
 	if err := current.run(s.ctx); err != nil && s.ctx.Err() == nil {
+		defer current.applyPostHandshakeDisconnectError(err)
 		s.retireImagePeer(current)
-		current.applyPostHandshakeDisconnectError(err)
 		return err
 	}
 	return nil
@@ -71,13 +71,13 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 
 func (s *Service) sendPostHandshakeAnnouncements(current *peer) error {
 	if err := current.advertiseLocalCompactMode(); err != nil {
+		defer func() { current.setLastError(err.Error()) }()
 		s.retireImagePeer(current)
-		current.setLastError(err.Error())
 		return err
 	}
 	if err := s.requestBlocksIfBehind(current); err != nil {
+		defer func() { current.setLastError(err.Error()) }()
 		s.retireImagePeer(current)
-		current.setLastError(err.Error())
 		return err
 	}
 	if err := current.send(messageGetAddr, nil); err != nil {
