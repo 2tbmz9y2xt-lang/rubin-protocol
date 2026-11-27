@@ -713,6 +713,37 @@ func candidateNonincrease(t *testing.T) {
 	candidateView(t, s.world, func(r *mdbx.Reader) { candidateRootOK(t, r, s.world.owner, in, canonicalUTXORoot(final)) })
 }
 
+type candidateInspectionWrapper struct {
+	error
+	calls int
+}
+
+func (e *candidateInspectionWrapper) As(any) bool {
+	e.calls++
+	return false
+}
+
+func (e *candidateInspectionWrapper) Unwrap() error {
+	e.calls++
+	return e.error
+}
+
+func TestInspectCandidateRootFailure(t *testing.T) {
+	cause := errors.New("logical state read failed")
+	direct := &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: cause}
+	wrapped := &candidateInspectionWrapper{error: direct}
+	class, original, ok := InspectCandidateRootFailure(wrapped)
+	logicalMDBXAssert(t, class == 0 && original == nil && !ok && wrapped.calls == 0,
+		"wrapped candidate inspection: class %v, cause %v, found %t, calls %d", class, original, ok, wrapped.calls)
+	class, original, ok = InspectCandidateRootFailure(direct)
+	logicalMDBXAssert(t, class == CandidateRootFailureStoreIntegrity && any(original) == any(cause) && ok,
+		"direct candidate inspection: class %v, cause %v, found %t", class, original, ok)
+	var typedNil *logicalStateFailure
+	class, original, ok = InspectCandidateRootFailure(typedNil)
+	logicalMDBXAssert(t, class == 0 && original == nil && !ok,
+		"typed nil candidate inspection: class %v, cause %v, found %t", class, original, ok)
+}
+
 func TestCandidateRootAdmission(t *testing.T) {
 	s := newCandidateScene(t, 5)
 	in, want := s.body(t, 0, 1)

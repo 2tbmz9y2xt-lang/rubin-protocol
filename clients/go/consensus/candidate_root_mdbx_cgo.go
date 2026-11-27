@@ -3,7 +3,6 @@
 package consensus
 
 import (
-	"errors"
 	"math"
 	"reflect"
 
@@ -97,8 +96,8 @@ const (
 
 // InspectCandidateRootFailure reports the class and original cause of a direct logical state failure.
 func InspectCandidateRootFailure(err error) (CandidateRootFailureKind, error, bool) {
-	var failure *logicalStateFailure
-	if !errors.As(err, &failure) || failure == nil || any(err) != any(failure) {
+	failure, ok := any(err).(*logicalStateFailure)
+	if !ok || failure == nil {
 		return 0, nil, false
 	}
 	return failure.kind, failure.cause, true
