@@ -146,9 +146,10 @@ func checkImageLocalEnd(t *testing.T, tc imageLocalEndCase) {
 	if tc.capD {
 		limits.RoundLifetime = 5 * time.Second
 	}
-	disconnected := tc.want == errImageDisconnected
+	disconnected := errors.Is(tc.want, errImageDisconnected)
 	if disconnected {
 		limits.Global.CurrentAssignments = 1
+		limits.Global.AdmittedRequests = 2
 	}
 	ctx, owner := newImageHookCtx(), newImageHookCtx()
 	round := f.roundCtx(t, owner, limits, 0, 1)
@@ -166,8 +167,12 @@ func checkImageLocalEnd(t *testing.T, tc imageLocalEndCase) {
 	requireImageResult(t, awaitImageResult(t, passive, "recorded local end"), 1, 1, tc.want, "recorded local end")
 	requireImageAbsent(t, round, t.Context(), 1, errImageNoAssignment)
 	if disconnected {
-		requireImageResult(t, f.request(round, t.Context(), 1, 1), 1, 1, nil, "same start on live source after disconnect")
+		successorCtx := newImageHookCtx()
+		requireImageResult(t, f.request(round, successorCtx, 1, 1), 1, 1, nil, "same start on live source after disconnect")
 		requireQueryResult(t, f.request(round, t.Context(), 0, 1), consensus.UTXOImageQuery{}, errImageDisconnected, "same start on disconnected source")
+		successorCtx.end(context.Canceled)
+		requireImageTake(t, round, t.Context(), 1, expectedImageQuery(1, 1), context.Canceled, "ended request on live source")
+		requireQueryResult(t, f.request(round, t.Context(), 1, 2), consensus.UTXOImageQuery{}, errImageLimit, "unused start after two admitted requests")
 	} else if tc.follow {
 		f.refused(t, round, t.Context(), 0, 1, errImageAttempted)
 		nextID := uint64(1)
