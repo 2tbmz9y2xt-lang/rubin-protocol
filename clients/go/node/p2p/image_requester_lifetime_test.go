@@ -104,6 +104,12 @@ func requireImageTake(t *testing.T, round *ImageRound, ctx context.Context, star
 	t.Helper()
 	got := awaitImageResult(t, goTakeImage(round, ctx, start), label)
 	requireQueryResult(t, got, q, want, label)
+	if slices.Contains([]error{errImageNoAssignment, errImageRoundClosed, errImageDisconnected}, want) {
+		switch got.err.(type) {
+		case interface{ Unwrap() error }, interface{ Unwrap() []error }:
+			t.Fatalf("%s returned a receive error with Unwrap: %v", label, got.err)
+		}
+	}
 }
 
 func requireImageAbsent(t *testing.T, round *ImageRound, ctx context.Context, start byte, want error) {
@@ -836,6 +842,7 @@ func testImageTerminalHooks(t *testing.T) {
 	}
 	t.Run("Done notification after service close", inImageBubble(testImageDoneNotificationAfterClose))
 	t.Run("Done closes during registration", testImageDoneDuringRegistration)
+	t.Run("custom AfterFunc scheduling cause", testImageAfterFuncHandoffCause)
 }
 
 func testImageTerminalObservationUnwind(t *testing.T) {
@@ -1035,20 +1042,99 @@ func testImageDoneDuringRegistration(t *testing.T) {
 	}
 }
 
+type imageRetentionKey struct{}
+
+type imageRetentionValueCtx struct {
+	context.Context
+	service *Service
+}
+
+func (c imageRetentionValueCtx) Value(any) any { return c.service }
+
+type imageRetentionAfterFuncCtx struct {
+	context.Context
+	parent *imageHookCtx
+}
+
+func (c imageRetentionAfterFuncCtx) AfterFunc(f func()) func() bool {
+	stop := c.parent.AfterFunc(f)
+	return func() bool {
+		stopped := stop()
+		runtime.KeepAlive(c.Context)
+		return stopped
+	}
+}
+
+type imageAfterFuncCauseCtx struct {
+	*imageHookCtx
+	parent context.Context
+}
+
+func (c imageAfterFuncCauseCtx) Value(key any) any { return c.parent.Value(key) }
+
+type imageServiceCancelError struct{ service *Service }
+
+func (e imageServiceCancelError) Error() string {
+	runtime.KeepAlive(e.service)
+	return "caller cancellation cause"
+}
+
+func testImageAfterFuncHandoffCause(t *testing.T) {
+	f := newImageTestFixture(t, 0)
+	parent, cancel := context.WithCancelCause(context.Background())
+	cancel(imageServiceCancelError{service: f.s})
+	caller := imageAfterFuncCauseCtx{imageHookCtx: newImageHookCtx(), parent: parent}
+	adapted, _ := imageCancellationContext(caller)
+	var cause error
+	caller.onAfterFunc = func() {
+		caller.end(context.Canceled)
+		cause = context.Cause(adapted)
+	}
+	stop := context.AfterFunc(adapted, func() {})
+	defer stop()
+	requireEqual(t, cause, context.Canceled, "cause during caller AfterFunc registration")
+}
+
 func testImageTerminalServiceRetention(t *testing.T) {
-	ctx := newImageHookCtx()
+	t.Run("native parent", func(t *testing.T) {
+		parent, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		checkImageTerminalServiceRetention(t, func(s *Service) context.Context {
+			return context.WithValue(parent, imageRetentionKey{}, s)
+		})
+		runtime.KeepAlive(parent)
+	})
+	t.Run("Done fallback", func(t *testing.T) {
+		parent := newImageHookCtx()
+		defer parent.end(context.Canceled)
+		checkImageTerminalServiceRetention(t, func(s *Service) context.Context {
+			return imageRetentionValueCtx{Context: parent, service: s}
+		})
+		runtime.KeepAlive(parent)
+	})
+	t.Run("custom AfterFunc", func(t *testing.T) {
+		parent := newImageHookCtx()
+		checkImageTerminalServiceRetention(t, func(s *Service) context.Context {
+			return imageRetentionAfterFuncCtx{Context: context.WithValue(parent, imageRetentionKey{}, s), parent: parent}
+		})
+		requireEqual(t, parent.endAndRun(errImageRequestEnd), 1, "inert callback retained by caller context")
+	})
+}
+
+func checkImageTerminalServiceRetention(t *testing.T, caller func(*Service) context.Context) {
+	t.Helper()
 	var service weak.Pointer[Service]
-	if t.Run("publish and join", func(t *testing.T) {
+	if !t.Run("publish and join", func(t *testing.T) {
 		f, round := newImageRound(t, 1, 0)
-		f.admitted(t, round, ctx, 0, 1, 1)
+		f.admitted(t, round, caller(f.s), 0, 1, 1)
 		requireReturned(t, lifecycleClose(f.s), "Close with registered context callback")
 		requireImageAbsent(t, round, t.Context(), 1, errServiceClosed)
 		service = weak.Make(f.s)
 	}) {
-		runtime.GC()
-		require(t, service.Value() == nil, "retained context callback keeps the closed Service alive")
-		requireEqual(t, ctx.endAndRun(errImageRequestEnd), 1, "inert callback retained by caller context")
+		t.FailNow()
 	}
+	runtime.GC()
+	require(t, service.Value() == nil, "retained context callback keeps the closed Service alive")
 }
 
 func applyImageTerminal(f *imageTestFixture, round *ImageRound, terminal string) {

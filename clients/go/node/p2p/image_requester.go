@@ -598,11 +598,14 @@ type imageCancelLookup struct {
 	key, value any
 }
 
+var imageDetachedLookup imageCancelLookup
+
 // imageCancelSignal schedules cancellation from a captured Done channel.
 type imageCancelSignal struct {
-	source context.Context
-	done   <-chan struct{}
-	lookup atomic.Pointer[imageCancelLookup]
+	source     context.Context
+	done       <-chan struct{}
+	lookup     atomic.Pointer[imageCancelLookup]
+	stopCaller func()
 }
 
 func (c *imageCancelSignal) Deadline() (time.Time, bool) { return time.Time{}, false }
@@ -640,20 +643,48 @@ type imageAfterFuncer interface {
 
 type imageAfterFuncSignal struct {
 	*imageCancelSignal
-	imageAfterFuncer
 }
 
-// afterImageCancel retains the parent's optional scheduling and stop hooks.
+// AfterFunc drops the non-native parent lookup and saves the caller's stop separately.
+func (c imageAfterFuncSignal) AfterFunc(f func()) func() bool {
+	c.lookup.Store(&imageDetachedLookup)
+	stop := c.source.(imageAfterFuncer).AfterFunc(f)
+	c.stopCaller = func() { stop() }
+	return func() bool { return false }
+}
+
+// afterImageCancel transfers registration data to the assignment's stop handle.
 func afterImageCancel(ctx context.Context, f func()) func() bool {
-	return context.AfterFunc(imageCancellationContext(ctx), f)
+	parent, signal := imageCancellationContext(ctx)
+	defer func() {
+		signal.lookup.Store(&imageDetachedLookup)
+		signal.source = nil
+		signal.stopCaller = nil
+	}()
+	stop := context.AfterFunc(parent, f)
+	lookup, stopCaller := signal.lookup.Load(), signal.stopCaller
+	if lookup == nil {
+		return stop
+	}
+	return func() bool {
+		stopped := func() bool {
+			signal.lookup.Store(lookup)
+			defer signal.lookup.Store(&imageDetachedLookup)
+			return stop()
+		}()
+		if stopped && stopCaller != nil {
+			stopCaller()
+		}
+		return stopped
+	}
 }
 
-func imageCancellationContext(ctx context.Context) context.Context {
+func imageCancellationContext(ctx context.Context) (context.Context, *imageCancelSignal) {
 	signal := &imageCancelSignal{source: ctx, done: ctx.Done()}
-	if scheduler, ok := ctx.(imageAfterFuncer); ok {
-		return imageAfterFuncSignal{signal, scheduler}
+	if _, ok := ctx.(imageAfterFuncer); ok {
+		return imageAfterFuncSignal{signal}, signal
 	}
-	return signal
+	return signal, signal
 }
 
 // commitLocked arms the ctx callbacks and the timer, each holding only inst.ref, then charges, allocates, registers and
