@@ -650,12 +650,18 @@ func candidateSetCap(t *testing.T, in *CandidateRootInput, chain [32]byte, heigh
 }
 
 func candidateCapFirst(t *testing.T) {
-	w, in, _, _ := candidateGrowthAtHeight(t, true, 20001)
-	candidateSetCap(t, &in, [32]byte{}, 20001)
-	irCounterV1(t, w, 1649267441664-773120, 25200009)
+	w, in, _ := candidateCapFirstInputs(t)
 	candidateView(t, w, func(r *mdbx.Reader) {
 		candidateTxError(t, r, w.owner, in, "BLOCK_ERR_STATE_CAP_EXCEEDED", "logical state cap exceeded")
 	})
+}
+
+func candidateCapFirstInputs(t *testing.T) (*btWorld, CandidateRootInput, candidateGrowthFunding) {
+	t.Helper()
+	w, in, _, funding := candidateGrowthAtHeight(t, true, 20001)
+	candidateSetCap(t, &in, [32]byte{}, 20001)
+	irCounterV1(t, w, 1649267441664-773120, 25200009)
+	return w, in, funding
 }
 
 func candidateInactiveCounters(t *testing.T) {
@@ -721,6 +727,9 @@ func TestCandidateRootAdmission(t *testing.T) {
 		{"nil_suite_registry", func(in *CandidateRootInput) { in.Registry = nil }, nil},
 		{"zero_suite_registry", func(in *CandidateRootInput) { in.Registry = &SuiteRegistry{} }, nil},
 		{"unresolved_suite", func(in *CandidateRootInput) { in.Registry = NewSuiteRegistryFromParams(nil) }, nil},
+		{"missing_suite_algorithm", func(in *CandidateRootInput) {
+			in.Registry = NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627, VerifyCost: 8, AlgName: ""}})
+		}, nil},
 		{"nil_rotation", func(in *CandidateRootInput) { in.Rotation = nil }, nil},
 		{"zero_rotation", func(in *CandidateRootInput) { in.Rotation = &CandidateRootRotation{} }, nil},
 		{"different_height", func(in *CandidateRootInput) { in.Rotation = &CandidateRootRotation{rotation: icbFrozenV1(4)} }, nil},

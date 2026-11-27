@@ -15,17 +15,22 @@ func TestCandidateRootFixtureOrder(t *testing.T) {
 	t.Run("transaction_before_binding", func(t *testing.T) {
 		s := newCandidateScene(t, 5)
 		in, next, want := candidateSpendOrderInputs(t, s)
-		candidateBeforeBinding(t, s.world, in, next, want, "TX_ERR_MISSING_UTXO", "utxo not found")
+		candidateBeforeBinding(t, s.world, in, next, want, "TX_ERR_MISSING_UTXO", "utxo not found", 1)
 	})
 	t.Run("subsidy_before_binding", func(t *testing.T) {
 		w, in, next, want := candidateSubsidyOrderInputs(t)
-		candidateBeforeBinding(t, w, in, next, want, "BLOCK_ERR_SUBSIDY_EXCEEDED", "coinbase outputs exceed subsidy+fees bound")
+		candidateBeforeBinding(t, w, in, next, want, "BLOCK_ERR_SUBSIDY_EXCEEDED", "coinbase outputs exceed subsidy+fees bound", 1)
+	})
+	t.Run("cap_before_binding", func(t *testing.T) {
+		w, in, funding := candidateCapFirstInputs(t)
+		next, want := candidateGrowthCoinbase(t, in, funding.parents)
+		candidateBeforeBinding(t, w, in, next, want, "BLOCK_ERR_STATE_CAP_EXCEEDED", "logical state cap exceeded", 2)
 	})
 	t.Run("growth_before_binding", candidateGrowthBeforeBinding)
 	t.Run("coinbase_placement", candidatePlacementBeforeReads)
 }
 
-func candidateBeforeBinding(t *testing.T, w *btWorld, in, next CandidateRootInput, want [32]byte, code ErrorCode, diagnostic string) {
+func candidateBeforeBinding(t *testing.T, w *btWorld, in, next CandidateRootInput, want [32]byte, code ErrorCode, diagnostic string, metadataGets uint64) {
 	t.Helper()
 	var outer error
 	evidence, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, btMeta(17, 1), func() {
@@ -35,8 +40,8 @@ func candidateBeforeBinding(t *testing.T, w *btWorld, in, next CandidateRootInpu
 		})
 	})
 	candidateUnreached(t, evidence, fixtureErr)
-	logicalMDBXAssert(t, evidence.BeginOld == 1 && evidence.OldGets[0] == 1 && evidence.NodeGets == 0 && evidence.NodePulls == 0,
-		"validation refusal read beyond authority or reached a node: %+v", evidence)
+	logicalMDBXAssert(t, evidence.BeginOld == 1 && evidence.OldGets[0] == metadataGets && evidence.NodeGets == 0 && evidence.NodePulls == 0,
+		"validation refusal read unexpected metadata or reached a node: %+v, want %d metadata GETs", evidence, metadataGets)
 	candidateNoNativeWrite(t, evidence)
 	logicalMDBXAssert(t, outer == nil, "candidate View after validation refusal: %v", outer)
 	candidateView(t, w, func(r *mdbx.Reader) {
@@ -247,6 +252,8 @@ func candidateApplicationFailures(t *testing.T) {
 					"candidate integrity class/cause: %v/%v, want %q", class, cause, row.message)
 				if sourceCause != nil {
 					logicalMDBXAssert(t, any(cause) == any(sourceCause), "candidate changed consumed row decoder cause: %v", cause)
+					_, _, joined := InspectCandidateRootFailure(errors.Join(err, errors.New("secondary view failure")))
+					logicalMDBXAssert(t, !joined, "joined View error classified as a direct candidate failure")
 				}
 				candidateReadControl(t, r)
 				return err

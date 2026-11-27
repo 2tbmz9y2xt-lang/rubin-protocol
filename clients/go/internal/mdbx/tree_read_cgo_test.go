@@ -1023,6 +1023,8 @@ func trCandidateCoverageAdmission(t *testing.T, r *Reader, owner *OperationReser
 		{"wrong_count", func(b *CandidateRootBodyV1) { b.BlockMeta.TxCount++ }, nil},
 		{"excess_events", func(b *CandidateRootBodyV1) { b.BlockMeta.EventCount = 0xffffffff }, nil},
 		{"excess_inputs", nil, []TreeOutpointV1{{Txid: tdTxid(1)}, {Txid: tdTxid(2)}}},
+		{"empty_input_backing", nil, make([]TreeOutpointV1, 0, 1)},
+		{"excess_input_capacity", nil, []TreeOutpointV1{{Txid: tdTxid(1)}, {}}[:1]},
 		{"duplicate_inputs", trCandidateTwoEvents, []TreeOutpointV1{{Txid: tdTxid(1)}, {Txid: tdTxid(1)}}},
 		{"descending_inputs", trCandidateTwoEvents, []TreeOutpointV1{{Txid: tdTxid(2)}, {Txid: tdTxid(1)}}},
 	} {

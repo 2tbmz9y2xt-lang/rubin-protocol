@@ -5,10 +5,10 @@ import (
 	"sync"
 )
 
-// LaneMaxBytes (LANE_MAX) is the reservation ceiling of every storage operation other than
-// a complete-block tree-integrated one; TreeLaneMaxBytes (TREE_LANE_MAX) is the ceiling of
-// one complete-block tree-integrated operation; MinReservationLimit (R_MIN = R_DEFAULT) is
-// the smallest aggregate limit at which an owner admits any charge.
+// LaneMaxBytes (LANE_MAX) bounds ordinary storage operations.
+// TreeLaneMaxBytes (TREE_LANE_MAX) bounds each complete-block tree-integrated operation
+// and pre-nonce tree scope. MinReservationLimit (R_MIN = R_DEFAULT) is the smallest
+// aggregate limit at which an owner admits a charge.
 const (
 	LaneMaxBytes        uint64 = 154_611_183
 	TreeLaneMaxBytes    uint64 = 402_653_184

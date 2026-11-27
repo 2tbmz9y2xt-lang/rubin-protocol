@@ -218,7 +218,7 @@ func (s *CandidateRootScopeV1) DeriveCandidateRootV1(body CandidateRootBodyV1, i
 		return [32]byte{}, treeDeltaInvalidV1()
 	}
 	state := s.state
-	if !state.candidateRootCoverageV1(body, len(inputs)) {
+	if !state.candidateRootCoverageV1(body, inputs) {
 		return [32]byte{}, treeDeltaInvalidV1()
 	}
 	if err := treeRootReadInputsV1(inputs); err != nil {
@@ -255,7 +255,7 @@ func (s *candidateRootScopeStateV1) retainsV1(bytes uint64) bool {
 }
 
 // candidateRootCoverageV1 bounds the candidate's body and facts before D admission.
-func (s *candidateRootScopeStateV1) candidateRootCoverageV1(body CandidateRootBodyV1, facts int) bool {
+func (s *candidateRootScopeStateV1) candidateRootCoverageV1(body CandidateRootBodyV1, inputs []TreeOutpointV1) bool {
 	n := uint64(len(body.Raw))
 	if !all(body.HeaderBytes == 148, n >= 149, n <= 68_000_157, n == s.rawBytes, body.Events != nil) {
 		return false
@@ -269,7 +269,8 @@ func (s *candidateRootScopeStateV1) candidateRootCoverageV1(body CandidateRootBo
 		return false
 	}
 	e := uint64(body.BlockMeta.EventCount)
-	return all(txs != 0, txs == uint64(body.BlockMeta.TxCount), candidateRootEventBoundV1(n, e), facts >= 0, int64(facts) <= int64(body.BlockMeta.EventCount))
+	return all(txs != 0, txs == uint64(body.BlockMeta.TxCount), candidateRootEventBoundV1(n, e),
+		inputs == nil || len(inputs) != 0, uint64(cap(inputs)) <= e)
 }
 
 // candidateRootEventBoundV1 checks the disjoint body-byte and allocation bounds.

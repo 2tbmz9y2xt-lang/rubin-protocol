@@ -3,6 +3,7 @@
 package consensus
 
 import (
+	"errors"
 	"math"
 	"reflect"
 
@@ -96,8 +97,8 @@ const (
 
 // InspectCandidateRootFailure reports the class and original cause of a direct logical state failure.
 func InspectCandidateRootFailure(err error) (CandidateRootFailureKind, error, bool) {
-	failure, ok := err.(*logicalStateFailure)
-	if !ok || failure == nil {
+	var failure *logicalStateFailure
+	if !errors.As(err, &failure) || failure == nil || any(err) != any(failure) {
 		return 0, nil, false
 	}
 	return failure.kind, failure.cause, true
@@ -127,9 +128,9 @@ func DeriveCandidateUTXORootV1(reader *mdbx.Reader, owner *mdbx.OperationReserva
 	return result.root, nil
 }
 
-// registriesV1 admits initialized registries and one height-frozen rotation.
+// registriesV1 admits the live suite manifest, cap registry, and height-frozen rotation.
 func (in *CandidateRootInput) registriesV1() bool {
-	if in.CapRegistry == nil || in.CapRegistry.registry.rows == nil || in.Registry == nil || in.Registry.suites == nil || in.Rotation == nil {
+	if in.CapRegistry == nil || in.CapRegistry.registry.rows == nil || !in.Registry.IsCanonicalDefaultLiveManifest() || in.Rotation == nil {
 		return false
 	}
 	height, rotation := in.Selection.Height, in.Rotation.rotation
