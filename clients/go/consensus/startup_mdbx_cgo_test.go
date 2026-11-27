@@ -212,8 +212,8 @@ func storageErrorCodeDeclarations(t *testing.T) (*types.Scope, []*types.Const) {
 		DisableUnusedImportCheck: true,
 		Importer:                 logicalMDBXStubImporter{},
 		Error: func(err error) {
-			diagnostic, ok := err.(types.Error)
-			if !ok || fset.PositionFor(diagnostic.Pos, false).Filename == source {
+			var diagnostic types.Error
+			if !errors.As(err, &diagnostic) || fset.PositionFor(diagnostic.Pos, false).Filename == source {
 				t.Fatalf("type-check declarations in %s: %v", source, err)
 			}
 		},
