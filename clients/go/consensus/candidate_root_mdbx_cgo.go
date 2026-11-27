@@ -128,9 +128,9 @@ func DeriveCandidateUTXORootV1(reader *mdbx.Reader, owner *mdbx.OperationReserva
 	return result.root, nil
 }
 
-// registriesV1 admits the live suite manifest, cap registry, and height-frozen rotation.
+// registriesV1 admits the supplied runtime suites, cap registry, and height-frozen rotation.
 func (in *CandidateRootInput) registriesV1() bool {
-	if in.CapRegistry == nil || in.CapRegistry.registry.rows == nil || !in.Registry.IsCanonicalDefaultLiveManifest() || in.Rotation == nil {
+	if in.CapRegistry == nil || in.CapRegistry.registry.rows == nil || !candidateSuiteRegistryV1(in.Registry) || in.Rotation == nil {
 		return false
 	}
 	height, rotation := in.Selection.Height, in.Rotation.rotation
@@ -140,14 +140,31 @@ func (in *CandidateRootInput) registriesV1() bool {
 	return in.hasFrozenSuitesV1(rotation.NativeCreateSuites(height)) && in.hasFrozenSuitesV1(rotation.NativeSpendSuites(height))
 }
 
+// candidateSuiteRegistryV1 requires the genesis suite and checks the supplied runtime parameters.
+func candidateSuiteRegistryV1(registry *SuiteRegistry) bool {
+	if !registry.IsRegistered(SUITE_ID_ML_DSA_87) {
+		return false
+	}
+	for id, params := range registry.suites {
+		reserved := id == SUITE_ID_SENTINEL || id == 0xff || IsStructuralWitnessCarrierSuiteID(id)
+		want := SuiteParams{
+			SuiteID: id, PubkeyLen: ML_DSA_87_PUBKEY_BYTES, SigLen: ML_DSA_87_SIG_BYTES,
+			VerifyCost: VERIFY_COST_ML_DSA_87, AlgName: "ML-DSA-87",
+		}
+		if reserved || params != want {
+			return false
+		}
+	}
+	return true
+}
+
 // hasFrozenSuitesV1 requires the supplied registry to resolve the frozen suite set.
 func (in *CandidateRootInput) hasFrozenSuitesV1(set *NativeSuiteSet) bool {
-	if set == nil || set.suites == nil {
+	if set.Len() == 0 {
 		return false
 	}
 	for suite := range set.suites {
-		params, ok := in.Registry.Lookup(suite)
-		if !ok || params.PubkeyLen <= 0 || params.SigLen <= 0 {
+		if !in.Registry.IsRegistered(suite) {
 			return false
 		}
 	}

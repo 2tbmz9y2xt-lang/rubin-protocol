@@ -717,6 +717,7 @@ func TestCandidateRootAdmission(t *testing.T) {
 	s := newCandidateScene(t, 5)
 	in, want := s.body(t, 0, 1)
 	t.Run("non_tree_reader", func(t *testing.T) { candidateOrdinaryReader(t, s, in) })
+	t.Run("descriptor_suite_registry", candidateDescriptorSuite)
 	for _, row := range []struct {
 		name string
 		edit func(*CandidateRootInput)
@@ -729,6 +730,12 @@ func TestCandidateRootAdmission(t *testing.T) {
 		{"unresolved_suite", func(in *CandidateRootInput) { in.Registry = NewSuiteRegistryFromParams(nil) }, nil},
 		{"missing_suite_algorithm", func(in *CandidateRootInput) {
 			in.Registry = NewSuiteRegistryFromParams([]SuiteParams{{SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627, VerifyCost: 8, AlgName: ""}})
+		}, nil},
+		{"missing_inactive_suite_algorithm", func(in *CandidateRootInput) {
+			active, _ := in.Registry.Lookup(0x01)
+			inactive := active
+			inactive.SuiteID, inactive.AlgName = 0x02, ""
+			in.Registry = NewSuiteRegistryFromParams([]SuiteParams{active, inactive})
 		}, nil},
 		{"nil_rotation", func(in *CandidateRootInput) { in.Rotation = nil }, nil},
 		{"zero_rotation", func(in *CandidateRootInput) { in.Rotation = &CandidateRootRotation{} }, nil},
@@ -755,6 +762,59 @@ func TestCandidateRootAdmission(t *testing.T) {
 			})
 		})
 	}
+}
+
+func candidateDescriptorSuite(t *testing.T) {
+	const height, newSuite = 10, 0x02
+	params := []SuiteParams{
+		{SuiteID: 0x01, PubkeyLen: 2592, SigLen: 4627, VerifyCost: 8, AlgName: "ML-DSA-87"},
+		{SuiteID: newSuite, PubkeyLen: 2592, SigLen: 4627, VerifyCost: 8, AlgName: "ML-DSA-87"},
+	}
+	registry := NewSuiteRegistryFromParams(params)
+	descriptor := CryptoRotationDescriptor{
+		Name: "test-rotation", OldSuiteID: 0x01, NewSuiteID: newSuite,
+		CreateHeight: 1, SpendHeight: 5, SunsetHeight: height,
+	}
+	err := ValidateRotationDescriptorForNetwork("devnet", descriptor, registry)
+	logicalMDBXAssert(t, err == nil, "candidate rotation descriptor: %v", err)
+	frozen, err := FreezeCandidateRootRotation(height, DescriptorRotationProvider{Descriptor: descriptor})
+	logicalMDBXAssert(t, err == nil, "freeze candidate descriptor: %v", err)
+
+	w, key := btNew(t), icbKeyV1(t)
+	cov := p2pkCovenantDataForPubkey(key.PubkeyBytes())
+	cov[0] = newSuite
+	seed, seedCoinbase, funding := icbSeedV1(t, w, cov, height)
+	spend := inputViewTx(11, Outpoint{Txid: funding.id})
+	spend.Outputs[0] = TxOutput{Value: 990, CovenantType: COV_TYPE_P2PK, CovenantData: cov}
+	spend.Witness[0] = signP2PKInputWitness(t, spend, 0, 1000, [32]byte{}, key)
+	spend.Witness[0].SuiteID = newSuite
+	signed := icbSignedRawV1(t, spend)
+	commit := initial148BlockWitnessCommit(t, signed)
+	cb := coinbaseTxWithOutputs(height, []testOutput{
+		{value: 1, covenantType: COV_TYPE_P2PK, covenantData: cov},
+		{covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]},
+	})
+	raw := initial148BlockFrame(t, [][]byte{cb, signed}, func(h *initial148BlockHead) { h.parent = seed.Endpoint.BlockHash })
+	in := candidateInput(t, raw, seed.Endpoint)
+	in.Registry, in.Rotation = registry, frozen
+	want := canonicalUTXORoot(map[Outpoint]UtxoEntry{
+		{Txid: seedCoinbase.id}:     btEntry(7, COV_TYPE_P2PK, validP2PKCovenantData(), height-1, true),
+		{Txid: funding.id, Vout: 1}: btEntry(2000, COV_TYPE_P2PK, cov, height-1, false),
+		{Txid: testTxID(t, signed)}: btEntry(990, COV_TYPE_P2PK, cov, height, false),
+		{Txid: testTxID(t, cb)}:     btEntry(1, COV_TYPE_P2PK, cov, height, true),
+	})
+	candidateView(t, w, func(r *mdbx.Reader) {
+		for _, subset := range [][]SuiteParams{params[1:], params[:1]} {
+			incomplete := in
+			incomplete.Registry = NewSuiteRegistryFromParams(subset)
+			root, err := DeriveCandidateUTXORootV1(r, w.owner, incomplete)
+			class, cause, ok := InspectCandidateRootFailure(err)
+			logicalMDBXAssert(t, root == [32]byte{} && ok && class == CandidateRootFailureLocalInvariant && cause != nil &&
+				cause.Error() == "invalid candidate validation context",
+				"candidate with only suite %02x: root %x, error %v, class %v, cause %v", subset[0].SuiteID, root, err, class, cause)
+			candidateRootOK(t, r, w.owner, in, want)
+		}
+	})
 }
 
 func candidateOrdinaryReader(t *testing.T, s candidateScene, in CandidateRootInput) {
