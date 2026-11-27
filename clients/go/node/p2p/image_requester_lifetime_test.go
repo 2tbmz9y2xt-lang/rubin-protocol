@@ -44,6 +44,7 @@ func TestImageRequesterLifetime(t *testing.T) {
 	t.Run("read exit before diagnostics", testImageReadExitBeforePublish)
 	t.Run("same address replacement", testImageReplacementRetainsNoPeer)
 	t.Run("exit before first capture", testImageExitBeforeCapture)
+	t.Run("retirement between snapshot and capture", testImageRetirementBetweenSnapshotAndCapture)
 	t.Run("retired source refusal allocations", testImageRetiredSourceAllocations)
 	t.Run("source bound counts live aliases", testImageLiveSourceBound)
 	t.Run("terminal context hooks", testImageTerminalHooks)
@@ -390,6 +391,7 @@ func testImageStagedOrder(t *testing.T) {
 	} {
 		t.Run(tc.name, inImageBubble(func(t *testing.T) { checkImageStagedOrder(t, tc) }))
 	}
+	t.Run("ready outcome survives later write panic", inImageBubble(testImageReadyOutcomeSurvivesUnwind))
 }
 
 func testImageEndAtActualWrite(t *testing.T) {
@@ -527,6 +529,26 @@ func checkImageStagedOrder(t *testing.T, tc imageStagedWriteCase) {
 	if tc.fault != nil {
 		f.requireFault(t, 0, 1, tc.fault.Error(), "actual write fault behind the recorded end")
 	}
+}
+
+func testImageReadyOutcomeSurvivesUnwind(t *testing.T) {
+	f, round := newImageRound(t, 2, 0, 1)
+	ready, writing := newImageHookCtx(), newImageHookCtx()
+	q := expectedImageQuery(1, 1)
+	q.ByteLimit++
+	sent := launch(round, ready, f.ids[1], 1, q.ByteLimit)
+	requireQueryResult(t, awaitImageResult(t, sent, "older send"), q, nil, "older send")
+	requireEqual(t, ready.endAndRun(errImageRoundEnd), 1, "older request callback count")
+	write, release := f.beginStagedWrite(t, round, writing, imageStagedWriteCase{unwind: imageUnwinder(false)})
+	defer release()
+	requireEqual(t, writing.endAndRun(errImageRequestEnd), 1, "writing request callback count")
+	synctest.Wait()
+	release()
+	requireImageUnwindReport(t, write, false)
+	waitCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	requireImageTake(t, round, waitCtx, 1, q, errImageRoundEnd, "older ready outcome after later write panic")
+	requireImageAbsent(t, round, waitCtx, 1, errImageNoAssignment)
 }
 
 func (f *imageTestFixture) holdImageUnwindSibling(t *testing.T, round *ImageRound) func() {
@@ -1155,6 +1177,61 @@ func testImageExitBeforeCapture(t *testing.T) {
 	require(t, !created, "retired source acquired a registration identity")
 	release()
 	requireChannelClosed(t, done, "peer cleanup")
+}
+
+func testImageRetirementBetweenSnapshotAndCapture(t *testing.T) {
+	t.Run("round", func(t *testing.T) {
+		f := newImageTestFixture(t, 2)
+		limits := imageTestLimits()
+		config := f.config(limits, 0, 1)
+		beginImageDuringSourceRetirement(t, f, "BeginImageRound", func() (*ImageRound, error) {
+			return f.s.BeginImageRound(t.Context(), config)
+		})
+		round := f.round(t, limits, 1)
+		requireImageResult(t, f.request(round, t.Context(), 1, 1), 1, 1, nil, "request after refused capture")
+		f.requireNoRetiredImageIdentity(t)
+	})
+	t.Run("probe round", func(t *testing.T) {
+		f := newImageTestFixture(t, 2)
+		limits, now := imageTestLimits(), f.clock.add(0)
+		config := imageProbeConfig(f, now, limits, 0, 1)
+		beginImageDuringSourceRetirement(t, f, "BeginImageProbeRound", func() (*ImageRound, error) {
+			return f.s.BeginImageProbeRound(t.Context(), config)
+		})
+		round := checkImageProbeBegin(t, f, t.Context(), imageProbeConfig(f, now, limits, 1), nil)
+		checkImageProbe(t, round, t.Context(), f.ids[1], 1, imageTestByteLimit, [32]byte{}, expectedImageQuery(1, 1), nil)
+		f.requireNoRetiredImageIdentity(t)
+	})
+}
+
+func beginImageDuringSourceRetirement(t *testing.T, f *imageTestFixture, constructor string, begin func() (*ImageRound, error)) {
+	t.Helper()
+	req := f.lockRequester()
+	release := sync.OnceFunc(req.mu.Unlock)
+	defer release()
+	leases := f.leases()
+	started := make(chan imageBegin, 1)
+	go func() {
+		round, err := begin()
+		started <- imageBegin{round: round, err: err}
+	}()
+	waitUntil(t, func() bool {
+		return f.leases() == leases+1 && goroutineParked("[sync.Mutex.Lock", "p2p.(*Service)."+constructor+"(")
+	}, "constructor mutex wait after the live source snapshot")
+	f.peers[0].imageRetired.Store(true)
+	release()
+	got := awaitImageResult(t, started, "constructor after source retirement")
+	requireEqual(t, got.err, errImageSourceSet, "constructor error after source retirement")
+	requireEqual(t, got.round, (*ImageRound)(nil), "constructor result after source retirement")
+}
+
+func (f *imageTestFixture) requireNoRetiredImageIdentity(t *testing.T) {
+	t.Helper()
+	req := f.lockRequester()
+	identity, sessions := f.peers[0].imageSession, len(req.sessions)
+	req.mu.Unlock()
+	requireEqual(t, identity, (*imageSession)(nil), "retired registration identity")
+	requireEqual(t, sessions, 1, "captured live registration count")
 }
 
 func testImageRetiredSourceAllocations(t *testing.T) {
