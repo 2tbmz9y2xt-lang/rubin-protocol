@@ -541,6 +541,7 @@ func testImageReplyTransport(t *testing.T) {
 		{name: "DisabledEmptyChunk", command: replyChunk, empty: true},
 		{name: "DisabledEmptyNegative", command: replyNegative, empty: true},
 		{name: "ResponderNonempty", command: "getutxoimg", size: 120, enabled: true},
+		{name: "ResponderEmpty", command: "getutxoimg", enabled: true, empty: true},
 		{name: "ChunkCapOver", command: replyChunk, size: 2097153, enabled: true},
 		{name: "NegativeCapOver", command: replyNegative, size: 121, enabled: true},
 	} {
@@ -559,6 +560,7 @@ func checkReplyTransportHeader(t *testing.T, tc replyTransportCase) {
 	payload := make([]byte, tc.size)
 	f.sendHeader(0, tc.command, tc.size, payload, false)
 	_, _ = p.remote.Write(payload)
+	_ = p.remote.Close()
 	requireChannelClosed(t, p.done, "terminal framed header")
 	requireEqual(t, p.wire.readBytes.Load()-prior, int64(24), "count of envelope bytes read")
 	want := "message exceeds command cap: " + tc.command
