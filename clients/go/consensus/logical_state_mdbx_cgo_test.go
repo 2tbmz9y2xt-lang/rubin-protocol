@@ -1292,7 +1292,7 @@ type OperationReservationOwner struct{}
 type OperationAccount struct{}
 func (*OperationAccount) WithReservation(uint64,func()error)error{return nil}
 type CandidateRootParentV1 struct{DatabaseID [32]byte; Generation,Height uint64; Parent TreeEndpointV1}
-type CandidateRootBodyV1 struct{Raw []byte; HeaderBytes uint16; BlockMeta TreeBlockV1; Events func([]byte,*TreeDeltaSinkV1)error}
+type CandidateRootBodyV1 struct{Raw []byte; HeaderBytes uint16; BlockMeta TreeBlockV1}
 type CandidateRootScopeV1 struct{}
 func (*OperationReservationOwner) WithCandidateRootV1(*Reader,CandidateRootParentV1,[]byte,func(*CandidateRootScopeV1)error)error{return nil}
 func (*CandidateRootScopeV1) WithCandidateValidationV1(uint64,func(func()error)error)error{return nil}

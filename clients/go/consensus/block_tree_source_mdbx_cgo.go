@@ -127,21 +127,17 @@ func (s *blockTreeSourceV1) TreeDeltaV1(position mdbx.TreePositionV1, old *mdbx.
 		return err
 	}
 	return s.visitV1(old, sink.WindowV1(), func(body treebody.Source) error {
-		return s.eventsV1(body, sink)
-	})
-}
-
-func (s *blockTreeSourceV1) eventsV1(body treebody.Source, sink *mdbx.TreeDeltaSinkV1) error {
-	census, err := s.scanV1(body, func(e treebody.Event) error {
-		return sink.EventV1(mdbx.TreeEventV1{
-			Kind: mdbx.TreeEventKindV1(e.Kind), Outpoint: mdbx.TreeOutpointV1(e.Outpoint),
-			TxIndex: e.TxIndex, InputIndex: e.InputIndex, FrameOffset: e.FrameOffset, FrameLength: e.FrameLength,
+		census, err := s.scanV1(body, func(e treebody.Event) error {
+			return sink.EventV1(mdbx.TreeEventV1{
+				Kind: mdbx.TreeEventKindV1(e.Kind), Outpoint: mdbx.TreeOutpointV1(e.Outpoint),
+				TxIndex: e.TxIndex, InputIndex: e.InputIndex, FrameOffset: e.FrameOffset, FrameLength: e.FrameLength,
+			})
 		})
+		if err == nil && (census.TxCount != s.coverage.BlockMeta.TxCount || census.EventCount != s.coverage.BlockMeta.EventCount) {
+			return s.framingV1()
+		}
+		return err
 	})
-	if err == nil && (census.TxCount != s.coverage.BlockMeta.TxCount || census.EventCount != s.coverage.BlockMeta.EventCount) {
-		return s.framingV1()
-	}
-	return err
 }
 
 func (s *blockTreeSourceV1) scanV1(body treebody.Source, emit func(treebody.Event) error) (treebody.Census, error) {
@@ -157,19 +153,6 @@ func (s *blockTreeSourceV1) framingV1() error {
 		return &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: errors.New("required block tree source framing differs")}
 	}
 	return localLogicalStateFailure("qualified block tree source framing differs")
-}
-
-func candidateTreeBodyV1(raw []byte, height uint64, meta mdbx.TreeBlockV1) mdbx.CandidateRootBodyV1 {
-	return mdbx.CandidateRootBodyV1{
-		Raw: raw, HeaderBytes: Initial148HeaderBytes, BlockMeta: meta,
-		Events: func(raw []byte, sink *mdbx.TreeDeltaSinkV1) error {
-			if err := sink.BeginV1(meta); err != nil {
-				return err
-			}
-			source := blockTreeSourceV1{coverage: mdbx.TreeSourceCoverageV1{HeaderBytes: Initial148HeaderBytes, Height: height, BlockMeta: meta}}
-			return source.eventsV1(treebody.Source{Raw: raw}, sink)
-		},
-	}
 }
 
 // Row, Reader, sink, hash, window and cursors are synchronous visit-local state.

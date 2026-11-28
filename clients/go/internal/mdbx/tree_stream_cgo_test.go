@@ -1810,7 +1810,7 @@ func tsCandidateSurfaceV1(t *testing.T) {
 	})
 	tsCandidateFieldsV1(t, reflect.TypeFor[CandidateRootBodyV1](), map[string]reflect.Type{
 		"Raw": reflect.TypeFor[[]byte](), "HeaderBytes": reflect.TypeFor[uint16](),
-		"BlockMeta": reflect.TypeFor[TreeBlockV1](), "Events": reflect.TypeFor[func([]byte, *TreeDeltaSinkV1) error](),
+		"BlockMeta": reflect.TypeFor[TreeBlockV1](),
 	})
 	scope := reflect.TypeFor[*CandidateRootScopeV1]()
 	tsCandidateFieldsV1(t, scope.Elem(), nil)

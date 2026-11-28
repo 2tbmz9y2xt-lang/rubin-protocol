@@ -869,16 +869,10 @@ func trCandidateSetup(t *testing.T) (*Store, *OperationReservationOwner, Candida
 	raw = append(raw, 255, 255, 255, 255, 0, 255, 255, 255, 255, 1)
 	raw = append(append(raw, frame...), 6, 0, 0, 0, 0, 0)
 	meta := TreeBlockV1{TxCount: 1, EventCount: 1}
-	body := CandidateRootBodyV1{Raw: raw, HeaderBytes: 148, BlockMeta: meta, Events: func(backing []byte, sink *TreeDeltaSinkV1) error {
-		if !bytes.Equal(backing, raw) || &backing[0] != &raw[0] {
-			t.Fatal("candidate native body backing changed")
-		}
-		if err := sink.BeginV1(meta); err != nil {
-			return err
-		}
-		return sink.EventV1(TreeEventV1{Kind: 2, Outpoint: TreeOutpointV1{Txid: tdTxid(37)}, FrameOffset: 205, FrameLength: uint32(len(frame))})
-	}}
-	return s, o, selection, body, trWantRootV1(t, frame, 6)
+	body := CandidateRootBodyV1{Raw: raw, HeaderBytes: 148, BlockMeta: meta}
+	key := tdUTXOKey(1, sha3.Sum256(raw[149:len(raw)-2]), 0)
+	root := testTreeBuild(1, []testTreeEntry{trEntryV1(key, tdFormed(frame, 6, 1))}, map[string][]byte{})
+	return s, o, selection, body, root.digest
 }
 
 func trCandidateAdmission(t *testing.T) {
@@ -923,69 +917,59 @@ func trCandidateBodyFunding(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				offered := body
 				admitted := body.Raw
-				held := uint64(len(body.Raw)) + 4096
+				validation := uint64(len(body.Raw)) + 4096
+				live := validation
 				var inputs []TreeOutpointV1
 				switch name {
 				case "different_backing":
 					offered.Raw = bytes.Clone(body.Raw)
 				case "different_width":
 					offered.Raw = admitted[:len(admitted)-1]
+				case "unfunded_validation":
+					live = 135240
 				case "key_funding_one_byte_short":
 					offered.Raw = bytes.Clone(body.Raw)
 					trCandidateTwoEvents(&offered)
 					admitted = offered.Raw
 					keys := [2]TreeOutpointV1{{Txid: tdTxid(1)}}
 					inputs = keys[:1]
-					held = uint64(len(admitted)) + 4096
+					validation = uint64(len(admitted)) + 4096
+					live = validation + 72
 				}
-				var entered bool
-				offered.Events = func(_ []byte, sink *TreeDeltaSinkV1) error {
-					entered = true
-					if offered.BlockMeta.EventCount == 2 {
-						return trCandidateRecordTwoEvents(offered.BlockMeta, sink)
-					}
-					return body.Events(body.Raw, sink)
-				}
+				preheld := specRMin - live - 288_439
+				reservationFill(t, owner, preheld)
 				unfunded := name == "unfunded_validation"
-				attempt := func() error {
-					return owner.WithCandidateRootV1(r, selection, admitted, func(scope *CandidateRootScopeV1) error {
-						derive := func() error {
-							got, err := scope.DeriveCandidateRootV1(offered, inputs)
-							if entered {
-								t.Fatal("candidate body or funding refusal reached event source")
-							}
-							trCandidateRefusal(t, got, err)
+				mustEnvironment(t, owner.WithCandidateRootV1(r, selection, admitted, func(scope *CandidateRootScopeV1) error {
+					derive := func() error {
+						trCandidateLive(t, owner, specRMin-288_439)
+						got, err := scope.DeriveCandidateRootV1(offered, inputs)
+						trCandidateRefusal(t, got, err)
+						return nil
+					}
+					err := scope.WithCandidateValidationV1(validation, func(func() error) error {
+						mustEnvironment(t, scope.QualifyCurrentV1())
+						trCandidateCensus(t, scope, admitted)
+						if unfunded {
 							return nil
 						}
-						err := scope.WithCandidateValidationV1(held, func(func() error) error {
-							mustEnvironment(t, scope.QualifyCurrentV1())
-							trCandidateCensus(t, scope, admitted)
-							if unfunded {
-								return nil
-							}
-							if len(inputs) != 0 {
-								return scope.WithCandidateFactsV1(2, func(lookup, lengths, _ func() error) error {
-									mustEnvironment(t, lookup())
-									mustEnvironment(t, lengths())
-									mustEnvironment(t, scope.state.facts.Load().shrink(1))
-									return scope.state.account.WithReservation(1, derive)
-								})
-							}
-							return derive()
-						})
-						if err == nil && unfunded {
-							return scope.WithCandidateFactsV1(1, func(func() error, func() error, func() error) error { return derive() })
+						if len(inputs) != 0 {
+							return scope.WithCandidateFactsV1(2, func(lookup, lengths, _ func() error) error {
+								mustEnvironment(t, lookup())
+								mustEnvironment(t, lengths())
+								mustEnvironment(t, scope.state.facts.Load().shrink(1))
+								return scope.state.account.WithReservation(1, derive)
+							})
 						}
-						return err
+						return derive()
 					})
-				}
-				if unfunded {
-					mustEnvironment(t, owner.WithReservation(8192, attempt))
-				} else {
-					mustEnvironment(t, attempt())
-				}
-				mustEnvironment(t, trCandidateReuse(t, r, owner, selection, body, want))
+					if err == nil && unfunded {
+						return scope.WithCandidateFactsV1(1, func(func() error, func() error, func() error) error { return derive() })
+					}
+					return err
+				}))
+				trCandidateLive(t, owner, preheld)
 			})
+			mustEnvironment(t, trCandidateReuse(t, r, owner, selection, body, want))
 		}
 		return nil
 	}))
@@ -1028,7 +1012,7 @@ func trCandidateCoverageAdmission(t *testing.T, r *Reader, owner *OperationReser
 		{"absent", func(b *CandidateRootBodyV1) { b.Raw = nil }, nil},
 		{"wrong_width", func(b *CandidateRootBodyV1) { b.HeaderBytes = 116 }, nil},
 		{"wrong_linkage", func(b *CandidateRootBodyV1) { b.Raw[4] ^= 1 }, nil},
-		{"missing_callback", func(b *CandidateRootBodyV1) { b.Events = nil }, nil},
+		{"missing_census", nil, nil},
 		{"missing_transactions", func(b *CandidateRootBodyV1) { b.Raw, b.BlockMeta.EventCount = b.Raw[:149], 0 }, nil},
 		{"wrong_count", func(b *CandidateRootBodyV1) { b.BlockMeta.TxCount++ }, nil},
 		{"excess_events", func(b *CandidateRootBodyV1) { b.BlockMeta.EventCount = 0xffffffff }, nil},
@@ -1044,11 +1028,6 @@ func trCandidateCoverageAdmission(t *testing.T, r *Reader, owner *OperationReser
 			if row.name != "underdeclared_events" {
 				body.Raw = bytes.Clone(original.Raw)
 			}
-			called := false
-			body.Events = func(_ []byte, sink *TreeDeltaSinkV1) error {
-				called = true
-				return sink.BeginV1(body.BlockMeta)
-			}
 			if row.edit != nil {
 				row.edit(&body)
 			}
@@ -1057,15 +1036,20 @@ func trCandidateCoverageAdmission(t *testing.T, r *Reader, owner *OperationReser
 				admitted = original.Raw
 			}
 			mustEnvironment(t, owner.WithCandidateRootV1(r, p, admitted, func(scope *CandidateRootScopeV1) error {
-				return scope.WithCandidateValidationV1(25_000, func(func() error) error {
+				return scope.WithCandidateValidationV1(specTreeLaneMax-288_439, func(func() error) error {
 					mustEnvironment(t, scope.QualifyCurrentV1())
-					trCandidateCensus(t, scope, admitted)
-					got, err := scope.DeriveCandidateRootV1(body, row.inputs)
-					if called {
-						t.Fatal("invalid coverage reached recorder")
+					if row.name != "missing_census" {
+						trCandidateCensus(t, scope, admitted)
 					}
-					trCandidateRefusal(t, got, err)
-					return nil
+					derive := func() error {
+						got, err := scope.DeriveCandidateRootV1(body, row.inputs)
+						trCandidateRefusal(t, got, err)
+						return nil
+					}
+					if len(row.inputs) != 0 {
+						return scope.WithCandidateFactsV1(body.BlockMeta.EventCount, func(func() error, func() error, func() error) error { return derive() })
+					}
+					return derive()
 				})
 			}))
 		})
@@ -1076,18 +1060,6 @@ func trCandidateTwoEvents(body *CandidateRootBodyV1) {
 	body.Raw[204] = 2
 	body.Raw = append(append(body.Raw[:len(body.Raw)-6], tdFrame(1, 0, []byte{8})...), 6, 0, 0, 0, 0, 0)
 	body.BlockMeta.EventCount = 2
-}
-
-func trCandidateRecordTwoEvents(meta TreeBlockV1, sink *TreeDeltaSinkV1) error {
-	if err := sink.BeginV1(meta); err != nil {
-		return err
-	}
-	first := TreeEventV1{Kind: TreeEventCreateV1, Outpoint: TreeOutpointV1{Txid: tdTxid(37)}, FrameOffset: 205, FrameLength: 13}
-	if err := sink.EventV1(first); err != nil {
-		return err
-	}
-	second := TreeEventV1{Kind: TreeEventCreateV1, Outpoint: TreeOutpointV1{Txid: tdTxid(37), Vout: 1}, FrameOffset: 218, FrameLength: 12}
-	return sink.EventV1(second)
 }
 
 func trCandidateRefusal(t *testing.T, got [32]byte, err error) {
@@ -1324,26 +1296,17 @@ func trCandidateLive(t *testing.T, owner *OperationReservationOwner, want uint64
 func trCandidateDerivationCapacity(t *testing.T) {
 	s, owner, selection, body, want := trCandidateSetup(t)
 	mustEnvironment(t, s.View(func(r *Reader) error {
-		eventCalls := 0
-		originalEvents := body.Events
-		body.Events = func(raw []byte, sink *TreeDeltaSinkV1) error {
-			eventCalls++
-			return originalEvents(raw, sink)
-		}
 		mustEnvironment(t, owner.WithCandidateRootV1(r, selection, body.Raw, func(scope *CandidateRootScopeV1) error {
 			const held = 402_653_184 - 288_544 + 1
 			return scope.WithCandidateValidationV1(held, func(func() error) error {
 				mustEnvironment(t, scope.QualifyCurrentV1())
 				trCandidateCensus(t, scope, body.Raw)
 				root, err := scope.DeriveCandidateRootV1(body, nil)
-				if root != ([32]byte{}) || !treeSameErrorV1(err, errOperationReservationCapacity) || eventCalls != 0 {
-					t.Fatalf("derivation one byte short: root %x, error %v, event calls %d", root, err, eventCalls)
+				if root != ([32]byte{}) || !treeSameErrorV1(err, errOperationReservationCapacity) {
+					t.Fatalf("derivation one byte short: root %x, error %v", root, err)
 				}
 				root, err = scope.DeriveCandidateRootV1(body, nil)
 				trCandidateRefusal(t, root, err)
-				if eventCalls != 0 {
-					t.Fatalf("consumed scope invoked the event source %d times", eventCalls)
-				}
 				trCandidateLive(t, owner, held)
 				return nil
 			})

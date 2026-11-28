@@ -27,12 +27,11 @@ type CandidateRootParentV1 struct {
 	Parent             TreeEndpointV1
 }
 
-// CandidateRootBodyV1 borrows an immutable complete body and its ordered events.
+// CandidateRootBodyV1 borrows the immutable complete body and its declared metadata.
 type CandidateRootBodyV1 struct {
 	Raw         []byte
 	HeaderBytes uint16
 	BlockMeta   TreeBlockV1
-	Events      func([]byte, *TreeDeltaSinkV1) error
 }
 
 // CandidateRootScopeV1 is a single synchronous root derivation on a borrowed Reader.
@@ -306,7 +305,7 @@ func (s *candidateRootScopeStateV1) matchesRawV1(raw []byte) bool {
 }
 
 func (s *candidateRootScopeStateV1) candidateRootCoverageV1(body CandidateRootBodyV1, inputs []TreeOutpointV1) bool {
-	if !all(body.HeaderBytes == 148, s.matchesRawV1(body.Raw), body.Events != nil) {
+	if !all(body.HeaderBytes == 148, s.matchesRawV1(body.Raw)) {
 		return false
 	}
 	if !bytes.Equal(body.Raw[4:36], s.selection.Parent.BlockHash[:]) {
@@ -337,7 +336,7 @@ func (r *Reader) candidateRootReadV1(p CandidateRootParentV1, body CandidateRoot
 	rec := newTreeRecorderV1(treeWriterV1, shape, treeBodyV1{bytes: body.Raw}, make([]byte, treeWindowBytesV1), ledger)
 	rec.rootReadOnly, rec.coverage.BlockMeta, rec.observation = true, body.BlockMeta, &observation
 	defer rec.releaseV1()
-	delta, err := r.candidateRootEventsV1(rec, body)
+	delta, err := candidateRootEventsV1(rec, body)
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -350,15 +349,19 @@ func (r *Reader) candidateRootReadV1(p CandidateRootParentV1, body CandidateRoot
 	return root, r.treeRootRecordV1(err)
 }
 
-func (r *Reader) candidateRootEventsV1(rec *treeRecorderV1, body CandidateRootBodyV1) (*treeDeltaV1, error) {
-	unwind, sourceErr := treeCallV1(func() error { return body.Events(body.Raw, &TreeDeltaSinkV1{recorder: rec}) })
-	defer unwind.resumeV1()
-	r.getMu.Lock()
-	readErr := r.failure
-	r.getMu.Unlock()
-	err := treePrimaryV1(sourceErr, readErr, rec.failureV1())
-	if err != nil || unwind.kind != 0 {
+func candidateRootEventsV1(rec *treeRecorderV1, body CandidateRootBodyV1) (*treeDeltaV1, error) {
+	meta := body.BlockMeta
+	if err := rec.beginV1(meta.TxCount, meta.EventCount, meta.Generated); err != nil {
 		return nil, err
+	}
+	census, err := treebody.Scan(treebody.Source{Raw: body.Raw}, body.HeaderBytes, rec.prim.height, func(e treebody.Event) error {
+		return rec.eventV1(uint8(e.Kind), e.Outpoint.Txid, e.Outpoint.Vout, e.TxIndex, e.InputIndex, e.FrameOffset, e.FrameLength)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if census.Malformed || census.TxCount != meta.TxCount || census.EventCount != meta.EventCount {
+		return nil, treeDeltaInvalidV1()
 	}
 	return rec.finishRootEventsV1()
 }

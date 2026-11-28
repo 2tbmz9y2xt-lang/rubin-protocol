@@ -97,7 +97,7 @@ func withCandidateRequiredV1(reader *mdbx.Reader, funding *mdbx.CandidateRootSco
 		}
 		binary.BigEndian.PutUint64(meta.Generated[:8], generated.Hi)
 		binary.BigEndian.PutUint64(meta.Generated[8:], generated.Lo)
-		body := candidateTreeBodyV1(raw, parent.Height, meta)
+		body := mdbx.CandidateRootBodyV1{Raw: raw, HeaderBytes: Initial148HeaderBytes, BlockMeta: meta}
 		out = scope.deriveCandidateV1(funding, body, retireLookup, retireLengths, retireKeys)
 		return out.cause
 	})
