@@ -37,8 +37,12 @@ func (g *imageGeneration) record(ready bool) {
 
 // ValidFor reports current attribution for the supplied round, source, anchor and
 // body hash. It takes no Service lease and has no admission effect.
-func (a *ImageAttribution) ValidFor(round *ImageRound, sourceID string, anchor ImageAnchor, expectedBodyHash [32]byte) bool {
-	if a == nil || a.generation == nil || round == nil || round.imageRoundUsage == nil || !round.probe {
+func (a *ImageAttribution) ValidFor(supplied *ImageRound, sourceID string, anchor ImageAnchor, expectedBodyHash [32]byte) bool {
+	if a == nil || a.generation == nil || supplied == nil {
+		return false
+	}
+	round := *supplied
+	if round.imageRoundUsage == nil || !round.probe {
 		return false
 	}
 	req := round.service.imageRequester
