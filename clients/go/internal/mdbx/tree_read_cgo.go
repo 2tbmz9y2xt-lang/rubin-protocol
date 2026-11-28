@@ -9,7 +9,373 @@ import (
 	"errors"
 	"math"
 	"sort"
+	"sync/atomic"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/treebody"
 )
+
+// ErrCandidateParentNotCurrent is a coherent CURRENT selection refusal.
+var ErrCandidateParentNotCurrent = errors.New("candidate parent is not CURRENT")
+
+// ErrCandidateSourceUnavailable reports a verified empty selection source.
+var ErrCandidateSourceUnavailable = errors.New("candidate source unavailable")
+
+// CandidateRootParentV1 names a positive-height derivation's committed parent.
+type CandidateRootParentV1 struct {
+	DatabaseID         [32]byte
+	Generation, Height uint64
+	Parent             TreeEndpointV1
+}
+
+// CandidateRootBodyV1 borrows the immutable complete body and its declared metadata.
+type CandidateRootBodyV1 struct {
+	Raw         []byte
+	HeaderBytes uint16
+	BlockMeta   TreeBlockV1
+}
+
+// CandidateRootScopeV1 is a single synchronous root derivation on a borrowed Reader.
+type CandidateRootScopeV1 struct {
+	state *candidateRootScopeStateV1
+}
+
+type candidateRootScopeStateV1 struct {
+	reader     *Reader
+	account    *OperationAccount
+	selection  CandidateRootParentV1
+	rawBytes   uint64
+	rawStart   atomic.Pointer[byte]
+	validation atomic.Pointer[operationHold]
+	facts      atomic.Pointer[candidateFactHoldV1]
+	counts     atomic.Uint64
+	status     atomic.Uint32
+	attempted  atomic.Bool
+}
+
+type candidateFactHoldV1 struct {
+	*operationHold
+	keys    uint64
+	retired atomic.Bool
+}
+
+const (
+	candidateUnqualifiedV1 uint32 = iota
+	candidateQualifyingV1
+	candidateCurrentV1
+)
+
+// WithCandidateRootV1 borrows one immutable body for the selected parent and closes the account on exit.
+func (o *OperationReservationOwner) WithCandidateRootV1(r *Reader, parent CandidateRootParentV1, raw []byte, use func(*CandidateRootScopeV1) error) error {
+	if o == nil || o.shared == nil || use == nil {
+		return errOperationReservationInput
+	}
+	if err := r.treeContext(); err != nil {
+		return err
+	}
+	if !candidateRootParentValidV1(r, parent) {
+		return treeDeltaInvalidV1()
+	}
+	return o.withAccountV1(TreeLaneMaxBytes, func(account *OperationAccount) error {
+		state := &candidateRootScopeStateV1{reader: r, account: account, selection: parent, rawBytes: uint64(len(raw))}
+		if len(raw) != 0 {
+			state.rawStart.Store(&raw[0])
+			defer state.rawStart.Store(nil)
+		}
+		return use(&CandidateRootScopeV1{state: state})
+	})
+}
+
+func candidateRootParentValidV1(r *Reader, p CandidateRootParentV1) bool {
+	return all(p.DatabaseID != [32]byte{}, p.DatabaseID == r.databaseID, p.Generation != 0,
+		p.Height != 0, p.Height <= math.MaxUint32, treeRootReadParentV1(p.Height, p.Parent))
+}
+
+func (s *CandidateRootScopeV1) openV1() bool {
+	return s != nil && s.state != nil && s.state.account.openV1() && s.state.reader.usable()
+}
+
+// WithCandidateValidationV1 funds validation and lends its once-only retirement function.
+func (s *CandidateRootScopeV1) WithCandidateValidationV1(initial uint64, use func(retire func() error) error) error {
+	if !s.openV1() || s.state.rawBytes > 68_000_157 || use == nil {
+		return errOperationReservationInput
+	}
+	state := s.state
+	retained := state.rawBytes + 4096
+	if initial < retained {
+		return errOperationReservationInput
+	}
+	return state.account.withHold(func(h *operationHold) error {
+		if err := h.grow(initial); err != nil {
+			return err
+		}
+		if !state.validation.CompareAndSwap(nil, h) {
+			return errOperationReservationInput
+		}
+		defer state.validation.Store(nil)
+		return use(h.reductionV1(initial - retained))
+	})
+}
+
+// CandidateCensusV1 counts the admitted body. Malformed framing yields zero counts.
+func (s *CandidateRootScopeV1) CandidateCensusV1(raw []byte) (TreeBlockV1, error) {
+	if !s.openV1() || !s.state.matchesRawV1(raw) || !s.state.retainsV1(0, false) {
+		return TreeBlockV1{}, errOperationReservationInput
+	}
+	state := s.state
+	var meta TreeBlockV1
+	err := state.account.WithReservation(4824, func() error {
+		census, err := treebody.Scan(treebody.Source{Raw: raw}, 148, state.selection.Height, nil)
+		if err == nil && !census.Malformed {
+			meta.TxCount, meta.EventCount = census.TxCount, census.EventCount
+			state.counts.Store(uint64(meta.TxCount)<<32 | uint64(meta.EventCount))
+		}
+		return err
+	})
+	return meta, err
+}
+
+// WithCandidateFactsV1 funds the full consulted-state arrays and lends their retirement functions.
+func (s *CandidateRootScopeV1) WithCandidateFactsV1(events uint32, use func(retireLookup func() error, retireLengths func() error, retireKeys func() error) error) error {
+	if !s.openV1() || use == nil {
+		return errOperationReservationInput
+	}
+	e := uint64(events)
+	if !candidateRootEventBoundV1(s.state.rawBytes, e) {
+		return errOperationReservationCapacity
+	}
+	state := s.state
+	counts := state.counts.Load()
+	if counts == 0 || counts&math.MaxUint32 != e {
+		return errOperationReservationInput
+	}
+	return state.account.withHold(func(h *operationHold) error {
+		if err := h.grow(135192 + 48*e); err != nil {
+			return err
+		}
+		facts := &candidateFactHoldV1{operationHold: h, keys: 36 * e}
+		if !state.facts.CompareAndSwap(nil, facts) {
+			return errOperationReservationInput
+		}
+		defer state.facts.Store(nil)
+		release := h.reductionV1(facts.keys)
+		return use(h.reductionV1(135192+8*e), h.reductionV1(4*e), func() error {
+			facts.retired.Store(true)
+			return release()
+		})
+	})
+}
+
+// QualifyCurrentV1 verifies the selected generation and tip on the borrowed Reader.
+func (s *CandidateRootScopeV1) QualifyCurrentV1() error {
+	if !s.openV1() || !s.state.status.CompareAndSwap(candidateUnqualifiedV1, candidateQualifyingV1) {
+		return treeDeltaInvalidV1()
+	}
+	state := s.state
+	if state.rawBytes < 149 || state.rawBytes > 68_000_157 || !state.retainsV1(0, false) {
+		return treeDeltaInvalidV1()
+	}
+	if err := state.reader.qualifyCandidateParentV1(state.selection); err != nil {
+		return err
+	}
+	state.status.Store(candidateCurrentV1)
+	return nil
+}
+
+func (r *Reader) qualifyCandidateParentV1(p CandidateRootParentV1) error {
+	r.getMu.Lock()
+	defer r.getMu.Unlock()
+	if err := r.treeContext(); err != nil {
+		return err
+	}
+	generation, err := r.candidateActiveGenerationV1()
+	if err != nil {
+		return r.treeRecord(err)
+	}
+	if generation == 0 {
+		return ErrCandidateSourceUnavailable
+	}
+	if generation != p.Generation {
+		return ErrCandidateParentNotCurrent
+	}
+	endpoint, err := r.candidateTipV1(generation)
+	if err != nil {
+		return r.treeRecord(err)
+	}
+	if endpoint != p.Parent {
+		return ErrCandidateParentNotCurrent
+	}
+	return nil
+}
+
+// candidateActiveGenerationV1 inspects borrowed authority or proves exact emptiness.
+func (r *Reader) candidateActiveGenerationV1() (uint64, error) {
+	image, err := r.largePoint(0, []byte{2})
+	if err != nil {
+		return 0, err
+	}
+	if !image.present {
+		return 0, treeEmptyCensus(r.txn, r.dbis, r.treeConfig, r.databaseID, operationGet)
+	}
+	if uint64(image.length) > MaxMetadataBytes {
+		return 0, treeIntegrity(operationGet, errSchema)
+	}
+	value, err := treeBorrowV1(image)
+	if err != nil {
+		return 0, err
+	}
+	var control authorityDecodeControl
+	control.ordinary.Cursor = &control.cursor
+	control.ordinary.CapturedSelectedSide = &control.selected
+	control.ordinary.CarriedCleanup = &control.cleanup
+	control.ordinary.RecordedFailure = &control.failure
+	control.failure.FailedBlockHash = &control.hash
+	var inspection authorityInspection
+	authority, err := decodeTreeAuthorityV1(value.value, &control, &inspection)
+	if err != nil {
+		return 0, treeIntegrity(operationGet, err)
+	}
+	return authority.Authority.ActiveGenerationID, nil
+}
+
+// candidateTipV1 captures the physical tip and its work under the Reader lock.
+func (r *Reader) candidateTipV1(generation uint64) (TreeEndpointV1, error) {
+	row, err := canonicalTipEndpoint(r.txn, r.dbis[2], generation, operationPrefixPage)
+	if err != nil {
+		return TreeEndpointV1{}, err
+	}
+	if row.key == nil {
+		return TreeEndpointV1{}, integrityError(operationPrefixPage, "canonical tip absent", nil)
+	}
+	point, err := canonicalTipPoint(row)
+	if err != nil {
+		return TreeEndpointV1{}, err
+	}
+	image, err := treeBorrowV1(row.image)
+	if err != nil {
+		return TreeEndpointV1{}, err
+	}
+	return TreeEndpointV1{Kind: TreeEndpointAppliedV1, Height: point.Height, BlockHash: point.BlockHash, CumulativeChainwork: [40]byte(image.value[64:104])}, nil
+}
+
+// DeriveCandidateRootV1 consumes the live scope's one attempt and derives only after qualification.
+func (s *CandidateRootScopeV1) DeriveCandidateRootV1(body CandidateRootBodyV1, inputs []TreeOutpointV1) ([32]byte, error) {
+	if !s.openV1() || s.state.attempted.Swap(true) || s.state.status.Load() != candidateCurrentV1 {
+		return [32]byte{}, treeDeltaInvalidV1()
+	}
+	state := s.state
+	if !state.candidateRootCoverageV1(body, inputs) {
+		return [32]byte{}, treeDeltaInvalidV1()
+	}
+	if err := treeRootReadInputsV1(inputs); err != nil {
+		return [32]byte{}, err
+	}
+	events := uint64(body.BlockMeta.EventCount)
+	var keys uint64
+	if len(inputs) != 0 {
+		keys = 36 * events
+	}
+	if !state.retainsV1(keys, true) {
+		return [32]byte{}, treeDeltaInvalidV1()
+	}
+	n := treeStepBytesV1 + treeValueBytesV1 + treeNodeWorkBytesV1 + treeDescSizeV1*events
+	var root [32]byte
+	err := state.account.WithReservation(n, func() error {
+		budget := treeBudgetV1{held: n}
+		var err error
+		root, err = state.reader.candidateRootReadV1(state.selection, body, inputs, budget.ledgerV1())
+		return err
+	})
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return root, nil
+}
+
+func (s *candidateRootScopeStateV1) retainsV1(keys uint64, derive bool) bool {
+	a := s.account.shared
+	a.origin.mu.Lock()
+	defer a.origin.mu.Unlock()
+	w := s.validation.Load()
+	retained := s.rawBytes + 4096
+	if w == nil || !all(!w.closed, !a.closed, w.amount >= retained, !derive || w.amount == retained) {
+		return false
+	}
+	if !derive {
+		return true
+	}
+	f := s.facts.Load()
+	if keys == 0 {
+		return f == nil || f.amount == 0
+	}
+	return f != nil && all(!f.closed, !f.retired.Load(), f.keys == keys, f.amount == keys)
+}
+
+func (s *candidateRootScopeStateV1) matchesRawV1(raw []byte) bool {
+	n := uint64(len(raw))
+	return n >= 149 && n <= 68_000_157 && n == s.rawBytes && &raw[0] == s.rawStart.Load()
+}
+
+func (s *candidateRootScopeStateV1) candidateRootCoverageV1(body CandidateRootBodyV1, inputs []TreeOutpointV1) bool {
+	if !all(body.HeaderBytes == 148, s.matchesRawV1(body.Raw)) {
+		return false
+	}
+	if !bytes.Equal(body.Raw[4:36], s.selection.Parent.BlockHash[:]) {
+		return false
+	}
+	counts := s.counts.Load()
+	txs := uint32(counts >> 32)
+	e := uint64(body.BlockMeta.EventCount)
+	return all(txs != 0, txs == body.BlockMeta.TxCount, counts&math.MaxUint32 == e, candidateRootEventBoundV1(s.rawBytes, e),
+		inputs == nil || len(inputs) != 0, uint64(cap(inputs)) <= e)
+}
+
+func candidateRootEventBoundV1(n, e uint64) bool {
+	if n < 149 || n > 68_000_157 {
+		return false
+	}
+	base := min(17_000_000, n-149, (68_000_157-n)/3)
+	return e <= base/11 && e <= uint64(math.MaxInt)/treeDescSizeV1
+}
+
+func (r *Reader) candidateRootReadV1(p CandidateRootParentV1, body CandidateRootBodyV1, inputs []TreeOutpointV1, ledger treeLedgerV1) ([32]byte, error) {
+	if err := ledger.chargeV1(treeStepBytesV1); err != nil {
+		return [32]byte{}, err
+	}
+	defer ledger.releaseV1(treeStepBytesV1)
+	observation := TreeObservationV1{DatabaseID: r.databaseID, Generation: p.Generation, Height: p.Height, Position: TreeWriterV1}
+	shape := treePrimitiveV1{direction: treeForwardV1, undo: treeUndoTransientV1, generation: p.Generation, height: p.Height}
+	rec := newTreeRecorderV1(treeWriterV1, shape, treeBodyV1{bytes: body.Raw}, make([]byte, treeWindowBytesV1), ledger)
+	rec.rootReadOnly, rec.coverage.BlockMeta, rec.observation = true, body.BlockMeta, &observation
+	defer rec.releaseV1()
+	delta, err := candidateRootEventsV1(rec, body)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	old := &treeRootOldV1{reader: r, generation: p.Generation, parent: p.Parent, inputs: inputs, rec: rec, observation: &observation, remaining: 577*uint64(rec.eventCount) + 1}
+	if err = delta.resolveV1(old); err != nil {
+		return [32]byte{}, r.treeRootRecordV1(err)
+	}
+	w := treeWalkV1{generation: p.Generation, old: old, leaves: delta.leavesV1(), observation: &observation}
+	root, err := treeCandidateDigestV1(&w, r.databaseID, ledger)
+	return root, r.treeRootRecordV1(err)
+}
+
+func candidateRootEventsV1(rec *treeRecorderV1, body CandidateRootBodyV1) (*treeDeltaV1, error) {
+	meta := body.BlockMeta
+	if err := rec.beginV1(meta.TxCount, meta.EventCount, meta.Generated); err != nil {
+		return nil, err
+	}
+	census, err := treebody.Scan(treebody.Source{Raw: body.Raw}, body.HeaderBytes, rec.prim.height, func(e treebody.Event) error {
+		return rec.eventV1(uint8(e.Kind), e.Outpoint.Txid, e.Outpoint.Vout, e.TxIndex, e.InputIndex, e.FrameOffset, e.FrameLength)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if census.Malformed || census.TxCount != meta.TxCount || census.EventCount != meta.EventCount {
+		return nil, treeDeltaInvalidV1()
+	}
+	return rec.finishRootEventsV1()
+}
 
 // TreeRootReadV1 binds one fresh noncommitting derivation to its selected parent.
 // Primitive is forward, DirectApply, UndoTransient and covered by a complete
@@ -137,7 +503,7 @@ func (r *Reader) treeRootReadV1(request TreeRootReadV1, ledger treeLedgerV1) ([3
 	if err != nil {
 		return [32]byte{}, err
 	}
-	var old treeOldV1 = &treeRootOldV1{reader: r, request: request, rec: rec, observation: &observation, remaining: 577*uint64(rec.eventCount) + 1}
+	var old treeOldV1 = &treeRootOldV1{reader: r, generation: p.Generation, parent: request.Parent, inputs: request.Inputs, rec: rec, observation: &observation, remaining: 577*uint64(rec.eventCount) + 1}
 	var seed *RootBindingV1
 	if p.Height == 0 {
 		old = treeEmptyOldV1{}
@@ -165,7 +531,9 @@ func (r *Reader) treeRootRecordV1(err error) error {
 // selected transaction owns borrowed images until the enclosing Reader expires.
 type treeRootOldV1 struct {
 	reader      *Reader
-	request     TreeRootReadV1
+	generation  uint64
+	parent      TreeEndpointV1
+	inputs      []TreeOutpointV1
 	rec         *treeRecorderV1
 	observation *TreeObservationV1
 	remaining   uint64
@@ -198,9 +566,9 @@ func (o *treeRootOldV1) pointV1(dbi DBI, key []byte) bool {
 		return false
 	}
 	if dbi.Rank == 0 {
-		return len(key) == 9 && key[0] == 0x11 && binary.BigEndian.Uint64(key[1:]) == o.request.Primitive.Generation
+		return len(key) == 9 && key[0] == 0x11 && binary.BigEndian.Uint64(key[1:]) == o.generation
 	}
-	return (dbi.Rank == 1 || dbi.Rank == 8) && binary.BigEndian.Uint64(key[:8]) == o.request.Primitive.Generation
+	return (dbi.Rank == 1 || dbi.Rank == 8) && binary.BigEndian.Uint64(key[:8]) == o.generation
 }
 
 func (o *treeRootOldV1) checkV1(dbi DBI, key []byte, image treeImageV1) error {
@@ -225,7 +593,7 @@ func (o *treeRootOldV1) bindingV1(key []byte, image treeImageV1) error {
 	}
 	binding, err := DecodeRootBindingV1(image.value)
 	if err == nil {
-		if binding.Endpoint != o.request.Parent || binding.DatabaseID != o.reader.databaseID {
+		if binding.Endpoint != o.parent || binding.DatabaseID != o.reader.databaseID {
 			return treeObserveV1(treeIntegrity(operationUpdate, nil), o.observation, 0, key, TreeObservationIdentityMismatchV1, image, true)
 		}
 		return o.topV1(binding)
@@ -235,16 +603,16 @@ func (o *treeRootOldV1) bindingV1(key []byte, image treeImageV1) error {
 
 // topV1 checks a decoded, selected-parent binding before its walker consumption.
 func (o *treeRootOldV1) topV1(binding RootBindingV1) error {
-	if len(o.request.Inputs) != 0 && binding.RootDigest == treeEmptyDigestV1() {
+	if len(o.inputs) != 0 && binding.RootDigest == treeEmptyDigestV1() {
 		return treeIntegrity(operationUpdate, nil)
 	}
 	if binding.Top.Kind == TreeTopEmptyV1 {
-		if len(o.request.Inputs) != 0 {
+		if len(o.inputs) != 0 {
 			return treeIntegrity(operationUpdate, nil)
 		}
 		return nil
 	}
-	return o.identityV1(treeRefOfID(*binding.Top.Node, binding.RootDigest), o.request.Inputs)
+	return o.identityV1(treeRefOfID(*binding.Top.Node, binding.RootDigest), o.inputs)
 }
 
 // nodeV1 checks both identities only after the existing record decoder accepts.
@@ -283,7 +651,7 @@ func (o *treeRootOldV1) identityV1(node treeNodeRefV1, inputs []TreeOutpointV1) 
 
 // intervalV1 borrows exactly P's parent-prefix/side interval without scanning.
 func (o *treeRootOldV1) intervalV1(node treeNodeRefV1) []TreeOutpointV1 {
-	inputs := o.request.Inputs
+	inputs := o.inputs
 	lower, upper := treeRootOutpointV1(node.key), treeRootOutpointV1(treeUpperV1(node))
 	first := sort.Search(len(inputs), func(i int) bool { return treeRootOutpointCompareV1(inputs[i], lower) >= 0 })
 	last := sort.Search(len(inputs), func(i int) bool { return treeRootOutpointCompareV1(inputs[i], upper) > 0 })
@@ -313,7 +681,7 @@ func (o *treeRootOldV1) originalV1(key []byte, image treeImageV1) error {
 
 // inputV1 searches all captured P keys, independently of event membership.
 func (o *treeRootOldV1) inputV1(op TreeOutpointV1) bool {
-	inputs := o.request.Inputs
+	inputs := o.inputs
 	i := sort.Search(len(inputs), func(i int) bool { return treeRootOutpointCompareV1(inputs[i], op) >= 0 })
 	return i < len(inputs) && inputs[i] == op
 }
