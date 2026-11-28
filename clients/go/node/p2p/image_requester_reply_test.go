@@ -298,11 +298,10 @@ func imageReplyQuery(anchor ImageAnchor, id uint64, start byte, limit uint32) co
 	}
 }
 
-func newSentImageReply(t *testing.T, ctx context.Context, peers int) (*imageReplyFixture, *ImageRound, consensus.UTXOImageQuery) {
-	t.Helper()
-	f := newImageReplyFixture(t, true, peers)
+func (f *imageReplyFixture) withInitialQuery(ctx context.Context) (*imageReplyFixture, *ImageRound, consensus.UTXOImageQuery) {
+	f.t.Helper()
 	r, err := f.s.BeginImageRound(ctx, ImageRoundConfig{Anchor: replyEmptyAnchor, SourceIDs: f.ids, Limits: imageReplyLimits()})
-	must(t, err, "begin round on connected sources")
+	must(f.t, err, "begin round on connected sources")
 	q := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit)
 	f.sendQuery(r, ctx, 0, q, [32]byte{})
 	return f, r, q
@@ -576,7 +575,7 @@ func checkReplyBadChecksum(t *testing.T) {
 }
 
 func checkReplyChecksumID(t *testing.T, id uint64) {
-	f, round, q := newSentImageReply(t, t.Context(), 1)
+	f, round, q := newImageReplyFixture(t, true, 1).withInitialQuery(t.Context())
 	wire := q
 	wire.RequestID = id
 	p := f.workers[0]
@@ -589,7 +588,7 @@ func checkReplyChecksumID(t *testing.T, id uint64) {
 }
 
 func checkReplyPartial(t *testing.T) {
-	f, round, q := newSentImageReply(t, t.Context(), 2)
+	f, round, q := newImageReplyFixture(t, true, 2).withInitialQuery(t.Context())
 	payload := imageReplyQBytes(q)
 	p := f.workers[0]
 	partial := p.wire.readBytes.Load() + 24 + 60
@@ -660,7 +659,7 @@ func checkReplyMaximumFrame(t *testing.T) {
 }
 
 func checkReplyNegative(t *testing.T, retry bool) {
-	f, round, q := newSentImageReply(t, t.Context(), 2)
+	f, round, q := newImageReplyFixture(t, true, 2).withInitialQuery(t.Context())
 	trace := observeReplyCalls(t, nil)
 	f.deliver(0, replyNegative, imageReplyQBytes(q))
 	trace.requireCount(t, "verify", 0)
@@ -702,7 +701,7 @@ func testImageReplyPrefix(t *testing.T) {
 }
 
 func checkImageReplyPrefix(t *testing.T, name string, id uint64, size int) {
-	f, round, q := newSentImageReply(t, t.Context(), 2)
+	f, round, q := newImageReplyFixture(t, true, 2).withInitialQuery(t.Context())
 	unknown := q
 	unknown.RequestID = id
 	source := 0
@@ -723,7 +722,7 @@ func checkImageReplyPrefix(t *testing.T, name string, id uint64, size int) {
 }
 
 func checkReplyEqualNumericSessions(t *testing.T) {
-	f, r, a := newSentImageReply(t, t.Context(), 2)
+	f, r, a := newImageReplyFixture(t, true, 2).withInitialQuery(t.Context())
 	b := imageReplyQuery(replyEmptyAnchor, 1, 2, replyLimit)
 	f.sendQuery(r, t.Context(), 1, b, [32]byte{})
 	member := replyCurrentInstance(f, r, a)
@@ -838,7 +837,7 @@ func testImageReplyGrammar(t *testing.T) {
 }
 
 func checkReplyMissingQ(t *testing.T, command string, length int) {
-	f, r, q := newSentImageReply(t, t.Context(), 1)
+	f, r, q := newImageReplyFixture(t, true, 1).withInitialQuery(t.Context())
 	f.deliver(0, command, imageReplyQBytes(q)[:length])
 	requireReplyNoRange(t, f.requireReceive(r, q, "image_encoding", nil))
 	f.requireEmpty(r, 1, errImageNoAssignment)
@@ -1310,7 +1309,7 @@ func checkReplySpentAfterStale(t *testing.T) {
 }
 
 func checkReplyDetachedFrame(t *testing.T) {
-	f, r, q := newSentImageReply(t, t.Context(), 1)
+	f, r, q := newImageReplyFixture(t, true, 1).withInitialQuery(t.Context())
 	f.addReplyPeer(f.ids[0])
 	other := f.beginReplyRound(t.Context(), replyEmptyAnchor, imageReplyLimits(), false, 1)
 	replacement := imageReplyQuery(replyEmptyAnchor, 1, 2, replyLimit)
@@ -1350,7 +1349,7 @@ func checkReplyArmingUnallocated(t *testing.T, roundContext bool) {
 }
 
 func checkReplyIndexLastUse(t *testing.T, closeService bool) {
-	f, r, q := newSentImageReply(t, context.Background(), 1)
+	f, r, q := newImageReplyFixture(t, true, 1).withInitialQuery(context.Background())
 	session, instance := observeReplyIndex(f, q)
 	if closeService {
 		must(t, f.s.Close(), "close image Service")
@@ -2644,7 +2643,7 @@ func checkReplyDrainingToken(t *testing.T, inProgress bool) {
 }
 
 func checkReplyJoinedFrame(t *testing.T, name string) {
-	f, r, q := newSentImageReply(t, context.Background(), 1)
+	f, r, q := newImageReplyFixture(t, true, 1).withInitialQuery(context.Background())
 	p, payload := f.workers[0], replyChunkBytes(q, nil, nil, nil, nil)
 	var finishStart func()
 	if name == "AlreadyAuthorized" || name == "NoNextRead" {
@@ -2759,7 +2758,7 @@ func checkReplyJoinedWrite(t *testing.T) {
 }
 
 func checkReplyPassiveReceive(t *testing.T) {
-	f, r, q := newSentImageReply(t, context.Background(), 1)
+	f, r, q := newImageReplyFixture(t, true, 1).withInitialQuery(context.Background())
 	entered, proceed := make(chan struct{}), make(chan struct{})
 	release := sync.OnceFunc(func() { close(proceed) })
 	defer release()
