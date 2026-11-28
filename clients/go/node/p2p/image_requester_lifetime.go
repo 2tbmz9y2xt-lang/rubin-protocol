@@ -19,8 +19,29 @@ var (
 // imageSession is the registration identity captured by rounds and assignments.
 // The requester mutex guards the allocator and the detachable transport.
 type imageSession struct {
-	transport *peer
-	lastID    uint64
+	transport   *peer
+	lastID      uint64
+	currentByID map[uint64]*imageInstance
+}
+
+// indexCurrentLocked binds the admitted ID to its exact registration and instance.
+func (s *imageSession) indexCurrentLocked(inst *imageInstance) {
+	if s.currentByID == nil {
+		s.currentByID = make(map[uint64]*imageInstance)
+	}
+	s.currentByID[inst.query.RequestID] = inst
+}
+
+// unindexCurrentLocked removes only the attachment owned by the retiring instance.
+func (s *imageSession) unindexCurrentLocked(inst *imageInstance) {
+	id := inst.query.RequestID
+	if s.currentByID[id] != inst {
+		return
+	}
+	delete(s.currentByID, id)
+	if len(s.currentByID) == 0 {
+		s.currentByID = nil
+	}
 }
 
 func checkImageSourcesLocked(sources map[string]*peer) error {
@@ -32,15 +53,21 @@ func checkImageSourcesLocked(sources map[string]*peer) error {
 	return nil
 }
 
-// ImageResult identifies the admitted query of a local assignment outcome.
+// ImageResult contains the admitted query and its whole verified range, probe attribution or source diagnostic.
+// A local assignment end supplies only Query (RUBIN_L1_P2P_AUX.md Sections 7.5, 7.7 and 7.8).
 type ImageResult struct {
-	Query consensus.UTXOImageQuery
+	Query       consensus.UTXOImageQuery
+	Range       *consensus.UTXOImageRange
+	Attribution *ImageAttribution
+	Diagnostic  string
 }
 
 type imageOutcome struct {
-	query consensus.UTXOImageQuery
-	end   error
-	ready bool
+	result      ImageResult
+	end         error
+	ready       bool
+	holderBytes uint64
+	bodyKey     imageQualificationKey
 }
 
 // Receive takes one completed outcome for expectedStart in admission order, or waits without a Service lease
@@ -94,8 +121,10 @@ func (r *ImageRound) takeOrWaitLocked(ctx context.Context, start [36]byte) (Imag
 	queue := r.outcomes[start]
 	if len(queue) != 0 && queue[0].ready {
 		outcome := queue[0]
+		result, end := outcome.result, outcome.end
 		r.deleteOutcomeLocked(start, queue, 0)
-		return ImageResult{Query: outcome.query}, nil, outcome.end
+		r.service.imageRequester.discardImageOutcomeLocked(outcome)
+		return result, nil, end
 	}
 	current := r.service.imageRequester.current[imageKey{r.anchor, start}]
 	if len(queue) == 0 && (current == nil || current.round.imageRoundUsage != r.imageRoundUsage) {
@@ -135,7 +164,9 @@ func (r *ImageRound) deleteOutcomeLocked(start [36]byte, queue []*imageOutcome, 
 // completeImageEndLocked records the end, revokes its appliers and retains the local outcome when write-authorized.
 func (req *imageRequester) completeImageEndLocked(inst *imageInstance, end error) {
 	req.detachImageInstanceLocked(inst, end)
-	inst.recordOutcomeLocked()
+	if !inst.round.closed && (inst.sendPhase == imageSent || inst.sendPhase == imageWriting) {
+		inst.recordOutcomeLocked(&imageOutcome{end: end})
+	}
 	inst.round.wakeImageWaitersLocked()
 }
 
@@ -144,21 +175,23 @@ func (req *imageRequester) detachImageInstanceLocked(inst *imageInstance, end er
 	inst.timer.Stop()
 	inst.retired, inst.end = true, end
 	delete(req.current, imageKey{inst.round.anchor, inst.query.StartKey})
+	inst.session.unindexCurrentLocked(inst)
 	inst.round.release(inst.session, unitCurrentAssignments, 1)
 	inst.revokeEndNotifications()
 }
 
 // recordOutcomeLocked appends in admission order because the next assignment for a start
 // cannot be admitted until the current one retires.
-func (inst *imageInstance) recordOutcomeLocked() {
+func (inst *imageInstance) recordOutcomeLocked(outcome *imageOutcome) {
 	r := &inst.round
-	if r.closed || inst.sendPhase == imageBeforeWrite {
-		return
-	}
 	if r.outcomes == nil {
 		r.outcomes = make(map[[36]byte][]*imageOutcome)
 	}
-	outcome := &imageOutcome{query: inst.query, end: inst.end, ready: inst.sendPhase == imageSent}
+	outcome.result.Query = inst.query
+	outcome.ready = inst.sendPhase == imageSent || inst.sendPhase == imageUnwound
+	if outcome.result.Attribution != nil {
+		outcome.result.Attribution.generation.record(outcome.ready)
+	}
 	start := inst.query.StartKey
 	r.outcomes[start] = append(r.outcomes[start], outcome)
 	if !outcome.ready {
@@ -167,15 +200,16 @@ func (inst *imageInstance) recordOutcomeLocked() {
 }
 
 // finishSend resolves an authorized write's provisional outcome and releases any pending bytes still held.
-func (r *ImageRound) finishSend(inst *imageInstance, sent bool) {
+func (r *ImageRound) finishSend(inst *imageInstance, returned bool, sendErr error) {
 	req := r.service.imageRequester
 	req.mu.Lock()
 	defer req.mu.Unlock()
-	if inst.sendPhase == imageWriting {
-		inst.sendPhase = imageBeforeWrite
-		if sent {
-			inst.sendPhase = imageSent
-		}
+	sent := returned && sendErr == nil
+	switch {
+	case !returned:
+		inst.sendPhase = imageUnwound
+	case sent:
+		inst.sendPhase = imageSent
 	}
 	if inst.staged != nil {
 		r.resolveStagedLocked(inst, sent)
@@ -190,12 +224,13 @@ func (r *ImageRound) resolveStagedLocked(inst *imageInstance, sent bool) {
 		return
 	}
 	if sent {
-		inst.staged.ready = true
+		inst.staged.publish()
 	} else {
 		start := inst.query.StartKey
 		queue := r.outcomes[start]
 		if i := slices.Index(queue, inst.staged); i >= 0 {
 			r.deleteOutcomeLocked(start, queue, i)
+			r.service.imageRequester.discardImageOutcomeLocked(inst.staged)
 		}
 	}
 	r.wakeImageWaitersLocked()
@@ -216,7 +251,8 @@ func (r *ImageRound) Close() {
 		return
 	}
 	round.closed = true
-	round.outcomes = nil
+	round.qualified = nil
+	round.discardImageOutcomesLocked()
 	req.retireImageOwnerLocked(s, errImageRoundClosed, func(inst *imageInstance) bool {
 		return inst.round.imageRoundUsage == round.imageRoundUsage
 	})
@@ -296,5 +332,8 @@ func (s *Service) finishImageRequester() {
 	}
 	for session := range req.sessions {
 		req.detachImageSessionLocked(session)
+	}
+	for outcome := range req.held {
+		req.discardImageOutcomeLocked(outcome)
 	}
 }

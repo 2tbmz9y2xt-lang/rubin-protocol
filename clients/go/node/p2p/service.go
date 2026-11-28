@@ -32,6 +32,8 @@ type ServiceConfig struct {
 	// EnableCompactReceive opens Go compact object receive after negotiated sendcmpct.
 	// It defaults false until the controller/parity boundary explicitly enables it.
 	EnableCompactReceive bool
+	// EnableImageRequester admits IMAGE replies on handshaken peer workers.
+	EnableImageRequester bool
 	PeerRuntimeConfig    node.PeerRuntimeConfig
 	PeerManager          *node.PeerManager
 	SyncConfig           node.SyncConfig
