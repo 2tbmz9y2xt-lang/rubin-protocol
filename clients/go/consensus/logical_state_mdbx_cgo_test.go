@@ -891,7 +891,8 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	}
 	logicalMDBXAssert(t, imports == 23, "bridge lost dormancy: %d non-test internal/mdbx imports, want 23", imports)
 	native := startupCensusNative(t)
-	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{native: native}}
+	scanner := blockTreeCensusPackageV1(t, fset)
+	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{native: native, scanner: scanner}}
 	consensusPackage, _ := config.Check("consensus", fset, files, info)
 	names, declared, resolved := map[string]bool{"newLogicalMDBXStateView": true, "newLogicalMDBXMetadata": true, "logicalMDBXPlanToBatch": true, "genesisMDBXBatch": true, "Counters": true, "Lookup": true}, map[types.Object]bool{}, map[string]bool{}
 	for ident, object := range info.Defs {
@@ -969,7 +970,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		})
 	}
 	startupCensusUses(t, fset, files, info, parents, native)
-	blockTreeCensusUsesV1(t, fset, files, info, native)
+	blockTreeCensusUsesV1(t, fset, files, info, native, scanner)
 	// Resolve dormant public uses in the actual node and command packages too.
 	// The existing incomplete-import checker remains deliberately tolerant of
 	// unrelated types, while every protected spelling must resolve nonvacuously.
@@ -1049,9 +1050,24 @@ func initial148CompleteCensusDefinitionsV1(t *testing.T, fset *token.FileSet, fi
 	return definitions
 }
 
+func blockTreeCensusPackageV1(t *testing.T, fset *token.FileSet) *types.Package {
+	t.Helper()
+	file, err := parser.ParseFile(fset, "../internal/treebody/cursor.go", nil, 0)
+	logicalMDBXAssert(t, err == nil, "block scanner census parse: %v", err)
+	ast.FileExports(file)
+	file.Decls = slices.DeleteFunc(file.Decls, func(d ast.Decl) bool {
+		fn, ok := d.(*ast.FuncDecl)
+		return ok && fn.Recv != nil
+	})
+	config := &types.Config{IgnoreFuncBodies: true, DisableUnusedImportCheck: true, Importer: logicalMDBXStubImporter{}}
+	pkg, err := config.Check("github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/treebody", fset, []*ast.File{file}, nil)
+	logicalMDBXAssert(t, err == nil, "block scanner census types: %v", err)
+	return pkg
+}
+
 // The exact declarations supply object identity despite the existing deliberate
 // incomplete-import checker. They are type evidence only, never an executable seam.
-func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File, info *types.Info, native *types.Package) {
+func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File, info *types.Info, native, scanner *types.Package) {
 	t.Helper()
 	owned := "block_tree_source_mdbx_cgo.go"
 	required := "initial148_required_state_mdbx_cgo.go"
@@ -1107,7 +1123,7 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 			logicalMDBXAssert(t, ok && types.Implements(types.NewPointer(object.Type()), iface), "block source does not implement exact native interface")
 		}
 	}
-	nativeUses := map[string]int{}
+	nativeUses, scannerUses := map[string]int{}, map[string]int{}
 	for id, object := range info.Uses {
 		filename := fset.Position(id.Pos()).Filename
 		if definitions[object] {
@@ -1122,6 +1138,15 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 		if (filename == owned || filename == required) && object.Pkg() == native {
 			nativeUses[id.Name]++
 		}
+		if object.Pkg() == scanner {
+			_, constant := object.(*types.Const)
+			logicalMDBXAssert(t, filename == owned || filename == "constants.go" && constant, "block scanner lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
+			scannerUses[id.Name]++
+		}
+	}
+	logicalMDBXAssert(t, scannerUses["Scan"] == 1, "block scanner uses: Scan=%d", scannerUses["Scan"])
+	for _, name := range []string{"Source", "Raw", "ReadAt", "Window", "Length", "Event", "Kind", "Outpoint", "TxIndex", "InputIndex", "FrameOffset", "FrameLength", "Census", "Parent", "TxCount", "EventCount", "Malformed"} {
+		logicalMDBXAssert(t, scannerUses[name] != 0, "block scanner resolved no uses: %s", name)
 	}
 	for _, name := range []string{"TreePrimitiveV1", "TreeSourceCoverageV1", "TreeEventV1", "TreeOutpointV1", "BeginV1", "EventV1", "WindowV1", "WithReservation", "VisitLargeImageV1", "ReadAt", "Present", "Length", "HeightKey", "CanonicalOwnerKey", "ChainValue", "CanonicalOwnerValue", "TreeSchemaV1DBIs", "BlockMeta", "CurrentBody", "Generated", "FrameOffset", "FrameLength"} {
 		logicalMDBXAssert(t, nativeUses[name] != 0, "block source resolved no native uses: %s", name)
@@ -1147,7 +1172,7 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 			ownedReceiver := false
 			if root, ok := selector.X.(*ast.Ident); ok {
 				if pkg, ok := info.Uses[root].(*types.PkgName); ok {
-					ownedReceiver = pkg.Imported() == native
+					ownedReceiver = pkg.Imported() == native || pkg.Imported() == scanner
 				}
 			}
 			receiver := types.Unalias(info.TypeOf(selector.X))
@@ -1159,7 +1184,7 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 				receiver = types.Unalias(pointer.Elem())
 			}
 			if named, ok := receiver.(*types.Named); ok {
-				ownedReceiver = ownedReceiver || named.Obj().Pkg() == native || named.Obj().Pkg() == sourcePackage
+				ownedReceiver = ownedReceiver || named.Obj().Pkg() == native || named.Obj().Pkg() == scanner || named.Obj().Pkg() == sourcePackage
 			}
 			if ownedReceiver {
 				logicalMDBXAssert(t, info.Uses[selector.Sel] != nil, "block source unresolved selector %s at %s", selector.Sel.Name, fset.Position(selector.Pos()))
@@ -1363,7 +1388,7 @@ func startupCensusUses(t *testing.T, fset *token.FileSet, files []*ast.File, inf
 	}
 }
 
-type logicalMDBXStubImporter struct{ native, consensus *types.Package }
+type logicalMDBXStubImporter struct{ native, consensus, scanner *types.Package }
 
 func (i logicalMDBXStubImporter) Import(path string) (*types.Package, error) {
 	if i.consensus != nil && path == "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus" {
@@ -1371,6 +1396,9 @@ func (i logicalMDBXStubImporter) Import(path string) (*types.Package, error) {
 	}
 	if i.native != nil && path == i.native.Path() {
 		return i.native, nil
+	}
+	if i.scanner != nil && path == i.scanner.Path() {
+		return i.scanner, nil
 	}
 	pkg := types.NewPackage(path, path[strings.LastIndex(path, "/")+1:])
 	pkg.MarkComplete()

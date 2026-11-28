@@ -1,5 +1,7 @@
 package consensus
 
+import "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/treebody"
+
 const (
 	WITNESS_DISCOUNT_DIVISOR = 4
 
@@ -20,15 +22,15 @@ const (
 
 	MAX_BLOCK_WEIGHT        = 68_000_000
 	MAX_BLOCK_BYTES         = 72_000_000 // operational P2P cap; not a consensus validity bound
-	MAX_DA_BYTES_PER_BLOCK  = 32_000_000
+	MAX_DA_BYTES_PER_BLOCK  = treebody.MaxDABytesPerBlock
 	MIN_DA_RETENTION_BLOCKS = 15_120
 	MAX_RELAY_MSG_BYTES     = 96_000_000
 
-	MAX_DA_MANIFEST_BYTES_PER_TX  = 65_536
-	CHUNK_BYTES                   = 524_288
+	MAX_DA_MANIFEST_BYTES_PER_TX  = treebody.MaxDAManifestBytesPerTx
+	CHUNK_BYTES                   = treebody.ChunkBytes
 	MAX_DA_BATCHES_PER_BLOCK      = 128
 	MAX_DA_CHUNK_COUNT            = MAX_DA_BYTES_PER_BLOCK / CHUNK_BYTES
-	MAX_ANCHOR_PAYLOAD_SIZE       = 65_536
+	MAX_ANCHOR_PAYLOAD_SIZE       = treebody.MaxAnchorPayloadSize
 	MAX_COVENANT_DATA_PER_OUTPUT  = MAX_ANCHOR_PAYLOAD_SIZE
 	MAX_ANCHOR_BYTES_PER_BLOCK    = 131_072
 	MAX_P2PK_COVENANT_DATA        = 33
@@ -44,12 +46,12 @@ const (
 	SIMPLICITY_MAX_GROUP_INPUTS   = 8
 	SIMPLICITY_MAX_GROUP_OUTPUTS  = 8
 
-	MAX_TX_INPUTS            = 1024
-	MAX_TX_OUTPUTS           = 1024
-	MAX_WITNESS_ITEMS        = 1024
-	MAX_WITNESS_BYTES_PER_TX = 100_000
-	MAX_SCRIPT_SIG_BYTES     = 32
-	TX_WIRE_VERSION          = 1
+	MAX_TX_INPUTS            = treebody.MaxTxInputs
+	MAX_TX_OUTPUTS           = treebody.MaxTxOutputs
+	MAX_WITNESS_ITEMS        = treebody.MaxWitnessItems
+	MAX_WITNESS_BYTES_PER_TX = treebody.MaxWitnessBytesPerTx
+	MAX_SCRIPT_SIG_BYTES     = treebody.MaxScriptSigBytes
+	TX_WIRE_VERSION          = treebody.TxWireVersion
 
 	SUITE_ID_SENTINEL            = 0x00
 	SUITE_ID_ML_DSA_87           = 0x01
@@ -57,10 +59,10 @@ const (
 
 	COV_TYPE_P2PK = 0x0000
 
-	COV_TYPE_ANCHOR          = 0x0002
+	COV_TYPE_ANCHOR          = treebody.CovTypeAnchor
 	COV_TYPE_HTLC            = 0x0100
 	COV_TYPE_VAULT           = 0x0101
-	COV_TYPE_DA_COMMIT       = 0x0103
+	COV_TYPE_DA_COMMIT       = treebody.CovTypeDACommit
 	COV_TYPE_MULTISIG        = 0x0104
 	COV_TYPE_CORE_SIMPLICITY = 0x0106
 
