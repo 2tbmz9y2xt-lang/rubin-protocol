@@ -161,6 +161,10 @@ func initial148StepsHeader(raw []byte, p *blockStepsPass, parentHash, expectedTa
 	if err := Initial148PowCheck(raw[:Initial148HeaderBytes], p.header.Target); err != nil {
 		return err
 	}
+	return initial148StepsHeaderSuffix(p, parentHash, expectedTarget, parentTimestamps)
+}
+
+func initial148StepsHeaderSuffix(p *blockStepsPass, parentHash, expectedTarget [32]byte, parentTimestamps []uint64) error {
 	if p.header.Target != expectedTarget {
 		return txerr(BLOCK_ERR_TARGET_INVALID, "target mismatch")
 	}
@@ -171,4 +175,18 @@ func initial148StepsHeader(raw []byte, p *blockStepsPass, parentHash, expectedTa
 		return err
 	}
 	return blockStepsTimestamp(p.header.Timestamp, parentTimestamps)
+}
+
+func validateCandidateBlockSteps(raw []byte, parentHash, expectedTarget [32]byte, parentTimestamps []uint64) error {
+	p, err := initial148FirstPass(raw)
+	if err != nil {
+		return err
+	}
+	if err := initial148StepsHeaderSuffix(&p, parentHash, expectedTarget, parentTimestamps); err != nil {
+		return err
+	}
+	if err := blockStepsResources(&p); err != nil {
+		return err
+	}
+	return blockStepsDA(raw, &p)
 }
