@@ -46,6 +46,12 @@ func TestImageRequesterReplies(t *testing.T) {
 	t.Run("Retention", testImageReplyRetention)
 }
 
+func runReplyCases(t *testing.T, check func(*testing.T, string), names ...string) {
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) { check(t, name) })
+	}
+}
+
 type imageReplyPeer struct {
 	current *peer
 	remote  net.Conn
@@ -114,8 +120,10 @@ type replyCallTrace struct {
 	visit  func(replyCallEvent)
 }
 
-var replyCallTracing bool
-var replyCallOwner atomic.Pointer[replyCallTrace]
+var (
+	replyCallTracing bool
+	replyCallOwner   atomic.Pointer[replyCallTrace]
+)
 
 func observeReplyCalls(t *testing.T, visit func(replyCallEvent)) *replyCallTrace {
 	t.Helper()
@@ -396,11 +404,11 @@ func replyLeaf(prefix byte, vout uint32, data []byte) imageReplyLeaf {
 	var leaf imageReplyLeaf
 	leaf.key[0] = prefix
 	binary.BigEndian.PutUint32(leaf.key[32:], vout)
-	entry := make([]byte, 46)
-	entry[0] = prefix
-	binary.LittleEndian.PutUint32(entry[32:], vout)
-	binary.LittleEndian.PutUint64(entry[36:], 23)
-	binary.LittleEndian.PutUint16(entry[44:], 5)
+	entry := make([]byte, 0, 46)
+	entry = append(entry, leaf.key[:32]...)
+	entry = binary.LittleEndian.AppendUint32(entry, vout)
+	entry = binary.LittleEndian.AppendUint64(entry, 23)
+	entry = binary.LittleEndian.AppendUint16(entry, 5)
 	if len(data) < 253 {
 		entry = append(entry, byte(len(data)))
 	} else {
@@ -680,8 +688,11 @@ func testImageReplyPrefix(t *testing.T) {
 		id   uint64
 		size int
 	}{
-		{"ShortZero", 1, 0}, {"ShortSeven", 1, 7}, {"ZeroID", 0, 60},
-		{"UnknownID", 2, 60}, {"ForeignID", 1, 60},
+		{"ShortZero", 1, 0},
+		{"ShortSeven", 1, 7},
+		{"ZeroID", 0, 60},
+		{"UnknownID", 2, 60},
+		{"ForeignID", 1, 60},
 	} {
 		t.Run(tc.name, func(t *testing.T) { checkImageReplyPrefix(t, tc.name, tc.id, tc.size) })
 	}
@@ -813,14 +824,22 @@ type replyGrammarCase struct{ name, command, diagnostic string }
 
 func testImageReplyGrammar(t *testing.T) {
 	for _, tc := range []replyGrammarCase{
-		{"Negative120", replyNegative, ""}, {"Chunk120", replyChunk, "image_encoding"},
-		{"Chunk184Count", replyChunk, "image_count"}, {"Chunk185Valid", replyChunk, ""},
-		{"Chunk185Truncated", replyChunk, "image_encoding"}, {"Edge33", replyChunk, "image_count"},
-		{"Edge34", replyChunk, ""}, {"NonminimalCompactSize", replyChunk, "image_encoding"},
-		{"PrevFlag", replyChunk, "image_encoding"}, {"Trailing", replyChunk, "image_encoding"},
-		{"Coinbase", replyChunk, "image_encoding"}, {"Depth288", replyChunk, "image_encoding"},
-		{"MixedEncodingFirst", replyChunk, "image_encoding"}, {"MixedCountFirst", replyChunk, "image_count"},
-		{"EncodingMapped", replyChunk, "image_encoding"}, {"CountMapped", replyChunk, "image_count"},
+		{"Negative120", replyNegative, ""},
+		{"Chunk120", replyChunk, "image_encoding"},
+		{"Chunk184Count", replyChunk, "image_count"},
+		{"Chunk185Valid", replyChunk, ""},
+		{"Chunk185Truncated", replyChunk, "image_encoding"},
+		{"Edge33", replyChunk, "image_count"},
+		{"Edge34", replyChunk, ""},
+		{"NonminimalCompactSize", replyChunk, "image_encoding"},
+		{"PrevFlag", replyChunk, "image_encoding"},
+		{"Trailing", replyChunk, "image_encoding"},
+		{"Coinbase", replyChunk, "image_encoding"},
+		{"Depth288", replyChunk, "image_encoding"},
+		{"MixedEncodingFirst", replyChunk, "image_encoding"},
+		{"MixedCountFirst", replyChunk, "image_count"},
+		{"EncodingMapped", replyChunk, "image_encoding"},
+		{"CountMapped", replyChunk, "image_count"},
 	} {
 		t.Run(tc.name, func(t *testing.T) { checkReplyGrammar(t, tc.name, tc.command, tc.diagnostic) })
 	}
@@ -938,10 +957,8 @@ func checkReplyParseHolding(t *testing.T, limit uint64) {
 }
 
 func testImageReplyQuery(t *testing.T) {
-	for _, name := range []string{"Height", "BlockHash", "Root", "Start", "ByteLimit", "HeightDomain",
-		"LowLimitDomain", "HighLimitDomain", "IdentityBeforePayloadLimit", "PayloadLimitBeforeProof", "PayloadEqual", "PayloadPlusOne"} {
-		t.Run(name, func(t *testing.T) { checkReplyQuery(t, name) })
-	}
+	runReplyCases(t, checkReplyQuery, "Height", "BlockHash", "Root", "Start", "ByteLimit", "HeightDomain",
+		"LowLimitDomain", "HighLimitDomain", "IdentityBeforePayloadLimit", "PayloadLimitBeforeProof", "PayloadEqual", "PayloadPlusOne")
 	t.Run("NegativeNoProof", func(t *testing.T) { checkReplyNegative(t, false) })
 	t.Run("NegativeShape", func(t *testing.T) { checkReplyNegative(t, true) })
 }
@@ -1021,10 +1038,8 @@ type imageProofFixture struct {
 }
 
 func testImageReplyProof(t *testing.T) {
-	for _, name := range []string{"VerifyReached", "VerifyFailure", "WrongRootDependency", "WrongRootTaxonomy", "NoVerifiedPrefix",
-		"KeyOrder", "Duplicate", "WrongStart", "WrongPredecessor", "InDomainEdgeOrder", "ContradictoryProof", "Root", "BadCover", "FutureEntryBadRoot"} {
-		t.Run(name, func(t *testing.T) { checkReplyProof(t, name) })
-	}
+	runReplyCases(t, checkReplyProof, "VerifyReached", "VerifyFailure", "WrongRootDependency", "WrongRootTaxonomy", "NoVerifiedPrefix",
+		"KeyOrder", "Duplicate", "WrongStart", "WrongPredecessor", "InDomainEdgeOrder", "ContradictoryProof", "Root", "BadCover", "FutureEntryBadRoot")
 }
 
 func checkReplyProof(t *testing.T, name string) {
@@ -1095,16 +1110,10 @@ func replyProofCase(name string) imageProofFixture {
 }
 
 func testImageReplyTime(t *testing.T) {
-	for _, name := range []string{"AdmitParseAtRD", "AdmitProofAtRD", "FinalAtD", "FinalAtRD", "FinalAfterD", "FinalAfterRD", "CancelRequest", "CancelRound"} {
-		t.Run(name, func(t *testing.T) { checkReplyTime(t, name) })
-	}
-	for _, name := range []string{"DetachedSession", "Replacement", "PriorEnd"} {
-		t.Run(name, func(t *testing.T) { checkReplyEndRace(t, name) })
-	}
+	runReplyCases(t, checkReplyTime, "AdmitParseAtRD", "AdmitProofAtRD", "FinalAtD", "FinalAtRD", "FinalAfterD", "FinalAfterRD", "CancelRequest", "CancelRound")
+	runReplyCases(t, checkReplyEndRace, "DetachedSession", "Replacement", "PriorEnd")
 	t.Run("SpentAfterStale", checkReplySpentAfterStale)
-	for _, name := range []string{"CancelBeforeProof", "CancelAfterCompare", "RoundCancelAfterCompare", "NegativeAtRD", "MalformedAtRD"} {
-		t.Run(name, func(t *testing.T) { checkReplyCompletionOrder(t, name) })
-	}
+	runReplyCases(t, checkReplyCompletionOrder, "CancelBeforeProof", "CancelAfterCompare", "RoundCancelAfterCompare", "NegativeAtRD", "MalformedAtRD")
 }
 
 func checkReplyCompletionOrder(t *testing.T, name string) {
@@ -1746,9 +1755,7 @@ func testImageReplyReceive(t *testing.T) {
 	t.Run("Oldest", func(t *testing.T) { checkReplyFIFO(t, true) })
 	t.Run("OneTake", func(t *testing.T) { checkReplyFIFO(t, false) })
 	t.Run("RejectedWhole", func(t *testing.T) { checkReplyProof(t, "NoVerifiedPrefix") })
-	for _, name := range []string{"ExactStart", "ExactRound", "Predecessor", "RightEdge", "Terminal", "FullEntries", "HeldTake", "DataIsolation"} {
-		t.Run(name, func(t *testing.T) { checkReplyIntervals(t, name) })
-	}
+	runReplyCases(t, checkReplyIntervals, "ExactStart", "ExactRound", "Predecessor", "RightEdge", "Terminal", "FullEntries", "HeldTake", "DataIsolation")
 }
 
 func checkReplyReadyDisconnect(t *testing.T) {
@@ -1839,23 +1846,21 @@ func checkReplyIntervalTakes(f *imageReplyFixture, r *ImageRound, first, later c
 }
 
 func testImageReplySend(t *testing.T) {
-	for _, name := range []string{"TerminalNilBeforeWrite", "CancelBeforeWrite", "ExpireBeforeWrite"} {
-		t.Run(name, func(t *testing.T) { checkReplyBeforeWrite(t, name) })
-	}
-	for _, name := range []string{"ProvisionalDuringWrite", "PendingLastUse", "ReplyWinsWriteError",
-		"CancelWhileWriting", "ExpireWhileWriting", "PeerWhileWriting", "RoundWhileWriting"} {
-		t.Run(name, func(t *testing.T) { checkReplyWhileWriting(t, name) })
-	}
-	for _, name := range []string{"StagedPanic", "StagedGoexit", "StagedNegativePanic", "StagedRejectionPanic", "StagedHolderRefusalPanic"} {
-		t.Run(name, func(t *testing.T) { checkReplyStagedUnwind(t, name) })
-	}
+	runReplyCases(t, checkReplyBeforeWrite, "TerminalNilBeforeWrite", "CancelBeforeWrite", "ExpireBeforeWrite")
+	runReplyCases(t, checkReplyWhileWriting, "ProvisionalDuringWrite", "PendingLastUse", "ReplyWinsWriteError",
+		"CancelWhileWriting", "ExpireWhileWriting", "PeerWhileWriting", "RoundWhileWriting")
+	runReplyCases(t, checkReplyStagedUnwind, "StagedPanic", "StagedGoexit", "StagedNegativePanic", "StagedRejectionPanic", "StagedHolderRefusalPanic")
 	t.Run("WriteFailureFirst", func(t *testing.T) { checkReplyWriteFailure(t, false) })
 	t.Run("OldReplyAfterWriteFailure", func(t *testing.T) { checkReplyWriteFailure(t, true) })
 	for _, tc := range []struct {
 		name          string
 		probe, goexit bool
-	}{{"AfterPanicOrdinary", false, false}, {"AfterGoexitOrdinary", false, true},
-		{"AfterPanicProbe", true, false}, {"AfterGoexitProbe", true, true}} {
+	}{
+		{"AfterPanicOrdinary", false, false},
+		{"AfterGoexitOrdinary", false, true},
+		{"AfterPanicProbe", true, false},
+		{"AfterGoexitProbe", true, true},
+	} {
 		t.Run(tc.name, func(t *testing.T) { checkReplyAfterUnwind(t, tc.probe, tc.goexit) })
 	}
 }
@@ -2002,7 +2007,7 @@ func checkReplyWhileWriting(t *testing.T, name string) {
 	defer send.release()
 	want := applyReplyWritingEnd(f, r, ctx, name)
 	f.deliver(0, replyChunk, replyChunkBytes(q, nil, nil, nil, nil))
-	if want == errImageRoundClosed {
+	if name == "RoundWhileWriting" {
 		f.requireEmpty(r, 1, errImageRoundClosed)
 	} else {
 		f.requireEmpty(r, 1, context.Canceled)
@@ -2011,7 +2016,7 @@ func checkReplyWhileWriting(t *testing.T, name string) {
 	}
 	send.release()
 	requireReplySent(t, send.done, q, nil)
-	if want == errImageRoundClosed {
+	if name == "RoundWhileWriting" {
 		f.requireEmpty(r, 1, want)
 		return
 	}
@@ -2196,16 +2201,10 @@ func (f *imageReplyFixture) requireToken(token *ImageAttribution, r *ImageRound,
 
 func testImageReplyBody(t *testing.T) {
 	t.Run("OrdinaryHasNoToken", func(t *testing.T) { checkReplyInsert(t, false) })
-	for _, name := range []string{"BeyondProbeD", "AtBodyRD", "AfterBodyRD", "TimelyNonempty", "LateProbe", "SeparateProbeDeadlines"} {
-		t.Run(name, func(t *testing.T) { checkReplyBodyClock(t, name) })
-	}
-	for _, name := range []string{"SameHandle", "CopiedHandle", "WrongSource", "WrongAnchor", "CancelledContext", "ClosedRound",
-		"ClosedService", "OrdinaryHandle", "EmptyAttribution", "ReadOnlySnapshot"} {
-		t.Run(name, func(t *testing.T) { checkReplyBodyScope(t, name) })
-	}
-	for _, name := range []string{"WrongRound", "WrongSession", "WrongHash"} {
-		t.Run(name, func(t *testing.T) { checkReplyBodySibling(t, name) })
-	}
+	runReplyCases(t, checkReplyBodyClock, "BeyondProbeD", "AtBodyRD", "AfterBodyRD", "TimelyNonempty", "LateProbe", "SeparateProbeDeadlines")
+	runReplyCases(t, checkReplyBodyScope, "SameHandle", "CopiedHandle", "WrongSource", "WrongAnchor", "CancelledContext", "ClosedRound",
+		"ClosedService", "OrdinaryHandle", "EmptyAttribution", "ReadOnlySnapshot")
+	runReplyCases(t, checkReplyBodySibling, "WrongRound", "WrongSession", "WrongHash")
 	t.Run("ReconnectedSource", checkReplyReconnectedToken)
 	t.Run("DrainingService", func(t *testing.T) { checkReplyDrainingToken(t, false) })
 	t.Run("DrainingDuringSnapshot", func(t *testing.T) { checkReplyDrainingToken(t, true) })
@@ -2396,9 +2395,7 @@ func testImageReplyGeneration(t *testing.T) {
 	t.Run("NegativeOwnsEvenIfSendUnwinds", func(t *testing.T) { checkReplyStagedUnwind(t, "NegativeOwnsEvenIfSendUnwinds") })
 	t.Run("UnpublishedLastClaim", func(t *testing.T) { checkReplyUnpublished(t, false) })
 	t.Run("NewGenerationSurvivesOldUnwind", func(t *testing.T) { checkReplyUnpublished(t, true) })
-	for _, name := range []string{"OtherRound", "OtherSession", "Malformed", "WrongQ", "Stale", "Refused", "BadProof"} {
-		t.Run(name, func(t *testing.T) { checkReplyUnrelatedGeneration(t, name) })
-	}
+	runReplyCases(t, checkReplyUnrelatedGeneration, "OtherRound", "OtherSession", "Malformed", "WrongQ", "Stale", "Refused", "BadProof")
 }
 
 func checkReplyGenerationRefresh(t *testing.T) {
@@ -2546,9 +2543,7 @@ func checkReplyUnrelatedGeneration(t *testing.T, name string) {
 }
 
 func testImageReplyJoin(t *testing.T) {
-	for _, name := range []string{"AlreadyAuthorized", "NoNextRead", "VerifyBacking", "FrameBacking", "DecodeBacking", "CompareBacking"} {
-		t.Run(name, func(t *testing.T) { checkReplyJoinedFrame(t, name) })
-	}
+	runReplyCases(t, checkReplyJoinedFrame, "AlreadyAuthorized", "NoNextRead", "VerifyBacking", "FrameBacking", "DecodeBacking", "CompareBacking")
 	t.Run("WriteBacking", checkReplyJoinedWrite)
 	t.Run("PassiveReceive", checkReplyPassiveReceive)
 	t.Run("OutcomeOnlyClose", func(t *testing.T) { checkReplyHolderEnd(t, "service") })
@@ -2557,7 +2552,7 @@ func testImageReplyJoin(t *testing.T) {
 	t.Run("CustomStopLocalEnd", checkReplyExternalStop)
 }
 
-// parkReplyStart holds the real Start before its listener is published or a transport is cancelled.
+// parkReplyStart holds the real Start before its listener is published or a transport is canceled.
 func parkReplyStart(t *testing.T, s *Service) func() {
 	t.Helper()
 	serviceStartPostListenHookMu.Lock()
@@ -2650,8 +2645,10 @@ func checkReplyJoinedFrame(t *testing.T, name string) {
 	if name == "AlreadyAuthorized" || name == "NoNextRead" {
 		finishStart = parkReplyStart(t, f.s)
 	}
-	phase := map[string]string{"AlreadyAuthorized": "checked-frame", "FrameBacking": "checked-frame", "DecodeBacking": "decode",
-		"VerifyBacking": "verify", "CompareBacking": "verify-return", "NoNextRead": "verify-return"}[name]
+	phase := map[string]string{
+		"AlreadyAuthorized": "checked-frame", "FrameBacking": "checked-frame", "DecodeBacking": "decode",
+		"VerifyBacking": "verify", "CompareBacking": "verify-return", "NoNextRead": "verify-return",
+	}[name]
 	entered, release := holdReplyJoinPhase(f, r, phase, len(payload))
 	defer release()
 	f.sendFrame(0, replyChunk, payload, false)
@@ -2890,8 +2887,10 @@ func captureReplyHeld(f *imageReplyFixture, r *ImageRound, q consensus.UTXOImage
 	require(t, req.held[o] == r.imageRoundUsage && o.result.Query == q, "actual record missing from its charged owner")
 	out, token := o.result.Range, o.result.Attribution
 	require(t, out != nil && len(out.Entries) == 1 && len(out.Entries[0].Entry.CovenantData) > 16, "verified record lacks owned data")
-	refs := replyHeldRefs{record: weak.Make(o), whole: weak.Make(out), entry: weak.Make(&out.Entries[0]),
-		data: weak.Make(&out.Entries[0].Entry.CovenantData[0]), token: weak.Make(token)}
+	refs := replyHeldRefs{
+		record: weak.Make(o), whole: weak.Make(out), entry: weak.Make(&out.Entries[0]),
+		data: weak.Make(&out.Entries[0].Entry.CovenantData[0]), token: weak.Make(token),
+	}
 	requireEqual(t, token != nil, r.probe, "held range token")
 	if token != nil {
 		require(t, token.generation != nil, "verified probe record lacks generation")

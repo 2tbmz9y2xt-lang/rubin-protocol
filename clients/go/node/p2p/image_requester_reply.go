@@ -281,12 +281,12 @@ func imageProofDelta(n uint64) imageUnitVector {
 		h = 2*t + e - 1
 	}
 	return imageUnitVector{
-		unitScalarProofWork: 11*n + 2048*h,
-		unitHashes: h,
-		unitPasses: 6,
-		unitCopies: 8*t + 2*e + 32*h + 8,
+		unitScalarProofWork:   11*n + 2048*h,
+		unitHashes:            h,
+		unitPasses:            6,
+		unitCopies:            8*t + 2*e + 32*h + 8,
 		unitProofHoldingBytes: 128*t + 40*e + 512*frontier + n,
-		unitCopyHoldingBytes: n,
+		unitCopyHoldingBytes:  n,
 	}
 }
 
