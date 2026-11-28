@@ -396,8 +396,15 @@ func candidateUnfundedCurrent(t *testing.T) {
 	var selected, outer error
 	evidence, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, []byte{2}, func() {
 		outer = w.s.View(func(r *mdbx.Reader) error {
-			selected = w.owner.WithCandidateRootV1(r, in.Selection, in.Raw, func(scope *mdbx.CandidateRootScopeV1) error {
-				return scope.WithCandidateFactsV1(1, func(func() error, func() error, func() error) error { return scope.QualifyCurrentV1() })
+			candidateTipCalls(t, w, 0, func() {
+				selected = w.owner.WithCandidateRootV1(r, in.Selection, in.Raw, func(scope *mdbx.CandidateRootScopeV1) error {
+					err := scope.WithCandidateValidationV1(uint64(len(in.Raw))+4096, func(func() error) error {
+						_, err := scope.CandidateCensusV1(in.Raw)
+						return err
+					})
+					logicalMDBXAssert(t, err == nil, "funded census before closing validation: %v", err)
+					return scope.WithCandidateFactsV1(1, func(func() error, func() error, func() error) error { return scope.QualifyCurrentV1() })
+				})
 			})
 			return selected
 		})
@@ -575,7 +582,7 @@ func candidateAuthorityIntegrity(t *testing.T, value []byte) {
 	w := s.world
 	candidateRawRow(t, w, 0, []byte{2}, value)
 	var outer error
-	counts, err := mdbx.FixtureCanonicalTipStep(w.s, 1, nil, nil, false, func() {
+	candidateTipCalls(t, w, 0, func() {
 		outer = w.s.View(func(r *mdbx.Reader) error {
 			root, err := DeriveCandidateUTXORootV1(r, w.owner, in)
 			logicalMDBXAssert(t, root == [32]byte{}, "authority integrity returned digest %x", root)
@@ -585,7 +592,6 @@ func candidateAuthorityIntegrity(t *testing.T, value []byte) {
 			return err
 		})
 	})
-	logicalMDBXAssert(t, err == nil && counts == (mdbx.CanonicalTipStepFixtureEvidence{}), "damaged authority reached tip: %+v/%v", counts, err)
 	candidateTerminalView(t, w, outer)
 }
 
@@ -596,9 +602,11 @@ func candidateWrongDatabase(t *testing.T) {
 	w := s.world
 	evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, []byte{2}, func() {
 		candidateView(t, w, func(r *mdbx.Reader) {
-			root, err := DeriveCandidateUTXORootV1(r, w.owner, in)
-			logicalMDBXAssert(t, root == [32]byte{}, "wrong database returned digest %x", root)
-			candidateEngine(t, err, "update", "InvalidInput", 22, "invalid tree delta")
+			candidateTipCalls(t, w, 0, func() {
+				root, err := DeriveCandidateUTXORootV1(r, w.owner, in)
+				logicalMDBXAssert(t, root == [32]byte{}, "wrong database returned digest %x", root)
+				candidateEngine(t, err, "update", "InvalidInput", 22, "invalid tree delta")
+			})
 			candidateReadControl(t, r)
 		})
 	})
@@ -730,22 +738,29 @@ func candidateWAdmission(t *testing.T) {
 	for _, limit := range []uint64{805306368, 1073741824} {
 		owner, err := mdbx.NewOperationReservationOwner(limit)
 		logicalMDBXAssert(t, err == nil, "candidate aggregate owner: %v", err)
-		for _, short := range []uint64{0, 1} {
+		for _, short := range []uint32{0, 1} {
 			evidence, err := mdbx.FixturePairReadObservation(s.world.s, nil, func() {
 				candidateView(t, s.world, func(r *mdbx.Reader) {
 					var shards uint64
-					preheld := limit - w + short
+					preheld := limit - w + uint64(short)
 					err := candidateFill(owner, preheld, &shards, func() error {
-						candidateCapacity(t, r, owner, in)
+						candidateTipCalls(t, s.world, 1-short, func() { candidateCapacity(t, r, owner, in) })
 						logicalMDBXAssert(t, mdbx.FixtureReservationLive(owner) == preheld, "W refusal changed continuing bytes")
 						return nil
 					})
 					logicalMDBXAssert(t, err == nil && shards > 0, "candidate W competing shards: %v", err)
 				})
 			})
-			logicalMDBXAssert(t, err == nil && evidence.Gets == 1-short && evidence.Writes == 0, "W admission at short=%d: %+v/%v", short, evidence, err)
+			logicalMDBXAssert(t, err == nil && evidence.Gets == uint64(1-short) && evidence.Writes == 0, "W admission at short=%d: %+v/%v", short, evidence, err)
 		}
 	}
+}
+
+func candidateTipCalls(t *testing.T, w *btWorld, queries uint32, run func()) {
+	t.Helper()
+	got, err := mdbx.FixtureCanonicalTipStep(w.s, 1, nil, nil, false, run)
+	want := mdbx.CanonicalTipStepFixtureEvidence{Opens: queries, Gets: 2 * queries, Closes: queries, Queries: queries}
+	logicalMDBXAssert(t, err == nil && got == want, "candidate canonical tip: %+v/%v, want %+v", got, err, want)
 }
 
 func candidateDLive(t *testing.T) {
@@ -777,11 +792,42 @@ func candidateDLive(t *testing.T) {
 				logicalMDBXAssert(t, err == nil, "D continuing hold: %v", err)
 			})
 			logicalMDBXAssert(t, err == nil && live == expected && counts.Gets >= tc.get && counts.Writes == 0, "D live at get %d: %d want %d, counts %+v/%v", tc.get, live, expected, counts, err)
+			if tc.spends == 0 {
+				candidateFactReferences(t, s.world, in, want)
+			}
 			fault := newCandidateScene(t, 5)
 			logicalMDBXAssert(t, fault.parent == in.Selection.Parent, "binding fault parent differs from observed parent")
 			candidateBindingIO(t, fault.world, in, tc.get)
 		})
 	}
+}
+
+func candidateFactReferences(t *testing.T, w *btWorld, in CandidateRootInput, want [32]byte) {
+	t.Helper()
+	candidateView(t, w, func(reader *mdbx.Reader) {
+		err := w.owner.WithCandidateRootV1(reader, in.Selection, in.Raw, func(native *mdbx.CandidateRootScopeV1) error {
+			return native.WithCandidateValidationV1(uint64(len(in.Raw))+4096, func(func() error) error {
+				logicalMDBXAssert(t, native.QualifyCurrentV1() == nil, "qualify retained facts")
+				meta, err := native.CandidateCensusV1(in.Raw)
+				logicalMDBXAssert(t, err == nil && meta.EventCount == 1, "count retained facts: %+v/%v", meta, err)
+				return native.WithCandidateFactsV1(1, func(lookup, lengths, keys func() error) error {
+					scope := newInitial148RequiredScopeV1(reader, 1, in.Selection.Height, 1)
+					body := mdbx.CandidateRootBodyV1{Raw: in.Raw, HeaderBytes: 148, BlockMeta: meta}
+					out := scope.deriveCandidateV1(native, body, func() error {
+						logicalMDBXAssert(t, scope.index == nil, "lookup index still referenced at retirement")
+						return lookup()
+					}, func() error {
+						logicalMDBXAssert(t, scope.keys == nil && scope.lengths == nil, "fact backing still referenced at retirement")
+						return lengths()
+					}, keys)
+					logicalMDBXAssert(t, out.derived && out.root == want, "retired facts returned %x/%v", out.root, out.cause)
+					return out.cause
+				})
+			})
+		})
+		logicalMDBXAssert(t, err == nil, "retire empty facts: %v", err)
+		candidateRootOK(t, reader, w.owner, in, want)
+	})
 }
 
 func candidateBindingIO(t *testing.T, w *btWorld, in CandidateRootInput, atGet uint64) {

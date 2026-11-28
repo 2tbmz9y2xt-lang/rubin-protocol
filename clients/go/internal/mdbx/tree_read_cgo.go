@@ -118,7 +118,7 @@ func (s *CandidateRootScopeV1) WithCandidateValidationV1(initial uint64, use fun
 
 // CandidateCensusV1 counts the admitted body. Malformed framing yields zero counts.
 func (s *CandidateRootScopeV1) CandidateCensusV1(raw []byte) (TreeBlockV1, error) {
-	if !s.openV1() || !s.state.matchesRawV1(raw) {
+	if !s.openV1() || !s.state.matchesRawV1(raw) || !s.state.retainsV1(0, false) {
 		return TreeBlockV1{}, errOperationReservationInput
 	}
 	state := s.state
@@ -144,6 +144,10 @@ func (s *CandidateRootScopeV1) WithCandidateFactsV1(events uint32, use func(reti
 		return errOperationReservationCapacity
 	}
 	state := s.state
+	counts := state.counts.Load()
+	if counts == 0 || counts&math.MaxUint32 != e {
+		return errOperationReservationInput
+	}
 	return state.account.withHold(func(h *operationHold) error {
 		if err := h.grow(135192 + 48*e); err != nil {
 			return err
@@ -167,7 +171,7 @@ func (s *CandidateRootScopeV1) QualifyCurrentV1() error {
 		return treeDeltaInvalidV1()
 	}
 	state := s.state
-	if state.rawBytes < 149 || state.rawBytes > 68_000_157 || !state.retainsV1(0) {
+	if state.rawBytes < 149 || state.rawBytes > 68_000_157 || !state.retainsV1(0, false) {
 		return treeDeltaInvalidV1()
 	}
 	if err := state.reader.qualifyCandidateParentV1(state.selection); err != nil {
@@ -270,7 +274,7 @@ func (s *CandidateRootScopeV1) DeriveCandidateRootV1(body CandidateRootBodyV1, i
 	if len(inputs) != 0 {
 		keys = 36 * events
 	}
-	if !state.retainsV1(keys) {
+	if !state.retainsV1(keys, true) {
 		return [32]byte{}, treeDeltaInvalidV1()
 	}
 	n := treeStepBytesV1 + treeValueBytesV1 + treeNodeWorkBytesV1 + treeDescSizeV1*events
@@ -287,16 +291,23 @@ func (s *CandidateRootScopeV1) DeriveCandidateRootV1(body CandidateRootBodyV1, i
 	return root, nil
 }
 
-func (s *candidateRootScopeStateV1) retainsV1(keys uint64) bool {
+func (s *candidateRootScopeStateV1) retainsV1(keys uint64, derive bool) bool {
 	a := s.account.shared
 	a.origin.mu.Lock()
 	defer a.origin.mu.Unlock()
 	w := s.validation.Load()
-	if w == nil || !all(!w.closed, !a.closed, w.amount >= s.rawBytes+4096) {
+	retained := s.rawBytes + 4096
+	if w == nil || !all(!w.closed, !a.closed, w.amount >= retained, !derive || w.amount == retained) {
 		return false
 	}
+	if !derive {
+		return true
+	}
 	f := s.facts.Load()
-	return keys == 0 || f != nil && all(!f.closed, !f.retired.Load(), f.keys == keys, f.amount >= keys)
+	if keys == 0 {
+		return f == nil || f.amount == 0
+	}
+	return f != nil && all(!f.closed, !f.retired.Load(), f.keys == keys, f.amount == keys)
 }
 
 func (s *candidateRootScopeStateV1) matchesRawV1(raw []byte) bool {

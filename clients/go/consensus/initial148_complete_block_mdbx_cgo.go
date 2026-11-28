@@ -595,7 +595,6 @@ func (f *initial148CompleteBlockFrameV1) capV1(view logicalStateView, transition
 	return initial148CheckCapV1(f.input.CapRegistry, f.input.ChainID, f.input.Height, view, transition)
 }
 
-// initial148CheckCapV1 consumes the complete touched subset and checks cap then growth.
 func initial148CheckCapV1(registry *validatedLogicalStateCapRegistry, chainID [32]byte, height uint64, view logicalStateView, transition *connectBlockInputViewResult) error {
 	_, err := evaluateLogicalStateCap(nil, *registry, chainID, height, view, replayStepTouched(transition), struct{}{})
 	return err
