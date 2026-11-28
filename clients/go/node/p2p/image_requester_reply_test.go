@@ -293,11 +293,19 @@ func (f *imageReplyFixture) beginReplyRound(ctx context.Context, anchor ImageAnc
 }
 
 func imageReplyQuery(anchor ImageAnchor, id uint64, start byte, limit uint32) consensus.UTXOImageQuery {
-	var key [36]byte
-	key[0] = start
 	return consensus.UTXOImageQuery{
-		RequestID: id, Height: anchor.Height, BlockHash: anchor.BlockHash, Root: anchor.Root, StartKey: key, ByteLimit: limit,
+		RequestID: id, Height: anchor.Height, BlockHash: anchor.BlockHash, Root: anchor.Root, StartKey: [36]byte{start}, ByteLimit: limit,
 	}
+}
+
+func newSentImageReply(t *testing.T, ctx context.Context, peers int) (*imageReplyFixture, *ImageRound, consensus.UTXOImageQuery) {
+	t.Helper()
+	f := newImageReplyFixture(t, true, peers)
+	r, err := f.s.BeginImageRound(ctx, ImageRoundConfig{Anchor: replyEmptyAnchor, SourceIDs: f.ids, Limits: imageReplyLimits()})
+	must(t, err, "begin round on connected sources")
+	q := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit)
+	f.sendQuery(r, ctx, 0, q, [32]byte{})
+	return f, r, q
 }
 
 func imageReplyQBytes(q consensus.UTXOImageQuery) []byte {
@@ -401,8 +409,7 @@ type imageReplyLeaf struct {
 }
 
 func replyLeaf(prefix byte, vout uint32, data []byte) imageReplyLeaf {
-	var leaf imageReplyLeaf
-	leaf.key[0] = prefix
+	leaf := imageReplyLeaf{key: [36]byte{prefix}}
 	binary.BigEndian.PutUint32(leaf.key[32:], vout)
 	entry := make([]byte, 0, 46)
 	entry = append(entry, leaf.key[:32]...)
@@ -483,25 +490,17 @@ func replyChunkBytes(q consensus.UTXOImageQuery, entries []imageReplyLeaf, pred 
 }
 
 func (f *imageReplyFixture) requireReceive(r *ImageRound, q consensus.UTXOImageQuery, diagnostic string, wantErr error) ImageResult {
-	t := f.t
-	t.Helper()
-	wait, cancel := context.WithCancel(t.Context())
-	cancel()
-	got, err := r.Receive(wait, q.StartKey)
-	requireEqual(t, err, wantErr, "Receive error")
-	requireEqual(t, got.Query, q, "Receive query")
-	requireEqual(t, got.Diagnostic, diagnostic, "Receive diagnostic")
+	f.t.Helper()
+	got := f.receiveReplyRaw(r, q.StartKey, wantErr)
+	requireEqual(f.t, got.Query, q, "Receive query")
+	requireEqual(f.t, got.Diagnostic, diagnostic, "Receive diagnostic")
 	return got
 }
 
 func (f *imageReplyFixture) requireEmpty(r *ImageRound, start byte, want error) {
-	t := f.t
-	t.Helper()
-	wait, cancel := context.WithCancel(t.Context())
-	cancel()
-	got, err := r.Receive(wait, [36]byte{start})
-	requireEqual(t, err, want, "Receive without takeable result")
-	requireEqual(t, got, ImageResult{}, "result without outcome")
+	f.t.Helper()
+	got := f.receiveReplyRaw(r, [36]byte{start}, want)
+	requireEqual(f.t, got, ImageResult{}, "result without outcome")
 }
 
 func requireReplyNoRange(t *testing.T, got ImageResult) {
@@ -577,10 +576,7 @@ func checkReplyBadChecksum(t *testing.T) {
 }
 
 func checkReplyChecksumID(t *testing.T, id uint64) {
-	f := newImageReplyFixture(t, true, 1)
-	round := f.beginReplyRound(t.Context(), replyEmptyAnchor, imageReplyLimits(), false, 0)
-	q := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit)
-	f.sendQuery(round, t.Context(), 0, q, [32]byte{})
+	f, round, q := newSentImageReply(t, t.Context(), 1)
 	wire := q
 	wire.RequestID = id
 	p := f.workers[0]
@@ -593,10 +589,7 @@ func checkReplyChecksumID(t *testing.T, id uint64) {
 }
 
 func checkReplyPartial(t *testing.T) {
-	f := newImageReplyFixture(t, true, 2)
-	round := f.beginReplyRound(t.Context(), replyEmptyAnchor, imageReplyLimits(), false, 0, 1)
-	q := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit)
-	f.sendQuery(round, t.Context(), 0, q, [32]byte{})
+	f, round, q := newSentImageReply(t, t.Context(), 2)
 	payload := imageReplyQBytes(q)
 	p := f.workers[0]
 	partial := p.wire.readBytes.Load() + 24 + 60
@@ -667,10 +660,7 @@ func checkReplyMaximumFrame(t *testing.T) {
 }
 
 func checkReplyNegative(t *testing.T, retry bool) {
-	f := newImageReplyFixture(t, true, 2)
-	round := f.beginReplyRound(t.Context(), replyEmptyAnchor, imageReplyLimits(), false, 0, 1)
-	q := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit)
-	f.sendQuery(round, t.Context(), 0, q, [32]byte{})
+	f, round, q := newSentImageReply(t, t.Context(), 2)
 	trace := observeReplyCalls(t, nil)
 	f.deliver(0, replyNegative, imageReplyQBytes(q))
 	trace.requireCount(t, "verify", 0)
@@ -701,25 +691,18 @@ func testImageReplyPrefix(t *testing.T) {
 	t.Run("EqualNumericSessions", checkReplyEqualNumericSessions)
 	t.Run("InsertOrdinary", func(t *testing.T) { checkReplyInsert(t, false) })
 	t.Run("InsertProbe", func(t *testing.T) { checkReplyInsert(t, true) })
-	t.Run("RetiredPrefix", func(t *testing.T) { checkReplyRetiredPrefix(t, "reply") })
-	t.Run("DetachReply", func(t *testing.T) { checkReplyRetiredPrefix(t, "reply") })
-	t.Run("DetachTimeout", func(t *testing.T) { checkReplyRetiredPrefix(t, "expiry") })
-	t.Run("DetachCancel", func(t *testing.T) { checkReplyRetiredPrefix(t, "cancel") })
-	t.Run("DetachRound", func(t *testing.T) { checkReplyRetiredPrefix(t, "round") })
+	runReplyCases(t, checkReplyRetiredPrefix, "RetiredPrefix", "DetachReply", "DetachTimeout", "DetachCancel", "DetachRound")
 	t.Run("DetachPeer", func(t *testing.T) { checkReplyIndexLastUse(t, false) })
 	t.Run("DetachService", func(t *testing.T) { checkReplyIndexLastUse(t, true) })
 	t.Run("BadEchoMalformed", func(t *testing.T) { checkReplyGrammar(t, "MixedEncodingFirst", replyChunk, "image_encoding") })
-	t.Run("StaleReplacement", func(t *testing.T) { checkReplyTime(t, "Replacement") })
+	t.Run("StaleReplacement", func(t *testing.T) { checkReplyEndRace(t, "Replacement") })
 	t.Run("DetachedFrame", checkReplyDetachedFrame)
 	t.Run("ArmingUnallocated/RequestContext", func(t *testing.T) { checkReplyArmingUnallocated(t, false) })
 	t.Run("ArmingUnallocated/RoundContext", func(t *testing.T) { checkReplyArmingUnallocated(t, true) })
 }
 
 func checkImageReplyPrefix(t *testing.T, name string, id uint64, size int) {
-	f := newImageReplyFixture(t, true, 2)
-	round := f.beginReplyRound(t.Context(), replyEmptyAnchor, imageReplyLimits(), false, 0, 1)
-	q := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit)
-	f.sendQuery(round, t.Context(), 0, q, [32]byte{})
+	f, round, q := newSentImageReply(t, t.Context(), 2)
 	unknown := q
 	unknown.RequestID = id
 	source := 0
@@ -740,10 +723,8 @@ func checkImageReplyPrefix(t *testing.T, name string, id uint64, size int) {
 }
 
 func checkReplyEqualNumericSessions(t *testing.T) {
-	f := newImageReplyFixture(t, true, 2)
-	r := f.beginReplyRound(t.Context(), replyEmptyAnchor, imageReplyLimits(), false, 0, 1)
-	a, b := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit), imageReplyQuery(replyEmptyAnchor, 1, 2, replyLimit)
-	f.sendQuery(r, t.Context(), 0, a, [32]byte{})
+	f, r, a := newSentImageReply(t, t.Context(), 2)
+	b := imageReplyQuery(replyEmptyAnchor, 1, 2, replyLimit)
 	f.sendQuery(r, t.Context(), 1, b, [32]byte{})
 	member := replyCurrentInstance(f, r, a)
 	trace := observeReplyCalls(t, nil)
@@ -789,21 +770,19 @@ func checkReplyRetiredPrefix(t *testing.T, how string) {
 	q := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit)
 	f.sendQuery(r, ctx, 0, q, [32]byte{})
 	session := f.workers[0].current.imageSession
+	want := errImageNoAssignment
 	switch how {
-	case "reply":
+	case "RetiredPrefix", "DetachReply":
 		f.deliver(0, replyNegative, imageReplyQBytes(q))
 		requireReplyNoRange(t, f.requireReceive(r, q, "", nil))
-	case "expiry":
+	case "DetachTimeout":
 		f.clock.add(10*time.Second + 1)
 		requireReplyNoRange(t, f.requireReceive(r, q, "", errImageExpired))
-	case "cancel":
+	case "DetachCancel":
 		cancel()
 		requireReplyNoRange(t, f.requireReceive(r, q, "", context.Canceled))
-	case "round":
+	case "DetachRound":
 		r.Close()
-	}
-	want := errImageNoAssignment
-	if how == "round" {
 		want = errImageRoundClosed
 	}
 	f.requireEmpty(r, 1, want)
@@ -859,10 +838,7 @@ func testImageReplyGrammar(t *testing.T) {
 }
 
 func checkReplyMissingQ(t *testing.T, command string, length int) {
-	f := newImageReplyFixture(t, true, 1)
-	r := f.beginReplyRound(t.Context(), replyEmptyAnchor, imageReplyLimits(), false, 0)
-	q := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit)
-	f.sendQuery(r, t.Context(), 0, q, [32]byte{})
+	f, r, q := newSentImageReply(t, t.Context(), 1)
 	f.deliver(0, command, imageReplyQBytes(q)[:length])
 	requireReplyNoRange(t, f.requireReceive(r, q, "image_encoding", nil))
 	f.requireEmpty(r, 1, errImageNoAssignment)
@@ -1059,7 +1035,8 @@ func checkReplyProof(t *testing.T, name string) {
 		want := consensus.UTXOImageRange{Entries: []consensus.UTXOImageEntry{replyEntry(0x20, 0, []byte{0x6d})}, Terminal: true}
 		requireReplyRange(t, f.requireReceive(r, q, "", nil), want, false)
 	} else {
-		got := f.receiveReplyRaw(r, q)
+		got := f.receiveReplyRaw(r, q.StartKey, nil)
+		requireEqual(t, got.Query, q, "admitted query in completed reply")
 		requireReplyNoRange(t, got)
 		requireEqual(t, got.Diagnostic, "image_range", "whole proof rejection diagnostic")
 	}
@@ -1071,14 +1048,12 @@ func checkReplyProof(t *testing.T, name string) {
 	requireReplyHealthy(t, f.workers[1].current)
 }
 
-func (f *imageReplyFixture) receiveReplyRaw(r *ImageRound, q consensus.UTXOImageQuery) ImageResult {
-	t := f.t
-	t.Helper()
-	wait, cancel := context.WithCancel(t.Context())
+func (f *imageReplyFixture) receiveReplyRaw(r *ImageRound, start [36]byte, want error) ImageResult {
+	f.t.Helper()
+	wait, cancel := context.WithCancel(f.t.Context())
 	cancel()
-	got, err := r.Receive(wait, q.StartKey)
-	requireEqual(t, err, nil, "completed reply error")
-	requireEqual(t, got.Query, q, "admitted query in completed reply")
+	got, err := r.Receive(wait, start)
+	requireEqual(f.t, err, want, "Receive error")
 	return got
 }
 
@@ -1166,10 +1141,6 @@ func checkReplyCompletionOrder(t *testing.T, name string) {
 }
 
 func checkReplyTime(t *testing.T, name string) {
-	if name == "Replacement" {
-		checkReplyEndRace(t, name)
-		return
-	}
 	f := newImageReplyFixture(t, true, 1)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -1267,10 +1238,8 @@ func checkReplyEndRace(t *testing.T, name string) {
 	q := imageReplyQuery(anchor, 1, 1, replyLimit)
 	f.sendQuery(r, ctx, 0, q, [32]byte{})
 	payload := replyChunkBytes(q, []imageReplyLeaf{leaf}, nil, nil, nil)
-	entered, release := holdReplyStage(t, f.workers[0], "verify-return", len(payload))
-	defer release()
-	f.sendFrame(0, replyChunk, payload, false)
-	requireChannelClosed(t, entered, "admitted reply before final compare")
+	wantRange := consensus.UTXOImageRange{Entries: []consensus.UTXOImageEntry{replyEntry(0x20, 0, []byte{0x42})}, Terminal: true}
+	finish := f.pauseReplyProof(name, payload, wantRange)
 	want := context.Canceled
 	if name == "DetachedSession" {
 		f.s.retireImagePeer(f.workers[0].current)
@@ -1283,16 +1252,41 @@ func checkReplyEndRace(t *testing.T, name string) {
 		q.ByteLimit++
 		f.sendQuery(r, t.Context(), 1, q, [32]byte{})
 	}
-	release()
-	f.sendFrame(0, "ping", nil, false)
+	finish()
 	if name != "Replacement" {
 		f.requireEmpty(r, 1, errImageNoAssignment)
 		return
 	}
+	f.requireEmpty(r, q.StartKey[0], context.Canceled)
 	f.deliver(1, replyChunk, replyChunkBytes(q, []imageReplyLeaf{leaf}, nil, nil, nil))
-	got := f.requireReceive(r, q, "", nil)
-	requireReplyRange(t, got, consensus.UTXOImageRange{Entries: []consensus.UTXOImageEntry{replyEntry(0x20, 0, []byte{0x42})}, Terminal: true}, false)
+	requireReplyRange(t, f.requireReceive(r, q, "", nil), wantRange, false)
 	f.requireEmpty(r, 1, errImageNoAssignment)
+}
+
+func (f *imageReplyFixture) pauseReplyProof(name string, payload []byte, want consensus.UTXOImageRange) func() {
+	t := f.t
+	t.Helper()
+	p := f.workers[0]
+	if name != "Replacement" || replyCallTracing {
+		entered, release := holdReplyStage(t, p, "verify-return", len(payload))
+		f.sendFrame(0, replyChunk, payload, false)
+		requireChannelClosed(t, entered, "admitted reply before final compare")
+		return func() { release(); f.sendFrame(0, "ping", nil, false) }
+	}
+	release := holdWorkLease(t, f.s)
+	work := imageReplyWork{peer: p.current}
+	t.Cleanup(work.release)
+	require(t, work.admitDecode(binary.LittleEndian.Uint64(payload[:8]), uint64(len(payload))), "original decode admission")
+	command, _ := encodeWireCommand(replyChunk)
+	reply, decoded, reason := consensus.DecodeUTXOImageReply(command, payload)
+	require(t, work.classify(reply, decoded, reason), "original proof admission: %s", reason)
+	result, verified, reason := consensus.VerifyUTXOImageChunk(reply)
+	require(t, verified && reason == "" && reflect.DeepEqual(result, want), "original proof before replacement: %s", reason)
+	return func() {
+		work.finishProof(result, verified, reason)
+		work.release()
+		release()
+	}
 }
 
 func checkReplySpentAfterStale(t *testing.T) {
@@ -1316,10 +1310,7 @@ func checkReplySpentAfterStale(t *testing.T) {
 }
 
 func checkReplyDetachedFrame(t *testing.T) {
-	f := newImageReplyFixture(t, true, 1)
-	r := f.beginReplyRound(t.Context(), replyEmptyAnchor, imageReplyLimits(), false, 0)
-	q := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit)
-	f.sendQuery(r, t.Context(), 0, q, [32]byte{})
+	f, r, q := newSentImageReply(t, t.Context(), 1)
 	f.addReplyPeer(f.ids[0])
 	other := f.beginReplyRound(t.Context(), replyEmptyAnchor, imageReplyLimits(), false, 1)
 	replacement := imageReplyQuery(replyEmptyAnchor, 1, 2, replyLimit)
@@ -1359,10 +1350,7 @@ func checkReplyArmingUnallocated(t *testing.T, roundContext bool) {
 }
 
 func checkReplyIndexLastUse(t *testing.T, closeService bool) {
-	f := newImageReplyFixture(t, true, 1)
-	r := f.beginReplyRound(context.Background(), replyEmptyAnchor, imageReplyLimits(), false, 0)
-	q := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit)
-	f.sendQuery(r, context.Background(), 0, q, [32]byte{})
+	f, r, q := newSentImageReply(t, context.Background(), 1)
 	session, instance := observeReplyIndex(f, q)
 	if closeService {
 		must(t, f.s.Close(), "close image Service")
@@ -1714,7 +1702,7 @@ func (f *imageReplyFixture) finishReplyScratchOverlap(r *ImageRound, a, b consen
 }
 
 func checkReplyMaximumAllocation(t *testing.T, capBytes uint64, unknown bool) {
-	leaves, _ := replyMaxLeaves()
+	leaves, entries := replyMaxLeaves()
 	anchor := replyAnchor(leaves...)
 	f := newImageReplyFixture(t, true, 1)
 	l := imageReplyLimits()
@@ -1733,15 +1721,24 @@ func checkReplyMaximumAllocation(t *testing.T, capBytes uint64, unknown bool) {
 	release := holdWorkLease(t, f.s)
 	defer release()
 	old, independent := replyCharged(f, r, 0), replyCharged(f, other, 0)
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	err := f.workers[0].current.handleMessage(message{Command: replyChunk, Payload: payload})
-	runtime.ReadMemStats(&after)
-	must(t, err, "process checksum-valid maximum frame")
-	requireEqual(t, after.TotalAlloc-before.TotalAlloc >= 2097152, capBytes == 2097152 && !unknown, "full owned decoder allocation")
+	admitted := capBytes == 2097152 && !unknown
+	if admitted {
+		command, _ := encodeWireCommand(replyChunk)
+		reply, decoded, reason := consensus.DecodeUTXOImageReply(command, payload)
+		require(t, decoded && reason == "", "maximum scalar layout: %s", reason)
+		const firstCovenantByte = 120 + 4 + 46 + 3
+		payload[firstCovenantByte] ^= 0xff
+		result, verified, reason := consensus.VerifyUTXOImageChunk(reply)
+		payload[firstCovenantByte] ^= 0xff
+		require(t, verified, "owned maximum reply proof after transport byte reuse: %s", reason)
+		require(t, reflect.DeepEqual(result, consensus.UTXOImageRange{Entries: entries, Terminal: true}), "owned maximum result differs from original entries")
+	}
+	trace := observeReplyCalls(t, nil)
+	must(t, f.workers[0].current.handleMessage(message{Command: replyChunk, Payload: payload}), "process checksum-valid maximum frame")
+	trace.requireCount(t, "decode", map[bool]int{false: 0, true: 1}[admitted])
 	f.requireEmpty(r, 1, context.Canceled)
 	f.requireEmpty(other, 2, context.Canceled)
-	if capBytes == 2097152 && !unknown {
+	if admitted {
 		for i := range old {
 			old[i][0] += 2097152
 			old[i][2]++
@@ -1920,9 +1917,10 @@ func unwindReplyWrite(goexit bool) func() error {
 
 func checkReplyBeforeWrite(t *testing.T, name string) {
 	traced := replyCallTracing && name == "TerminalNilBeforeWrite"
-	for _, mode := range []string{"Request", "Probe", "RequestAfterLock", "ProbeAfterLock"} {
+	for _, mode := range []string{"Request", "Probe", "ProbePositive", "RequestAfterLock", "ProbeAfterLock"} {
 		final := strings.HasSuffix(mode, "AfterLock")
-		if final && !traced {
+		positive := mode == "ProbePositive"
+		if final && !traced || positive && name != "TerminalNilBeforeWrite" {
 			continue
 		}
 		t.Run(mode, func(t *testing.T) {
@@ -1945,7 +1943,8 @@ func checkReplyBeforeWrite(t *testing.T, name string) {
 					unlock()
 				}
 			}
-			done := goReplySend(r, ctx, f.ids[0], q, [32]byte{0x26})
+			hash := [32]byte{0x26}
+			done := goReplySend(r, ctx, f.ids[0], q, hash)
 			requireChannelClosed(t, waiting, "admitted send before authorization")
 			var want error
 			switch name {
@@ -1956,7 +1955,11 @@ func checkReplyBeforeWrite(t *testing.T, name string) {
 				f.clock.add(10*time.Second + 1)
 				want = errImageExpired
 			}
-			f.deliver(0, replyNegative, imageReplyQBytes(q))
+			if positive {
+				f.deliver(0, replyChunk, replyChunkBytes(q, nil, nil, nil, nil))
+			} else {
+				f.deliver(0, replyNegative, imageReplyQBytes(q))
+			}
 			var continued <-chan struct{}
 			if traced && !final {
 				continued, _ = holdReplyCall(t, "write-wait", p.current)
@@ -1969,7 +1972,11 @@ func checkReplyBeforeWrite(t *testing.T, name string) {
 			requireEqual(t, writes, 0, "writes after terminal decision")
 			requireEqual(t, got, any(imageResult{q, want}), "pre-write result")
 			unlock()
-			if want == nil {
+			if positive {
+				result := f.requireReceive(r, q, "", nil)
+				requireReplyRange(t, result, consensus.UTXOImageRange{Terminal: true}, true)
+				f.requireToken(result.Attribution, r, 0, hash, true)
+			} else if want == nil {
 				requireReplyNoRange(t, f.requireReceive(r, q, "", nil))
 			}
 			f.requireEmpty(r, 1, errImageNoAssignment)
@@ -1985,15 +1992,14 @@ func checkReplyWhileWriting(t *testing.T, name string) {
 	q, next := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit), imageReplyQuery(replyEmptyAnchor, 1, 2, replyLimit)
 	ctx := newImageHookCtx()
 	var writeErr error
-	var recorded <-chan string
+	var recorded chan string
 	if name == "ReplyWinsWriteError" {
 		writeErr = errImageScriptedWrite
-		atClose := make(chan string, 1)
+		recorded = make(chan string, 1)
 		p := f.workers[0]
 		p.conn.mu.Lock()
-		p.conn.closeHook = sync.OnceFunc(func() { atClose <- p.current.snapshotState().LastError })
+		p.conn.closeHook = sync.OnceFunc(func() { recorded <- p.current.snapshotState().LastError })
 		p.conn.mu.Unlock()
-		recorded = atClose
 	}
 	send := f.parkReplySend(r, ctx, 0, q, [32]byte{}, func() error { return writeErr })
 	defer send.release()
@@ -2638,10 +2644,7 @@ func checkReplyDrainingToken(t *testing.T, inProgress bool) {
 }
 
 func checkReplyJoinedFrame(t *testing.T, name string) {
-	f := newImageReplyFixture(t, true, 1)
-	r := f.beginReplyRound(context.Background(), replyEmptyAnchor, imageReplyLimits(), false, 0)
-	q := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit)
-	f.sendQuery(r, context.Background(), 0, q, [32]byte{})
+	f, r, q := newSentImageReply(t, context.Background(), 1)
 	p, payload := f.workers[0], replyChunkBytes(q, nil, nil, nil, nil)
 	var finishStart func()
 	if name == "AlreadyAuthorized" || name == "NoNextRead" {
@@ -2756,10 +2759,7 @@ func checkReplyJoinedWrite(t *testing.T) {
 }
 
 func checkReplyPassiveReceive(t *testing.T) {
-	f := newImageReplyFixture(t, true, 1)
-	r := f.beginReplyRound(context.Background(), replyEmptyAnchor, imageReplyLimits(), false, 0)
-	q := imageReplyQuery(replyEmptyAnchor, 1, 1, replyLimit)
-	f.sendQuery(r, context.Background(), 0, q, [32]byte{})
+	f, r, q := newSentImageReply(t, context.Background(), 1)
 	entered, proceed := make(chan struct{}), make(chan struct{})
 	release := sync.OnceFunc(func() { close(proceed) })
 	defer release()
