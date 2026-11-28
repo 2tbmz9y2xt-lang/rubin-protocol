@@ -2,6 +2,24 @@ package p2p
 
 import "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 
+const (
+	messageUTXOImage      = "utxoimg"
+	messageUTXONotAvail   = "utxonotavail"
+	imageChunkPayloadCap  = 2097152
+	imageNegativeReplyCap = 120
+)
+
+func imageReplyPayloadCap(command string) uint32 {
+	switch command {
+	case messageUTXOImage:
+		return imageChunkPayloadCap
+	case messageUTXONotAvail:
+		return imageNegativeReplyCap
+	default:
+		return 0
+	}
+}
+
 func inventoryPayloadCap() uint32 {
 	return uint32(maxInventoryVectors * inventoryVectorSize)
 }

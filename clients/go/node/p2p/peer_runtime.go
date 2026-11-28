@@ -650,6 +650,11 @@ func (p *peer) postHandshakePayloadCap() payloadLimitFn {
 			return 0
 		case messageBlockTxn:
 			return p.blockTxnPostHandshakePayloadCap()
+		case messageUTXOImage, messageUTXONotAvail:
+			if p.service.cfg.EnableImageRequester {
+				return imageReplyPayloadCap(command)
+			}
+			return 0
 		default:
 			return base(command)
 		}
@@ -812,7 +817,7 @@ func (p *peer) handleMessage(frame message) error {
 	case messageVerAck:
 		return errors.New("invalid verack after handshake")
 	default:
-		return postHandshakeUnknownCommandError{command: frame.Command}
+		return p.handleOptionalImageReply(frame)
 	}
 }
 

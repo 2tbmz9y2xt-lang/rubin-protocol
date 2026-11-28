@@ -42,8 +42,8 @@ type ImageAnchor struct {
 }
 
 // ImageUnits holds one positive limit per requester IMAGE unit (RUBIN_L1_P2P_AUX.md Sections 7.5 and 7.8). A session's
-// request IDs start at 1 and strictly increase across the rounds of the Service, with no reuse or wrap. Retirement
-// releases the current-assignment unit and Request the pending request bytes, once each; no other unit is released
+// request IDs start at 1 and strictly increase across the rounds of the Service, with no reuse or wrap. Assignment
+// retirement releases current capacity. Pending write bytes, reply scratch and held ranges release at last use
 // (RUBIN_L1_P2P_AUX.md Sections 6.1 and 7.5).
 type ImageUnits struct {
 	CurrentAssignments  uint64
@@ -96,8 +96,15 @@ const (
 	unitDistinctStarts
 	unitSourceAttempts
 	unitAdmittedRequests
-	unitPendingNetworkBytes = 8
-	imageUnitCount          = 12
+	unitScalarProofWork
+	unitHashes
+	unitPasses
+	unitCopies
+	unitPendingNetworkBytes
+	unitProofHoldingBytes
+	unitCopyHoldingBytes
+	unitHolderBytes
+	imageUnitCount
 )
 
 type imageUnitVector [imageUnitCount]uint64
@@ -162,6 +169,7 @@ type imageRequester struct {
 	mu       sync.Mutex
 	sessions map[*imageSession]struct{}
 	current  map[imageKey]*imageInstance
+	held     map[*imageOutcome]*imageRoundUsage
 	drain    chan struct{}
 }
 
@@ -201,6 +209,7 @@ const (
 	imageBeforeWrite imageSendPhase = iota
 	imageWriting
 	imageSent
+	imageUnwound
 )
 
 // endAt returns the ctx error, else the round ctx error, else errImageExpired when now is after D, else nil.
@@ -252,6 +261,7 @@ type imageRoundUsage struct {
 	closed    bool
 	wake      chan struct{}
 	outcomes  map[[36]byte][]*imageOutcome
+	qualified map[imageQualificationKey]*imageGeneration
 }
 
 // BeginImageRound admits an acquisition round under one Service lease. Refusals, in order, return a nil round and fault
@@ -718,6 +728,7 @@ func (r *ImageRound) commitLocked(inst *imageInstance, now time.Time) {
 	usage.add(perPeer)
 	r.global.add(global)
 	inst.session.lastID = inst.query.RequestID
+	inst.session.indexCurrentLocked(inst)
 	req.current[imageKey{r.anchor, start}] = inst
 	r.attempted[imageAttemptKey{start, inst.session}] = struct{}{}
 	r.starts[start] = struct{}{}
@@ -762,7 +773,7 @@ func applyImageEnd(ref *atomic.Pointer[imageInstance], byTimer bool) {
 func (r *ImageRound) send(inst *imageInstance, transport *peer, payload [imageRequestBytes]byte) (err error) {
 	returned := false
 	defer func() {
-		r.finishSend(inst, returned && err == nil)
+		r.finishSend(inst, returned, err)
 	}()
 	err = r.writeRequest(inst, transport, payload)
 	returned = true
@@ -801,7 +812,7 @@ func (r *ImageRound) writeRequest(inst *imageInstance, transport *peer, payload 
 // lockImageWrite can refuse while waiting. Only the check with writeMu held can authorize a write.
 func (r *ImageRound) lockImageWrite(inst *imageInstance, transport *peer) (acquired bool, err error) {
 	for !transport.writeMu.TryLock() {
-		if end := r.endBeforeWrite(inst, false); end != nil {
+		if terminal, end := r.endBeforeWrite(inst, false); terminal {
 			return false, end
 		}
 		time.Sleep(time.Millisecond)
@@ -811,7 +822,7 @@ func (r *ImageRound) lockImageWrite(inst *imageInstance, transport *peer) (acqui
 			transport.writeMu.Unlock()
 		}
 	}()
-	if end := r.endBeforeWrite(inst, true); end != nil {
+	if terminal, end := r.endBeforeWrite(inst, true); terminal {
 		return false, end
 	}
 	return true, nil
@@ -832,20 +843,22 @@ func writeImageFrame(session *peer, payload [imageRequestBytes]byte) error {
 }
 
 // endBeforeWrite records write authorization with writeMu held. A refusal releases the pending bytes.
-func (r *ImageRound) endBeforeWrite(inst *imageInstance, holdsWrite bool) error {
+func (r *ImageRound) endBeforeWrite(inst *imageInstance, holdsWrite bool) (bool, error) {
 	req := r.service.imageRequester
 	req.mu.Lock()
 	defer req.mu.Unlock()
 	end := inst.preWriteEnd(r.service.cfg.Now)
-	if end == nil {
-		if holdsWrite {
-			inst.sendPhase = imageWriting
-		}
-		return nil
+	if inst.retired {
+		return true, end
 	}
-	req.retireLocked(inst, end)
-	inst.releasePendingLocked()
-	return end
+	if end != nil {
+		req.retireLocked(inst, end)
+		return true, end
+	}
+	if holdsWrite {
+		inst.sendPhase = imageWriting
+	}
+	return false, nil
 }
 
 // finishWrite returns nil for an instance retired during the write, else retires it on writeErr and returns writeErr;
@@ -865,7 +878,7 @@ func (r *ImageRound) finishWrite(inst *imageInstance, writeErr error) error {
 }
 
 // release subtracts amount of unit from r's usage on session and from r's global usage.
-func (r *ImageRound) release(session *imageSession, unit int, amount uint64) {
+func (r *imageRoundUsage) release(session *imageSession, unit int, amount uint64) {
 	r.perPeer[session][unit] -= amount
 	r.global[unit] -= amount
 }
