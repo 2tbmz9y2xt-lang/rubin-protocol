@@ -5,10 +5,10 @@ import (
 	"sync"
 )
 
-// LaneMaxBytes (LANE_MAX) is the reservation ceiling of every storage operation other than
-// a complete-block tree-integrated one; TreeLaneMaxBytes (TREE_LANE_MAX) is the ceiling of
-// one complete-block tree-integrated operation; MinReservationLimit (R_MIN = R_DEFAULT) is
-// the smallest aggregate limit at which an owner admits any charge.
+// LaneMaxBytes (LANE_MAX) bounds ordinary storage operations.
+// TreeLaneMaxBytes (TREE_LANE_MAX) bounds each complete-block tree-integrated operation
+// and pre-nonce tree scope. MinReservationLimit (R_MIN = R_DEFAULT) is the smallest
+// aggregate limit at which an owner admits a charge.
 const (
 	LaneMaxBytes        uint64 = 154_611_183
 	TreeLaneMaxBytes    uint64 = 402_653_184
@@ -262,6 +262,11 @@ func (o *OperationReservationOwner) WithOperation(kind OperationKind, callback f
 	if !ok {
 		return errOperationReservationInput
 	}
+	return o.withAccountV1(ceiling, callback)
+}
+
+// withAccountV1 closes its private account on every callback exit.
+func (o *OperationReservationOwner) withAccountV1(ceiling uint64, callback func(*OperationAccount) error) error {
 	s := o.shared
 	account := &operationAccountState{origin: s, ceiling: ceiling}
 	defer s.close(account)
@@ -301,14 +306,18 @@ func (a *OperationAccount) WithPhaseReservationV1(initial, retained uint64, call
 		if err := h.grow(initial); err != nil {
 			return err
 		}
-		var once sync.Once
-		var result error
-		release := func() error {
-			once.Do(func() { result = h.shrink(initial - retained) })
-			return result
-		}
-		return callback(release)
+		return callback(h.reductionV1(initial - retained))
 	})
+}
+
+// reductionV1 lends an idempotent reduction of the open hold.
+func (h *operationHold) reductionV1(bytes uint64) func() error {
+	var once sync.Once
+	var result error
+	return func() error {
+		once.Do(func() { result = h.shrink(bytes) })
+		return result
+	}
 }
 
 // openV1 reports whether a was opened and its WithOperation frame has not left.

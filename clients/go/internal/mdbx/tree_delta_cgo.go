@@ -133,6 +133,21 @@ func treeEventShapeV1(e *treeDescV1, height uint64) bool {
 }
 
 func (r *treeRecorderV1) finishV1() (*treeDeltaV1, error) {
+	d, err := r.finishRootEventsV1()
+	if err != nil {
+		return nil, err
+	}
+	d.keys.block = r.prim.block
+	for i := uint32(0); i < r.count; i++ {
+		if r.descs[i].group == i && r.descs[i].kind == treeSpendV1 {
+			d.spent++
+		}
+	}
+	d.buildManifestV1()
+	return d, nil
+}
+
+func (r *treeRecorderV1) finishRootEventsV1() (*treeDeltaV1, error) {
 	r.expireV1()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -142,14 +157,7 @@ func (r *treeRecorderV1) finishV1() (*treeDeltaV1, error) {
 	if !r.begun || r.count != r.eventCount || !treeGroupV1(r.descs, r.count) {
 		return nil, treeDeltaInvalidV1()
 	}
-	d := &treeDeltaV1{rec: r, keys: &treeKeysV1{block: r.prim.block}}
-	for i := uint32(0); i < r.count; i++ {
-		if r.descs[i].group == i && r.descs[i].kind == treeSpendV1 {
-			d.spent++
-		}
-	}
-	d.buildManifestV1()
-	return d, nil
+	return &treeDeltaV1{rec: r, keys: &treeKeysV1{}}, nil
 }
 
 func (d *treeDeltaV1) resolveV1(old treeOldV1) error {
