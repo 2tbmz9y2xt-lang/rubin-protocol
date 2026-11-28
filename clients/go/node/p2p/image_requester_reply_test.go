@@ -1854,17 +1854,7 @@ func testImageReplySend(t *testing.T) {
 	runReplyCases(t, checkReplyStagedUnwind, "StagedPanic", "StagedGoexit", "StagedNegativePanic", "StagedRejectionPanic", "StagedHolderRefusalPanic")
 	t.Run("WriteFailureFirst", func(t *testing.T) { checkReplyWriteFailure(t, false) })
 	t.Run("OldReplyAfterWriteFailure", func(t *testing.T) { checkReplyWriteFailure(t, true) })
-	for _, tc := range []struct {
-		name          string
-		probe, goexit bool
-	}{
-		{"AfterPanicOrdinary", false, false},
-		{"AfterGoexitOrdinary", false, true},
-		{"AfterPanicProbe", true, false},
-		{"AfterGoexitProbe", true, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) { checkReplyAfterUnwind(t, tc.probe, tc.goexit) })
-	}
+	runReplyCases(t, checkReplyAfterUnwind, "AfterPanicOrdinary", "AfterGoexitOrdinary", "AfterPanicProbe", "AfterGoexitProbe")
 }
 
 // goReplySend captures the value that escapes the actual Request or Probe call.
@@ -2164,7 +2154,8 @@ func requireReplyStagedShape(f *imageReplyFixture, r *ImageRound, q consensus.UT
 	}
 }
 
-func checkReplyAfterUnwind(t *testing.T, probe, goexit bool) {
+func checkReplyAfterUnwind(t *testing.T, name string) {
+	probe, goexit := strings.HasSuffix(name, "Probe"), strings.HasPrefix(name, "AfterGoexit")
 	f := newImageReplyFixture(t, true, 2)
 	l := imageReplyLimits()
 	l.Global.PendingNetworkBytes = 120
@@ -2559,26 +2550,35 @@ func parkReplyStart(t *testing.T, s *Service) func() {
 	t.Helper()
 	serviceStartPostListenHookMu.Lock()
 	old := serviceStartPostListenHook
+	restore := sync.OnceFunc(func() {
+		serviceStartPostListenHook = old
+		serviceStartPostListenHookMu.Unlock()
+	})
 	entered, proceed := make(chan struct{}), make(chan struct{})
 	serviceStartPostListenHook = func(current *Service, _ net.Listener) {
 		if current == s {
+			restore()
 			close(entered)
 			<-proceed
 		}
 	}
 	started := make(chan error, 1)
-	go func() { started <- s.Start(context.Background()) }()
+	go func() {
+		err := s.Start(context.Background())
+		restore()
+		started <- err
+	}()
 	finish := sync.OnceFunc(func() {
 		close(proceed)
 		err := awaitImageResult(t, started, "joined Start")
-		serviceStartPostListenHook = old
-		serviceStartPostListenHookMu.Unlock()
 		if !t.Failed() {
 			requireClosedRejection(t, err, "Start after Close")
 		}
 	})
 	t.Cleanup(finish)
 	requireChannelClosed(t, entered, "Start before listener publication")
+	require(t, serviceStartPostListenHookMu.TryLock(), "parked Start still owns the post-listen hook mutex")
+	serviceStartPostListenHookMu.Unlock()
 	return finish
 }
 
