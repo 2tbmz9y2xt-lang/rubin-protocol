@@ -193,28 +193,44 @@ func initial148CompleteTargetContextV1(input initial148CompleteBlockInputV1) boo
 	return input.ExpectedTarget != ([32]byte{}) && bytes.Compare(input.ExpectedTarget[:], POW_LIMIT[:]) <= 0
 }
 
-// initial148CompleteTariffV1 reserves the RUB-1907 W' census: Raw, distinct
-// genesis backing, frozen configuration and the larger connect/cap phase.
 func initial148CompleteTariffV1(input initial148CompleteBlockInputV1) (uint64, bool) {
-	m, ok := initial148MinimumWitnessV1(input.Registry)
+	total, ok := initial148ValidationTariffV1(input.Raw, input.Registry, input.CapRegistry, input.Rotation, input.ParentTimestamps)
 	if !ok {
 		return 0, false
 	}
-	total, ok := initial148CompleteBodyTariffV1(uint64(len(input.Raw)), m)
+	total, carry := bits.Add64(total, initial148DistinctGenesisBytesV1(input.Raw, input.PublishedGenesis), 0)
+	return total, carry == 0 && total <= math.MaxInt64
+}
+
+func initial148ValidationTariffV1(raw []byte, suites *SuiteRegistry, caps *validatedLogicalStateCapRegistry, rotation RotationProvider, times []uint64) (uint64, bool) {
+	m, ok := initial148MinimumWitnessV1(suites)
 	if !ok {
 		return 0, false
 	}
-	r, a := initial148RegistryCountsV1(input.Registry)
+	total, ok := initial148CompleteBodyTariffV1(uint64(len(raw)), m)
+	if !ok {
+		return 0, false
+	}
+	r, a, ok := initial148RegistryCountsV1(suites)
+	if !ok {
+		return 0, false
+	}
 	terms := [...][2]uint64{
-		{16384, initial148DescriptorCountV1(input.Rotation)},
-		{128, uint64(len(input.CapRegistry.rows))},
+		{16384, initial148DescriptorCountV1(rotation)},
+		{128, uint64(len(caps.rows))},
 		{1024, r},
 		{2, a},
-		{8, uint64(len(input.ParentTimestamps))},
-		{1, initial148DistinctGenesisBytesV1(input.Raw, input.PublishedGenesis)},
+		{8, uint64(len(times))},
 	}
 	total, ok = initial148TariffSumV1(total, terms[:])
 	return total, ok && total <= math.MaxInt64
+}
+
+func initial148BaseLimitV1(n uint64) uint64 {
+	if n <= 149 {
+		return 0
+	}
+	return min(17_000_000, n-149, (68_000_157-n)/3)
 }
 
 // initial148TariffSumV1 checks every product and sum before it enters W'.
@@ -240,7 +256,7 @@ func initial148CompleteBodyTariffV1(n, m uint64) (uint64, bool) {
 	var b, w, s uint64
 	if n > 149 {
 		w = n - 149
-		b = min(17_000_000, w, (68_000_157-n)/3)
+		b = initial148BaseLimitV1(n)
 	}
 	if m != 0 {
 		s = w / m
@@ -259,10 +275,7 @@ func initial148CompleteBodyTariffV1(n, m uint64) (uint64, bool) {
 // current-transaction metadata after required/root/queue work has completed.
 // Admission has already bounded n, so every operation here fits uint64.
 func initial148RetainedTariffV1(n uint64) uint64 {
-	var b uint64
-	if n > 149 {
-		b = min(17_000_000, n-149, (68_000_157-n)/3)
-	}
+	b := initial148BaseLimitV1(n)
 	return 16_777_216 + n + 6*b
 }
 
@@ -288,12 +301,16 @@ func initial148MinimumWitnessV1(registry *SuiteRegistry) (uint64, bool) {
 	return minimum, true
 }
 
-func initial148RegistryCountsV1(registry *SuiteRegistry) (uint64, uint64) {
+func initial148RegistryCountsV1(registry *SuiteRegistry) (uint64, uint64, bool) {
 	var names uint64
 	for _, params := range registry.suites {
-		names += uint64(len(params.AlgName))
+		sum, carry := bits.Add64(names, uint64(len(params.AlgName)), 0)
+		if carry != 0 {
+			return 0, 0, false
+		}
+		names = sum
 	}
-	return uint64(len(registry.suites)), names
+	return uint64(len(registry.suites)), names, true
 }
 
 func initial148DescriptorCountV1(rotation RotationProvider) uint64 {
@@ -439,9 +456,13 @@ func initial148GenesisHeaderV1(raw []byte, p *blockStepsPass, expectedTarget [32
 // BlockMeta. A pending overflow is not exposed here: finish returns it before
 // cap or D, and the prepared source is then never delivered.
 func initial148PendingGeneratedV1(input initial148CompleteBlockInputV1) Uint128 {
-	next, err := checkedAdvanceAlreadyGenerated(input.Height, input.AlreadyGenerated, input.AlreadyGenerated.Big())
+	return initial148ExpectedGeneratedV1(input.Height, input.AlreadyGenerated)
+}
+
+func initial148ExpectedGeneratedV1(height uint64, already Uint128) Uint128 {
+	next, err := checkedAdvanceAlreadyGenerated(height, already, already.Big())
 	if err != nil {
-		return input.AlreadyGenerated
+		return already
 	}
 	return next
 }
@@ -531,31 +552,52 @@ func (f *initial148CompleteBlockFrameV1) candidateV1(view logicalStateView, deri
 
 func (f *initial148CompleteBlockFrameV1) connectV1(view logicalStateView) (*connectBlockInputViewResult, error) {
 	in := f.input
-	header, _, off, count, err := initial148Frame(in.Raw)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateInputViewPlacement(in.Raw, off, count); err != nil {
-		return nil, err
-	}
-	blockMTP, err := inMemoryConnectBlockMTP(in.Height, in.ParentTimestamps, header.Timestamp)
-	if err != nil {
-		return nil, err
-	}
-	work := newBlockInputViewConnectWork(connectBlockBasicInMemorySuiteContext{
+	context := connectBlockBasicInMemorySuiteContext{
 		BlockBytes: in.Raw, BlockHeight: in.Height, PrevTimestamps: in.ParentTimestamps,
 		ChainID: in.ChainID, Rotation: in.Rotation, Registry: in.Registry,
-	}, view, off, count, blockMTP)
+	}
+	frame, err := initial148ConnectFrameV1(context)
+	if err != nil {
+		return nil, err
+	}
+	work := frame.workV1(context, view)
 	if !f.parallel {
 		return work.connect(in.AlreadyGenerated)
 	}
 	return connectBlockInputViewQueued(work, NewSigCheckQueue(f.workers).WithRegistry(in.Registry), in.AlreadyGenerated)
 }
 
+type initial148ConnectFrame struct {
+	off             int
+	count, blockMTP uint64
+}
+
+// initial148ConnectFrameV1 checks placement before preparing the spend context.
+func initial148ConnectFrameV1(in connectBlockBasicInMemorySuiteContext) (initial148ConnectFrame, error) {
+	header, _, off, count, err := initial148Frame(in.BlockBytes)
+	if err != nil {
+		return initial148ConnectFrame{}, err
+	}
+	if err := validateInputViewPlacement(in.BlockBytes, off, count); err != nil {
+		return initial148ConnectFrame{}, err
+	}
+	blockMTP, err := inMemoryConnectBlockMTP(in.BlockHeight, in.PrevTimestamps, header.Timestamp)
+	return initial148ConnectFrame{off: off, count: count, blockMTP: blockMTP}, err
+}
+
+func (f initial148ConnectFrame) workV1(in connectBlockBasicInMemorySuiteContext, view logicalStateView) *blockInputViewConnectWork {
+	return newBlockInputViewConnectWork(in, view, f.off, f.count, f.blockMTP)
+}
+
 // capV1 derives the exact totals in both activation states and applies cap then
 // growth; the plan is consumed here and never escapes.
 func (f *initial148CompleteBlockFrameV1) capV1(view logicalStateView, transition *connectBlockInputViewResult) error {
-	_, err := evaluateLogicalStateCap(nil, *f.input.CapRegistry, f.input.ChainID, f.input.Height, view, replayStepTouched(transition), struct{}{})
+	return initial148CheckCapV1(f.input.CapRegistry, f.input.ChainID, f.input.Height, view, transition)
+}
+
+// initial148CheckCapV1 consumes the complete touched subset and checks cap then growth.
+func initial148CheckCapV1(registry *validatedLogicalStateCapRegistry, chainID [32]byte, height uint64, view logicalStateView, transition *connectBlockInputViewResult) error {
+	_, err := evaluateLogicalStateCap(nil, *registry, chainID, height, view, replayStepTouched(transition), struct{}{})
 	return err
 }
 

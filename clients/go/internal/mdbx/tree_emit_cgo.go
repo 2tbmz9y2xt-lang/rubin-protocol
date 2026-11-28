@@ -85,6 +85,12 @@ func treeRunV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databa
 // seed is supplied only for the definitionally empty genesis parent. All other
 // callers retain the existing committed-binding read and walk.
 func treeRunResultV1(w treeWalkV1, endpoint TreeEndpointV1, databaseID [32]byte, ledger treeLedgerV1, seed *RootBindingV1) ([32]byte, error) {
+	return treeRunWalkV1(&w, databaseID, ledger, seed, func(binding RootBindingV1) ([32]byte, error) {
+		return w.finish(binding, endpoint)
+	})
+}
+
+func treeRunWalkV1(w *treeWalkV1, databaseID [32]byte, ledger treeLedgerV1, seed *RootBindingV1, finish func(RootBindingV1) ([32]byte, error)) ([32]byte, error) {
 	if err := ledger.chargeV1(treeNodeWorkBytesV1); err != nil {
 		return [32]byte{}, err
 	}
@@ -103,7 +109,16 @@ func treeRunResultV1(w treeWalkV1, endpoint TreeEndpointV1, databaseID [32]byte,
 	if err := w.walk(); err != nil {
 		return [32]byte{}, err
 	}
-	return w.finish(binding, endpoint)
+	return finish(binding)
+}
+
+func treeCandidateDigestV1(w *treeWalkV1, databaseID [32]byte, ledger treeLedgerV1) ([32]byte, error) {
+	return treeRunWalkV1(w, databaseID, ledger, nil, func(RootBindingV1) ([32]byte, error) {
+		if w.hasCur {
+			return w.cur.digest, nil
+		}
+		return treeEmptyDigestV1(), nil
+	})
 }
 
 func (w *treeWalkV1) readBinding(databaseID [32]byte) (RootBindingV1, error) {

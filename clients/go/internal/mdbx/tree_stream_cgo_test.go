@@ -1735,6 +1735,8 @@ func TestTreeStreamSurfaceV1(t *testing.T) {
 	want := []string{"TreePositionV1", "TreeWriterV1", "TreeReadbackV1", "TreeDeltaSinkV1", "TreeOutpointV1", "TreeEventKindV1", "TreeEventSpendV1", "TreeEventCreateV1", "TreeBlockV1", "TreeEventV1", "BeginV1", "EventV1", "WindowV1", "TreeUndoEffectV1", "UndoWriteOrReuseV1", "UndoTransientV1", "UndoCompareV1", "UndoCompareDeleteV1", "UndoSourceRetainV1", "UndoSourceDeleteV1", "TreeDirectionV1", "TreeForwardV1", "TreeInverseV1", "TreePrimitiveKindV1", "TreeKindDirectApplyV1", "TreeKindConnectV1", "TreeKindReplayNextV1", "TreeKindFirstGenesisV1", "TreeKindRestoreOldV1", "TreeKindLagForwardV1", "TreeKindDisconnectV1", "TreeKindRollbackNewV1", "TreeKindLagReverseV1", "TreePairV1", "TreeSourceV1", "TreePrimitiveV1", "TreeOperationV1", "UpdateTreeV1"}
 	want = append(want, "TreeSourceCoverageV1", "TreeObservationV1", "TreeObservationKindV1", "TreeObservationAbsentV1", "TreeObservationMalformedV1", "TreeObservationIdentityMismatchV1", "TreeObservationDigestMismatchV1")
 	want = append(want, "TreeRootReadV1", "CheckTreeRootReadV1", "DeriveTreeRootV1")
+	want = append(want, "CandidateRootParentV1", "CandidateRootBodyV1", "CandidateRootScopeV1", "ErrCandidateParentNotCurrent", "ErrCandidateSourceUnavailable",
+		"WithCandidateRootV1", "WithCandidateValidationV1", "CandidateCensusV1", "WithCandidateFactsV1", "QualifyCurrentV1", "DeriveCandidateRootV1")
 	want = append(want, "TreeRoleDeltaV1", "TreeUndoFamilyEffectV1", "TreeUndoFamilyNoneV1", "TreeUndoFamilyWrittenV1", "TreeUndoFamilyKeptV1", "TreeUndoFamilyDeletedV1", "TreeUndoChargeV1", "TreeDeltaReportV1")
 	want = append(want, "TreeHeaderSlotV1")
 	want = append(want, "TreeImagePublicationV1", "TreeImageRecordV1", "UpdateImageV1")
@@ -1771,6 +1773,7 @@ func TestTreeStreamSurfaceV1(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("public surface %v want %v", got, want)
 	}
+	tsCandidateSurfaceV1(t)
 	for i, v := range []TreeUndoEffectV1{UndoWriteOrReuseV1, UndoTransientV1, UndoCompareV1, UndoCompareDeleteV1, UndoSourceRetainV1, UndoSourceDeleteV1} {
 		if int(v) != i+1 {
 			t.Fatalf("Undo encoding %d=%d", i, v)
@@ -1796,6 +1799,57 @@ func TestTreeStreamSurfaceV1(t *testing.T) {
 	}
 	if n := uint64(unsafe.Sizeof(treeDescV1{})); n != 104 || n > 128 {
 		t.Fatalf("descriptor size%d", n)
+	}
+}
+
+func tsCandidateSurfaceV1(t *testing.T) {
+	t.Helper()
+	tsCandidateFieldsV1(t, reflect.TypeFor[CandidateRootParentV1](), map[string]reflect.Type{
+		"DatabaseID": reflect.TypeFor[[32]byte](), "Generation": reflect.TypeFor[uint64](),
+		"Height": reflect.TypeFor[uint64](), "Parent": reflect.TypeFor[TreeEndpointV1](),
+	})
+	tsCandidateFieldsV1(t, reflect.TypeFor[CandidateRootBodyV1](), map[string]reflect.Type{
+		"Raw": reflect.TypeFor[[]byte](), "HeaderBytes": reflect.TypeFor[uint16](),
+		"BlockMeta": reflect.TypeFor[TreeBlockV1](), "Events": reflect.TypeFor[func([]byte, *TreeDeltaSinkV1) error](),
+	})
+	scope := reflect.TypeFor[*CandidateRootScopeV1]()
+	tsCandidateFieldsV1(t, scope.Elem(), nil)
+	if got := reflect.TypeOf((*OperationReservationOwner).WithCandidateRootV1); got != reflect.TypeFor[func(*OperationReservationOwner, *Reader, CandidateRootParentV1, []byte, func(*CandidateRootScopeV1) error) error]() {
+		t.Fatalf("candidate owner scope method: %v", got)
+	}
+	want := map[string]reflect.Type{
+		"QualifyCurrentV1":          reflect.TypeFor[func(*CandidateRootScopeV1) error](),
+		"WithCandidateValidationV1": reflect.TypeFor[func(*CandidateRootScopeV1, uint64, func(func() error) error) error](),
+		"CandidateCensusV1":         reflect.TypeFor[func(*CandidateRootScopeV1, []byte) (TreeBlockV1, error)](),
+		"WithCandidateFactsV1":      reflect.TypeFor[func(*CandidateRootScopeV1, uint32, func(func() error, func() error, func() error) error) error](),
+		"DeriveCandidateRootV1":     reflect.TypeFor[func(*CandidateRootScopeV1, CandidateRootBodyV1, []TreeOutpointV1) ([32]byte, error)](),
+	}
+	if scope.Elem().NumMethod() != 0 || scope.NumMethod() != len(want) || scope.ConvertibleTo(reflect.TypeFor[*OperationAccount]()) {
+		t.Fatalf("candidate scope public method sets: %v/%v", scope.Elem().NumMethod(), scope.NumMethod())
+	}
+	for i := 0; i < scope.NumMethod(); i++ {
+		method := scope.Method(i)
+		if method.Type != want[method.Name] {
+			t.Fatalf("candidate scope public method %s: %v", method.Name, method.Type)
+		}
+	}
+}
+
+func tsCandidateFieldsV1(t *testing.T, shape reflect.Type, want map[string]reflect.Type) {
+	t.Helper()
+	got := make(map[string]reflect.Type)
+	for _, field := range reflect.VisibleFields(shape) {
+		if field.IsExported() {
+			got[field.Name] = field.Type
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%v public fields: %v, want %v", shape, got, want)
+	}
+	for name, typ := range want {
+		if got[name] != typ {
+			t.Fatalf("%v public field %s: %v, want %v", shape, name, got[name], typ)
+		}
 	}
 }
 
