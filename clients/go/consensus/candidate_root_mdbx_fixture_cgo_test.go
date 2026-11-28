@@ -71,20 +71,27 @@ func candidatePlacementBeforeReads(t *testing.T) {
 
 func candidateFixtureRetry(t *testing.T, w *btWorld, next CandidateRootInput, want [32]byte, refuse func(*mdbx.Reader)) {
 	t.Helper()
-	const continuing = 127
-	err := w.owner.WithReservation(continuing, func() error {
-		candidateView(t, w, func(r *mdbx.Reader) {
-			refuse(r)
-			live := mdbx.FixtureReservationLive(w.owner)
-			logicalMDBXAssert(t, live == continuing, "refusal retained %d bytes, want %d", live, continuing)
-			candidateRootOK(t, r, w.owner, next, want)
-			live = mdbx.FixtureReservationLive(w.owner)
-			logicalMDBXAssert(t, live == continuing, "retry retained %d bytes, want %d", live, continuing)
-			candidateReadControl(t, r)
-		})
+	candidateContinuingView(t, w, func(r *mdbx.Reader) {
+		refuse(r)
+		live := mdbx.FixtureReservationLive(w.owner)
+		logicalMDBXAssert(t, live == candidateContinuing, "refusal retained %d bytes, want %d", live, candidateContinuing)
+		candidateRootOK(t, r, w.owner, next, want)
+		live = mdbx.FixtureReservationLive(w.owner)
+		logicalMDBXAssert(t, live == candidateContinuing, "retry retained %d bytes, want %d", live, candidateContinuing)
+		candidateReadControl(t, r)
+	})
+}
+
+const candidateContinuing = 127
+
+func candidateContinuingView(t *testing.T, w *btWorld, use func(*mdbx.Reader)) {
+	t.Helper()
+	err := w.owner.WithReservation(candidateContinuing, func() error {
+		candidateView(t, w, use)
+		logicalMDBXAssert(t, mdbx.FixtureReservationLive(w.owner) == candidateContinuing, "View changed continuing bytes")
 		return nil
 	})
-	logicalMDBXAssert(t, err == nil, "continuing owner hold: %v", err)
+	logicalMDBXAssert(t, err == nil && mdbx.FixtureReservationLive(w.owner) == 0, "continuing hold release: %v", err)
 }
 
 func TestCandidateRootFixtureFailure(t *testing.T) {
@@ -373,7 +380,11 @@ func TestCandidateRootFixtureParent(t *testing.T) {
 	t.Run("different_generation_missing_tip", func(t *testing.T) { candidateDifferentGeneration(t, "missing_tip", 1) })
 	t.Run("different_generation_malformed_tip", func(t *testing.T) { candidateDifferentGeneration(t, "malformed_tip", 1) })
 	t.Run("different_generation_cursor_eio", func(t *testing.T) { candidateDifferentGeneration(t, "cursor_eio", 2) })
-	t.Run("matching_generation_cursor_eio", candidateMatchingCursor)
+	t.Run("matching_generation_cursor_eio", func(t *testing.T) {
+		s := newCandidateScene(t, 5)
+		in, _ := s.body(t, 1, 1)
+		candidateCheckMatchingTip(t, s.world, in, "cursor_eio", 2)
+	})
 	t.Run("unfunded_current", candidateUnfundedCurrent)
 	t.Run("authority_get_eio", candidateAuthorityIO)
 	t.Run("authority_absent_nonempty", func(t *testing.T) { candidateAuthorityIntegrity(t, nil) })
@@ -511,12 +522,6 @@ func candidateSeedTip(t *testing.T, w *btWorld, parent mdbx.TreeEndpointV1, gene
 		return
 	}
 	w.pair(t, tip, owner)
-}
-
-func candidateMatchingCursor(t *testing.T) {
-	s := newCandidateScene(t, 5)
-	in, _ := s.body(t, 1, 1)
-	candidateCheckMatchingTip(t, s.world, in, "cursor_eio", 2)
 }
 
 func candidateCheckMatchingTip(t *testing.T, w *btWorld, in CandidateRootInput, mode string, scenario uint8) {
@@ -669,28 +674,23 @@ func candidateGrowthLive(t *testing.T, over bool) {
 	t.Helper()
 	w, in, want, funding := candidateGrowthSetup(t, over)
 	next, nextRoot := candidateGrowthCoinbase(t, in, funding.parents)
-	const continuing = 127
 	var live []uint64
 	evidence, obsErr := mdbx.FixturePairReadObservation(w.s, func(site uint32) {
 		if site == 1 {
 			live = append(live, mdbx.FixtureReservationLive(w.owner))
 		}
 	}, func() {
-		err := w.owner.WithReservation(continuing, func() error {
-			candidateView(t, w, func(r *mdbx.Reader) {
-				if over {
-					candidateTxError(t, r, w.owner, in, "BLOCK_ERR_STATE_GROWTH_EXCEEDED", "logical state growth exceeded")
-				} else {
-					candidateRootOK(t, r, w.owner, in, want)
-				}
-				logicalMDBXAssert(t, mdbx.FixtureReservationLive(w.owner) == continuing, "growth result changed continuing bytes")
-				candidateGrowthPhaseBytes(t, live, uint64(len(in.Raw)), continuing, over)
-				candidateRootOK(t, r, w.owner, next, nextRoot)
-				logicalMDBXAssert(t, mdbx.FixtureReservationLive(w.owner) == continuing, "growth retry changed continuing bytes")
-			})
-			return nil
+		candidateContinuingView(t, w, func(r *mdbx.Reader) {
+			if over {
+				candidateTxError(t, r, w.owner, in, "BLOCK_ERR_STATE_GROWTH_EXCEEDED", "logical state growth exceeded")
+			} else {
+				candidateRootOK(t, r, w.owner, in, want)
+			}
+			logicalMDBXAssert(t, mdbx.FixtureReservationLive(w.owner) == candidateContinuing, "growth result changed continuing bytes")
+			candidateGrowthPhaseBytes(t, live, uint64(len(in.Raw)), candidateContinuing, over)
+			candidateRootOK(t, r, w.owner, next, nextRoot)
+			logicalMDBXAssert(t, mdbx.FixtureReservationLive(w.owner) == candidateContinuing, "growth retry changed continuing bytes")
 		})
-		logicalMDBXAssert(t, err == nil && mdbx.FixtureReservationLive(w.owner) == 0, "growth continuing hold release: %v", err)
 	})
 	logicalMDBXAssert(t, obsErr == nil && evidence.Gets == uint64(len(live)) && evidence.Writes == 0, "growth native GET trace: %+v/%v", evidence, obsErr)
 }
@@ -709,8 +709,7 @@ func candidateGrowthPhaseBytes(t *testing.T, live []uint64, n, continuing uint64
 	if !over {
 		// The final producer GET precedes digest return and the next producer call.
 		check = continuing + n + 4096 + 36*events + 288440 + 104*events
-		last := live[len(live)-1]
-		logicalMDBXAssert(t, last == check, "growth final derivation GET live %d, want %d", last, check)
+		logicalMDBXAssert(t, live[len(live)-1] == check, "growth final derivation GET live %d, want %d", live[len(live)-1], check)
 	}
 }
 
@@ -772,28 +771,21 @@ func candidateDLive(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newCandidateScene(t, 5)
 			in, want := s.body(t, tc.spends, 1)
-			owner := s.world.owner
-			const continuing = 127
-			expected := continuing + uint64(len(in.Raw)) + 4096 + tc.keyBytes + 288440 + 104*tc.events
+			expected := candidateContinuing + uint64(len(in.Raw)) + 4096 + tc.keyBytes + 288440 + 104*tc.events
 			gets, live := uint64(0), uint64(0)
 			counts, err := mdbx.FixturePairReadObservation(s.world.s, func(site uint32) {
 				if site == 1 {
 					gets++
 					if gets == tc.get {
-						live = mdbx.FixtureReservationLive(owner)
+						live = mdbx.FixtureReservationLive(s.world.owner)
 					}
 				}
 			}, func() {
-				err := owner.WithReservation(continuing, func() error {
-					candidateView(t, s.world, func(r *mdbx.Reader) { candidateRootOK(t, r, owner, in, want) })
-					logicalMDBXAssert(t, mdbx.FixtureReservationLive(owner) == continuing, "D return changed continuing bytes")
-					return nil
-				})
-				logicalMDBXAssert(t, err == nil, "D continuing hold: %v", err)
+				candidateContinuingView(t, s.world, func(r *mdbx.Reader) { candidateRootOK(t, r, s.world.owner, in, want) })
 			})
 			logicalMDBXAssert(t, err == nil && live == expected && counts.Gets >= tc.get && counts.Writes == 0, "D live at get %d: %d want %d, counts %+v/%v", tc.get, live, expected, counts, err)
 			if tc.spends == 0 {
-				candidateFactReferences(t, s.world, in, want)
+				candidatePhaseReferences(t, s.world, in, want)
 			}
 			fault := newCandidateScene(t, 5)
 			logicalMDBXAssert(t, fault.parent == in.Selection.Parent, "binding fault parent differs from observed parent")
@@ -802,30 +794,44 @@ func candidateDLive(t *testing.T) {
 	}
 }
 
-func candidateFactReferences(t *testing.T, w *btWorld, in CandidateRootInput, want [32]byte) {
+func candidatePhaseReferences(t *testing.T, w *btWorld, in CandidateRootInput, want [32]byte) {
 	t.Helper()
+	logicalMDBXAssert(t, in.CapRegistry != nil && in.Registry != nil && in.Rotation != nil && len(in.ParentTimestamps) != 0, "validation fixture lacks context")
+	validation := candidateW(uint64(len(in.Raw)), uint64(len(in.ParentTimestamps)), 0)
 	candidateView(t, w, func(reader *mdbx.Reader) {
-		err := w.owner.WithCandidateRootV1(reader, in.Selection, in.Raw, func(native *mdbx.CandidateRootScopeV1) error {
-			return native.WithCandidateValidationV1(uint64(len(in.Raw))+4096, func(func() error) error {
-				logicalMDBXAssert(t, native.QualifyCurrentV1() == nil, "qualify retained facts")
-				meta, err := native.CandidateCensusV1(in.Raw)
-				logicalMDBXAssert(t, err == nil && meta.EventCount == 1, "count retained facts: %+v/%v", meta, err)
-				return native.WithCandidateFactsV1(1, func(lookup, lengths, keys func() error) error {
-					scope := newInitial148RequiredScopeV1(reader, 1, in.Selection.Height, 1)
-					body := mdbx.CandidateRootBodyV1{Raw: in.Raw, HeaderBytes: 148, BlockMeta: meta}
-					out := scope.deriveCandidateV1(native, body, func() error {
-						logicalMDBXAssert(t, scope.index == nil, "lookup index still referenced at retirement")
-						return lookup()
-					}, func() error {
-						logicalMDBXAssert(t, scope.keys == nil && scope.lengths == nil, "fact backing still referenced at retirement")
-						return lengths()
-					}, keys)
-					logicalMDBXAssert(t, out.derived && out.root == want, "retired facts returned %x/%v", out.root, out.cause)
-					return out.cause
+		for _, held := range []uint64{validation, uint64(len(in.Raw)) + 4096} {
+			err := w.owner.WithCandidateRootV1(reader, in.Selection, in.Raw, func(native *mdbx.CandidateRootScopeV1) error {
+				return native.WithCandidateValidationV1(held, func(retire func() error) error {
+					if held == validation {
+						current := in
+						out, err := current.deriveFundedV1(reader, native, func() error {
+							logicalMDBXAssert(t, current.CapRegistry == nil && current.Registry == nil && current.Rotation == nil && current.ParentTimestamps == nil,
+								"validation context still referenced before retirement")
+							return retire()
+						})
+						logicalMDBXAssert(t, err == nil && out.derived && out.root == want, "retired validation returned %x/%v", out.root, err)
+						return err
+					}
+					logicalMDBXAssert(t, native.QualifyCurrentV1() == nil, "qualify retained facts")
+					meta, err := native.CandidateCensusV1(in.Raw)
+					logicalMDBXAssert(t, err == nil && meta.EventCount == 1, "count retained facts: %+v/%v", meta, err)
+					return native.WithCandidateFactsV1(1, func(lookup, lengths, keys func() error) error {
+						scope := newInitial148RequiredScopeV1(reader, 1, in.Selection.Height, 1)
+						body := mdbx.CandidateRootBodyV1{Raw: in.Raw, HeaderBytes: 148, BlockMeta: meta}
+						out := scope.deriveCandidateV1(native, body, func() error {
+							logicalMDBXAssert(t, scope.index == nil, "lookup index still referenced at retirement")
+							return lookup()
+						}, func() error {
+							logicalMDBXAssert(t, scope.keys == nil && scope.lengths == nil, "fact backing still referenced at retirement")
+							return lengths()
+						}, keys)
+						logicalMDBXAssert(t, out.derived && out.root == want, "retired facts returned %x/%v", out.root, out.cause)
+						return out.cause
+					})
 				})
 			})
-		})
-		logicalMDBXAssert(t, err == nil, "retire empty facts: %v", err)
+			logicalMDBXAssert(t, err == nil, "retire candidate references: %v", err)
+		}
 		candidateRootOK(t, reader, w.owner, in, want)
 	})
 }
@@ -934,19 +940,13 @@ func candidateNextOperation(t *testing.T) {
 func candidateNoWrite(t *testing.T) {
 	s := newCandidateScene(t, 5)
 	in, want := s.body(t, 1, 1)
-	w := s.world
-	evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
-		const continuing = 127
-		err := w.owner.WithReservation(continuing, func() error {
-			candidateView(t, w, func(r *mdbx.Reader) {
-				for range 2 {
-					candidateRootOK(t, r, w.owner, in, want)
-					logicalMDBXAssert(t, mdbx.FixtureReservationLive(w.owner) == continuing, "candidate changed continuing bytes")
-				}
-			})
-			return nil
+	evidence, err := mdbx.FixtureSelectedDamage(s.world.s, s.world.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
+		candidateContinuingView(t, s.world, func(r *mdbx.Reader) {
+			for range 2 {
+				candidateRootOK(t, r, s.world.owner, in, want)
+				logicalMDBXAssert(t, mdbx.FixtureReservationLive(s.world.owner) == candidateContinuing, "candidate changed continuing bytes")
+			}
 		})
-		logicalMDBXAssert(t, err == nil && mdbx.FixtureReservationLive(w.owner) == 0, "continuing hold release: %v", err)
 	})
 	logicalMDBXAssert(t, err == nil && evidence.BeginOld == 1 && evidence.OldGets[0] == 6 && evidence.NodeGets > 0 && evidence.OldAborts == 1,
 		"candidate native read path: %+v/%v", evidence, err)
