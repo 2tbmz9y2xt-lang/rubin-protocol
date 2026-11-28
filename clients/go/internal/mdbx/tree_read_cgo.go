@@ -259,7 +259,7 @@ func (r *Reader) candidateTipV1(generation uint64) (TreeEndpointV1, error) {
 
 // DeriveCandidateRootV1 consumes the live scope's one attempt and derives only after qualification.
 func (s *CandidateRootScopeV1) DeriveCandidateRootV1(body CandidateRootBodyV1, inputs []TreeOutpointV1) ([32]byte, error) {
-	if !s.openV1() || s.state.attempted.Swap(true) || s.state.status.Load() != candidateCurrentV1 {
+	if !s.claimDerivationV1() {
 		return [32]byte{}, treeDeltaInvalidV1()
 	}
 	state := s.state
@@ -289,6 +289,10 @@ func (s *CandidateRootScopeV1) DeriveCandidateRootV1(body CandidateRootBodyV1, i
 		return [32]byte{}, err
 	}
 	return root, nil
+}
+
+func (s *CandidateRootScopeV1) claimDerivationV1() bool {
+	return s.openV1() && !s.state.attempted.Swap(true) && s.state.status.Load() == candidateCurrentV1
 }
 
 func (s *candidateRootScopeStateV1) retainsV1(keys uint64, derive bool) bool {

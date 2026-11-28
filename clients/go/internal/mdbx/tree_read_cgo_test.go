@@ -1002,8 +1002,10 @@ func trCandidateBindingError(t *testing.T) {
 	wrong.CumulativeChainwork[39]++
 	key := tsRootKey(1)
 	trSeedV1(t, s, owner, 0, key, trBindingV1(t, 1, wrong))
-	observed := &TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 1, Height: 6, Position: TreeWriterV1,
-		Rank: 0, KeyLength: 9, Kind: TreeObservationIdentityMismatchV1, OriginalImage: true, OriginalReference: true}
+	observed := &TreeObservationV1{
+		DatabaseID: [32]byte{7}, Generation: 1, Height: 6, Position: TreeWriterV1,
+		Rank: 0, KeyLength: 9, Kind: TreeObservationIdentityMismatchV1, OriginalImage: true, OriginalReference: true,
+	}
 	copy(observed.Key[:], key)
 	trCandidateTerminal(t, s, owner, selection, body, nil, observed)
 }
@@ -1061,8 +1063,10 @@ func trCandidateEmptySource(t *testing.T) {
 	s, _, database := treeNativeStore(t)
 	owner := reservationOwner(t, specRMin)
 	raw := make([]byte, 149)
-	selection := CandidateRootParentV1{DatabaseID: database, Generation: 1, Height: 6,
-		Parent: TreeEndpointV1{Kind: TreeEndpointAppliedV1, Height: 5, BlockHash: tdTxid(5), CumulativeChainwork: [40]byte{39: 37}}}
+	selection := CandidateRootParentV1{
+		DatabaseID: database, Generation: 1, Height: 6,
+		Parent: TreeEndpointV1{Kind: TreeEndpointAppliedV1, Height: 5, BlockHash: tdTxid(5), CumulativeChainwork: [40]byte{39: 37}},
+	}
 	mustEnvironment(t, s.View(func(r *Reader) error {
 		err := owner.WithCandidateRootV1(r, selection, raw, func(scope *CandidateRootScopeV1) error {
 			return scope.WithCandidateValidationV1(4245, func(func() error) error { return scope.QualifyCurrentV1() })
